@@ -16,6 +16,12 @@ import hashlib
 import argparse
 from pathlib import Path
 
+# Force UTF-8 stdout — Windows cp1252 console can't render the status glyphs.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 GENESIS_HASH = "0" * 64
 
 
