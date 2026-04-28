@@ -14,6 +14,18 @@ The result: a track record that **no party** (not Stewart & Co., not GitHub, not
 
 ---
 
+## Verify it yourself in 30 seconds
+
+```bash
+git clone https://github.com/stewartandco/stewart-forward-test.git
+cd stewart-forward-test
+python verify.py
+```
+
+That re-walks the entire hash chain and reports whether any entry has been tampered with. For deeper Bitcoin-blockchain verification, see [Anchor 1](#1-opentimestamps--bitcoin-blockchain-mathematical-proof) below.
+
+---
+
 ## Why this exists
 
 Backtests are easy to fake. Forward tests are harder — but only if the audit trail itself is tamper-proof.
@@ -123,4 +135,5 @@ SDCA uses on-chain data inputs that are not all freely accessible (some require 
 ## Contact
 
 Stewart & Co.  
-[stewartandco.org](https://stewartandco.org)
+[stewartandco.org](https://stewartandco.org)  
+GitHub: [@stewartandco](https://github.com/stewartandco)
