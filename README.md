@@ -8,9 +8,9 @@ This repository contains the **cryptographically anchored, append-only daily dec
 | **MRS** | Majors Rotation System — 3-asset (BTC/ETH/SOL) + Gold defensive escape |
 | **SDCA** | System 2 — composite Z-score BTC dollar-cost-averaging strategy |
 
-Every day at 00:30 UTC, an automated job appends one entry per system to [`forward_test_log.jsonl`](./forward_test_log.jsonl), hash-chains it to the prior entry, and submits the file's hash to the [OpenTimestamps](https://opentimestamps.org/) calendar servers — which anchor it into a Bitcoin transaction within ~1 hour.
+Every day at 00:30 UTC, an automated job appends one entry per system to [`forward_test_log.jsonl`](./forward_test_log.jsonl), hash-chains it to the prior entry, and pushes the result to this public GitHub repo. The same decisions are also broadcast in real time to a public Discord channel.
 
-The result: a track record that **no party** (not Stewart & Co., not GitHub, not OpenTimestamps) can backdate or forge after the fact.
+The result: a track record where each entry is anchored by **two independent third parties** (GitHub commit timestamps + Discord server timestamps) plus an internal Merkle-style hash chain that detects any retroactive edits.
 
 ---
 
@@ -22,7 +22,7 @@ cd stewart-forward-test
 python verify.py
 ```
 
-That re-walks the entire hash chain and reports whether any entry has been tampered with. For deeper Bitcoin-blockchain verification, see [Anchor 1](#1-opentimestamps--bitcoin-blockchain-mathematical-proof) below.
+That re-walks the entire hash chain and reports whether any entry has been tampered with. Cross-check the public GitHub commit history and the Discord channel timestamps for additional independent verification.
 
 ---
 
@@ -30,27 +30,21 @@ That re-walks the entire hash chain and reports whether any entry has been tampe
 
 Backtests are easy to fake. Forward tests are harder — but only if the audit trail itself is tamper-proof.
 
-This log uses **three independent third-party anchors** so that any prospective licensee can verify the track record without trusting Stewart & Co.:
+This log uses **two independent third-party anchors** plus an internal hash chain, so that any prospective licensee can verify the track record without trusting Stewart & Co.:
 
-### 1. OpenTimestamps + Bitcoin blockchain (mathematical proof)
+### 1. GitHub commit timestamps (independent server-side timestamp)
 
-`forward_test_log.jsonl.ots` contains a Merkle-tree proof linking the JSONL file's SHA-256 hash to a specific Bitcoin transaction. Once that transaction has confirmations, the proof is mathematically immutable — altering even one byte of the JSONL would invalidate the proof.
-
-Verify with:
-```bash
-pip install opentimestamps-client
-ots verify forward_test_log.jsonl.ots
-```
-
-This will report the Bitcoin block height and timestamp at which the file's hash was anchored. No internet authority is involved — only Bitcoin's proof-of-work.
-
-### 2. GitHub commit timestamps (independent server-side timestamp)
-
-Every daily run is committed to this repository. GitHub's commit timestamps and (optionally) signed-commit infrastructure provide an independent audit trail. The repo's commit history shows exactly when each batch of decisions was published:
+Every daily run is committed to this repository. GitHub's commit timestamps are recorded server-side and can't be backdated by Stewart & Co.; the public commit history is visible to anyone:
 
 ```bash
 git log --pretty=format:"%h  %ad  %s" --date=iso-strict forward_test_log.jsonl
 ```
+
+Each commit lands within minutes of the daily 00:30 UTC run, so the GitHub-recorded commit time is itself a third-party witness to when each entry was published.
+
+### 2. Discord server timestamps (real-time public broadcast)
+
+The same daily decisions are posted to a public read-only Discord channel via webhook. Discord stamps every message with the receive-time on its servers — these timestamps are visible in the channel's message history and Discord's API, and are independent of both GitHub and Stewart & Co.'s clock.
 
 ### 3. Internal hash chain (tamper detection within the file)
 
@@ -62,6 +56,10 @@ python verify.py forward_test_log.jsonl
 ```
 
 A tampered file will fail with `✗ BROKEN CHAIN` at the line where the modification occurred.
+
+### Roadmap: Bitcoin-blockchain anchoring
+
+A fourth anchor — [OpenTimestamps](https://opentimestamps.org/) submission, which writes the file's hash into a Bitcoin transaction — is on the roadmap. It's currently paused while a python-bitcoinlib + Python 3.14 compatibility issue gets sorted upstream. Once active, `forward_test_log.jsonl.ots` will appear alongside the JSONL with a Bitcoin Merkle proof.
 
 ---
 
