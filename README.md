@@ -1,13 +1,13 @@
 # Stewart & Co. — Forward-Test Log
 
-This repository contains the **cryptographically anchored, append-only daily decision log** for the production trading systems operated by Stewart & Co.:
+This repository contains the **cryptographically anchored, append-only daily decision log** for the four production trading systems operated by Stewart & Co.:
 
 | System | Description |
 |---|---|
 | **DHRS** | Dynamic Hedging Rotation System — multi-asset crypto rotation with trend filter |
 | **MRS** | Majors Rotation System — 3-asset (BTC/ETH/SOL) + Gold defensive escape |
+| **MARS** | Multi-Asset Rotation System — 6-asset (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape (growth-tilted sibling to MRS) |
 | **SDCA** | System 2 — composite Z-score BTC dollar-cost-averaging strategy |
-| **MARS** | Multi-Asset Rotation System — 6-asset (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape — *currently in final optimization, joins this log once locked* |
 
 Every day at 00:30 UTC, an automated job appends one entry per system to [`forward_test_log.jsonl`](./forward_test_log.jsonl), hash-chains it to the prior entry, and pushes the result to this public GitHub repo. The same decisions are also broadcast in real time to a public Discord channel.
 
@@ -70,7 +70,7 @@ A fourth anchor — [OpenTimestamps](https://opentimestamps.org/) submission, wh
 {
   "ts_utc"            : "2026-04-28T00:31:14Z",     // when the entry was written
   "decision_date"     : "2026-04-27",               // bar-close date the signal was computed from
-  "system"            : "MRS",                      // DHRS | MRS | SDCA  (MARS joining)
+  "system"            : "MRS",                      // DHRS | MRS | MARS | SDCA
   "version"           : 1,                          // schema version
   "decision"          : { /* system-specific */ },
   "prices_at_decision": { "BTC": 77890.39, ... },   // prices used to compute the signal
