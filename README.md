@@ -1,13 +1,16 @@
 # Stewart & Co. — Forward-Test Log
 
-This repository contains the **cryptographically anchored, append-only daily decision log** for the four production trading systems operated by Stewart & Co.:
+This repository contains the **cryptographically anchored, append-only daily decision log** for the production trading systems operated by Stewart & Co.
 
-| System | Description |
-|---|---|
-| **DHRS** | Dynamic Hedging Rotation System — multi-asset crypto rotation with trend filter |
-| **MRS** | Majors Rotation System — 3-asset (BTC/ETH/SOL) + Gold defensive escape |
-| **MARS** | Multi-Asset Rotation System — 6-asset (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape (growth-tilted sibling to MRS) |
-| **SDCA** | System 2 — composite Z-score BTC dollar-cost-averaging strategy |
+The display brand names sit alongside their internal preset keys; the JSONL `"system"` field uses the internal key so the hash chain stays stable across rebrands.
+
+| Display | Internal key | Description |
+|---|---|---|
+| **SDCA**     | `SDCA`  | Single-asset BTC composite Z-score dollar-cost-averaging strategy |
+| **Anchor**   | `MRS`   | 3-asset rotation (BTC/ETH/SOL) + on-chain Gold defensive escape |
+| **Vanguard** | `MARS`  | 6-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape |
+| **Apex**     | `TARS`  | 10-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB/LINK/DOGE/TRX/HYPE) + Gold |
+| **Spectrum** | `DHRS`  | 60-asset top-100 screener rotation with regime filter |
 
 Every day at 00:30 UTC, an automated job appends one entry per system to [`forward_test_log.jsonl`](./forward_test_log.jsonl), hash-chains it to the prior entry, and pushes the result to this public GitHub repo. The same decisions are also broadcast in real time to a public Discord channel.
 
@@ -70,7 +73,7 @@ A fourth anchor — [OpenTimestamps](https://opentimestamps.org/) submission, wh
 {
   "ts_utc"            : "2026-04-28T00:31:14Z",     // when the entry was written
   "decision_date"     : "2026-04-27",               // bar-close date the signal was computed from
-  "system"            : "MRS",                      // DHRS | MRS | MARS | SDCA
+  "system"            : "MRS",                      // DHRS | MRS | MARS | TARS | SDCA  (internal preset key)
   "version"           : 1,                          // schema version
   "decision"          : { /* system-specific */ },
   "prices_at_decision": { "BTC": 77890.39, ... },   // prices used to compute the signal
@@ -85,7 +88,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 
 ## System-specific decision payloads
 
-### DHRS
+### Spectrum (`DHRS`)
 ```json
 "decision": {
   "dominant":  "ETH",
@@ -94,7 +97,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 }
 ```
 
-### MRS
+### Anchor (`MRS`)
 ```json
 "decision": {
   "dominant": "Gold",
@@ -102,11 +105,20 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 }
 ```
 
-### MARS
+### Vanguard (`MARS`)
 ```json
 "decision": {
   "dominant": "Gold",
   "scores":   {"BTC": 2, "ETH": 1, "SOL": 4, "SUI": 3, "XRP": 1, "BNB": 5, "Gold": 6, "USD": 0}
+}
+```
+
+### Apex (`TARS`)
+```json
+"decision": {
+  "dominant": "BTC",
+  "scores":   {"BTC": 7, "ETH": 5, "SOL": 4, "SUI": 3, "XRP": 2, "BNB": 4,
+               "LINK": 3, "DOGE": 2, "TRX": 1, "HYPE": 4, "Gold": 6, "USD": 0}
 }
 ```
 
@@ -124,7 +136,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 
 ## Reproducing the decisions
 
-For each entry, the price and parameter inputs are captured. The MRS and DHRS algorithms are deterministic functions of those inputs — meaning anyone with access to the published indicators (e.g. the [MRS Pine Script indicator on TradingView](https://tradingview.com/)) can replay the exact decision from a given day's prices.
+For each entry, the price and parameter inputs are captured. The Anchor / Vanguard / Apex / Spectrum algorithms are deterministic functions of those inputs — meaning anyone with access to the published indicators (e.g. the Anchor Pine Script indicator on TradingView) can replay the exact decision from a given day's prices.
 
 SDCA uses on-chain data inputs that are not all freely accessible (some require ChartInspect / Glassnode subscriptions). The `composite_z` is published in the log so the action is verifiable from the threshold relationship even without re-running the full computation.
 
