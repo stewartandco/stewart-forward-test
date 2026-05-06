@@ -7,10 +7,10 @@ The display brand names sit alongside their internal preset keys; the JSONL `"sy
 | Display | Internal key | Description |
 |---|---|---|
 | **SDCA**     | `SDCA`  | Single-asset BTC composite Z-score dollar-cost-averaging strategy |
-| **Anchor**   | `MRS`   | 3-asset rotation (BTC/ETH/SOL) + on-chain Gold defensive escape |
-| **Vanguard** | `MARS`  | 6-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape |
-| **Apex**     | `TARS`  | 10-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB/LINK/DOGE/TRX/HYPE) + Gold |
-| **Spectrum** | `DHRS`  | 60-asset top-100 screener rotation with regime filter |
+| **Majors**   | `MRS`   | 3-asset rotation (BTC/ETH/SOL) + on-chain Gold defensive escape |
+| **Core** | `MARS`  | 6-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB) + Gold defensive escape |
+| **Select**     | `TARS`  | 10-asset rotation (BTC/ETH/SOL/SUI/XRP/BNB/LINK/DOGE/TRX/HYPE) + Gold |
+| **Broad** | `DHRS`  | 60-asset top-100 screener rotation with regime filter |
 
 Every day at 00:30 UTC, an automated job appends one entry per system to [`forward_test_log.jsonl`](./forward_test_log.jsonl), hash-chains it to the prior entry, and pushes the result to this public GitHub repo. The same decisions are also broadcast in real time to a public Discord channel.
 
@@ -88,7 +88,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 
 ## System-specific decision payloads
 
-### Spectrum (`DHRS`)
+### Broad (`DHRS`)
 ```json
 "decision": {
   "dominant":  "ETH",
@@ -97,7 +97,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 }
 ```
 
-### Anchor (`MRS`)
+### Majors (`MRS`)
 ```json
 "decision": {
   "dominant": "Gold",
@@ -105,7 +105,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 }
 ```
 
-### Vanguard (`MARS`)
+### Core (`MARS`)
 ```json
 "decision": {
   "dominant": "Gold",
@@ -113,7 +113,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 }
 ```
 
-### Apex (`TARS`)
+### Select (`TARS`)
 ```json
 "decision": {
   "dominant": "BTC",
@@ -136,7 +136,7 @@ The `params_hash` pins each decision to a specific algorithm configuration. If w
 
 ## Reproducing the decisions
 
-For each entry, the price and parameter inputs are captured. The Anchor / Vanguard / Apex / Spectrum algorithms are deterministic functions of those inputs — meaning anyone with access to the published indicators (e.g. the Anchor Pine Script indicator on TradingView) can replay the exact decision from a given day's prices.
+For each entry, the price and parameter inputs are captured. The Majors / Core / Select / Broad algorithms are deterministic functions of those inputs — meaning anyone with access to the published indicators (e.g. the Majors Pine Script indicator on TradingView) can replay the exact decision from a given day's prices.
 
 SDCA uses on-chain data inputs that are not all freely accessible (some require ChartInspect / Glassnode subscriptions). The `composite_z` is published in the log so the action is verifiable from the threshold relationship even without re-running the full computation.
 
