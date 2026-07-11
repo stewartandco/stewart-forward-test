@@ -1,0 +1,1 @@
+{"system": "MARS_RECAL", "signal_date": "2026-07-10", "logged_at": "2026-07-11T08:01:59.457448+08:00", "dominant": "USD", "in_usd": true, "regime": false, "equity": 5244.300637651903, "stats_cagr": 173.26, "stats_maxdd": 41.62, "prev_entry_hash": "GENESIS", "note": "LOCAL witnessed fwd-test (pre-deploy); joins public log at batch deploy"}
