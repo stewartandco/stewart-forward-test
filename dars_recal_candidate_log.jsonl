@@ -1,0 +1,1 @@
+{"system": "DARS_RECAL", "signal_date": "2026-07-11", "logged_at": "2026-07-12T08:46:10.645394+08:00", "dominant": "USD", "in_usd": true, "regime": false, "equity": 3120.235147285513, "stats_cagr": 157.02, "stats_maxdd": 39.07, "prev_entry_hash": "GENESIS", "note": "LOCAL witnessed fwd-test (pre-deploy); joins public log at batch deploy"}
