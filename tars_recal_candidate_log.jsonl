@@ -1,0 +1,1 @@
+{"system": "TARS_RECAL", "signal_date": "2026-07-11", "logged_at": "2026-07-12T19:36:32.397983+08:00", "dominant": "USD", "in_usd": true, "regime": false, "equity": 1373.6374611760878, "stats_cagr": 133.44, "stats_maxdd": 33.11, "prev_entry_hash": "GENESIS", "note": "LOCAL witnessed fwd-test (pre-deploy); joins public log at batch deploy"}
