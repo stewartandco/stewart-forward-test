@@ -1,0 +1,1 @@
+{"system": "FRONTIER_RECAL", "signal_date": "2026-07-12", "logged_at": "2026-07-13T20:09:16.329202+08:00", "dominant": "USD", "in_usd": true, "regime": false, "equity": 4376.336105273806, "stats_cagr": 167.35, "stats_maxdd": 41.08, "prev_entry_hash": "GENESIS", "note": "LOCAL witnessed fwd-test (pre-deploy); joins public log at batch deploy"}
