@@ -1,0 +1,1 @@
+{"system": "BROAD_RECAL", "signal_date": "2026-07-13", "logged_at": "2026-07-14T15:20:23.966309+08:00", "dominant": "USD", "in_usd": true, "regime": false, "equity": 502156.8902724225, "stats_cagr": 366.07, "stats_maxdd": 60.45, "prev_entry_hash": "GENESIS", "note": "LOCAL witnessed fwd-test (pre-deploy); joins public log at batch deploy"}
