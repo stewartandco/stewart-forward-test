@@ -21,6 +21,7 @@ that died — is provable after the fact.
 | [`schemas/registry_entry.schema.json`](./schemas/registry_entry.schema.json) | JSON Schema — registry log entry (the hash-chained unit) |
 | [`verify_registry.py`](./verify_registry.py) | Standalone chain walker for `registry_log.jsonl`, mirroring the root `verify.py` |
 | [`examples/`](./examples) | Worked examples: a research card, a strategy spec, and a valid chained registry log |
+| [`pipeline/`](./pipeline) | Reader pilot: registry writer, Claude-powered card extraction, and human triage CLI |
 
 ## The one-paragraph pitch
 
@@ -54,8 +55,46 @@ third-party witness.
 Every arrow emits a registry entry. See `SCHEMA.md` for the entry types and
 gate criteria.
 
+## Reader pilot (`pipeline/`)
+
+The first agent, per the roadmap: read sources → extract quote-grounded cards
+→ human triage. Requires `pip install anthropic jsonschema` (plus `pypdf` for
+PDF sources) and an `ANTHROPIC_API_KEY`.
+
+```bash
+cd research-layer
+
+# 1. Extract cards from a source (--dry-run to preview without writing)
+python -m pipeline.reader paper.pdf --title "Some Paper" --source-type paper \
+    --author "A. Author" --year 2021 --url https://example.org/paper
+
+# 2. Review pending cards — accept/reject each, decisions are chained
+python -m pipeline.triage --reviewer coen
+
+# 3. Verify the chain any time
+python verify_registry.py registry_log.jsonl
+```
+
+Mechanics worth knowing:
+
+- **The honesty guard is code, not prompt.** The model is asked for verbatim
+  quotes, and `pipeline/common.py:quote_in_source` then checks each quote is an
+  exact substring of the source (whitespace-normalized). Claims whose quotes
+  fail the check are dropped before registration and reported.
+- **Cards register as `pending`** and cannot be cited by strategies until a
+  human accepts them in triage — `Registry.register_strategy` enforces it.
+- **Every write chains.** The `Registry` class appends `card_registered`,
+  `card_reviewed`, `strategy_registered`, `verdict`, and `state_change`
+  entries with the same canonical-JSON SHA-256 linkage as the root log, and
+  enforces the lifecycle state machine on writes (verify_registry.py enforces
+  it again on reads).
+
+Offline tests (no API key needed): `python -m pytest pipeline/test_pipeline.py`
+
 ## Status
 
-- **v1 — specification only.** No pipeline code in this directory yet.
-- The registry chain (`registry_log.jsonl`) will live alongside this spec once
-  the first agent runs; `verify_registry.py` already validates the example log.
+- **v1 — specification + Reader pilot.** Composer/gauntlet agents are not
+  built yet; the lifecycle beyond `card_reviewed` is exercised only by tests
+  and examples.
+- The live registry chain (`registry_log.jsonl`) is created on the Reader's
+  first non-dry-run write; `verify_registry.py` validates it and the example log.
