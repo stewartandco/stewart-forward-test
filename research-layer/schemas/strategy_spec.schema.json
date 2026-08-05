@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stewartandco.org/schemas/strategy_spec.schema.json",
+  "title": "Strategy Spec v1",
+  "type": "object",
+  "required": ["strategy_id", "version", "created_utc", "name", "family", "universe", "blocks", "provenance", "generator", "cost_model"],
+  "additionalProperties": false,
+  "properties": {
+    "strategy_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+    "version": {"const": 1},
+    "created_utc": {"type": "string", "format": "date-time"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 120},
+    "family": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+    "universe": {
+      "type": "object",
+      "required": ["assets", "asset_class", "timeframe"],
+      "additionalProperties": false,
+      "properties": {
+        "assets": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "asset_class": {"enum": ["futures", "equities", "crypto", "fx", "options", "rates", "commodities", "cross"]},
+        "timeframe": {"type": "string"},
+        "session": {"type": ["string", "null"]}
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["role", "type", "params"],
+        "additionalProperties": false,
+        "properties": {
+          "role": {"enum": ["entry", "filter", "exit", "stop", "target", "risk", "regime"]},
+          "type": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "params": {"type": "object"}
+        }
+      },
+      "allOf": [
+        {"contains": {"properties": {"role": {"const": "entry"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"role": {"const": "stop"}}, "required": ["role"]}, "minContains": 1},
+        {"contains": {"properties": {"role": {"const": "risk"}}, "required": ["role"]}, "minContains": 1}
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["card_ids", "sibling_group_id", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "card_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[0-9a-f]{16}$"}},
+        "parent_strategy_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{16}$"},
+        "sibling_group_id": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "generator": {
+      "type": "object",
+      "required": ["agent", "model", "pipeline_version", "run_id"],
+      "additionalProperties": false,
+      "properties": {
+        "agent": {"type": "string"},
+        "model": {"type": "string"},
+        "pipeline_version": {"type": "string"},
+        "run_id": {"type": "string"}
+      }
+    },
+    "cost_model": {
+      "type": "object",
+      "required": ["commission_per_side", "slippage_ticks"],
+      "additionalProperties": false,
+      "properties": {
+        "commission_per_side": {"type": "number", "minimum": 0},
+        "slippage_ticks": {"type": "number", "minimum": 0}
+      }
+    }
+  },
+  "not": {
+    "anyOf": [
+      {"required": ["net_pnl"]},
+      {"required": ["sharpe"]},
+      {"required": ["win_rate"]},
+      {"required": ["results"]},
+      {"required": ["backtest"]}
+    ]
+  }
+}
