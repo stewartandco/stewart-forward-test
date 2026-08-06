@@ -88,5 +88,47 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
     return errors
 
 
-def expand_family(*a, **k):
-    raise NotImplementedError  # Task 5
+def _build_name(assets: list[str], family: str, blocks: list[dict]) -> str:
+    bits = ["+".join(a.replace("USD", "") for a in assets), "1d", family]
+    for b in blocks:
+        for p, v in sorted(b["params"].items()):
+            short = "".join(w[0] for w in p.split("_"))
+            bits.append(f"{short}{v}")
+    return " ".join(bits)[:120]
+
+
+def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[dict]:
+    """Cartesian expansion of sweep axes, in declaration order. Deterministic:
+    same family + run_id + timestamp -> same strategy_ids."""
+    axes = fam.get("sweep", [])
+    combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
+    specs = []
+    for combo in combos:
+        blocks = copy.deepcopy(fam["blocks"])
+        for ax, val in zip(axes, combo):
+            blocks[ax["block"]]["params"][ax["param"]] = val
+        spec = {
+            "strategy_id": None,
+            "version": 1,
+            "created_utc": created_utc,
+            "name": _build_name(fam["assets"], fam["family"], blocks),
+            "family": fam["family"],
+            "universe": {"assets": list(fam["assets"]), **UNIVERSE_BASE},
+            "blocks": blocks,
+            "provenance": {
+                "card_ids": list(fam["card_ids"]),
+                "parent_strategy_id": None,
+                "sibling_group_id": f"{fam['family']}-{run_id}",
+                "generation": 0,
+            },
+            "generator": {
+                "agent": "composer",
+                "model": model,
+                "pipeline_version": PIPELINE_VERSION,
+                "run_id": run_id,
+            },
+            "cost_model": dict(COST_MODEL),
+        }
+        spec["strategy_id"] = content_id(spec, "strategy_id")
+        specs.append(spec)
+    return specs

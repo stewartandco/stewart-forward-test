@@ -4,10 +4,12 @@ Run: python -m pytest pipeline/test_composer.py -q
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from .blocks import BLOCK_TYPES, validate_block, block_type_payload
@@ -181,7 +183,7 @@ def good_family(**overrides):
     fam = {
         "family": "zscore_dip_buyer",
         "rationale": "Mean reversion PT/SL asymmetry per accepted cards.",
-        "card_ids": ["CARD_A"],
+        "card_ids": ["aaaaaaaaaaaaaaaa"],
         "assets": ["BTCUSD"],
         "blocks": [
             {"role": "entry", "type": "zscore_reversion",
@@ -199,7 +201,7 @@ def good_family(**overrides):
     return fam
 
 
-ACCEPTED = {"CARD_A", "CARD_B"}
+ACCEPTED = {"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"}
 
 
 # ---------------- family validation ----------------
@@ -209,8 +211,8 @@ def test_valid_family_passes():
 
 
 def test_family_citing_unaccepted_card_rejected():
-    errs = validate_family(good_family(card_ids=["CARD_A", "CARD_X"]), ACCEPTED, 25)
-    assert any("CARD_X" in e and "not accepted" in e for e in errs)
+    errs = validate_family(good_family(card_ids=["aaaaaaaaaaaaaaaa", "cccccccccccccccc"]), ACCEPTED, 25)
+    assert any("cccccccccccccccc" in e and "not accepted" in e for e in errs)
 
 
 def test_family_with_unknown_block_rejected():
@@ -275,3 +277,48 @@ def test_duplicate_sweep_axis_rejected():
     ])
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("duplicate sweep axis" in e for e in errs)
+
+
+# ---------------- deterministic expansion ----------------
+
+TS = "2026-08-06T12:00:00Z"
+
+
+def test_expansion_count_is_axis_product():
+    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    assert len(specs) == 9  # 3 z_entry x 3 mult
+
+
+def test_expansion_is_deterministic():
+    a = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    b = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
+
+
+def test_siblings_share_group_and_vary_swept_params():
+    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    groups = {s["provenance"]["sibling_group_id"] for s in specs}
+    assert groups == {"zscore_dip_buyer-run1"}
+    z_values = {s["blocks"][0]["params"]["z_entry"] for s in specs}
+    assert z_values == {1.5, 2.0, 2.5}
+    lookbacks = {s["blocks"][0]["params"]["lookback"] for s in specs}
+    assert lookbacks == {60}  # base param untouched
+
+
+def test_no_sweep_yields_single_spec():
+    specs = expand_family(good_family(sweep=[]), "run1", "claude-opus-5", TS)
+    assert len(specs) == 1
+
+
+def test_expanded_specs_are_schema_valid():
+    schema = json.loads((LAYER / "schemas" / "strategy_spec.schema.json").read_text())
+    validator = jsonschema.Draft202012Validator(schema)
+    for spec in expand_family(good_family(), "run1", "claude-opus-5", TS):
+        validator.validate(spec)
+
+
+def test_names_are_unique_and_bounded():
+    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    names = [s["name"] for s in specs]
+    assert len(set(names)) == len(names)
+    assert all(len(n) <= 120 for n in names)
