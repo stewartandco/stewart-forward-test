@@ -78,7 +78,7 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
             errors.append(f"duplicate sweep axis {p!r} on block {i}")
         seen_axes.add((i, p))
         values = ax.get("values", [])
-        if not values or not set(map(repr, values)) <= set(map(repr, schema[p]["grid"])):
+        if not values or not set(values) <= set(schema[p]["grid"]):
             errors.append(f"sweep values for {p!r} not a subset of grid {schema[p]['grid']}")
 
     if not errors:

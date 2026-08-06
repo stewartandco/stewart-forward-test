@@ -261,3 +261,17 @@ def test_bad_family_name_rejected():
 def test_bad_asset_rejected():
     errs = validate_family(good_family(assets=["SOLUSD"]), ACCEPTED, 25)
     assert any("SOLUSD" in e for e in errs)
+
+
+def test_sweep_int_value_accepted_against_float_grid():
+    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2, 2.5]}])
+    assert validate_family(fam, ACCEPTED, 25) == []
+
+
+def test_duplicate_sweep_axis_rejected():
+    fam = good_family(sweep=[
+        {"block": 0, "param": "z_entry", "values": [1.5, 2.0]},
+        {"block": 0, "param": "z_entry", "values": [2.5]},
+    ])
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("duplicate sweep axis" in e for e in errs)
