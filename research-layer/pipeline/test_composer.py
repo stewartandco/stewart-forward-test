@@ -42,10 +42,16 @@ def test_ma_cross_constraint_fast_below_slow():
     assert errs == []
     errs = validate_block("entry", "ma_cross", {"fast": 20, "slow": 200})
     assert errs == []
-    # grids fast {5,10,20} slow {50,100,200} never overlap — constraint still
-    # guards future grid edits; test it directly:
-    from .blocks import CONSTRAINTS
-    assert CONSTRAINTS[("entry", "ma_cross")]({"fast": 60, "slow": 50})
+
+
+def test_constraint_wiring_via_validate_block(monkeypatch):
+    from . import blocks
+    monkeypatch.setitem(blocks.BLOCK_TYPES, ("entry", "ma_cross"), {
+        "fast": {"type": "int", "grid": [5, 10, 60]},
+        "slow": {"type": "int", "grid": [50, 100, 200]},
+    })
+    errs = validate_block("entry", "ma_cross", {"fast": 60, "slow": 50})
+    assert errs == ["ma_cross: fast must be < slow"]
 
 
 def test_block_type_payload_shape():

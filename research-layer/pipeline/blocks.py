@@ -8,6 +8,8 @@ grammar's growth is auditable. All types are computable from daily OHLCV.
 """
 from __future__ import annotations
 
+import copy
+
 BLOCK_TYPES: dict[tuple[str, str], dict] = {
     ("entry", "ma_cross"): {
         "fast": {"type": "int", "grid": [5, 10, 20]},
@@ -85,4 +87,4 @@ def validate_block(role: str, btype: str, params: dict) -> list[str]:
 def block_type_payload(role: str, btype: str) -> dict:
     """Payload for a block_type_registered registry entry."""
     return {"role": role, "type": btype,
-            "params_schema": BLOCK_TYPES[(role, btype)]}
+            "params_schema": copy.deepcopy(BLOCK_TYPES[(role, btype)])}
