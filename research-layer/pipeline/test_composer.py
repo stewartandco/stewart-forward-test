@@ -58,3 +58,43 @@ def test_block_type_payload_shape():
     p = block_type_payload("risk", "vol_target")
     assert p["role"] == "risk" and p["type"] == "vol_target"
     assert set(p["params_schema"]) == {"ann_vol", "lookback"}
+
+
+from .registry import Registry
+from .test_pipeline import make_card, make_strategy
+
+
+def register_grammar(reg):
+    """Chain every grammar block type (idempotent helper used across tests)."""
+    from .blocks import BLOCK_TYPES
+    existing = reg.block_types()
+    for (role, btype) in BLOCK_TYPES:
+        if (role, btype) not in existing:
+            reg.register_block_type(block_type_payload(role, btype))
+
+
+# ---------------- registry block-type support ----------------
+
+def test_block_types_roundtrip(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    assert reg.block_types() == set()
+    register_grammar(reg)
+    assert ("entry", "ma_cross") in reg.block_types()
+    assert len(reg.block_types()) == 12
+
+
+def test_register_grammar_is_idempotent(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    register_grammar(reg)
+    n = sum(1 for _ in reg.entries())
+    register_grammar(reg)
+    assert sum(1 for _ in reg.entries()) == n
+
+
+def test_register_strategy_rejects_unregistered_block_type(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    with pytest.raises(ValueError, match="not registered"):
+        reg.register_strategy(make_strategy([card["card_id"]]))

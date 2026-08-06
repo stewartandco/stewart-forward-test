@@ -89,6 +89,14 @@ class Registry:
                 state[e["payload"]["strategy_id"]] = e["payload"]["to"]
         return state
 
+    def block_types(self) -> set[tuple[str, str]]:
+        """(role, type) pairs registered via block_type_registered entries."""
+        out: set[tuple[str, str]] = set()
+        for e in self.entries():
+            if e["entry_type"] == "block_type_registered":
+                out.add((e["payload"]["role"], e["payload"]["type"]))
+        return out
+
     # -- typed writers -----------------------------------------------------
 
     def register_card(self, card: dict) -> dict:
@@ -110,6 +118,12 @@ class Registry:
             "reject_reason": reject_reason, "reviewed_by": reviewed_by,
         })
 
+    def register_block_type(self, payload: dict) -> dict:
+        for k in ("role", "type", "params_schema"):
+            if k not in payload:
+                raise ValueError(f"block type payload missing {k!r}")
+        return self.append("block_type_registered", payload)
+
     def register_strategy(self, spec: dict) -> dict:
         accepted = self.cards(status="accepted")
         cited = spec.get("provenance", {}).get("card_ids", [])
@@ -118,6 +132,10 @@ class Registry:
         missing = [c for c in cited if c not in accepted]
         if missing:
             raise ValueError(f"cited cards not registered+accepted: {missing}")
+        registered_blocks = self.block_types()
+        for b in spec.get("blocks", []):
+            if (b["role"], b["type"]) not in registered_blocks:
+                raise ValueError(f"block type {b['role']}/{b['type']} not registered")
         return self.append("strategy_registered", spec)
 
     def record_state_change(self, strategy_id: str, to: str, reason: str | None = None) -> dict:

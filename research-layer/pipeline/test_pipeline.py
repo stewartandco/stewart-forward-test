@@ -64,6 +64,16 @@ def make_strategy(card_ids):
     return spec
 
 
+def register_example_blocks(reg):
+    """Register the block types make_strategy() uses (example futures grammar)."""
+    reg.register_block_type({"role": "entry", "type": "orb_breakout",
+                             "params_schema": {"window_min": {"type": "int", "grid": [15]}}})
+    reg.register_block_type({"role": "stop", "type": "structure",
+                             "params_schema": {}})
+    reg.register_block_type({"role": "risk", "type": "fixed_contracts",
+                             "params_schema": {"n": {"type": "int", "grid": [1]}}})
+
+
 # ---------------- honesty guard ----------------
 
 def test_quote_found_despite_whitespace():
@@ -95,6 +105,7 @@ def test_card_id_changes_with_content():
 def test_full_flow_produces_valid_chain(tmp_path):
     log = tmp_path / "registry_log.jsonl"
     reg = Registry(log)
+    register_example_blocks(reg)
 
     card = make_card()
     reg.register_card(card)
@@ -117,6 +128,7 @@ def test_full_flow_produces_valid_chain(tmp_path):
 
 def test_strategy_requires_accepted_cards(tmp_path):
     reg = Registry(tmp_path / "log.jsonl")
+    register_example_blocks(reg)
     card = make_card()
     reg.register_card(card)  # pending, never accepted
     with pytest.raises(ValueError, match="not registered\\+accepted"):
@@ -125,6 +137,7 @@ def test_strategy_requires_accepted_cards(tmp_path):
 
 def test_illegal_transition_rejected(tmp_path):
     reg = Registry(tmp_path / "log.jsonl")
+    register_example_blocks(reg)
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
@@ -136,6 +149,7 @@ def test_illegal_transition_rejected(tmp_path):
 
 def test_terminal_state_is_final(tmp_path):
     reg = Registry(tmp_path / "log.jsonl")
+    register_example_blocks(reg)
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
