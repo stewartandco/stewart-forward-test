@@ -172,3 +172,92 @@ def test_live_registry_still_valid():
         pytest.skip("no live registry")
     out = run_verifier(live)
     assert out.returncode == 0, out.stdout
+
+
+from .composer import validate_family, expand_family, SIBLING_CAP_DEFAULT
+
+
+def good_family(**overrides):
+    fam = {
+        "family": "zscore_dip_buyer",
+        "rationale": "Mean reversion PT/SL asymmetry per accepted cards.",
+        "card_ids": ["CARD_A"],
+        "assets": ["BTCUSD"],
+        "blocks": [
+            {"role": "entry", "type": "zscore_reversion",
+             "params": {"lookback": 60, "z_entry": 2.0, "direction": "long"}},
+            {"role": "stop", "type": "atr_stop", "params": {"atr_len": 14, "mult": 2.0}},
+            {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "sweep": [
+            {"block": 0, "param": "z_entry", "values": [1.5, 2.0, 2.5]},
+            {"block": 1, "param": "mult", "values": [1.5, 2.0, 3.0]},
+        ],
+    }
+    fam.update(overrides)
+    return fam
+
+
+ACCEPTED = {"CARD_A", "CARD_B"}
+
+
+# ---------------- family validation ----------------
+
+def test_valid_family_passes():
+    assert validate_family(good_family(), ACCEPTED, 25) == []
+
+
+def test_family_citing_unaccepted_card_rejected():
+    errs = validate_family(good_family(card_ids=["CARD_A", "CARD_X"]), ACCEPTED, 25)
+    assert any("CARD_X" in e and "not accepted" in e for e in errs)
+
+
+def test_family_with_unknown_block_rejected():
+    fam = good_family()
+    fam["blocks"][0]["type"] = "orb_breakout"
+    assert any("unknown block type" in e for e in validate_family(fam, ACCEPTED, 25))
+
+
+def test_family_missing_stop_rejected():
+    fam = good_family()
+    fam["blocks"] = [b for b in fam["blocks"] if b["role"] != "stop"]
+    fam["sweep"] = fam["sweep"][:1]
+    assert any("stop" in e for e in validate_family(fam, ACCEPTED, 25))
+
+
+def test_family_with_two_entries_rejected():
+    fam = good_family()
+    fam["blocks"].append({"role": "entry", "type": "ma_cross",
+                          "params": {"fast": 10, "slow": 100}})
+    assert any("exactly one entry" in e for e in validate_family(fam, ACCEPTED, 25))
+
+
+def test_sweep_values_off_grid_rejected():
+    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2.0, 9.9]}])
+    assert any("not a subset" in e for e in validate_family(fam, ACCEPTED, 25))
+
+
+def test_sweep_unknown_param_rejected():
+    fam = good_family(sweep=[{"block": 0, "param": "zz", "values": [2.0]}])
+    assert any("zz" in e for e in validate_family(fam, ACCEPTED, 25))
+
+
+def test_sibling_cap_rejects_not_clips():
+    fam = good_family(sweep=[
+        {"block": 0, "param": "z_entry", "values": [1.5, 2.0, 2.5]},
+        {"block": 0, "param": "lookback", "values": [20, 60, 90]},
+        {"block": 1, "param": "mult", "values": [1.5, 2.0, 3.0]},
+    ])  # 27 siblings
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("sibling" in e and "cap" in e for e in errs)
+
+
+def test_bad_family_name_rejected():
+    errs = validate_family(good_family(family="Bad Name!"), ACCEPTED, 25)
+    assert any("family name" in e for e in errs)
+
+
+def test_bad_asset_rejected():
+    errs = validate_family(good_family(assets=["SOLUSD"]), ACCEPTED, 25)
+    assert any("SOLUSD" in e for e in errs)
