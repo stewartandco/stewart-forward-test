@@ -6,9 +6,10 @@ invariants:
 
   1. chain integrity (prev_entry_hash links, genesis = 64 zeros)
   2. verdicts / state_changes reference a previously registered strategy_id
-  3. strategies cite >= 1 previously registered card_id
+  3. strategies cite >= 1 card_id previously registered AND accepted
   4. strategy_registered payloads carry no results fields
   5. lifecycle transitions follow the state machine
+  6. strategy blocks reference previously registered block types
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -58,6 +59,8 @@ def verify(log_path: Path) -> int:
     prev_hash = GENESIS_HASH
     n_ok = n_bad = 0
     cards: set[str] = set()
+    accepted: set[str] = set()
+    block_types: set[tuple[str, str]] = set()
     strategies: set[str] = set()
     state: dict[str, str] = {}
     by_type: dict[str, int] = {}
@@ -95,6 +98,17 @@ def verify(log_path: Path) -> int:
                 else:
                     cards.add(cid)
 
+            elif etype == "card_reviewed":
+                if payload.get("status") == "accepted":
+                    accepted.add(payload.get("card_id"))
+
+            elif etype == "block_type_registered":
+                role, btype = payload.get("role"), payload.get("type")
+                if not role or not btype:
+                    fail(lineno, "block_type_registered missing role/type"); ok = False
+                else:
+                    block_types.add((role, btype))
+
             elif etype == "strategy_registered":
                 sid = payload.get("strategy_id")
                 if not sid:
@@ -107,6 +121,13 @@ def verify(log_path: Path) -> int:
                     fail(lineno, f"strategy {sid}: cites no research cards"); ok = False
                 elif not cited <= cards:
                     fail(lineno, f"strategy {sid}: cites unregistered cards {sorted(cited - cards)}"); ok = False
+                not_accepted = sorted(cited & cards - accepted)
+                if cited <= cards and not_accepted:
+                    fail(lineno, f"strategy {sid}: cites cards not accepted {not_accepted}"); ok = False
+                for b in payload.get("blocks", []):
+                    if (b.get("role"), b.get("type")) not in block_types:
+                        fail(lineno, f"strategy {sid}: unregistered block type "
+                                     f"{b.get('role')}/{b.get('type')}"); ok = False
                 leaked = FORBIDDEN_RESULT_KEYS & set(payload.keys())
                 if leaked:
                     fail(lineno, f"strategy {sid}: results fields in spec {sorted(leaked)}"); ok = False

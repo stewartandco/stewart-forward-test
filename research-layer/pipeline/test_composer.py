@@ -4,9 +4,22 @@ Run: python -m pytest pipeline/test_composer.py -q
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from .blocks import BLOCK_TYPES, validate_block, block_type_payload
+
+HERE = Path(__file__).resolve().parent
+LAYER = HERE.parent
+
+
+def run_verifier(log_path):
+    return subprocess.run(
+        [sys.executable, str(LAYER / "verify_registry.py"), str(log_path)],
+        capture_output=True, text=True)
 
 
 # ---------------- block grammar ----------------
@@ -107,3 +120,55 @@ def test_register_strategy_rejects_unregistered_block_type(tmp_path):
     reg.review_card(card["card_id"], "accepted", "tester")
     with pytest.raises(ValueError, match="block type"):
         reg.register_strategy(make_strategy([card["card_id"]]))
+
+
+# ---------------- verifier extensions ----------------
+
+def _chained_strategy_setup(tmp_path, accept=True):
+    reg = Registry(tmp_path / "log.jsonl")
+    from .test_pipeline import register_example_blocks
+    register_example_blocks(reg)
+    card = make_card()
+    reg.register_card(card)
+    if accept:
+        reg.review_card(card["card_id"], "accepted", "tester")
+    return reg, card
+
+
+def test_verifier_accepts_strategy_with_registered_blocks(tmp_path):
+    reg, card = _chained_strategy_setup(tmp_path)
+    reg.register_strategy(make_strategy([card["card_id"]]))
+    out = run_verifier(tmp_path / "log.jsonl")
+    assert out.returncode == 0, out.stdout
+
+
+def test_verifier_rejects_unregistered_block_type(tmp_path):
+    reg, card = _chained_strategy_setup(tmp_path)
+    spec = make_strategy([card["card_id"]])
+    spec["blocks"][0]["type"] = "never_registered"
+    reg.append("strategy_registered", spec)   # bypass writer guard on purpose
+    out = run_verifier(tmp_path / "log.jsonl")
+    assert out.returncode != 0
+    assert "unregistered block type" in out.stdout
+
+
+def test_verifier_rejects_citation_of_unaccepted_card(tmp_path):
+    reg, card = _chained_strategy_setup(tmp_path, accept=False)
+    spec = make_strategy([card["card_id"]])
+    reg.append("strategy_registered", spec)   # bypass writer guard on purpose
+    out = run_verifier(tmp_path / "log.jsonl")
+    assert out.returncode != 0
+    assert "not accepted" in out.stdout
+
+
+def test_example_log_still_valid():
+    out = run_verifier(LAYER / "examples" / "registry_log.example.jsonl")
+    assert out.returncode == 0, out.stdout
+
+
+def test_live_registry_still_valid():
+    live = LAYER / "registry_log.jsonl"
+    if not live.exists():
+        pytest.skip("no live registry")
+    out = run_verifier(live)
+    assert out.returncode == 0, out.stdout
