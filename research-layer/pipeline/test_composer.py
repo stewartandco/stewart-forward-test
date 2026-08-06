@@ -91,10 +91,19 @@ def test_register_grammar_is_idempotent(tmp_path):
     assert sum(1 for _ in reg.entries()) == n
 
 
+def test_register_block_type_conflicting_schema_rejected(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    reg.register_block_type({"role": "entry", "type": "ma_cross",
+                             "params_schema": {"fast": {"type": "int", "grid": [5]}}})
+    with pytest.raises(ValueError, match="conflicts|conflicting"):
+        reg.register_block_type({"role": "entry", "type": "ma_cross",
+                                 "params_schema": {"fast": {"type": "int", "grid": [5, 99]}}})
+
+
 def test_register_strategy_rejects_unregistered_block_type(tmp_path):
     reg = Registry(tmp_path / "log.jsonl")
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
-    with pytest.raises(ValueError, match="not registered"):
+    with pytest.raises(ValueError, match="block type"):
         reg.register_strategy(make_strategy([card["card_id"]]))

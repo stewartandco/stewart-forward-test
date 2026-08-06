@@ -122,6 +122,14 @@ class Registry:
         for k in ("role", "type", "params_schema"):
             if k not in payload:
                 raise ValueError(f"block type payload missing {k!r}")
+        role, btype = payload["role"], payload["type"]
+        for e in self.entries():
+            if (e["entry_type"] == "block_type_registered"
+                    and e["payload"]["role"] == role
+                    and e["payload"]["type"] == btype
+                    and e["payload"]["params_schema"] != payload["params_schema"]):
+                raise ValueError(
+                    f"block type {role}/{btype} already registered with a conflicting params_schema")
         return self.append("block_type_registered", payload)
 
     def register_strategy(self, spec: dict) -> dict:
