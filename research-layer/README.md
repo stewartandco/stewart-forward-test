@@ -68,7 +68,8 @@ cd research-layer
 python -m pipeline.reader paper.pdf --title "Some Paper" --source-type paper \
     --author "A. Author" --year 2021 --url https://example.org/paper
 
-# 2. Review pending cards — accept/reject each, decisions are chained
+# 2. Review pending cards — accept/reject each ([u] undoes); decisions buffer
+#    in memory and chain only on the final [w]rite confirmation
 python -m pipeline.triage --reviewer coen
 
 # 3. Verify the chain any time

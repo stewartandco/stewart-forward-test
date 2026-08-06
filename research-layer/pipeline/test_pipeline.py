@@ -14,6 +14,7 @@ import pytest
 from .common import quote_in_source, content_id
 from .registry import Registry
 from .reader import build_card
+from .triage import collect_decisions, confirm_write, apply_decisions
 
 HERE = Path(__file__).resolve().parent
 LAYER = HERE.parent
@@ -151,6 +152,75 @@ def test_rejected_review_needs_reason(tmp_path):
     reg.register_card(card)
     with pytest.raises(ValueError, match="reject_reason"):
         reg.review_card(card["card_id"], "rejected", "tester")
+
+
+# ---------------- triage batching + undo ----------------
+
+def scripted(*keys):
+    it = iter(keys)
+    return lambda _prompt: next(it)
+
+
+def make_pending(n):
+    cards = [make_card(claim=f"Distinct testable claim number {i} about volatility.")
+             for i in range(n)]
+    return {c["card_id"]: c for c in cards}
+
+
+def test_triage_undo_reverses_last_decision():
+    pending = make_pending(2)
+    ids = list(pending)
+    # accept #1, then at #2 undo (back to #1), reject #1, accept #2, finish
+    decisions = collect_decisions(pending, scripted("a", "u", "o", "a", "x"))
+    assert decisions[ids[0]] == ("rejected", "off_topic")
+    assert decisions[ids[1]] == ("accepted", None)
+
+
+def test_triage_undo_at_first_card_is_noop():
+    pending = make_pending(1)
+    decisions = collect_decisions(pending, scripted("u", "a"))
+    assert decisions[list(pending)[0]] == ("accepted", None)
+
+
+def test_triage_skip_and_quit_leave_cards_undecided():
+    pending = make_pending(3)
+    ids = list(pending)
+    decisions = collect_decisions(pending, scripted("s", "a", "x"))
+    assert ids[0] not in decisions and ids[2] not in decisions
+    assert decisions[ids[1]] == ("accepted", None)
+
+
+def test_triage_nothing_chained_without_write(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    pending = make_pending(2)
+    for c in pending.values():
+        reg.register_card(c)
+    decisions = collect_decisions(pending, scripted("a", "d"))
+    assert not confirm_write(decisions, len(pending), scripted("q"))
+    assert reg.cards(status="pending").keys() == pending.keys()
+
+
+def test_triage_write_chains_all_buffered_decisions(tmp_path):
+    reg = Registry(tmp_path / "log.jsonl")
+    pending = make_pending(3)
+    for c in pending.values():
+        reg.register_card(c)
+    ids = list(pending)
+    decisions = collect_decisions(pending, scripted("a", "c", "s"))
+    assert confirm_write(decisions, len(pending), scripted("w"))
+    apply_decisions(reg, decisions, "tester")
+    cards = reg.cards()
+    assert cards[ids[0]]["review"]["status"] == "accepted"
+    assert cards[ids[1]]["review"]["status"] == "rejected"
+    assert cards[ids[1]]["review"]["reject_reason"] == "claim_not_supported"
+    assert cards[ids[2]]["review"]["status"] == "pending"
+
+
+def test_triage_eof_discards(tmp_path):
+    def raise_eof(_prompt):
+        raise EOFError
+    pending = make_pending(1)
+    assert collect_decisions(pending, raise_eof) == {}
 
 
 def test_tampering_breaks_chain(tmp_path):
