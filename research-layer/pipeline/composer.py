@@ -18,6 +18,7 @@ import re
 import sys
 import copy
 import json
+import hashlib
 import argparse
 import itertools
 from math import prod
@@ -80,6 +81,8 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
         values = ax.get("values", [])
         if not values or not set(values) <= set(schema[p]["grid"]):
             errors.append(f"sweep values for {p!r} not a subset of grid {schema[p]['grid']}")
+        if len(set(values)) != len(values):
+            errors.append(f"duplicate values in sweep axis {p!r}")
 
     if not errors:
         n = prod(len(ax["values"]) for ax in fam.get("sweep", [])) if fam.get("sweep") else 1
@@ -89,17 +92,35 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
 
 
 def _build_name(assets: list[str], family: str, blocks: list[dict]) -> str:
-    bits = ["+".join(a.replace("USD", "") for a in assets), "1d", family]
+    bits = ["+".join(a.replace("USD", "") for a in assets),
+            UNIVERSE_BASE["timeframe"], family]
     for b in blocks:
         for p, v in sorted(b["params"].items()):
             short = "".join(w[0] for w in p.split("_"))
             bits.append(f"{short}{v}")
-    return " ".join(bits)[:120]
+    full = " ".join(bits)
+    if len(full) <= 120:
+        return full
+    # keep names unique after truncation: suffix = hash of the full name
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:8]
+    return full[:111] + "~" + digest
+
+
+def _snap_to_grid(blocks: list[dict]) -> None:
+    """Replace each param value with the equal grid element (in place), so
+    2 and 2.0 hash identically. Membership was already validated."""
+    for b in blocks:
+        schema = BLOCK_TYPES.get((b["role"], b["type"]), {})
+        for p, v in b["params"].items():
+            grid = schema.get(p, {}).get("grid")
+            if grid:
+                b["params"][p] = next(g for g in grid if g == v)
 
 
 def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[dict]:
     """Cartesian expansion of sweep axes, in declaration order. Deterministic:
     same family + run_id + timestamp -> same strategy_ids."""
+    assets = sorted(fam["assets"])
     axes = fam.get("sweep", [])
     combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
     specs = []
@@ -107,16 +128,17 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
         blocks = copy.deepcopy(fam["blocks"])
         for ax, val in zip(axes, combo):
             blocks[ax["block"]]["params"][ax["param"]] = val
+        _snap_to_grid(blocks)
         spec = {
             "strategy_id": None,
             "version": 1,
             "created_utc": created_utc,
-            "name": _build_name(fam["assets"], fam["family"], blocks),
+            "name": _build_name(assets, fam["family"], blocks),
             "family": fam["family"],
-            "universe": {"assets": list(fam["assets"]), **UNIVERSE_BASE},
+            "universe": {"assets": assets, **UNIVERSE_BASE},
             "blocks": blocks,
             "provenance": {
-                "card_ids": list(fam["card_ids"]),
+                "card_ids": sorted(fam["card_ids"]),
                 "parent_strategy_id": None,
                 "sibling_group_id": f"{fam['family']}-{run_id}",
                 "generation": 0,

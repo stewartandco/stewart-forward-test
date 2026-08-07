@@ -322,3 +322,31 @@ def test_names_are_unique_and_bounded():
     names = [s["name"] for s in specs]
     assert len(set(names)) == len(names)
     assert all(len(n) <= 120 for n in names)
+
+
+def test_long_family_name_truncation_keeps_names_unique():
+    fam = good_family(family="zscore_dip_buyer_with_a_very_long_descriptive_family_name_for_realism_and_extra_padding")
+    specs = expand_family(fam, "run1", "claude-opus-5", TS)
+    names = [s["name"] for s in specs]
+    assert len(set(names)) == len(names)
+    assert all(len(n) <= 120 for n in names)
+
+
+def test_int_and_float_sweep_values_hash_identically():
+    a = expand_family(good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2]}]),
+                      "run1", "claude-opus-5", TS)
+    b = expand_family(good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2.0]}]),
+                      "run1", "claude-opus-5", TS)
+    assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
+
+
+def test_asset_order_does_not_change_identity():
+    a = expand_family(good_family(assets=["BTCUSD", "ETHUSD"]), "run1", "claude-opus-5", TS)
+    b = expand_family(good_family(assets=["ETHUSD", "BTCUSD"]), "run1", "claude-opus-5", TS)
+    assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
+
+
+def test_duplicate_values_in_sweep_axis_rejected():
+    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [1.5, 1.5, 2.0]}])
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("duplicate values" in e for e in errs)
