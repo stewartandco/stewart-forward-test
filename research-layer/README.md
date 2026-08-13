@@ -57,8 +57,7 @@ gate criteria.
 
 ## Pipeline agents (`pipeline/`)
 
-The first agent, per the roadmap: read sources → extract quote-grounded cards
-→ human triage. Requires `pip install anthropic jsonschema` (plus `pypdf` for
+Two agents so far: the Reader (sources → quote-grounded cards → human triage) and the Composer (accepted cards → pre-registered sibling strategy specs). Requires `pip install anthropic jsonschema` (plus `pypdf` for
 PDF sources) and an `ANTHROPIC_API_KEY`.
 
 ```bash
@@ -99,7 +98,7 @@ Mechanics worth knowing:
   denominator is a fact of record, not model whim. Invalid families are
   dropped loudly and counted.
 
-Offline tests (no API key needed): `python -m pytest pipeline/test_pipeline.py`
+Offline tests (no API key needed): `python -m pytest pipeline/`
 
 ## Status
 
