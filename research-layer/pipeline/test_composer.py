@@ -475,3 +475,12 @@ def test_run_max_families_truncation_is_loud(tmp_path, capsys):
                       propose_fn=lambda cards: fams)
     assert rc == 0
     assert "1 families beyond --max-families 2 discarded" in capsys.readouterr().out
+
+
+def test_normalize_proposal_converts_param_lists():
+    from .composer import normalize_proposal
+    fams = [{"blocks": [{"role": "entry", "type": "ma_cross",
+                         "params": [{"name": "fast", "value": 10},
+                                    {"name": "slow", "value": 100}]}]}]
+    out = normalize_proposal(fams)
+    assert out[0]["blocks"][0]["params"] == {"fast": 10, "slow": 100}

@@ -177,7 +177,22 @@ PROPOSAL_SCHEMA = {
                                 "role": {"enum": ["entry", "filter", "exit",
                                                    "stop", "target", "risk", "regime"]},
                                 "type": {"type": "string"},
-                                "params": {"type": "object"},
+                                # structured outputs cannot express free-form
+                                # maps (every object needs additionalProperties
+                                # false), so params travel as name/value pairs
+                                # and normalize_proposal() converts to dicts
+                                "params": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "value": {"type": ["number", "string"]},
+                                        },
+                                        "required": ["name", "value"],
+                                        "additionalProperties": False,
+                                    },
+                                },
                             },
                             "required": ["role", "type", "params"],
                             "additionalProperties": False,
@@ -190,7 +205,8 @@ PROPOSAL_SCHEMA = {
                             "properties": {
                                 "block": {"type": "integer"},
                                 "param": {"type": "string"},
-                                "values": {"type": "array"},
+                                "values": {"type": "array",
+                                           "items": {"type": ["number", "string"]}},
                             },
                             "required": ["block", "param", "values"],
                             "additionalProperties": False,
@@ -277,7 +293,17 @@ def propose_families(model: str, accepted: dict[str, dict],
         print("  model refusal", file=sys.stderr)
         return []
     text = next(b.text for b in message.content if b.type == "text")
-    return json.loads(text)["families"]
+    return normalize_proposal(json.loads(text)["families"])
+
+
+def normalize_proposal(families: list[dict]) -> list[dict]:
+    """Convert model-emitted [{name, value}] param lists back into the
+    {name: value} dicts the rest of the pipeline uses (see PROPOSAL_SCHEMA)."""
+    for fam in families:
+        for b in fam.get("blocks", []):
+            if isinstance(b.get("params"), list):
+                b["params"] = {p["name"]: p["value"] for p in b["params"]}
+    return families
 
 
 def run(argv: list[str] | None = None, propose_fn=None) -> int:
