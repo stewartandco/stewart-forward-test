@@ -423,3 +423,35 @@ def test_run_errors_when_no_accepted_cards(tmp_path):
     rc = composer_run(["--registry", str(tmp_path / "empty.jsonl"), "--run-id", "t1"],
                       propose_fn=lambda cards: [])
     assert rc == 1
+
+
+def test_run_aborts_on_grammar_conflict(tmp_path, capsys):
+    path, cid = seeded_registry(tmp_path)
+    reg = Registry(path)
+    from .blocks import BLOCK_TYPES as GRAMMAR
+    role, btype = next(iter(GRAMMAR))
+    reg.register_block_type({"role": role, "type": btype,
+                             "params_schema": {"different": {"type": "int", "grid": [1]}}})
+    rc = composer_run(["--registry", str(path), "--run-id", "t1", "--dry-run"],
+                      propose_fn=lambda cards: [good_family(card_ids=[cid])])
+    assert rc == 1
+    assert "GRAMMAR CONFLICT" in capsys.readouterr().out
+
+
+def test_run_partial_write_warns(tmp_path, capsys, monkeypatch):
+    path, cid = seeded_registry(tmp_path)
+    orig = Registry.register_strategy
+    calls = {"n": 0}
+
+    def flaky(self, spec):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("disk full")
+        return orig(self, spec)
+
+    monkeypatch.setattr(Registry, "register_strategy", flaky)
+    with pytest.raises(RuntimeError, match="disk full"):
+        composer_run(["--registry", str(path), "--run-id", "t1"],
+                     propose_fn=lambda cards: [good_family(card_ids=[cid])])
+    err = capsys.readouterr().err
+    assert "PARTIAL WRITE: 2/9" in err

@@ -240,6 +240,20 @@ def cards_summary(accepted: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def preflight_block_types(registry: Registry) -> list[str]:
+    """Conflicts between the in-code grammar and already-chained block types.
+    Non-empty means blocks.py mutated a chained schema — abort before any write."""
+    chained = {}
+    for e in registry.entries():
+        if e["entry_type"] == "block_type_registered":
+            chained[(e["payload"]["role"], e["payload"]["type"])] = e["payload"]["params_schema"]
+    return [
+        f"{role}/{btype} already chained with a different params_schema"
+        for (role, btype), schema in BLOCK_TYPES.items()
+        if (role, btype) in chained and chained[(role, btype)] != schema
+    ]
+
+
 def propose_families(model: str, accepted: dict[str, dict],
                      max_families: int) -> list[dict]:
     import anthropic
@@ -283,6 +297,14 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     accepted = registry.cards(status="accepted")
     if not accepted:
         print("No accepted cards in the registry — run the Reader and triage first.")
+        return 1
+
+    conflicts = preflight_block_types(registry)
+    if conflicts:
+        for c in conflicts:
+            print(f"  GRAMMAR CONFLICT: {c}")
+        print("Aborting — grammar changes must be additive (new types); "
+              "never mutate a chained params_schema.")
         return 1
 
     if propose_fn is None:
@@ -336,10 +358,18 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         if key not in existing:
             registry.register_block_type(block_type_payload(*key))
             n_blocks += 1
-    for fam, specs in kept:
-        for spec in specs:
-            registry.register_strategy(spec)
-            print(f"  registered {spec['strategy_id']}  {spec['name']}")
+    n_written = 0
+    try:
+        for fam, specs in kept:
+            for spec in specs:
+                registry.register_strategy(spec)
+                n_written += 1
+                print(f"  registered {spec['strategy_id']}  {spec['name']}")
+    except BaseException:
+        print(f"\nPARTIAL WRITE: {n_written}/{total} spec(s) chained before failure — "
+              f"the last sibling group is incomplete; review the registry tail "
+              f"before re-running.", file=sys.stderr)
+        raise
 
     print(f"\n{len(kept)} families kept, {dropped} dropped, {total} spec(s) "
           f"registered in {len(kept)} sibling group(s), "
