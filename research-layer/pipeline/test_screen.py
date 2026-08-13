@@ -42,3 +42,11 @@ def test_write_csv_roundtrip(tmp_path):
 
 def test_symbol_mapping():
     assert SYMBOLS == {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT"}
+
+
+def test_write_csv_bytes_are_lf_only(tmp_path):
+    rows = klines_to_rows(FAKE_KLINES)
+    out = tmp_path / "x.csv"
+    write_csv(rows, out)
+    raw = out.read_bytes()
+    assert b"\r" not in raw
