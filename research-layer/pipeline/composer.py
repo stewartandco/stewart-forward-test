@@ -311,7 +311,10 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         proposals = propose_families(args.model, accepted, args.max_families)
     else:
         proposals = propose_fn(accepted)
-    proposals = proposals[:args.max_families]
+    if len(proposals) > args.max_families:
+        print(f"  NOTE: {len(proposals) - args.max_families} families beyond "
+              f"--max-families {args.max_families} discarded unvalidated.")
+        proposals = proposals[:args.max_families]
 
     import jsonschema
     schema = json.loads(

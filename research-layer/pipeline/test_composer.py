@@ -455,3 +455,23 @@ def test_run_partial_write_warns(tmp_path, capsys, monkeypatch):
                      propose_fn=lambda cards: [good_family(card_ids=[cid])])
     err = capsys.readouterr().err
     assert "PARTIAL WRITE: 2/9" in err
+
+
+def test_verifier_honors_acceptance_revocation(tmp_path):
+    reg, card = _chained_strategy_setup(tmp_path)
+    reg.review_card(card["card_id"], "rejected", "tester", reject_reason="duplicate")
+    spec = make_strategy([card["card_id"]])
+    reg.append("strategy_registered", spec)   # bypass writer guard on purpose
+    out = run_verifier(tmp_path / "log.jsonl")
+    assert out.returncode != 0
+    assert "not accepted" in out.stdout
+
+
+def test_run_max_families_truncation_is_loud(tmp_path, capsys):
+    path, cid = seeded_registry(tmp_path)
+    fams = [good_family(card_ids=[cid], family=f"fam_{i}") for i in range(3)]
+    rc = composer_run(["--registry", str(path), "--run-id", "t1", "--dry-run",
+                       "--max-families", "2"],
+                      propose_fn=lambda cards: fams)
+    assert rc == 0
+    assert "1 families beyond --max-families 2 discarded" in capsys.readouterr().out

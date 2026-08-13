@@ -101,6 +101,8 @@ def verify(log_path: Path) -> int:
             elif etype == "card_reviewed":
                 if payload.get("status") == "accepted":
                     accepted.add(payload.get("card_id"))
+                else:
+                    accepted.discard(payload.get("card_id"))
 
             elif etype == "block_type_registered":
                 role, btype = payload.get("role"), payload.get("type")
