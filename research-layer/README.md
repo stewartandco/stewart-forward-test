@@ -55,7 +55,7 @@ third-party witness.
 Every arrow emits a registry entry. See `SCHEMA.md` for the entry types and
 gate criteria.
 
-## Reader pilot (`pipeline/`)
+## Pipeline agents (`pipeline/`)
 
 The first agent, per the roadmap: read sources → extract quote-grounded cards
 → human triage. Requires `pip install anthropic jsonschema` (plus `pypdf` for
@@ -72,7 +72,11 @@ python -m pipeline.reader paper.pdf --title "Some Paper" --source-type paper \
 #    in memory and chain only on the final [w]rite confirmation
 python -m pipeline.triage --reviewer coen
 
-# 3. Verify the chain any time
+# 3. Compose strategy specs from accepted cards (--dry-run first, then real)
+python -m pipeline.composer --max-families 8 --dry-run
+python -m pipeline.composer --max-families 8
+
+# 4. Verify the chain any time
 python verify_registry.py registry_log.jsonl
 ```
 
@@ -89,13 +93,18 @@ Mechanics worth knowing:
   entries with the same canonical-JSON SHA-256 linkage as the root log, and
   enforces the lifecycle state machine on writes (verify_registry.py enforces
   it again on reads).
+- **The Composer cannot invent blocks.** Strategy specs compose only block
+  types registered in the chain (`pipeline/blocks.py` is the source of
+  truth); sibling enumeration is deterministic code, so the multiple-testing
+  denominator is a fact of record, not model whim. Invalid families are
+  dropped loudly and counted.
 
 Offline tests (no API key needed): `python -m pytest pipeline/test_pipeline.py`
 
 ## Status
 
-- **v1 — specification + Reader pilot.** Composer/gauntlet agents are not
-  built yet; the lifecycle beyond `card_reviewed` is exercised only by tests
-  and examples.
+- **v1 — specification + Reader + Composer.** Screening/gauntlet execution is
+  not built yet; the lifecycle beyond `strategy_registered` is exercised only
+  by tests and examples.
 - The live registry chain (`registry_log.jsonl`) is created on the Reader's
   first non-dry-run write; `verify_registry.py` validates it and the example log.
