@@ -350,3 +350,76 @@ def test_duplicate_values_in_sweep_axis_rejected():
     fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [1.5, 1.5, 2.0]}])
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("duplicate values" in e for e in errs)
+
+
+from .composer import run as composer_run
+
+
+def seeded_registry(tmp_path):
+    """Registry with one accepted card; returns (registry_path, card_id)."""
+    reg = Registry(tmp_path / "reg.jsonl")
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    return tmp_path / "reg.jsonl", card["card_id"]
+
+
+# ---------------- run() paths ----------------
+
+def test_run_dry_run_writes_nothing(tmp_path, capsys):
+    path, cid = seeded_registry(tmp_path)
+    n_before = sum(1 for _ in Registry(path).entries())
+    rc = composer_run(
+        ["--registry", str(path), "--run-id", "t1", "--dry-run"],
+        propose_fn=lambda cards: [good_family(card_ids=[cid])])
+    assert rc == 0
+    assert sum(1 for _ in Registry(path).entries()) == n_before
+    outp = capsys.readouterr().out
+    assert "DRY RUN" in outp and "9 sibling" in outp
+
+
+def test_run_registers_blocks_then_specs(tmp_path):
+    path, cid = seeded_registry(tmp_path)
+    rc = composer_run(
+        ["--registry", str(path), "--run-id", "t1"],
+        propose_fn=lambda cards: [good_family(card_ids=[cid])])
+    assert rc == 0
+    reg = Registry(path)
+    assert len(reg.block_types()) == 12
+    states = reg.strategy_states()
+    assert len(states) == 9 and set(states.values()) == {"proposed"}
+    out = run_verifier(path)
+    assert out.returncode == 0, out.stdout
+
+
+def test_run_drops_invalid_family_loudly(tmp_path, capsys):
+    path, cid = seeded_registry(tmp_path)
+    bad = good_family(card_ids=["nope"], family="badfam")
+    ok = good_family(card_ids=[cid])
+    rc = composer_run(
+        ["--registry", str(path), "--run-id", "t1"],
+        propose_fn=lambda cards: [bad, ok])
+    assert rc == 0
+    outp = capsys.readouterr().out
+    assert "DROPPED family badfam" in outp
+    assert len(Registry(path).strategy_states()) == 9
+
+
+def test_run_rejects_duplicate_family_names(tmp_path, capsys):
+    path, cid = seeded_registry(tmp_path)
+    rc = composer_run(
+        ["--registry", str(path), "--run-id", "t1"],
+        propose_fn=lambda cards: [good_family(card_ids=[cid]),
+                                  good_family(card_ids=[cid])])
+    assert rc == 0
+    assert len(Registry(path).strategy_states()) == 9  # second dropped
+    assert "duplicate family name" in capsys.readouterr().out
+
+
+def test_run_errors_when_no_accepted_cards(tmp_path):
+    reg = Registry(tmp_path / "empty.jsonl")
+    card = make_card()
+    reg.register_card(card)  # pending only
+    rc = composer_run(["--registry", str(tmp_path / "empty.jsonl"), "--run-id", "t1"],
+                      propose_fn=lambda cards: [])
+    assert rc == 1

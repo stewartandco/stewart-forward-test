@@ -154,3 +154,198 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
         spec["strategy_id"] = content_id(spec, "strategy_id")
         specs.append(spec)
     return specs
+
+
+PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "families": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "family": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "card_ids": {"type": "array", "items": {"type": "string"}},
+                    "assets": {"type": "array",
+                               "items": {"enum": list(ALLOWED_ASSETS)}},
+                    "blocks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"enum": ["entry", "filter", "exit",
+                                                   "stop", "target", "risk", "regime"]},
+                                "type": {"type": "string"},
+                                "params": {"type": "object"},
+                            },
+                            "required": ["role", "type", "params"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "sweep": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "block": {"type": "integer"},
+                                "param": {"type": "string"},
+                                "values": {"type": "array"},
+                            },
+                            "required": ["block", "param", "values"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["family", "rationale", "card_ids", "assets",
+                              "blocks", "sweep"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["families"],
+    "additionalProperties": False,
+}
+
+SYSTEM_PROMPT = """\
+You are the Composer agent in Stewart & Co.'s research pipeline. You design
+candidate trading strategies for crypto daily bars (BTCUSD, ETHUSD) as
+compositions of typed blocks, grounded in accepted research cards.
+
+Rules:
+- Use ONLY the block types and parameter grid values given in the grammar.
+- Every family must cite the card_ids that motivate it. Cite only cards that
+  genuinely inform the composition; do not decorate with irrelevant citations.
+- Exactly one entry block; at least one stop and one risk block per family.
+- Choose sweep axes ONLY where the cited research motivates exploring the
+  parameter; sweep values must come from the declared grids. Small, motivated
+  sweeps beat exhaustive ones.
+- Strategies must be implementable from daily OHLCV alone.
+- Propose fewer, better-grounded families over many weak ones. If the cards
+  support only two good families, propose two."""
+
+
+def grammar_summary() -> str:
+    lines = []
+    for (role, btype), schema in BLOCK_TYPES.items():
+        params = ", ".join(f"{p} in {s['grid']}" for p, s in schema.items())
+        lines.append(f"- {role}/{btype}: {params or '(no params)'}")
+    return "\n".join(lines)
+
+
+def cards_summary(accepted: dict[str, dict]) -> str:
+    lines = []
+    for cid, c in accepted.items():
+        lines.append(f"- {cid} [{c['testability']['score']:.2f}] {c['claim']}")
+    return "\n".join(lines)
+
+
+def propose_families(model: str, accepted: dict[str, dict],
+                     max_families: int) -> list[dict]:
+    import anthropic
+    client = anthropic.Anthropic()
+    with client.messages.stream(
+        model=model,
+        max_tokens=32_000,
+        system=SYSTEM_PROMPT,
+        output_config={"format": {"type": "json_schema", "schema": PROPOSAL_SCHEMA}},
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Block grammar:\n{grammar_summary()}\n\n"
+                f"Accepted research cards:\n{cards_summary(accepted)}\n\n"
+                f"Propose up to {max_families} strategy families per your rules."
+            ),
+        }],
+    ) as stream:
+        message = stream.get_final_message()
+    if message.stop_reason == "refusal":
+        print("  model refusal", file=sys.stderr)
+        return []
+    text = next(b.text for b in message.content if b.type == "text")
+    return json.loads(text)["families"]
+
+
+def run(argv: list[str] | None = None, propose_fn=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--max-families", type=int, default=8)
+    ap.add_argument("--sibling-cap", type=int, default=SIBLING_CAP_DEFAULT)
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--registry", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "registry_log.jsonl")
+    ap.add_argument("--run-id",
+                    default=datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-manual")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print families and specs, do not write to the registry")
+    args = ap.parse_args(argv)
+
+    registry = Registry(args.registry)
+    accepted = registry.cards(status="accepted")
+    if not accepted:
+        print("No accepted cards in the registry — run the Reader and triage first.")
+        return 1
+
+    if propose_fn is None:
+        proposals = propose_families(args.model, accepted, args.max_families)
+    else:
+        proposals = propose_fn(accepted)
+    proposals = proposals[:args.max_families]
+
+    import jsonschema
+    schema = json.loads(
+        (Path(__file__).resolve().parent.parent / "schemas"
+         / "strategy_spec.schema.json").read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+
+    created_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    accepted_ids = set(accepted)
+    kept, dropped, seen_names = [], 0, set()
+    for fam in proposals:
+        name = fam.get("family", "?")
+        errors = validate_family(fam, accepted_ids, args.sibling_cap)
+        if name in seen_names:
+            errors.append("duplicate family name in this run")
+        if errors:
+            dropped += 1
+            print(f"  DROPPED family {name}:")
+            for e in errors:
+                print(f"    - {e}")
+            continue
+        seen_names.add(name)
+        specs = expand_family(fam, args.run_id, args.model, created_utc)
+        for spec in specs:
+            validator.validate(spec)   # composer bug if this raises: abort pre-write
+        kept.append((fam, specs))
+
+    total = sum(len(s) for _, s in kept)
+    for fam, specs in kept:
+        print(f"family {fam['family']}: {len(specs)} sibling(s), "
+              f"cites {len(fam['card_ids'])} card(s) — {fam['rationale']}")
+        if args.dry_run:
+            for spec in specs:
+                print(json.dumps(spec, indent=2, ensure_ascii=False))
+
+    if args.dry_run:
+        print(f"\nDRY RUN — {len(kept)} families kept, {dropped} dropped, "
+              f"{total} sibling spec(s); nothing written.")
+        return 0
+
+    existing = registry.block_types()
+    n_blocks = 0
+    for key in BLOCK_TYPES:
+        if key not in existing:
+            registry.register_block_type(block_type_payload(*key))
+            n_blocks += 1
+    for fam, specs in kept:
+        for spec in specs:
+            registry.register_strategy(spec)
+            print(f"  registered {spec['strategy_id']}  {spec['name']}")
+
+    print(f"\n{len(kept)} families kept, {dropped} dropped, {total} spec(s) "
+          f"registered in {len(kept)} sibling group(s), "
+          f"{n_blocks} block type(s) newly registered.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
