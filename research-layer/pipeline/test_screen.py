@@ -373,3 +373,186 @@ def test_run_spec_rejects_misaligned_calendars():
 
 def test_max_drawdown_zero_peak_no_crash():
     assert max_drawdown([0.0, 0.0]) == 0.0
+
+
+import subprocess
+import sys
+
+from .registry import Registry
+from .screen import run as screen_run, PROTOCOL, GATE_MIN_TRADES
+from .test_pipeline import make_card
+from .blocks import BLOCK_TYPES, block_type_payload
+
+HERE = Path(__file__).resolve().parent
+LAYER = HERE.parent
+
+
+def run_verifier(log_path):
+    return subprocess.run(
+        [sys.executable, str(LAYER / "verify_registry.py"), str(log_path)],
+        capture_output=True, text=True)
+
+
+def write_data_dir(tmp_path, bars_by_asset):
+    d = tmp_path / "data"
+    d.mkdir()
+    for asset, bars in bars_by_asset.items():
+        with (d / f"{asset}_1d.csv").open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["date", "open", "high", "low",
+                                              "close", "volume"])
+            w.writeheader()
+            w.writerows(bars)
+    return d
+
+
+def dated_target_hit_bars():
+    """Like target_hit_bars but long enough to warm a lookback-20 breakout
+    (23 bars) and carrying real pre-fence ISO dates."""
+    bars = flat_bars(20)                                  # prior 20-bar high = 100
+    bars.append({"date": "sig", "open": 100, "high": 110, "low": 100,
+                 "close": 110, "volume": 1.0})
+    bars.append({"date": "fill", "open": 111, "high": 111, "low": 111,
+                 "close": 111, "volume": 1.0})
+    bars.append({"date": "hit", "open": 112, "high": 120, "low": 112,
+                 "close": 118, "volume": 1.0})
+    for i, b in enumerate(bars):
+        b["date"] = f"2023-01-{i + 1:02d}"
+    return bars
+
+
+def screening_registry(tmp_path, blocks=None):
+    """Registry with grammar, an accepted card, and one proposed spec."""
+    reg = Registry(tmp_path / "reg.jsonl")
+    for key in BLOCK_TYPES:
+        reg.register_block_type(block_type_payload(*key))
+    # the test spec uses grammar-external param values, so register its shapes
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    spec = {
+        "strategy_id": None, "version": 1,
+        "created_utc": "2026-08-13T00:00:00Z",
+        "name": "test breakout", "family": "breakout_test",
+        "universe": {"assets": ["BTCUSD"], "asset_class": "crypto",
+                     "timeframe": "1d", "session": "24x7"},
+        "blocks": blocks if blocks is not None else [
+            {"role": "entry", "type": "channel_breakout",
+             "params": {"lookback": 20, "direction": "long"}},
+            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "target", "type": "r_multiple", "params": {"r": 1.0}},
+            {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"card_ids": [card["card_id"]],
+                       "parent_strategy_id": None,
+                       "sibling_group_id": "g-test", "generation": 0},
+        "generator": {"agent": "composer", "model": "m",
+                      "pipeline_version": "g1.0.0", "run_id": "t"},
+        "cost_model": dict(COST),
+    }
+    from .common import content_id
+    spec["strategy_id"] = content_id(spec, "strategy_id")
+    reg.register_strategy(spec)
+    return reg, spec
+
+
+def chain_protocol_note(reg):
+    reg.append("note", {"text": f"{PROTOCOL}: test protocol anchor"})
+
+
+# ---------------- screen CLI ----------------
+
+def test_screen_refuses_real_run_without_protocol_note(tmp_path):
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data)])
+    assert rc == 1
+
+
+def test_screen_dry_run_allowed_without_note_and_writes_nothing(tmp_path, capsys):
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    n_before = sum(1 for _ in reg.entries())
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--dry-run"])
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == n_before
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_screen_fence_excludes_post_cutoff_bars(tmp_path):
+    # all signal bars dated AFTER the cutoff -> zero trades
+    reg, spec = screening_registry(tmp_path)
+    bars = dated_target_hit_bars()
+    for i, b in enumerate(bars):
+        b["date"] = f"2025-01-{i + 1:02d}"
+    data = write_data_dir(tmp_path, {"BTCUSD": bars})
+    chain_protocol_note(reg)
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+    verdicts = [e for e in reg.entries() if e["entry_type"] == "verdict"]
+    assert verdicts[0]["payload"]["metrics"]["trades"] == 0
+    assert verdicts[0]["payload"]["verdict"] == "fail"
+
+
+def test_screen_full_run_chains_and_verifies(tmp_path):
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    chain_protocol_note(reg)
+    art = tmp_path / "art"
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art)])
+    assert rc == 0
+    states = reg.strategy_states()
+    assert states[spec["strategy_id"]] == "graveyard"   # 1 trade < 40
+    verdicts = [e for e in reg.entries() if e["entry_type"] == "verdict"]
+    v = verdicts[0]["payload"]
+    assert v["verdict"] == "fail" and v["metrics"]["trades"] == 1
+    assert set(v["metrics"]) == {"trades", "net_pnl", "win_rate", "max_dd"}
+    # graveyard reason is trade_count (pnl is positive)
+    gy = [e["payload"] for e in reg.entries() if e["entry_type"] == "state_change"
+          and e["payload"]["to"] == "graveyard"]
+    assert gy[0]["reason"] == "trade_count"
+    # artifacts exist and hash matches
+    bundle = art / spec["strategy_id"]
+    assert (bundle / "trades.csv").exists()
+    assert (bundle / "equity.csv").exists()
+    cfg = json.loads((bundle / "config.json").read_text())
+    assert cfg["protocol"] == PROTOCOL
+    from .screen import bundle_hash
+    assert v["artifacts_hash"] == bundle_hash(bundle)
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+
+
+def test_screen_gate_pass_goes_to_gauntlet(tmp_path, monkeypatch):
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    chain_protocol_note(reg)
+    monkeypatch.setattr("pipeline.screen.GATE_MIN_TRADES", 1)
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+def test_gate_min_trades_is_forty():
+    assert GATE_MIN_TRADES == 40
+
+
+def test_screen_reason_net_negative_when_trades_suffice(tmp_path, monkeypatch):
+    # losing trade: same shape as dated_target_hit_bars but the trade stops out
+    reg, spec = screening_registry(tmp_path)
+    bars = dated_target_hit_bars()
+    bars[-1] = {"date": bars[-1]["date"], "open": 108, "high": 108, "low": 100,
+                "close": 101, "volume": 1.0}              # stop 105.45 hit
+    data = write_data_dir(tmp_path, {"BTCUSD": bars})
+    chain_protocol_note(reg)
+    monkeypatch.setattr("pipeline.screen.GATE_MIN_TRADES", 1)
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+    gy = [e["payload"] for e in reg.entries() if e["entry_type"] == "state_change"
+          and e["payload"]["to"] == "graveyard"]
+    assert gy[0]["reason"] == "net_negative"
