@@ -226,3 +226,137 @@ def test_psr_clamp_fails_closed():
     # inputs violating Pearson's inequality (impossible from moments()) must
     # fail closed, not saturate to an auto-pass
     assert psr(0.5, 0.0, 101, 10.0, 1.0) == 0.0
+
+
+import csv
+import subprocess
+import sys
+
+from .registry import Registry
+from .gauntlet import run as gauntlet_run, select_survivors
+from .test_screen import (screening_registry, chain_protocol_note,
+                          write_data_dir, dated_target_hit_bars)
+
+HERE = Path(__file__).resolve().parent
+LAYER = HERE.parent
+
+
+def run_verifier(log_path):
+    return subprocess.run(
+        [sys.executable, str(LAYER / "verify_registry.py"), str(log_path)],
+        capture_output=True, text=True)
+
+
+def gauntlet_registry(tmp_path):
+    """Registry with one strategy advanced to gauntlet state."""
+    reg, spec = screening_registry(tmp_path)
+    reg.append("note", {"text": "screen-protocol-v1: test anchor"})
+    reg.record_state_change(spec["strategy_id"], "screened", "test")
+    reg.record_verdict(spec["strategy_id"], "screened", "pass",
+                       {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
+                        "max_dd": -0.1}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "gauntlet", None)
+    return reg, spec
+
+
+def chain_gauntlet_note(reg):
+    reg.append("note", {"text": "gauntlet-protocol-v1: test anchor"})
+
+
+# ---------------- selection ----------------
+
+def test_select_survivors_one_slot_per_group():
+    rows = [
+        {"sid": "a" * 16, "group": "g1", "passed": True, "dsr": 0.97},
+        {"sid": "b" * 16, "group": "g1", "passed": True, "dsr": 0.99},
+        {"sid": "c" * 16, "group": "g1", "passed": False, "dsr": 0.99},
+        {"sid": "d" * 16, "group": "g2", "passed": True, "dsr": 0.96},
+        {"sid": "e" * 16, "group": "g3", "passed": False, "dsr": 0.10},
+    ]
+    quarantine, not_selected = select_survivors(rows)
+    assert quarantine == {"b" * 16, "d" * 16}
+    assert not_selected == {"a" * 16}
+
+
+def test_select_survivors_dsr_tie_breaks_by_id():
+    rows = [
+        {"sid": "b" * 16, "group": "g1", "passed": True, "dsr": 0.99},
+        {"sid": "a" * 16, "group": "g1", "passed": True, "dsr": 0.99},
+    ]
+    quarantine, not_selected = select_survivors(rows)
+    assert quarantine == {"a" * 16}
+    assert not_selected == {"b" * 16}
+
+
+# ---------------- CLI guards ----------------
+
+def test_gauntlet_refuses_without_protocol_note(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data)])
+    assert rc == 1
+
+
+def test_gauntlet_dry_run_writes_nothing(tmp_path, capsys):
+    reg, spec = gauntlet_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    n_before = sum(1 for _ in reg.entries())
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data), "--dry-run"])
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == n_before
+    assert "DRY RUN" in capsys.readouterr().out
+
+
+def test_gauntlet_detects_orphan(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    chain_gauntlet_note(reg)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"x": 1}, "0" * 64)   # verdict but still gauntlet-state
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data), "--dry-run"])
+    assert rc == 1
+
+
+def test_gauntlet_full_run_chains_and_verifies(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    chain_gauntlet_note(reg)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    art = tmp_path / "art"
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data),
+                       "--artifacts-dir", str(art)])
+    assert rc == 0
+    states = reg.strategy_states()
+    # the test spec has 1 trade, all IS-dated -> oos_negative -> graveyard
+    assert states[spec["strategy_id"]] == "graveyard"
+    verdicts = [e for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"]["stage"] == "gauntlet"]
+    assert len(verdicts) == 1
+    v = verdicts[0]["payload"]
+    assert v["verdict"] == "fail"
+    assert set(v["metrics"]) >= {"is_edge_per_trade", "oos_edge_per_trade",
+                                 "edge_decay_pct", "mc_p05_equity", "p_ruin",
+                                 "deflated_sharpe", "sibling_group_n",
+                                 "cost_stress_net_pnl"}
+    bundle = art / spec["strategy_id"] / "gauntlet"
+    assert (bundle / "oos_trades.csv").exists()
+    assert (bundle / "mc_summary.json").exists()
+    assert (bundle / "config.json").exists()
+    from .screen import bundle_hash
+    assert v["artifacts_hash"] == bundle_hash(
+        bundle, names=("oos_trades.csv", "mc_summary.json", "config.json"))
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+
+
+def test_gauntlet_no_gauntlet_strategies(tmp_path, capsys):
+    reg, spec = screening_registry(tmp_path)
+    chain_gauntlet_note(reg)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data)])
+    assert rc == 0
+    assert "No strategies" in capsys.readouterr().out
