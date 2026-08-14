@@ -247,7 +247,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
                                "entry_date": bars[pos["entry_i"]]["date"],
                                "entry_px": pos["entry_px"],
                                "exit_date": b["date"], "exit_px": exit_px,
-                               "exit_reason": exit_reason, "return_net": net})
+                               "exit_reason": exit_reason, "return_net": net,
+                               "notional_frac": pos["notional_frac"]})
                 pos = None
 
         # --- entries: signal from previous close, honored only if we were
@@ -272,10 +273,11 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
                     else:
                         notional = risk["params"]["ann_vol"] / rv
                 if notional is not None:
-                    notional = min(notional, 1.0) * equity
+                    frac = min(notional, 1.0)
                     pos = {"side": side, "entry_px": entry_px, "entry_i": i,
                            "stop": stop, "target": target,
-                           "deadline": deadline, "notional": notional}
+                           "deadline": deadline, "notional": frac * equity,
+                           "notional_frac": frac}
 
         # --- daily mark-to-market
         mtm = equity

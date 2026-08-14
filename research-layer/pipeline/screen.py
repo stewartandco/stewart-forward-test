@@ -56,7 +56,7 @@ def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
         w = csv.DictWriter(f, fieldnames=["asset", "side", "entry_date",
                                           "entry_px", "exit_date", "exit_px",
                                           "exit_reason", "return_net"],
-                           lineterminator="\n")
+                           lineterminator="\n", extrasaction="ignore")
         w.writeheader()
         w.writerows(result["trades"])
     with (bundle / "equity.csv").open("w", newline="", encoding="utf-8") as f:
@@ -69,9 +69,11 @@ def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
     return bundle
 
 
-def bundle_hash(bundle: Path) -> str:
+def bundle_hash(bundle: Path,
+                names: tuple[str, ...] = ("trades.csv", "equity.csv",
+                                          "config.json")) -> str:
     h = hashlib.sha256()
-    for name in ("trades.csv", "equity.csv", "config.json"):
+    for name in names:
         h.update((bundle / name).read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
 
