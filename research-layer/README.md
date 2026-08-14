@@ -102,7 +102,11 @@ python -m pipeline.data_fetch
 python -m pipeline.screen --dry-run
 python -m pipeline.screen
 
-# 5. Verify the chain any time
+# 5. Gauntlet the screen survivors (--dry-run first, then real)
+python -m pipeline.gauntlet --dry-run
+python -m pipeline.gauntlet
+
+# 6. Verify the chain any time
 python verify_registry.py registry_log.jsonl
 ```
 
@@ -130,13 +134,19 @@ Mechanics worth knowing:
   `pipeline/screen.py` refuses real runs without it. Verdict artifacts
   (trades, equity, config) are committed under `artifacts/` and hashed
   on-chain.
+- **Gauntlet gates are pre-declared and falsifiable.** SCHEMA's two
+  unfalsifiable literal gates were amended on-chain BEFORE any verdict
+  (`gauntlet-protocol-v1` note): MC P05 terminal > 1.0 and DSR >= 0.95 with
+  the sibling group as the trial count. One quarantine slot per sibling
+  group, selected by DSR — passers not selected are graveyarded as
+  `sibling_not_selected`, visibly distinct from gate failure.
 
 Offline tests (no API key needed): `python -m pytest pipeline/`
 
 ## Status
 
-- **v1 — specification + Reader + Composer + Screen.** The gauntlet battery
-  is not built yet; the lifecycle beyond the screen verdict is exercised only
-  by tests and examples.
+- **v1 — specification + Reader + Composer + Screen + Gauntlet.** Quarantine
+  wiring (daily posting into the root forward-test log) is not built yet;
+  the lifecycle beyond the gauntlet verdict is exercised only by tests.
 - The live registry chain (`registry_log.jsonl`) is created on the Reader's
   first non-dry-run write; `verify_registry.py` validates it and the example log.
