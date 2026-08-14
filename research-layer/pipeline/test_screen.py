@@ -343,7 +343,11 @@ def test_run_spec_single_asset_metrics():
 
 
 def test_run_spec_two_assets_combined():
-    bars = {"BTCUSD": target_hit_bars(), "ETHUSD": flat_bars(9)}
+    btc = target_hit_bars()
+    eth = flat_bars(9)
+    for i, b in enumerate(eth):
+        b["date"] = btc[i]["date"]
+    bars = {"BTCUSD": btc, "ETHUSD": eth}
     result = run_spec(make_screen_spec(assets=("BTCUSD", "ETHUSD")), bars)
     # ETH book flat at 1.0; combined = mean -> half the BTC-only pnl
     solo = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
@@ -355,3 +359,17 @@ def test_run_spec_deterministic():
     a = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
     b = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
     assert a == b
+
+
+def test_run_spec_rejects_misaligned_calendars():
+    btc = target_hit_bars()
+    eth = flat_bars(9)
+    for i, b in enumerate(eth):
+        b["date"] = f"x{i}"          # same length, different calendar
+    with pytest.raises(ValueError, match="calendar misalignment"):
+        run_spec(make_screen_spec(assets=("BTCUSD", "ETHUSD")),
+                 {"BTCUSD": btc, "ETHUSD": eth})
+
+
+def test_max_drawdown_zero_peak_no_crash():
+    assert max_drawdown([0.0, 0.0]) == 0.0

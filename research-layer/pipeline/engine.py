@@ -293,7 +293,8 @@ def max_drawdown(curve: list[float]) -> float:
     peak, dd = float("-inf"), 0.0
     for v in curve:
         peak = max(peak, v)
-        dd = max(dd, (peak - v) / peak)
+        if peak > 0:
+            dd = max(dd, (peak - v) / peak)
     return dd
 
 
@@ -307,6 +308,12 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
                                       spec["cost_model"])
     n = min(len(bars_by_asset[a]) for a in books)
     dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
+    for a in books:
+        for i in range(n):
+            if bars_by_asset[a][i]["date"] != dates[i]:
+                raise ValueError(
+                    f"calendar misalignment: {a} bar {i} is "
+                    f"{bars_by_asset[a][i]['date']}, expected {dates[i]}")
     combined = [sum(books[a]["equity"][i] for a in books) / len(books)
                 for i in range(n)]
     trades = [dict(t, asset=a) for a in books for t in books[a]["trades"]]
