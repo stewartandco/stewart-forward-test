@@ -1,0 +1,237 @@
+{
+  "version": 1,
+  "note": "Coen-verified source watchlist (D23). A source is pollable ONLY when added_by=='coen' AND verified_date is set. Seed proposed 2026-08-14; every entry awaits Coen's one-time verification pass. feed==null means HTML listing diff on url.",
+  "sources": [
+    {
+      "id": "arxiv-q-fin",
+      "class": "arxiv",
+      "name": "arXiv quantitative finance (all q-fin subcategories)",
+      "url": "https://arxiv.org/list/q-fin/recent",
+      "feed": "https://rss.arxiv.org/rss/q-fin",
+      "poll_minutes": 240,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Aggregate feed covers q-fin.PM/TR/ST/CP/RM/PR/MF/EC/GN. Updates daily ~midnight ET."
+    },
+    {
+      "id": "arxiv-stat-ml",
+      "class": "arxiv",
+      "name": "arXiv stat.ML (machine learning / time-series methods)",
+      "url": "https://arxiv.org/list/stat.ML/recent",
+      "feed": "https://rss.arxiv.org/rss/stat.ML",
+      "poll_minutes": 240,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Higher volume than q-fin; the relevance screen carries the load. cs.LG deliberately excluded (volume too high for precision) - revisit if stat.ML proves thin."
+    },
+    {
+      "id": "quantocracy",
+      "class": "aggregator",
+      "name": "Quantocracy (quant blog aggregator)",
+      "url": "https://quantocracy.com/",
+      "feed": "https://quantocracy.com/feed/",
+      "poll_minutes": 120,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Links out to third-party posts; linked domains off-watchlist go to the discovery queue, the aggregator item itself is screened on title."
+    },
+    {
+      "id": "alpha-architect",
+      "class": "blog",
+      "name": "Alpha Architect blog",
+      "url": "https://alphaarchitect.com/blog/",
+      "feed": "https://alphaarchitect.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Factor investing research summaries; usually quote-grounded claims."
+    },
+    {
+      "id": "robot-wealth",
+      "class": "blog",
+      "name": "Robot Wealth blog",
+      "url": "https://robotwealth.com/blog/",
+      "feed": "https://robotwealth.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Practitioner trading research."
+    },
+    {
+      "id": "rob-carver",
+      "class": "blog",
+      "name": "Rob Carver - Investment Idiocy",
+      "url": "https://qoppac.blogspot.com/",
+      "feed": "https://qoppac.blogspot.com/feeds/posts/default",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Atom feed. Systematic futures, position sizing, portfolio construction."
+    },
+    {
+      "id": "quantpedia",
+      "class": "blog",
+      "name": "Quantpedia blog (free articles)",
+      "url": "https://quantpedia.com/blog/",
+      "feed": "https://quantpedia.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Free tier only; premium strategy database is paywalled and never fetched."
+    },
+    {
+      "id": "financial-hacker",
+      "class": "blog",
+      "name": "The Financial Hacker",
+      "url": "https://financial-hacker.com/",
+      "feed": "https://financial-hacker.com/feed/",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Low post frequency; algorithmic strategy dissections."
+    },
+    {
+      "id": "quantifiable-edges",
+      "class": "blog",
+      "name": "Quantifiable Edges",
+      "url": "https://quantifiableedges.com/blog/",
+      "feed": "https://quantifiableedges.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Short-horizon equity index edges."
+    },
+    {
+      "id": "flirting-with-models",
+      "class": "blog",
+      "name": "Newfound Research - Flirting with Models",
+      "url": "https://blog.thinknewfound.com/",
+      "feed": "https://blog.thinknewfound.com/feed/",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Trend, rebalance timing luck, return stacking."
+    },
+    {
+      "id": "ssrn-new-papers",
+      "class": "ssrn",
+      "name": "SSRN new-paper feeds (FEN eJournals) - URL TO BE PINNED AT VERIFICATION",
+      "url": "https://papers.ssrn.com/",
+      "feed": null,
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "SSRN per-eJournal RSS availability is spotty and journal IDs need confirming. At verification, pin either the eJournal RSS URLs (split into one entry per journal) or a public new-papers listing URL for HTML diff. Abstract pages are public; full-text PDFs sometimes gated - paywall flagging applies."
+    },
+    {
+      "id": "fed-feds-papers",
+      "class": "central_bank",
+      "name": "Federal Reserve FEDS working papers",
+      "url": "https://www.federalreserve.gov/econres/feds/index.htm",
+      "feed": "https://www.federalreserve.gov/feeds/feds.xml",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Finance and Economics Discussion Series - research with mechanism, not press noise."
+    },
+    {
+      "id": "fed-monetary-press",
+      "class": "central_bank",
+      "name": "Federal Reserve monetary policy press releases",
+      "url": "https://www.federalreserve.gov/newsevents/pressreleases.htm",
+      "feed": "https://www.federalreserve.gov/feeds/press_monetary.xml",
+      "poll_minutes": 120,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "FOMC statements / implementation notes. Screen bar: keep only items with testable market-behavior implications; mechanism-free macro news is a kill category."
+    },
+    {
+      "id": "liberty-street",
+      "class": "central_bank",
+      "name": "NY Fed Liberty Street Economics",
+      "url": "https://libertystreeteconomics.newyorkfed.org/",
+      "feed": "https://libertystreeteconomics.newyorkfed.org/feed/",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Microstructure, funding markets, dealer positioning research."
+    },
+    {
+      "id": "bis-working-papers",
+      "class": "central_bank",
+      "name": "BIS working papers",
+      "url": "https://www.bis.org/wpapers/index.htm",
+      "feed": "https://www.bis.org/doclist/wppubls.rss",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Cross-market structure and FX research."
+    },
+    {
+      "id": "rba-media-releases",
+      "class": "central_bank",
+      "name": "RBA media releases",
+      "url": "https://www.rba.gov.au/media-releases/",
+      "feed": "https://www.rba.gov.au/rss/rss-cb-media-releases.xml",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "AU jurisdiction relevance. Same mechanism bar as fed-monetary-press."
+    },
+    {
+      "id": "gh-qlib",
+      "class": "github",
+      "name": "microsoft/qlib releases",
+      "url": "https://github.com/microsoft/qlib",
+      "feed": "https://github.com/microsoft/qlib/releases.atom",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "AI-for-quant platform; release notes surface new factor/model research."
+    },
+    {
+      "id": "gh-pysystemtrade",
+      "class": "github",
+      "name": "robcarver17/pysystemtrade releases",
+      "url": "https://github.com/robcarver17/pysystemtrade",
+      "feed": "https://github.com/robcarver17/pysystemtrade/releases.atom",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Carver's production futures system."
+    },
+    {
+      "id": "gh-vectorbt",
+      "class": "github",
+      "name": "polakowo/vectorbt releases",
+      "url": "https://github.com/polakowo/vectorbt",
+      "feed": "https://github.com/polakowo/vectorbt/releases.atom",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Backtesting tooling."
+    },
+    {
+      "id": "gh-nautilus-trader",
+      "class": "github",
+      "name": "nautechsystems/nautilus_trader releases",
+      "url": "https://github.com/nautechsystems/nautilus_trader",
+      "feed": "https://github.com/nautechsystems/nautilus_trader/releases.atom",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Execution/live-trading infrastructure."
+    },
+    {
+      "id": "gh-freqtrade",
+      "class": "github",
+      "name": "freqtrade/freqtrade releases",
+      "url": "https://github.com/freqtrade/freqtrade",
+      "feed": "https://github.com/freqtrade/freqtrade/releases.atom",
+      "poll_minutes": 720,
+      "added_by": "coen",
+      "verified_date": null,
+      "notes": "Crypto bot framework; release notes occasionally carry strategy research links."
+    }
+  ]
+}

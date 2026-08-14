@@ -116,8 +116,9 @@ def chunk_text(text: str) -> list[tuple[str, str]]:
     return chunks
 
 
-def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dict]:
-    """One structured-output extraction call. Streaming so long inputs don't
+def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
+    """One structured-output extraction call; returns (claims, usage) so
+    callers (the v2 scanner) can meter spend. Streaming so long inputs don't
     hit HTTP timeouts; thinking is on by default on this model."""
     with client.messages.stream(
         model=model,
@@ -136,11 +137,17 @@ def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dic
         message = stream.get_final_message()
     if message.stop_reason == "refusal":
         print(f"  refusal on {chunk_label}"
-              + (f" (category: {message.stop_details.category})" if message.stop_details else ""),
+              + (f" (category: {message.stop_details.category})"
+                 if getattr(message, "stop_details", None) else ""),
               file=sys.stderr)
-        return []
+        return [], message.usage
     text = next(b.text for b in message.content if b.type == "text")
-    return json.loads(text)["claims"]
+    return json.loads(text)["claims"], message.usage
+
+
+def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dict]:
+    claims, _usage = extract_claims_usage(client, model, chunk_label, chunk)
+    return claims
 
 
 def build_card(raw: dict, source_meta: dict, model: str, run_id: str) -> dict:

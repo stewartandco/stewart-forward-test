@@ -60,6 +60,28 @@ gate criteria.
 Two agents so far: the Reader (sources → quote-grounded cards → human triage) and the Composer (accepted cards → pre-registered sibling strategy specs). Requires `pip install anthropic jsonschema` (plus `pypdf` for
 PDF sources) and an `ANTHROPIC_API_KEY`.
 
+### Reader v2 — continuous scanner (D23)
+
+The Reader also runs as a 24/7 scanner over the Coen-verified source watchlist
+(`sources/verified_sources.json`): token-free polling (RSS/Atom or HTML diff)
+→ cheap relevance screen with strict intake parameters → full fetch + the same
+card extraction/honesty-guard/pending-registration path as the CLI. Budget:
+USD 25/month hard cap, alert at 80%; at cap extraction stops, polling
+continues. Off-list sources it encounters queue as Tier 3 proposals in
+`sources/discovery_queue.jsonl` and are **never** fetched; paywalled items are
+flagged, never fetched with credentials. Dashboard artifacts land in `logs/`
+(`status.json`, `digest_YYYYMMDD.txt`, hash-chained `reader_actions.jsonl`).
+Design: `docs/2026-08-14-reader-v2-scanner-design.md`.
+
+```bash
+# one poll cycle (also the smoke test); refuses to run until Coen has
+# verification-stamped watchlist entries (the Tier 3 corpus gate)
+python -m pipeline.scanner --once
+
+# resident loop: launch OS-detached, NEVER as a session child
+powershell -ExecutionPolicy Bypass -File run_scanner.ps1
+```
+
 ```bash
 cd research-layer
 
