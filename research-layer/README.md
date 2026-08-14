@@ -75,7 +75,12 @@ python -m pipeline.triage --reviewer coen
 python -m pipeline.composer --max-families 8 --dry-run
 python -m pipeline.composer --max-families 8
 
-# 4. Verify the chain any time
+# 4. Fetch/refresh daily data, then screen proposed strategies
+python -m pipeline.data_fetch
+python -m pipeline.screen --dry-run
+python -m pipeline.screen
+
+# 5. Verify the chain any time
 python verify_registry.py registry_log.jsonl
 ```
 
@@ -97,13 +102,19 @@ Mechanics worth knowing:
   truth); sibling enumeration is deterministic code, so the multiple-testing
   denominator is a fact of record, not model whim. Invalid families are
   dropped loudly and counted.
+- **Screen results are pre-protocoled.** The gate (>=40 trades, net-positive
+  after costs), the 2023-12-31 train fence, and the execution conventions are
+  chained as a `screen-protocol-v1` note BEFORE any verdict exists;
+  `pipeline/screen.py` refuses real runs without it. Verdict artifacts
+  (trades, equity, config) are committed under `artifacts/` and hashed
+  on-chain.
 
 Offline tests (no API key needed): `python -m pytest pipeline/`
 
 ## Status
 
-- **v1 — specification + Reader + Composer.** Screening/gauntlet execution is
-  not built yet; the lifecycle beyond `strategy_registered` is exercised only
+- **v1 — specification + Reader + Composer + Screen.** The gauntlet battery
+  is not built yet; the lifecycle beyond the screen verdict is exercised only
   by tests and examples.
 - The live registry chain (`registry_log.jsonl`) is created on the Reader's
   first non-dry-run write; `verify_registry.py` validates it and the example log.
