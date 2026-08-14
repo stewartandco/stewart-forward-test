@@ -106,6 +106,8 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             if fast[i] is None or slow[i] is None:
                 continue
             state[i] = 1 if fast[i] > slow[i] else 0
+            # convention: the first warm bar counts as a cross if already
+            # fast>slow (state init 0 during warmup) — enter-on-first-eligible
             if state[i] == 1 and (i == 0 or state[i - 1] == 0):
                 sig[i] = 1
 
@@ -164,3 +166,122 @@ def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
         else:
             raise ValueError(f"no executor for gate type {g['type']!r}")
     return mask
+
+
+# ---------------- single-asset simulator -----------------------------------
+
+def _tightest_stop(stops: list[dict], entry_px: float, side: int,
+                   atr_series: dict, i: int) -> float | None:
+    """Stop price from the tightest of the spec's stop blocks; None if any
+    ATR stop is still warming up."""
+    candidates = []
+    for s in stops:
+        p = s["params"]
+        if s["type"] == "pct_stop":
+            dist = entry_px * p["pct"]
+        elif s["type"] == "atr_stop":
+            atr = atr_series[(p["atr_len"],)][i]
+            if atr is None:
+                return None
+            dist = p["mult"] * atr
+        else:
+            raise ValueError(f"no executor for stop type {s['type']!r}")
+        candidates.append(dist)
+    return entry_px - side * min(candidates)
+
+
+def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> dict:
+    """Run one asset's book. Returns {trades, equity} where equity is the
+    daily mark-to-market curve starting at 1.0."""
+    by_role: dict[str, list[dict]] = {}
+    for b in blocks:
+        by_role.setdefault(b["role"], []).append(b)
+    entry = by_role["entry"][0]
+    gates = by_role.get("regime", []) + by_role.get("filter", [])
+    stops = by_role["stop"]
+    targets = by_role.get("target", [])
+    time_stops = by_role.get("exit", [])
+    risk = by_role["risk"][0]
+
+    sig, state = entry_signals(entry, bars)
+    mask = gate_mask(gates, bars) if gates else [True] * len(bars)
+    atr_series = {}
+    for s in stops:
+        if s["type"] == "atr_stop":
+            atr_series[(s["params"]["atr_len"],)] = atr_wilder(bars, s["params"]["atr_len"])
+    closes = [b["close"] for b in bars]
+    vol_series = (realized_ann_vol(closes, risk["params"]["lookback"])
+                  if risk["type"] == "vol_target" else None)
+
+    per_side = cost_model["commission_per_side"] + cost_model["slippage_ticks"]
+    equity, curve, trades = 1.0, [], []
+    pos = None  # {side, entry_px, entry_i, stop, target, deadline, notional}
+
+    for i, b in enumerate(bars):
+        was_flat = pos is None      # flat at the close of bar i-1 (signal time)
+
+        # --- exits first (at this bar), for a position opened earlier
+        if pos is not None and i > pos["entry_i"]:
+            exit_px = exit_reason = None
+            side = pos["side"]
+            if pos["deadline"] is not None and i >= pos["deadline"]:
+                exit_px, exit_reason = b["open"], "time"
+            elif side * (pos["stop"] - b["open"]) >= 0:          # gap through stop
+                exit_px, exit_reason = b["open"], "stop"
+            elif pos["target"] is not None and side * (b["open"] - pos["target"]) >= 0:
+                exit_px, exit_reason = b["open"], "target"       # gap through target
+            elif (side == 1 and b["low"] <= pos["stop"]) or \
+                 (side == -1 and b["high"] >= pos["stop"]):      # intrabar stop (wins ties)
+                exit_px, exit_reason = pos["stop"], "stop"
+            elif pos["target"] is not None and (
+                    (side == 1 and b["high"] >= pos["target"]) or
+                    (side == -1 and b["low"] <= pos["target"])):
+                exit_px, exit_reason = pos["target"], "target"
+            elif entry["type"] == "ma_cross" and state[i - 1] == 0:
+                exit_px, exit_reason = b["open"], "signal"       # cross-down exit
+            if exit_px is not None:
+                gross = pos["side"] * (exit_px / pos["entry_px"] - 1)
+                net = gross - 2 * per_side
+                equity += pos["notional"] * net
+                trades.append({"side": "long" if pos["side"] == 1 else "short",
+                               "entry_date": bars[pos["entry_i"]]["date"],
+                               "entry_px": pos["entry_px"],
+                               "exit_date": b["date"], "exit_px": exit_px,
+                               "exit_reason": exit_reason, "return_net": net})
+                pos = None
+
+        # --- entries: signal from previous close, honored only if we were
+        # flat AT SIGNAL TIME (design: signals while in a position are
+        # ignored, not queued) — prevents same-bar exit->reenter
+        if was_flat and pos is None and i > 0 and sig[i - 1] != 0 and mask[i - 1]:
+            side, entry_px = sig[i - 1], b["open"]
+            stop = _tightest_stop(stops, entry_px, side, atr_series, i - 1)
+            if stop is not None:
+                dist = abs(entry_px - stop)
+                target = None
+                if targets:
+                    target = entry_px + side * targets[0]["params"]["r"] * dist
+                deadline = (i + time_stops[0]["params"]["max_bars"]
+                            if time_stops else None)
+                if risk["type"] == "fixed_fraction":
+                    notional = risk["params"]["f"] / (dist / entry_px)
+                else:                                            # vol_target
+                    rv = vol_series[i - 1]
+                    if rv is None or rv == 0:
+                        notional = None
+                    else:
+                        notional = risk["params"]["ann_vol"] / rv
+                if notional is not None:
+                    notional = min(notional, 1.0) * equity
+                    pos = {"side": side, "entry_px": entry_px, "entry_i": i,
+                           "stop": stop, "target": target,
+                           "deadline": deadline, "notional": notional}
+
+        # --- daily mark-to-market
+        mtm = equity
+        if pos is not None:
+            unreal = pos["side"] * (b["close"] / pos["entry_px"] - 1)
+            mtm = equity + pos["notional"] * unreal
+        curve.append(mtm)
+
+    return {"trades": trades, "equity": curve}

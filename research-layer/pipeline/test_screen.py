@@ -179,3 +179,118 @@ def test_vol_percentile_gate_and_warmup():
                        "params": {"lookback": 90, "max_pctile": 1.0}}], bars)
     assert mask[10] is False     # warmup (needs 365-bar percentile window)
     assert mask[-1] is True      # max_pctile 1.0 admits everything once warm
+
+
+from .engine import simulate_asset
+
+
+def breakout_spec_blocks(pct=0.05, r=1.0, max_bars=40, f=0.01):
+    return [
+        {"role": "entry", "type": "channel_breakout",
+         "params": {"lookback": 5, "direction": "long"}},
+        {"role": "stop", "type": "pct_stop", "params": {"pct": pct}},
+        {"role": "target", "type": "r_multiple", "params": {"r": r}},
+        {"role": "exit", "type": "time_stop", "params": {"max_bars": max_bars}},
+        {"role": "risk", "type": "fixed_fraction", "params": {"f": f}},
+    ]
+
+
+COST = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
+
+
+def target_hit_bars():
+    bars = flat_bars(6)                                   # warmup, prior high 100
+    bars.append({"date": "sig", "open": 100, "high": 110, "low": 100,
+                 "close": 110, "volume": 1.0})            # breakout close
+    bars.append({"date": "fill", "open": 111, "high": 111, "low": 111,
+                 "close": 111, "volume": 1.0})            # entry at open 111
+    bars.append({"date": "hit", "open": 112, "high": 120, "low": 112,
+                 "close": 118, "volume": 1.0})            # target 116.55 hit
+    return bars
+
+
+# ---------------- simulator ----------------
+
+def test_long_breakout_target_hit_math():
+    book = simulate_asset(breakout_spec_blocks(), target_hit_bars(), COST)
+    assert len(book["trades"]) == 1
+    t = book["trades"][0]
+    assert t["side"] == "long"
+    assert t["entry_px"] == pytest.approx(111.0)
+    # stop = 111*(1-0.05) = 105.45; distance 5.55; target = 116.55
+    assert t["exit_px"] == pytest.approx(116.55)
+    assert t["exit_reason"] == "target"
+    gross = 116.55 / 111.0 - 1
+    net = gross - 0.0015 * 2
+    assert t["return_net"] == pytest.approx(net)
+    # sizing: f=0.01, stop distance 5% -> notional = 0.2x equity
+    assert book["equity"][-1] == pytest.approx(1 + 0.2 * net)
+
+
+def test_same_bar_stop_and_target_stop_wins():
+    bars = flat_bars(6)
+    bars.append({"date": "sig", "open": 100, "high": 110, "low": 100,
+                 "close": 110, "volume": 1.0})
+    bars.append({"date": "fill", "open": 111, "high": 111, "low": 111,
+                 "close": 111, "volume": 1.0})
+    bars.append({"date": "wide", "open": 111, "high": 120, "low": 100,
+                 "close": 111, "volume": 1.0})            # touches both barriers
+    book = simulate_asset(breakout_spec_blocks(), bars, COST)
+    assert book["trades"][0]["exit_reason"] == "stop"
+    assert book["trades"][0]["exit_px"] == pytest.approx(105.45)
+
+
+def test_gap_through_stop_fills_at_open():
+    bars = flat_bars(6)
+    bars.append({"date": "sig", "open": 100, "high": 110, "low": 100,
+                 "close": 110, "volume": 1.0})
+    bars.append({"date": "fill", "open": 111, "high": 111, "low": 111,
+                 "close": 111, "volume": 1.0})
+    bars.append({"date": "gap", "open": 90, "high": 95, "low": 88,
+                 "close": 92, "volume": 1.0})             # opens far below stop
+    book = simulate_asset(breakout_spec_blocks(), bars, COST)
+    assert book["trades"][0]["exit_px"] == pytest.approx(90.0)
+    assert book["trades"][0]["exit_reason"] == "stop"
+
+
+def test_time_stop_exits_at_deadline_open():
+    bars = flat_bars(6)
+    bars.append({"date": "sig", "open": 100, "high": 110, "low": 100,
+                 "close": 110, "volume": 1.0})
+    bars.append({"date": "fill", "open": 111, "high": 111, "low": 111,
+                 "close": 111, "volume": 1.0})
+    for i in range(4):                                    # drift, no barriers
+        bars.append({"date": f"h{i}", "open": 112, "high": 113, "low": 111,
+                     "close": 112, "volume": 1.0})
+    book = simulate_asset(breakout_spec_blocks(max_bars=3), bars, COST)
+    assert book["trades"][0]["exit_reason"] == "time"
+    assert book["trades"][0]["exit_px"] == pytest.approx(112.0)
+
+
+def test_one_position_at_a_time():
+    # continuous new highs would re-signal every bar; only one open trade
+    bars = flat_bars(6) + ramp_bars(10, start=101.0, step=2.0)
+    blocks = breakout_spec_blocks(pct=0.05, r=3.0, max_bars=40)
+    book = simulate_asset(blocks, bars, COST)
+    assert len(book["trades"]) <= 1
+
+
+def test_notional_cap_no_leverage():
+    # tight stop 1% would imply 1.0/0.01 = 100x sizing at f=1.0 -> capped at 1x
+    bars = target_hit_bars()
+    blocks = breakout_spec_blocks(pct=0.01, r=1.0, f=1.0)
+    book = simulate_asset(blocks, bars, COST)
+    t = book["trades"][0]
+    # stop 109.89, distance 1.11 -> target 112.11, hit on 'hit' bar
+    gross = 112.11 / 111.0 - 1
+    net = gross - 0.003
+    assert book["equity"][-1] == pytest.approx(1 + 1.0 * net)  # notional 1x, not 100x
+
+
+def test_signal_while_in_position_is_ignored_not_queued():
+    # sig fires again at the fill bar's close (111 > rolling high 110);
+    # it must not open a phantom same-bar position after the target exit
+    book = simulate_asset(breakout_spec_blocks(), target_hit_bars(), COST)
+    assert len(book["trades"]) == 1
+    assert book["equity"][-1] == pytest.approx(
+        1 + 0.2 * book["trades"][0]["return_net"])
