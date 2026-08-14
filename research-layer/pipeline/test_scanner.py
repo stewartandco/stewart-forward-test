@@ -55,13 +55,16 @@ def write_watchlist(tmp_path, sources):
 
 # ---------------- watchlist ----------------
 
-def test_seed_watchlist_loads_and_is_fully_unverified():
+def test_committed_watchlist_loads_and_gate_tracks_verification():
     sources = load_watchlist(LAYER / "sources" / "verified_sources.json")
     assert len(sources) >= 15
     classes = {s["class"] for s in sources}
     assert classes == {"arxiv", "aggregator", "blog", "ssrn", "central_bank", "github"}
-    # Seed ships unverified: the scanner must refuse to poll ALL of it.
-    assert pollable(sources) == []
+    # The gate admits exactly the Coen-stamped entries, nothing else.
+    stamped = {s["id"] for s in sources if s["added_by"] == "coen" and s["verified_date"]}
+    assert {s["id"] for s in pollable(sources)} == stamped
+    # The SSRN placeholder stays out until its URL is pinned.
+    assert "ssrn-new-papers" not in stamped
 
 
 def test_watchlist_rejects_duplicate_ids(tmp_path):

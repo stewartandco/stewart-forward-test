@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "Coen-verified source watchlist (D23). A source is pollable ONLY when added_by=='coen' AND verified_date is set. Seed proposed 2026-08-14; every entry awaits Coen's one-time verification pass. feed==null means HTML listing diff on url.",
+  "note": "Coen-verified source watchlist (D23). A source is pollable ONLY when added_by=='coen' AND verified_date is set. Seed proposed 2026-08-14; Coen verified 20/21 entries 2026-08-14 (all but the SSRN placeholder, which awaits a pinned URL). feed==null means HTML listing diff on url.",
   "sources": [
     {
       "id": "arxiv-q-fin",
@@ -10,7 +10,7 @@
       "feed": "https://rss.arxiv.org/rss/q-fin",
       "poll_minutes": 240,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Aggregate feed covers q-fin.PM/TR/ST/CP/RM/PR/MF/EC/GN. Updates daily ~midnight ET."
     },
     {
@@ -21,7 +21,7 @@
       "feed": "https://rss.arxiv.org/rss/stat.ML",
       "poll_minutes": 240,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Higher volume than q-fin; the relevance screen carries the load. cs.LG deliberately excluded (volume too high for precision) - revisit if stat.ML proves thin."
     },
     {
@@ -32,7 +32,7 @@
       "feed": "https://quantocracy.com/feed/",
       "poll_minutes": 120,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Links out to third-party posts; linked domains off-watchlist go to the discovery queue, the aggregator item itself is screened on title."
     },
     {
@@ -43,7 +43,7 @@
       "feed": "https://alphaarchitect.com/feed/",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Factor investing research summaries; usually quote-grounded claims."
     },
     {
@@ -54,7 +54,7 @@
       "feed": "https://robotwealth.com/feed/",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Practitioner trading research."
     },
     {
@@ -65,7 +65,7 @@
       "feed": "https://qoppac.blogspot.com/feeds/posts/default",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Atom feed. Systematic futures, position sizing, portfolio construction."
     },
     {
@@ -76,7 +76,7 @@
       "feed": "https://quantpedia.com/feed/",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Free tier only; premium strategy database is paywalled and never fetched."
     },
     {
@@ -87,7 +87,7 @@
       "feed": "https://financial-hacker.com/feed/",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Low post frequency; algorithmic strategy dissections."
     },
     {
@@ -98,7 +98,7 @@
       "feed": "https://quantifiableedges.com/feed/",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Short-horizon equity index edges."
     },
     {
@@ -109,7 +109,7 @@
       "feed": "https://blog.thinknewfound.com/feed/",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Trend, rebalance timing luck, return stacking."
     },
     {
@@ -131,7 +131,7 @@
       "feed": "https://www.federalreserve.gov/feeds/feds.xml",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Finance and Economics Discussion Series - research with mechanism, not press noise."
     },
     {
@@ -142,7 +142,7 @@
       "feed": "https://www.federalreserve.gov/feeds/press_monetary.xml",
       "poll_minutes": 120,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "FOMC statements / implementation notes. Screen bar: keep only items with testable market-behavior implications; mechanism-free macro news is a kill category."
     },
     {
@@ -153,7 +153,7 @@
       "feed": "https://libertystreeteconomics.newyorkfed.org/feed/",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Microstructure, funding markets, dealer positioning research."
     },
     {
@@ -164,7 +164,7 @@
       "feed": "https://www.bis.org/doclist/wppubls.rss",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Cross-market structure and FX research."
     },
     {
@@ -175,7 +175,7 @@
       "feed": "https://www.rba.gov.au/rss/rss-cb-media-releases.xml",
       "poll_minutes": 360,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "AU jurisdiction relevance. Same mechanism bar as fed-monetary-press."
     },
     {
@@ -186,7 +186,7 @@
       "feed": "https://github.com/microsoft/qlib/releases.atom",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "AI-for-quant platform; release notes surface new factor/model research."
     },
     {
@@ -197,7 +197,7 @@
       "feed": "https://github.com/robcarver17/pysystemtrade/releases.atom",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Carver's production futures system."
     },
     {
@@ -208,7 +208,7 @@
       "feed": "https://github.com/polakowo/vectorbt/releases.atom",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Backtesting tooling."
     },
     {
@@ -219,7 +219,7 @@
       "feed": "https://github.com/nautechsystems/nautilus_trader/releases.atom",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Execution/live-trading infrastructure."
     },
     {
@@ -230,7 +230,7 @@
       "feed": "https://github.com/freqtrade/freqtrade/releases.atom",
       "poll_minutes": 720,
       "added_by": "coen",
-      "verified_date": null,
+      "verified_date": "2026-08-14",
       "notes": "Crypto bot framework; release notes occasionally carry strategy research links."
     }
   ]
