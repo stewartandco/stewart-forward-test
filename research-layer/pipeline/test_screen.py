@@ -294,3 +294,21 @@ def test_signal_while_in_position_is_ignored_not_queued():
     assert len(book["trades"]) == 1
     assert book["equity"][-1] == pytest.approx(
         1 + 0.2 * book["trades"][0]["return_net"])
+
+
+def test_zero_stop_distance_skips_entry_no_crash(monkeypatch):
+    import pipeline.engine as eng
+    bars = flat_bars(30)
+    sig = [0] * len(bars)
+    sig[10] = 1
+    monkeypatch.setattr(eng, "entry_signals", lambda block, b: (sig, [0] * len(b)))
+    monkeypatch.setattr(eng, "_tightest_stop",
+                        lambda stops, entry_px, side, atr_series, i: entry_px)  # dist 0
+    blocks = [
+        {"role": "entry", "type": "channel_breakout",
+         "params": {"lookback": 5, "direction": "long"}},
+        {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+        {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+    ]
+    book = eng.simulate_asset(blocks, bars, COST)
+    assert book["trades"] == []

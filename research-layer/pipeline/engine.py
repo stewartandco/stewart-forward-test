@@ -256,7 +256,7 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
         if was_flat and pos is None and i > 0 and sig[i - 1] != 0 and mask[i - 1]:
             side, entry_px = sig[i - 1], b["open"]
             stop = _tightest_stop(stops, entry_px, side, atr_series, i - 1)
-            if stop is not None:
+            if stop is not None and abs(entry_px - stop) > 0:
                 dist = abs(entry_px - stop)
                 target = None
                 if targets:
