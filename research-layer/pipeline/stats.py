@@ -81,7 +81,11 @@ def psr(sr_hat: float, sr_star: float, T: int, skew: float,
     true per-period SR exceeds sr_star, correcting for skew/kurtosis."""
     under = 1 - skew * sr_hat + (kurt - 1) / 4 * sr_hat ** 2
     if under <= 0:
-        under = 1e-12          # extreme-moment clamp; documented conservative
+        # unreachable for skew/kurt from moments() on a real sample
+        # (Pearson: kurt >= skew^2 + 1 makes the discriminant <= 0);
+        # if inputs are ever inconsistent, FAIL CLOSED rather than letting
+        # the saturating z auto-pass the gate
+        return 0.0
     z = (sr_hat - sr_star) * math.sqrt(T - 1) / math.sqrt(under)
     return normal_cdf(z)
 

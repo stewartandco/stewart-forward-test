@@ -133,3 +133,96 @@ def test_screen_trades_csv_bytes_are_format_stable(tmp_path):
     assert b"notional_frac" not in raw
     assert raw.startswith(b"asset,side,entry_date,entry_px,exit_date,"
                           b"exit_px,exit_reason,return_net\n")
+
+
+from .gauntlet import (split_trades, contributions, compound, evaluate_spec,
+                       DSR_MIN, DECAY_MIN_PCT, MC_P05_MIN, P_RUIN_MAX)
+
+
+def trade(entry_date, ret, frac=0.2):
+    return {"entry_date": entry_date, "return_net": ret, "notional_frac": frac}
+
+
+GOOD_IS = [trade("2022-01-01", 0.05)] * 30 + [trade("2022-06-01", -0.02)] * 20
+GOOD_OOS = [trade("2024-02-01", 0.05)] * 12 + [trade("2024-06-01", -0.02)] * 8
+STEADY_RETURNS = [0.001, 0.002, -0.001, 0.0015, 0.001] * 200  # T=1000, SR~high
+
+
+def eval_with(is_t=GOOD_IS, oos_t=GOOD_OOS, stress_oos=None, returns=None,
+              group_n=4, group_var=0.0001):
+    if stress_oos is None:
+        stress_oos = [trade(t["entry_date"], t["return_net"] - 0.001)
+                      for t in oos_t]
+    if returns is None:
+        returns = STEADY_RETURNS
+    return evaluate_spec(is_t, oos_t, stress_oos, returns,
+                         group_n, group_var, seed=12345)
+
+
+# ---------------- battery evaluation ----------------
+
+def test_split_and_contributions():
+    all_t = GOOD_IS + GOOD_OOS
+    is_t, oos_t = split_trades(all_t, "2023-12-31")
+    assert len(is_t) == 50 and len(oos_t) == 20
+    assert contributions([trade("x", 0.05, 0.2)]) == [pytest.approx(0.01)]
+    assert compound([0.01, 0.01]) == pytest.approx(1.01 * 1.01 - 1)
+
+
+def test_all_gates_pass():
+    passed, reason, metrics, mc = eval_with()
+    assert passed and reason is None
+    assert set(metrics) == {"is_edge_per_trade", "oos_edge_per_trade",
+                            "edge_decay_pct", "mc_p05_equity", "p_ruin",
+                            "deflated_sharpe", "sibling_group_n",
+                            "cost_stress_net_pnl"}
+    assert metrics["sibling_group_n"] == 4
+
+
+def test_oos_negative_fails_first():
+    bad_oos = [trade("2024-02-01", -0.05)] * 20
+    passed, reason, metrics, _ = eval_with(oos_t=bad_oos)
+    assert not passed and reason == "oos_negative"
+
+
+def test_edge_decay_fails():
+    # OOS positive but per-trade edge decayed far more than 25%
+    weak_oos = [trade("2024-02-01", 0.004)] * 20   # edge 0.0008 vs IS 0.0044
+    passed, reason, _, _ = eval_with(oos_t=weak_oos)
+    assert not passed and reason == "edge_decay"
+
+
+def test_is_edge_nonpositive_fails_edge_decay():
+    flat_is = [trade("2022-01-01", 0.0)] * 50
+    passed, reason, _, _ = eval_with(is_t=flat_is)
+    assert not passed and reason == "edge_decay"
+
+
+def test_mc_p05_fails_on_volatile_contribs():
+    # violent but net-positive alternation (1.30 x 0.78 = +1.4%/pair): OOS
+    # nets positive and edge holds, but the resampled P05 path is deep
+    # underwater (log-space sigma ~2.1 over 70 draws)
+    wild_is = [trade("2022-01-01", 0.30, 1.0),
+               trade("2022-02-01", -0.22, 1.0)] * 25
+    wild_oos = [trade("2024-02-01", 0.30, 1.0),
+                trade("2024-03-01", -0.22, 1.0)] * 10
+    passed, reason, _, _ = eval_with(is_t=wild_is, oos_t=wild_oos)
+    assert not passed and reason in ("mc_p05", "p_ruin")  # both legitimate here
+
+
+def test_dsr_fails_on_weak_curve():
+    noisy = [0.001, -0.001] * 500      # SR ~ 0
+    passed, reason, _, _ = eval_with(returns=noisy)
+    assert not passed and reason == "dsr"
+
+
+def test_cost_stress_fails():
+    fragile_stress = [trade("2024-02-01", -0.001)] * 20
+    passed, reason, _, _ = eval_with(stress_oos=fragile_stress)
+    assert not passed and reason == "cost_stress"
+
+
+def test_psr_clamp_fails_closed():
+    # inputs violating Pearson's inequality (impossible from moments()) must
+    # fail closed, not saturate to an auto-pass
+    assert psr(0.5, 0.0, 101, 10.0, 1.0) == 0.0
