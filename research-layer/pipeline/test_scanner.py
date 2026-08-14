@@ -5,11 +5,17 @@ Run: python -m pytest research-layer/pipeline/test_scanner.py -q
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from .lock import FileLock, FileLockTimeout
 
 from .watchlist import (WatchlistError, load_watchlist, pollable,
                         normalize_url, queue_discovery, load_discovery)
@@ -466,6 +472,62 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     lines[0] = lines[0].replace("scanner_started", "scanner_tampered")
     p.write_text("\n".join(lines) + "\n")
     assert not verify_chain(p)
+
+
+# ---------------- registry file lock ----------------
+
+def test_filelock_acquire_release_roundtrip(tmp_path):
+    target = tmp_path / "reg.jsonl"
+    lock = FileLock(target)
+    with lock:
+        assert lock.lock_path.exists()
+    assert not lock.lock_path.exists()
+    with FileLock(target):  # reacquirable after release
+        pass
+
+
+def test_filelock_contention_times_out(tmp_path):
+    target = tmp_path / "reg.jsonl"
+    holder = FileLock(target)
+    holder.acquire()
+    try:
+        with pytest.raises(FileLockTimeout):
+            FileLock(target, timeout=0.3).acquire()
+    finally:
+        holder.release()
+    # released -> acquirable again
+    with FileLock(target, timeout=0.3):
+        pass
+
+
+def test_filelock_breaks_stale_lock(tmp_path):
+    target = tmp_path / "reg.jsonl"
+    stale = FileLock(target)
+    stale.lock_path.write_text("dead-pid")
+    old = time.time() - 3600
+    os.utime(stale.lock_path, (old, old))
+    with FileLock(target, timeout=1.0, stale_after=60.0):  # must not time out
+        pass
+
+
+def test_concurrent_appends_keep_chain_linear(tmp_path):
+    """The hazard that bit twice on 08-14: multiple processes appending the
+    same registry must never fork the chain."""
+    log = tmp_path / "reg.jsonl"
+    script = (
+        "import sys\n"
+        "from pipeline.registry import Registry\n"
+        f"r = Registry({str(log)!r})\n"
+        "for i in range(25):\n"
+        "    r.append('note', {'writer': sys.argv[1], 'i': i})\n"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", script, str(w)],
+                              cwd=str(LAYER)) for w in range(4)]
+    for p in procs:
+        assert p.wait(timeout=120) == 0
+    entries = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 100
+    assert verify_chain(log)
 
 
 # ---------------- scanner orchestration ----------------

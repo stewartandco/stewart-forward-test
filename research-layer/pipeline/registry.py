@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from .common import GENESIS_HASH, canonical_json, entry_hash
+from .lock import FileLock
 
 VALID_TRANSITIONS = {
     "proposed":   {"screened", "graveyard"},
@@ -43,16 +44,19 @@ class Registry:
         return entry_hash(json.loads(last))
 
     def append(self, entry_type: str, payload: dict, ts_utc: str | None = None) -> dict:
-        entry = {
-            "version": 1,
-            "ts_utc": ts_utc or _now_utc(),
-            "entry_type": entry_type,
-            "prev_entry_hash": self._head_hash(),
-            "payload": payload,
-        }
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.log_path.open("a", encoding="utf-8") as f:
-            f.write(canonical_json(entry) + "\n")
+        # Cross-process lock spans the head-read AND the write: two writers
+        # that read the same head would fork the chain (bit twice 2026-08-14).
+        with FileLock(self.log_path):
+            entry = {
+                "version": 1,
+                "ts_utc": ts_utc or _now_utc(),
+                "entry_type": entry_type,
+                "prev_entry_hash": self._head_hash(),
+                "payload": payload,
+            }
+            with self.log_path.open("a", encoding="utf-8") as f:
+                f.write(canonical_json(entry) + "\n")
         return entry
 
     # -- reads -------------------------------------------------------------
