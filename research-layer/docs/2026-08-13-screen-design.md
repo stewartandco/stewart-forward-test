@@ -83,6 +83,17 @@ equity × (ann_vol / realized_ann_vol(lookback)). Both capped at 1.0 × equity
 **Costs.** Applied per side from the spec's `cost_model`: commission_per_side
 + slippage_ticks (both fractions of notional; 10 + 5 bps for v1 specs).
 
+**Documented conventions** (implemented behavior, recorded pre-results):
+- Signals are edges, not levels: an `ma_cross` cross-up that fires while a
+  gate is closed is NOT re-honored when the gate later opens — the next
+  fresh cross is required. Gate-blocked signals are lost, not queued.
+- Barriers do not apply on the entry fill bar itself (checks start the
+  following bar) — conservative for daily bars with unknown intrabar order.
+- If a time-stop deadline coincides with a same-bar gap through the stop,
+  the exit price is the open either way; `exit_reason` records `time`.
+- A zero stop distance (degenerate flat data) skips the entry rather than
+  sizing it.
+
 **Multi-asset.** Each asset in `universe.assets` runs an independent book
 with an equal share of capital; combined equity curve = mean of per-asset
 equity curves; `trades` = sum of per-asset counts; metrics computed on the
