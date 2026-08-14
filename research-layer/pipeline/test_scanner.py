@@ -630,6 +630,30 @@ def test_funnel_at_budget_cap_polls_but_defers(tmp_path):
     assert client.calls == []
 
 
+def test_scanner_cards_total_is_cumulative_and_survives_triage(tmp_path):
+    """The status counter must not drop to zero when triage clears pending -
+    it reports what the scanner has registered, ever."""
+    from .scanner import scanner_cards_total
+    from .reader import build_card
+    registry = Registry(tmp_path / "reg.jsonl")
+    meta = {"type": "blog", "title": "T", "authors": [], "year": None,
+            "url": "https://x.example/a", "doi": None, "isbn": None,
+            "credibility_tier": "practitioner"}
+    raw = {"claim": "Scanner claim one.", "quote": "q", "locator": "l",
+           "asset_classes": ["crypto"], "topics": ["t"], "horizon": "daily",
+           "testability_score": 0.5, "data_required": ["d"], "notes": None}
+    c1 = build_card(raw, meta, "claude-sonnet-5", "2026-08-14-scanner")
+    c2 = build_card({**raw, "claim": "Scanner claim two."}, meta,
+                    "claude-sonnet-5", "2026-08-15-scanner")
+    manual = build_card({**raw, "claim": "Manual corpus claim."}, meta,
+                        "claude-opus-5", "2026-08-14-manual")
+    for c in (c1, c2, manual):
+        registry.register_card(c)
+    assert scanner_cards_total(registry) == 2
+    registry.review_card(c1["card_id"], "accepted", "coen")  # triage happened
+    assert scanner_cards_total(registry) == 2  # cumulative, not pending
+
+
 def test_pending_tier3_counts_discoveries_plus_pending_cards(tmp_path):
     from .test_pipeline import make_card
     registry = Registry(tmp_path / "reg.jsonl")

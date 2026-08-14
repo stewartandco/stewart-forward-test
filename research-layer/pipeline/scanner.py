@@ -194,6 +194,15 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
     return stats
 
 
+def scanner_cards_total(registry: Registry) -> int:
+    """Cumulative cards the scanner has ever registered (run_id *-scanner) -
+    unlike the pending count, this does not drop when triage clears cards."""
+    return sum(1 for e in registry.entries()
+               if e["entry_type"] == "card_registered"
+               and str(e["payload"].get("extraction", {}).get("run_id", ""))
+                   .endswith("-scanner"))
+
+
 def pending_tier3_count(registry: Registry, discovery_path) -> int:
     """The two things waiting on Coen: discovery proposals + cards in triage."""
     proposals = [d for d in load_discovery(discovery_path)
@@ -244,7 +253,7 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                      if d["queued_utc"][:10] == datetime.now(timezone.utc).strftime("%Y-%m-%d")],
         paywalled=[e["link"] for e in seen.items_with_status("paywalled").values()],
         spend_usd=meter.month_spend(),
-        cards_registered=len(registry.cards(status="pending")),
+        cards_registered=scanner_cards_total(registry),
         budget_state=meter.state())
     budget_state = meter.state()
     overall = "OK" if budget_state == "OK" else "WARN"
@@ -257,7 +266,7 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                "screened_pass": len(seen.items_with_status("screen_keep"))
                                 + len(seen.items_with_status("extracted")),
                "extracted": len(seen.items_with_status("extracted")),
-               "cards_registered": len(registry.cards(status="pending")),
+               "cards_registered": scanner_cards_total(registry),
                "budget": "WARN" if budget_state != "OK" else "OK"},
         pending_tier3=pending_tier3_count(registry, discovery_path),
         digest_file=digest, next_run=next_due_utc)

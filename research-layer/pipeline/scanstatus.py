@@ -91,7 +91,7 @@ def write_digest(dir_path: str | Path, *, date: str, new_by_source: dict,
     else:
         lines.append("  (none)")
     lines.append("")
-    lines.append(f"Cards registered (pending triage): {cards_registered}")
+    lines.append(f"Cards registered by scanner (cumulative): {cards_registered}")
     lines.append("")
     lines.append("Off-list sources queued for Coen (Tier 3, never fetched):")
     if discoveries:
