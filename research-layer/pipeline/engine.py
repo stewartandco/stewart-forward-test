@@ -50,6 +50,8 @@ def atr_wilder(bars: list[dict], n: int) -> list:
 def trend_tstat(window_closes: list[float]) -> float:
     """t-stat of the OLS slope of close vs time over the window.
     Perfect line -> +/-inf (sign of slope); flat -> 0."""
+    if len(window_closes) < 3:
+        raise ValueError("trend_tstat needs >= 3 points")
     n = len(window_closes)
     xs = list(range(n))
     mx = (n - 1) / 2
@@ -84,3 +86,81 @@ def percentile_rank(values: list[float], i: int, window: int) -> float | None:
     if any(v is None for v in win):
         return None
     return sum(1 for v in win if v <= values[i]) / len(win)
+
+
+# ---------------- entry signals + gates ------------------------------------
+
+def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
+    """Per-bar entry signal (+1 long, -1 short, 0 none), evaluated on close.
+    Also returns a per-bar desired-state list (used by ma_cross signal exits;
+    zeros for stateless entries). Warmup bars emit 0."""
+    p = block["params"]
+    closes = [b["close"] for b in bars]
+    n = len(bars)
+    sig = [0] * n
+    state = [0] * n
+
+    if block["type"] == "ma_cross":
+        fast, slow = sma(closes, p["fast"]), sma(closes, p["slow"])
+        for i in range(n):
+            if fast[i] is None or slow[i] is None:
+                continue
+            state[i] = 1 if fast[i] > slow[i] else 0
+            if state[i] == 1 and (i == 0 or state[i - 1] == 0):
+                sig[i] = 1
+
+    elif block["type"] == "channel_breakout":
+        lb = p["lookback"]
+        for i in range(lb, n):
+            hi = max(b["high"] for b in bars[i - lb:i])
+            lo = min(b["low"] for b in bars[i - lb:i])
+            if closes[i] > hi:
+                sig[i] = 1
+            elif p["direction"] == "both" and closes[i] < lo:
+                sig[i] = -1
+
+    elif block["type"] == "zscore_reversion":
+        mean, sd = sma(closes, p["lookback"]), stdev(closes, p["lookback"])
+        for i in range(n):
+            if mean[i] is None or sd[i] is None or sd[i] == 0:
+                continue
+            z = (closes[i] - mean[i]) / sd[i]
+            if z <= -p["z_entry"]:
+                sig[i] = 1
+            elif p["direction"] == "both" and z >= p["z_entry"]:
+                sig[i] = -1
+
+    elif block["type"] == "trend_scan":
+        windows = list(range(20, p["max_lookback"] + 1, 10))
+        for i in range(max(windows) - 1, n):
+            best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows),
+                       key=abs)
+            if best >= p["t_min"]:
+                sig[i] = 1
+
+    else:
+        raise ValueError(f"no executor for entry type {block['type']!r}")
+    return sig, state
+
+
+def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
+    """AND of all regime/filter blocks; False during any gate's warmup."""
+    closes = [b["close"] for b in bars]
+    n = len(bars)
+    mask = [True] * n
+    for g in gates:
+        p = g["params"]
+        if g["type"] == "regime_ma":
+            ma = sma(closes, p["ma_len"])
+            for i in range(n):
+                if ma[i] is None or closes[i] <= ma[i]:
+                    mask[i] = False
+        elif g["type"] == "vol_percentile":
+            vol = realized_ann_vol(closes, p["lookback"])
+            for i in range(n):
+                r = percentile_rank(vol, i, 365)
+                if r is None or r > p["max_pctile"]:
+                    mask[i] = False
+        else:
+            raise ValueError(f"no executor for gate type {g['type']!r}")
+    return mask

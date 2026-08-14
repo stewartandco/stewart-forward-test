@@ -97,3 +97,85 @@ def test_percentile_rank():
     # rank of current value among trailing window values (incl. current)
     assert percentile_rank([1, 2, 3], 2, 3) == pytest.approx(1.0)
     assert percentile_rank([3, 2, 1], 2, 3) == pytest.approx(1 / 3)
+
+
+from .engine import entry_signals, gate_mask
+
+
+def flat_bars(n, px=100.0):
+    return [{"date": f"d{i}", "open": px, "high": px, "low": px,
+             "close": px, "volume": 1.0} for i in range(n)]
+
+
+def ramp_bars(n, start=100.0, step=1.0):
+    out = []
+    for i in range(n):
+        c = start + i * step
+        out.append({"date": f"d{i}", "open": c, "high": c, "low": c,
+                    "close": c, "volume": 1.0})
+    return out
+
+
+# ---------------- entry signals ----------------
+
+def test_ma_cross_signal_and_state():
+    # 6 flat bars then a jump: fast sma(2) crosses above slow sma(4)
+    bars = flat_bars(6) + ramp_bars(4, start=110.0, step=5.0)
+    sig, state = entry_signals({"role": "entry", "type": "ma_cross",
+                                "params": {"fast": 2, "slow": 4}}, bars)
+    # state is +1 while fast>slow; the cross bar emits +1 in sig
+    assert 1 in sig
+    first = sig.index(1)
+    assert state[first] == 1 and state[first - 1] in (0, None)
+
+
+def test_channel_breakout_long_only_by_default():
+    bars = flat_bars(6) + [{"date": "b", "open": 100, "high": 111, "low": 100,
+                            "close": 111, "volume": 1.0}]
+    spec = {"role": "entry", "type": "channel_breakout",
+            "params": {"lookback": 5, "direction": "long"}}
+    sig, _ = entry_signals(spec, bars)
+    assert sig[-1] == 1
+
+
+def test_zscore_reversion_long_at_negative_z():
+    bars = flat_bars(10) + [{"date": "b", "open": 90, "high": 90, "low": 90,
+                             "close": 90, "volume": 1.0}]
+    spec = {"role": "entry", "type": "zscore_reversion",
+            "params": {"lookback": 5, "z_entry": 1.5, "direction": "long"}}
+    sig, _ = entry_signals(spec, bars)
+    assert sig[-1] == 1          # 90 is far below the flat-100 mean
+
+
+def test_trend_scan_long_on_strong_trend():
+    bars = ramp_bars(130)
+    spec = {"role": "entry", "type": "trend_scan",
+            "params": {"max_lookback": 60, "t_min": 3.0}}
+    sig, _ = entry_signals(spec, bars)
+    assert sig[-1] == 1
+
+
+def test_signals_none_during_warmup():
+    bars = flat_bars(3)
+    spec = {"role": "entry", "type": "channel_breakout",
+            "params": {"lookback": 5, "direction": "long"}}
+    sig, _ = entry_signals(spec, bars)
+    assert all(s == 0 for s in sig)
+
+
+# ---------------- gates ----------------
+
+def test_regime_ma_gate_blocks_below_ma():
+    down = [{"date": f"d{i}", "open": 100 - i, "high": 100 - i, "low": 100 - i,
+             "close": 100 - i, "volume": 1.0} for i in range(120)]
+    mask = gate_mask([{"role": "regime", "type": "regime_ma",
+                       "params": {"ma_len": 100}}], down)
+    assert mask[-1] is False     # falling market: close < sma(100)
+
+
+def test_vol_percentile_gate_and_warmup():
+    bars = flat_bars(500)
+    mask = gate_mask([{"role": "filter", "type": "vol_percentile",
+                       "params": {"lookback": 90, "max_pctile": 1.0}}], bars)
+    assert mask[10] is False     # warmup (needs 365-bar percentile window)
+    assert mask[-1] is True      # max_pctile 1.0 admits everything once warm
