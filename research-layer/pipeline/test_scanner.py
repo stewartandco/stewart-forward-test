@@ -116,6 +116,30 @@ def test_discovery_queue_dedups_and_never_marks_fetchable(tmp_path):
     assert entries[0]["status"] == "proposed"
 
 
+def test_discovery_queue_dedups_at_domain_level(tmp_path):
+    # a source proposal is a DOMAIN, not a post: second URL on the same
+    # domain is not a new proposal
+    q = tmp_path / "discovery_queue.jsonl"
+    assert queue_discovery(q, "https://newblog.example/post-one",
+                           found_in="a/1", reason="cited")
+    assert not queue_discovery(q, "https://newblog.example/post-two",
+                               found_in="a/2", reason="cited")
+    assert not queue_discovery(q, "https://www.newblog.example/post-three",
+                               found_in="a/3", reason="cited")
+    assert len(load_discovery(q)) == 1
+    assert load_discovery(q)[0]["domain"] == "newblog.example"
+
+
+def test_discovery_queue_rejects_junk_platform_domains(tmp_path):
+    q = tmp_path / "discovery_queue.jsonl"
+    for junk in ("https://twitter.com/someone/status/1",
+                 "https://www.linkedin.com/in/someone",
+                 "https://www.youtube.com/watch?v=x",
+                 "https://amazon.com/some-book"):
+        assert not queue_discovery(q, junk, found_in="a/1", reason="cited")
+    assert load_discovery(q) == []
+
+
 # ---------------- feeds ----------------
 
 RSS_XML = """<?xml version="1.0"?>

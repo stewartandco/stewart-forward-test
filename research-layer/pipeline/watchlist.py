@@ -59,6 +59,23 @@ def normalize_url(url: str) -> str:
                        parts.path.rstrip("/"), query, ""))
 
 
+# Platforms that are never research SOURCES (social, video, retail, share
+# infrastructure) - links to them are noise, not proposals for Coen.
+JUNK_DOMAINS = {
+    "twitter.com", "x.com", "facebook.com", "linkedin.com", "instagram.com",
+    "youtube.com", "youtu.be", "reddit.com", "t.me", "wa.me", "threads.net",
+    "amazon.com", "apple.com", "spotify.com", "podcasts.apple.com",
+    "play.google.com", "google.com", "goo.gl", "bit.ly", "feedburner.com",
+    "wordpress.com", "wp.com", "gravatar.com", "creativecommons.org",
+    "mailchi.mp", "eepurl.com", "substackcdn.com",
+}
+
+
+def discovery_domain(url: str) -> str:
+    netloc = urlsplit(url).netloc.lower().split(":")[0]
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
 def load_discovery(path: str | Path) -> list[dict]:
     p = Path(path)
     if not p.exists():
@@ -70,15 +87,22 @@ def load_discovery(path: str | Path) -> list[dict]:
 def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> bool:
     """Append an off-list source proposal (Tier 3, never fetched).
 
-    Returns False (no write) when the normalized URL is already queued.
+    A proposal is a DOMAIN, not a post: further URLs on an already-queued
+    domain are not new proposals, and junk platforms (social/video/retail)
+    never queue. Returns False when nothing was written.
     """
-    normalized = normalize_url(url)
-    known = {e["normalized"] for e in load_discovery(path)}
-    if normalized in known:
+    domain = discovery_domain(url)
+    if not domain or domain in JUNK_DOMAINS \
+            or any(domain.endswith("." + j) for j in JUNK_DOMAINS):
+        return False
+    known = {e.get("domain") or discovery_domain(e["url"])
+             for e in load_discovery(path)}
+    if domain in known:
         return False
     entry = {
         "url": url,
-        "normalized": normalized,
+        "domain": domain,
+        "normalized": normalize_url(url),
         "found_in": found_in,
         "reason": reason,
         "tier": 3,
