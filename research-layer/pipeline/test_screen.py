@@ -312,3 +312,46 @@ def test_zero_stop_distance_skips_entry_no_crash(monkeypatch):
     ]
     book = eng.simulate_asset(blocks, bars, COST)
     assert book["trades"] == []
+
+
+from .engine import run_spec, max_drawdown
+
+
+def make_screen_spec(assets=("BTCUSD",), **kw):
+    return {
+        "strategy_id": "aaaaaaaaaaaaaaaa",
+        "universe": {"assets": list(assets), "asset_class": "crypto",
+                     "timeframe": "1d", "session": "24x7"},
+        "blocks": breakout_spec_blocks(**kw),
+        "cost_model": COST,
+    }
+
+
+# ---------------- run_spec + metrics ----------------
+
+def test_max_drawdown():
+    assert max_drawdown([1.0, 1.2, 0.9, 1.1]) == pytest.approx(0.25)
+    assert max_drawdown([1.0, 1.1, 1.2]) == pytest.approx(0.0)
+
+
+def test_run_spec_single_asset_metrics():
+    result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    m = result["metrics"]
+    assert m["trades"] == 1
+    assert m["win_rate"] == pytest.approx(1.0)
+    assert m["net_pnl"] == pytest.approx(result["equity"][-1][1] - 1)
+
+
+def test_run_spec_two_assets_combined():
+    bars = {"BTCUSD": target_hit_bars(), "ETHUSD": flat_bars(9)}
+    result = run_spec(make_screen_spec(assets=("BTCUSD", "ETHUSD")), bars)
+    # ETH book flat at 1.0; combined = mean -> half the BTC-only pnl
+    solo = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    assert result["metrics"]["net_pnl"] == pytest.approx(solo["metrics"]["net_pnl"] / 2)
+    assert result["metrics"]["trades"] == 1
+
+
+def test_run_spec_deterministic():
+    a = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    b = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    assert a == b

@@ -285,3 +285,38 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
         curve.append(mtm)
 
     return {"trades": trades, "equity": curve}
+
+
+# ---------------- spec runner + metrics ------------------------------------
+
+def max_drawdown(curve: list[float]) -> float:
+    peak, dd = float("-inf"), 0.0
+    for v in curve:
+        peak = max(peak, v)
+        dd = max(dd, (peak - v) / peak)
+    return dd
+
+
+def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
+    """Run a strategy spec: one independent equal-capital book per universe
+    asset, combined by mean. Returns {trades, equity, metrics}; equity is
+    [(date, combined_equity)] over the shortest common calendar."""
+    books = {}
+    for asset in spec["universe"]["assets"]:
+        books[asset] = simulate_asset(spec["blocks"], bars_by_asset[asset],
+                                      spec["cost_model"])
+    n = min(len(bars_by_asset[a]) for a in books)
+    dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
+    combined = [sum(books[a]["equity"][i] for a in books) / len(books)
+                for i in range(n)]
+    trades = [dict(t, asset=a) for a in books for t in books[a]["trades"]]
+    trades.sort(key=lambda t: (t["entry_date"], t["asset"]))
+    wins = sum(1 for t in trades if t["return_net"] > 0)
+    metrics = {
+        "trades": len(trades),
+        "net_pnl": combined[-1] - 1 if combined else 0.0,
+        "win_rate": wins / len(trades) if trades else 0.0,
+        "max_dd": -max_drawdown(combined) if combined else 0.0,
+    }
+    return {"trades": trades, "equity": list(zip(dates, combined)),
+            "metrics": metrics}
