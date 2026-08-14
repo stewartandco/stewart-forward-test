@@ -567,3 +567,17 @@ def test_screen_detects_orphaned_screened_strategy(tmp_path, capsys):
                      "--dry-run"])
     assert rc == 1
     assert "ORPHANED" in capsys.readouterr().out
+
+
+def test_screen_detects_orphan_even_with_verdict(tmp_path, capsys):
+    reg, spec = screening_registry(tmp_path)
+    chain_protocol_note(reg)
+    reg.record_state_change(spec["strategy_id"], "screened", "crash simulation")
+    reg.record_verdict(spec["strategy_id"], "screened", "pass",
+                       {"trades": 50, "net_pnl": 0.1, "win_rate": 0.5,
+                        "max_dd": -0.1}, "0" * 64)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--dry-run"])
+    assert rc == 1
+    assert "ORPHANED" in capsys.readouterr().out

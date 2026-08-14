@@ -90,10 +90,10 @@ def run(argv: list[str] | None = None) -> int:
 
     registry = Registry(args.registry)
 
-    verdicted = {e["payload"]["strategy_id"] for e in registry.entries()
-                 if e["entry_type"] == "verdict"}
+    # any strategy resting in "screened" between runs is a crash artifact:
+    # only this CLI's write-triplet ever advances that state
     orphans = [sid for sid, st in registry.strategy_states().items()
-               if st == "screened" and sid not in verdicted]
+               if st == "screened"]
     if orphans:
         print("ORPHANED: strategies stuck in 'screened' with no verdict "
               "(mid-run crash?) — repair manually before proceeding:")
