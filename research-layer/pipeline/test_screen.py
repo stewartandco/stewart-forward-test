@@ -556,3 +556,14 @@ def test_screen_reason_net_negative_when_trades_suffice(tmp_path, monkeypatch):
     gy = [e["payload"] for e in reg.entries() if e["entry_type"] == "state_change"
           and e["payload"]["to"] == "graveyard"]
     assert gy[0]["reason"] == "net_negative"
+
+
+def test_screen_detects_orphaned_screened_strategy(tmp_path, capsys):
+    reg, spec = screening_registry(tmp_path)
+    chain_protocol_note(reg)
+    reg.record_state_change(spec["strategy_id"], "screened", "crash simulation")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--dry-run"])
+    assert rc == 1
+    assert "ORPHANED" in capsys.readouterr().out

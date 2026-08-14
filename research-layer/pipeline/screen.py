@@ -89,6 +89,18 @@ def run(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
+
+    verdicted = {e["payload"]["strategy_id"] for e in registry.entries()
+                 if e["entry_type"] == "verdict"}
+    orphans = [sid for sid, st in registry.strategy_states().items()
+               if st == "screened" and sid not in verdicted]
+    if orphans:
+        print("ORPHANED: strategies stuck in 'screened' with no verdict "
+              "(mid-run crash?) — repair manually before proceeding:")
+        for sid in orphans:
+            print(f"  {sid}")
+        return 1
+
     if not args.dry_run and not protocol_note_chained(registry):
         print(f"REFUSED: no '{PROTOCOL}' note on the chain. Chain the screen "
               f"protocol note before running for real (dry-run is allowed).")
