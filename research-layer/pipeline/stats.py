@@ -15,7 +15,7 @@ def normal_cdf(x: float) -> float:
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
 
-# Acklam's rational approximation to the inverse normal CDF (|err| < 1.15e-9)
+# Acklam's rational approximation to the inverse normal CDF (relative |err| < 1.15e-9)
 _A = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
       1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
 _B = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
@@ -73,3 +73,46 @@ def percentile(sorted_xs: list[float], q: float) -> float:
     if lo == hi:
         return sorted_xs[lo]
     return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (idx - lo)
+
+
+def psr(sr_hat: float, sr_star: float, T: int, skew: float,
+        kurt: float) -> float:
+    """Probabilistic Sharpe Ratio (Bailey & Lopez de Prado): probability the
+    true per-period SR exceeds sr_star, correcting for skew/kurtosis."""
+    under = 1 - skew * sr_hat + (kurt - 1) / 4 * sr_hat ** 2
+    if under <= 0:
+        under = 1e-12          # extreme-moment clamp; documented conservative
+    z = (sr_hat - sr_star) * math.sqrt(T - 1) / math.sqrt(under)
+    return normal_cdf(z)
+
+
+def expected_max_sharpe(n_trials: int, var_trials: float) -> float:
+    """E[max SR] across n zero-skill trials with cross-trial SR variance
+    var_trials (Bailey & Lopez de Prado False Strategy theorem). 0 at n<=1
+    or degenerate variance, by convention."""
+    if n_trials <= 1 or var_trials <= 0:
+        return 0.0
+    return math.sqrt(var_trials) * (
+        (1 - EULER_GAMMA) * inv_normal_cdf(1 - 1 / n_trials)
+        + EULER_GAMMA * inv_normal_cdf(1 - 1 / (n_trials * math.e)))
+
+
+def bootstrap_paths(contribs: list[float], n_paths: int, seed: int,
+                    ruin_level: float = 0.5) -> dict:
+    """IID bootstrap of per-trade portfolio contributions, compounded from
+    1.0. Returns {"terminals": sorted list, "p_ruin": fraction of paths whose
+    running equity ever touched <= ruin_level}."""
+    rng = random.Random(seed)
+    n = len(contribs)
+    terminals, ruined = [], 0
+    for _ in range(n_paths):
+        eq, min_eq = 1.0, 1.0
+        for _ in range(n):
+            eq *= 1 + contribs[rng.randrange(n)]
+            if eq < min_eq:
+                min_eq = eq
+        terminals.append(eq)
+        if min_eq <= ruin_level:
+            ruined += 1
+    terminals.sort()
+    return {"terminals": terminals, "p_ruin": ruined / n_paths}

@@ -78,8 +78,50 @@ def test_percentile_linear_interpolation():
     assert percentile(xs, 0.25) == pytest.approx(2.0)
 
 
+from .stats import psr, expected_max_sharpe, bootstrap_paths
+
+
+# ---------------- stats: PSR / E[max SR] / bootstrap ----------------
+
+def test_psr_hand_case():
+    # sr_hat=0.1/period, sr_star=0, T=101, normal returns (skew 0, kurt 3):
+    # denom = sqrt(1 + (3-1)/4 * 0.01) = sqrt(1.005); z = 0.1*10/1.00249...
+    assert psr(0.1, 0.0, 101, 0.0, 3.0) == pytest.approx(0.8407, abs=0.001)
+
+
+def test_psr_higher_sr_higher_prob():
+    assert psr(0.2, 0.0, 101, 0.0, 3.0) > psr(0.1, 0.0, 101, 0.0, 3.0)
+
+
+def test_expected_max_sharpe_conventions():
+    assert expected_max_sharpe(1, 0.01) == 0.0
+    assert expected_max_sharpe(10, 0.0) == 0.0
+    e10 = expected_max_sharpe(10, 0.01)
+    e100 = expected_max_sharpe(100, 0.01)
+    assert 0 < e10 < e100
+
+
+def test_bootstrap_deterministic_and_ruin():
+    contribs = [0.05, -0.02, 0.01, -0.01]
+    a = bootstrap_paths(contribs, 200, seed=42)
+    b = bootstrap_paths(contribs, 200, seed=42)
+    assert a == b
+    c = bootstrap_paths(contribs, 200, seed=43)
+    assert a != c
+    # single always-ruinous trade: every path dips to 0.4 <= 0.5
+    r = bootstrap_paths([-0.6], 50, seed=1)
+    assert r["p_ruin"] == 1.0
+    assert r["terminals"][0] == pytest.approx(0.4)
+
+
+def test_bootstrap_no_ruin_on_positive_contribs():
+    r = bootstrap_paths([0.01, 0.02], 100, seed=7)
+    assert r["p_ruin"] == 0.0
+    assert all(t > 1.0 for t in r["terminals"])
+
+
 def test_screen_trades_csv_bytes_are_format_stable(tmp_path):
-    # the 22 committed artifact bundles' hashes depend on this exact format;
+    # committed trades.csv artifact bytes depend on this exact format;
     # a trade carrying notional_frac must produce byte-identical CSV output
     from .screen import write_artifacts
     from .engine import run_spec
