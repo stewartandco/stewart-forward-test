@@ -136,17 +136,34 @@ Mechanics worth knowing:
   on-chain.
 - **Gauntlet gates are pre-declared and falsifiable.** SCHEMA's two
   unfalsifiable literal gates were amended on-chain BEFORE any verdict
-  (`gauntlet-protocol-v1` note): MC P05 terminal > 1.0 and DSR >= 0.95 with
-  the sibling group as the trial count. One quarantine slot per sibling
-  group, selected by DSR — passers not selected are graveyarded as
-  `sibling_not_selected`, visibly distinct from gate failure.
+  (`gauntlet-protocol-v1` note): MC P05 terminal > 1.0 and DSR >= 0.95. One
+  quarantine slot per sibling group, selected by DSR — passers not selected
+  are graveyarded as `sibling_not_selected`, visibly distinct from gate
+  failure.
+- **A buried strategy cannot come back.** `graveyard` is terminal, and the
+  Composer refuses any family whose composition fingerprint matches a
+  previously-registered strategy in any state — so a dead idea cannot return
+  under a fresh id. Under `gauntlet-protocol-v2`, deflation counts every
+  strategy ever registered against this data, not just the current batch, so
+  the multiple-testing hurdle rises as the search widens.
+- **Edge decay is measured per unit of opportunity.** v1 compared raw
+  per-trade edge across the fence, which could not distinguish strategy
+  decay from a shrinking opportunity set — over 2024+ passive buy-and-hold
+  decayed harder than any of the 13 gen-1 candidates. v2 normalizes by each
+  window's realized volatility and records both readings, so any v2 verdict
+  can be re-derived under the v1 rule.
 
 Offline tests (no API key needed): `python -m pytest pipeline/`
 
 ## Status
 
-- **v1 — specification + Reader + Composer + Screen + Gauntlet.** Quarantine
-  wiring (daily posting into the root forward-test log) is not built yet;
-  the lifecycle beyond the gauntlet verdict is exercised only by tests.
+- **v1 — specification + Reader + Composer + Screen + Gauntlet**, with
+  `gauntlet-protocol-v2` superseding v1 for all future verdicts (v1 verdicts
+  stand; the strategies they buried stay buried). Quarantine wiring (daily
+  posting into the root forward-test log) is not built yet; the lifecycle
+  beyond the gauntlet verdict is exercised only by tests.
+- **Generation 1 closed at 22 proposed → 13 screened-in → 0 quarantined.**
+  The full funnel, including every kill and its reason, is computable from
+  `registry_log.jsonl` alone.
 - The live registry chain (`registry_log.jsonl`) is created on the Reader's
   first non-dry-run write; `verify_registry.py` validates it and the example log.
