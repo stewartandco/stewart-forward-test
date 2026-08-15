@@ -474,6 +474,64 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- 48h checkpoint report ----------------
+
+def _ev(item, src, status, first, ts=None, reason=None):
+    return {"item_id": item, "source_id": src, "status": status,
+            "title": "t", "link": f"https://x/{item}", "reason": reason,
+            "ts_utc": ts or first, "first_seen_utc": first}
+
+
+def test_report_aggregates_per_source_within_window():
+    from .report import build_report
+    since = "2026-08-14T00:00:00Z"
+    seen = [
+        _ev("a", "blog1", "extracted", "2026-08-14T10:00:00Z", reason="3 cards"),
+        _ev("b", "blog1", "screen_kill", "2026-08-14T11:00:00Z", reason="spam"),
+        _ev("c", "blog2", "paywalled", "2026-08-14T12:00:00Z"),
+        _ev("old", "blog1", "extracted", "2026-08-10T00:00:00Z", reason="9 cards"),
+    ]
+    screen_rows = [
+        {"ts_utc": "2026-08-14T10:00:00Z", "item_id": "a", "decision": "screen_keep",
+         "reason": "edge", "model": "m"},
+        {"ts_utc": "2026-08-14T11:00:00Z", "item_id": "b", "decision": "screen_kill",
+         "reason": "spam", "model": "m"},
+        {"ts_utc": "2026-08-10T00:00:00Z", "item_id": "old", "decision": "screen_keep",
+         "reason": "edge", "model": "m"},
+    ]
+    ledger = [
+        {"ts_utc": "2026-08-14T10:00:00Z", "purpose": "screen", "usd": 0.10,
+         "model": "m", "input_tokens": 1, "output_tokens": 1,
+         "cache_read_tokens": 0, "cache_write_tokens": 0},
+        {"ts_utc": "2026-08-14T10:05:00Z", "purpose": "extract", "usd": 0.50,
+         "model": "m", "input_tokens": 1, "output_tokens": 1,
+         "cache_read_tokens": 0, "cache_write_tokens": 0},
+        {"ts_utc": "2026-08-10T00:00:00Z", "purpose": "extract", "usd": 9.99,
+         "model": "m", "input_tokens": 1, "output_tokens": 1,
+         "cache_read_tokens": 0, "cache_write_tokens": 0},
+    ]
+    rep = build_report(seen, screen_rows, ledger, discovery=[], since_utc=since)
+    assert rep["window"]["items_seen"] == 3  # 'old' outside the cohort
+    b1 = rep["per_source"]["blog1"]
+    assert b1["seen"] == 2 and b1["extracted"] == 1 and b1["cards"] == 3
+    assert rep["per_source"]["blog2"]["paywalled"] == 1
+    assert rep["spend"]["screen"] == pytest.approx(0.10)
+    assert rep["spend"]["extract"] == pytest.approx(0.50)
+    assert rep["spend"]["total"] == pytest.approx(0.60)
+    assert rep["kill_reasons"]["spam"] == 1
+
+
+def test_report_renders_readable_text():
+    from .report import build_report, render_report
+    seen = [_ev("a", "blog1", "extracted", "2026-08-14T10:00:00Z",
+                reason="2 cards")]
+    rep = build_report(seen, [], [], discovery=[],
+                       since_utc="2026-08-14T00:00:00Z")
+    text = render_report(rep)
+    assert "blog1" in text and "2" in text
+    assert "spend" in text.lower()
+
+
 # ---------------- registry file lock ----------------
 
 def test_filelock_acquire_release_roundtrip(tmp_path):
