@@ -45,8 +45,9 @@ class BudgetMeter:
                 self._rows = [json.loads(l) for l in f if l.strip()]
 
     def record_call(self, model: str, usage, purpose: str,
-                    ts_utc: str | None = None) -> float:
-        """Append one ledger row from an API response's usage object."""
+                    ts_utc: str | None = None, extra_usd: float = 0.0) -> float:
+        """Append one ledger row from an API response's usage object.
+        extra_usd covers non-token charges (e.g. server-side web searches)."""
         row = {
             "ts_utc": ts_utc or _now_utc(),
             "model": model,
@@ -56,8 +57,9 @@ class BudgetMeter:
             "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
             "cache_write_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
         }
-        row["usd"] = usd_for_usage(model, row["input_tokens"], row["output_tokens"],
-                                   row["cache_read_tokens"], row["cache_write_tokens"])
+        row["usd"] = extra_usd + usd_for_usage(
+            model, row["input_tokens"], row["output_tokens"],
+            row["cache_read_tokens"], row["cache_write_tokens"])
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         with self.ledger_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")

@@ -474,6 +474,94 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- source scout (weekly) ----------------
+
+def _scout_msg(candidates, stop_reason="end_turn", searches=2):
+    content = [SimpleNamespace(type="server_tool_use", name="web_search",
+                               id=f"srvtoolu_{i}", input={"query": "q"})
+               for i in range(searches)]
+    content.append(SimpleNamespace(
+        type="text", text=json.dumps({"candidates": candidates})))
+    return SimpleNamespace(
+        stop_reason=stop_reason, content=content,
+        usage=SimpleNamespace(input_tokens=4000, output_tokens=400,
+                              cache_read_input_tokens=0,
+                              cache_creation_input_tokens=0))
+
+
+def test_budget_record_call_extra_usd():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        m = BudgetMeter(Path(td) / "led.jsonl")
+        u = SimpleNamespace(input_tokens=1_000_000, output_tokens=0,
+                            cache_read_input_tokens=0,
+                            cache_creation_input_tokens=0)
+        usd = m.record_call("claude-sonnet-5", u, purpose="scout",
+                            extra_usd=0.08)
+        assert usd == pytest.approx(3.08)
+        assert m.month_spend() == pytest.approx(3.08)
+
+
+def test_scout_queues_new_domains_and_skips_known(tmp_path):
+    from .scout import run_scout
+    watchlist = [make_source(id="rob-carver", url="https://qoppac.blogspot.com/",
+                             feed="https://qoppac.blogspot.com/feeds/posts/default")]
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://alreadyqueued.example/post", found_in="x",
+                    reason="cited")
+    candidates = [
+        {"url": "https://freshquant.example/blog", "name": "Fresh Quant",
+         "why": "systematic futures research", "source_class": "blog"},
+        {"url": "https://qoppac.blogspot.com/some-post", "name": "Carver",
+         "why": "already on watchlist", "source_class": "blog"},
+        {"url": "https://alreadyqueued.example/other", "name": "Dup",
+         "why": "already queued", "source_class": "blog"},
+        {"url": "https://twitter.com/quantguy", "name": "Junk",
+         "why": "social", "source_class": "blog"},
+    ]
+    client = StubClient([_scout_msg(candidates, searches=3)])
+    meter = BudgetMeter(tmp_path / "led.jsonl")
+    result = run_scout(client=client, model="claude-sonnet-5", meter=meter,
+                       watchlist_sources=watchlist, discovery_path=q,
+                       actions=ActionLog(tmp_path / "act.jsonl"))
+    assert result["queued"] == 1 and result["searches"] == 3
+    domains = {e["domain"] for e in load_discovery(q)}
+    assert domains == {"alreadyqueued.example", "freshquant.example"}
+    rows = [json.loads(l) for l in (tmp_path / "led.jsonl").read_text().splitlines()]
+    assert rows[-1]["purpose"] == "scout"
+    assert rows[-1]["usd"] > 0.03  # includes 3 searches at $0.01 on top of tokens
+
+
+def test_scout_resumes_pause_turn(tmp_path):
+    from .scout import run_scout
+    final = _scout_msg([{"url": "https://newsource.example/", "name": "N",
+                         "why": "w", "source_class": "blog"}], searches=1)
+    paused = _scout_msg([], stop_reason="pause_turn", searches=2)
+    client = StubClient([paused, final])
+    result = run_scout(client=client, model="claude-sonnet-5",
+                       meter=BudgetMeter(tmp_path / "led.jsonl"),
+                       watchlist_sources=[make_source()],
+                       discovery_path=tmp_path / "q.jsonl",
+                       actions=ActionLog(tmp_path / "act.jsonl"))
+    assert result["queued"] == 1
+    assert len(client.calls) == 2
+    # second call resumes with the paused assistant content appended
+    assert client.calls[1]["messages"][-1]["role"] == "assistant"
+
+
+def test_scout_respects_budget_cap(tmp_path):
+    from .scout import run_scout
+    client = StubClient([])  # any call raises
+    result = run_scout(client=client, model="claude-sonnet-5",
+                       meter=BudgetMeter(tmp_path / "led.jsonl",
+                                         monthly_cap_usd=0.0),
+                       watchlist_sources=[make_source()],
+                       discovery_path=tmp_path / "q.jsonl",
+                       actions=ActionLog(tmp_path / "act.jsonl"))
+    assert result["queued"] == 0 and result.get("skipped") == "budget"
+    assert client.calls == []
+
+
 # ---------------- inbox drop-folder ingest ----------------
 
 ARTICLE_HTML = ("<html><head><title>VIX trend following out of sample</title>"
