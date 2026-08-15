@@ -12,6 +12,7 @@ Gates and amendments per docs/2026-08-14-gauntlet-design.md.
 from __future__ import annotations
 
 import sys
+import math
 import json
 import argparse
 from pathlib import Path
@@ -21,7 +22,7 @@ from .engine import run_spec
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
                     bootstrap_paths)
 
-PROTOCOL = "gauntlet-protocol-v1"
+PROTOCOL = "gauntlet-protocol-v2"
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
@@ -49,25 +50,50 @@ def compound(contribs: list[float]) -> float:
     return eq - 1
 
 
+def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> float:
+    """Equal-weight mean annualized realized volatility across assets, over
+    bars with lo < date <= hi. Returns 0.0 when no window has enough bars."""
+    vols = []
+    for a in assets:
+        closes = [b["close"] for b in bars_by_asset[a] if lo < b["date"] <= hi]
+        if len(closes) < 3:
+            continue
+        rets = [math.log(closes[i] / closes[i - 1])
+                for i in range(1, len(closes))]
+        m = sum(rets) / len(rets)
+        vols.append(math.sqrt(sum((r - m) ** 2 for r in rets) / len(rets))
+                    * math.sqrt(365))
+    return sum(vols) / len(vols) if vols else 0.0
+
+
 def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   stress_oos_trades: list[dict], daily_returns: list[float],
-                  group_n: int, group_sr_var: float, seed: int):
+                  is_vol: float, oos_vol: float,
+                  trials_n: int, trials_sr_var: float, seed: int,
+                  group_n: int | None = None):
     """Run the six checks in fixed order. Returns
-    (passed, fail_reason|None, metrics, mc_summary)."""
+    (passed, fail_reason|None, metrics, mc_summary).
+
+    protocol-v2: the edge-decay gate compares VOLATILITY-NORMALIZED per-trade
+    edge, so a shrinking opportunity set is not scored as strategy decay;
+    trials_n is the registry-wide strategy count, not the sibling group."""
     is_c = contributions(is_trades)
     oos_c = contributions(oos_trades)
-    is_edge = sum(is_c) / len(is_c) if is_c else 0.0
-    oos_edge = sum(oos_c) / len(oos_c) if oos_c else 0.0
+    is_raw = sum(is_c) / len(is_c) if is_c else 0.0
+    oos_raw = sum(oos_c) / len(oos_c) if oos_c else 0.0
     oos_net = compound(oos_c)
+
+    is_edge = is_raw / is_vol if is_vol > 0 else 0.0
+    oos_edge = oos_raw / oos_vol if oos_vol > 0 else 0.0
     decay = ((oos_edge - is_edge) / abs(is_edge) * 100
-             if is_edge > 0 else None)
+             if is_edge > 0 and oos_vol > 0 else None)
 
     mc = bootstrap_paths(is_c + oos_c, MC_PATHS, seed, RUIN_LEVEL)
     mc_p05 = percentile(mc["terminals"], 0.05)
 
     sr_hat = sharpe(daily_returns)
     _, _, skew, kurt = moments(daily_returns)
-    sr_star = expected_max_sharpe(group_n, group_sr_var)
+    sr_star = expected_max_sharpe(trials_n, trials_sr_var)
     dsr = psr(sr_hat, sr_star, len(daily_returns), skew, kurt)
 
     stress_net = compound(contributions(stress_oos_trades))
@@ -79,8 +105,13 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "mc_p05_equity": mc_p05,
         "p_ruin": mc["p_ruin"],
         "deflated_sharpe": dsr,
-        "sibling_group_n": group_n,
+        "sibling_group_n": group_n if group_n is not None else trials_n,
         "cost_stress_net_pnl": stress_net,
+        "trials_n": trials_n,
+        "is_edge_raw": is_raw,
+        "oos_edge_raw": oos_raw,
+        "is_vol": is_vol,
+        "oos_vol": oos_vol,
     }
     mc_summary = {"seed": seed, "paths": MC_PATHS,
                   "p05": mc_p05,
@@ -213,20 +244,23 @@ def run(argv: list[str] | None = None) -> int:
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
                 for s in all_specs}
     group_srs: dict[str, list[float]] = {}
+    all_srs: list[float] = []
     full_results: dict[str, dict] = {}
     for s in all_specs:
         res = run_spec(s, {a: bars_by_asset[a]
                            for a in s["universe"]["assets"]})
         full_results[s["strategy_id"]] = res
         rets = daily_returns_from_curve(res["equity"])
-        group_srs.setdefault(group_of[s["strategy_id"]], []).append(
-            sharpe(rets))
-    group_var = {}
-    for g, srs in group_srs.items():
-        m = sum(srs) / len(srs)
-        group_var[g] = (sum((x - m) ** 2 for x in srs) / (len(srs) - 1)
-                       if len(srs) > 1 else 0.0)
+        sr = sharpe(rets)
+        group_srs.setdefault(group_of[s["strategy_id"]], []).append(sr)
+        all_srs.append(sr)
     group_n = {g: len(srs) for g, srs in group_srs.items()}
+    # protocol-v2: deflate against EVERY strategy ever registered against this
+    # data, not just the sibling batch — the honest multiple-testing count
+    trials_n = len(all_srs)
+    mean_sr = sum(all_srs) / len(all_srs)
+    trials_var = (sum((x - mean_sr) ** 2 for x in all_srs) / (len(all_srs) - 1)
+                  if len(all_srs) > 1 else 0.0)
 
     rows, payloads = [], []
     for s in candidates:
@@ -239,9 +273,13 @@ def run(argv: list[str] | None = None) -> int:
         _, stress_oos = split_trades(stress_res["trades"], args.cutoff)
         rets = daily_returns_from_curve(res["equity"])
         g = group_of[sid]
+        assets = s["universe"]["assets"]
+        is_vol = window_vol(bars_by_asset, assets, "", args.cutoff)
+        oos_vol = window_vol(bars_by_asset, assets, args.cutoff, "9999-12-31")
         passed, reason, metrics, mc_summary = evaluate_spec(
-            is_t, oos_t, stress_oos, rets, group_n[g], group_var[g],
-            seed=int(sid, 16) % (2 ** 31))
+            is_t, oos_t, stress_oos, rets, is_vol, oos_vol,
+            trials_n, trials_var, seed=int(sid, 16) % (2 ** 31),
+            group_n=group_n[g])
         rows.append({"sid": sid, "group": g, "passed": passed,
                      "dsr": metrics["deflated_sharpe"]})
         payloads.append((s, oos_t, passed, reason, metrics, mc_summary))

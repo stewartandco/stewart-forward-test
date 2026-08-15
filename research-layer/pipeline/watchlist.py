@@ -46,9 +46,15 @@ def load_watchlist(path: str | Path) -> list[dict]:
     return sources
 
 
+POLLABLE_PROVENANCE = {"coen", "auto-d27"}
+
+
 def pollable(sources: list[dict]) -> list[dict]:
-    """The verified gate: Coen-added AND verification-stamped, nothing else."""
-    return [s for s in sources if s["added_by"] == "coen" and s["verified_date"]]
+    """The verified gate: Coen-stamped entries, plus D27 mechanical
+    admissions (scout-researched or 2+ distinct citers, chain-logged with
+    honest added_by='auto-d27'). Nothing else polls."""
+    return [s for s in sources
+            if s["added_by"] in POLLABLE_PROVENANCE and s["verified_date"]]
 
 
 def normalize_url(url: str) -> str:
@@ -95,9 +101,22 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
     if not domain or domain in JUNK_DOMAINS \
             or any(domain.endswith("." + j) for j in JUNK_DOMAINS):
         return False
-    known = {e.get("domain") or discovery_domain(e["url"])
-             for e in load_discovery(path)}
-    if domain in known:
+    citer = found_in.split("/", 1)[0]
+    entries = load_discovery(path)
+    existing = next((e for e in entries
+                     if (e.get("domain") or discovery_domain(e["url"])) == domain),
+                    None)
+    if existing is not None:
+        # accumulate distinct citing sources on open proposals (D27 evidence)
+        if existing.get("status") == "proposed":
+            cited_by = existing.setdefault(
+                "cited_by", [existing.get("found_in", "").split("/", 1)[0]])
+            if citer and citer not in cited_by:
+                cited_by.append(citer)
+                Path(path).write_text(
+                    "".join(json.dumps(e, ensure_ascii=False) + "\n"
+                            for e in entries),
+                    encoding="utf-8")
         return False
     entry = {
         "url": url,
@@ -105,6 +124,7 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
         "normalized": normalize_url(url),
         "found_in": found_in,
         "reason": reason,
+        "cited_by": [citer] if citer else [],
         "tier": 3,
         "status": "proposed",
         "queued_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

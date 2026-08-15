@@ -474,6 +474,74 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- D27 quality-bar auto-admit ----------------
+
+def test_discovery_queue_accumulates_distinct_citers(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://newsrc.example/a", found_in="blog1/item1", reason="cited")
+    queue_discovery(q, "https://newsrc.example/b", found_in="blog1/item2", reason="cited")
+    queue_discovery(q, "https://newsrc.example/c", found_in="blog2/item9", reason="cited")
+    entry = load_discovery(q)[0]
+    assert sorted(entry["cited_by"]) == ["blog1", "blog2"]  # distinct sources, not items
+
+
+def test_pollable_accepts_auto_d27_provenance(tmp_path):
+    srcs = [make_source(id="human"),
+            make_source(id="auto", added_by="auto-d27"),
+            make_source(id="auto-unstamped", added_by="auto-d27", verified_date=None),
+            make_source(id="rogue", added_by="claude")]
+    p = write_watchlist(tmp_path, srcs)
+    assert {s["id"] for s in pollable(load_watchlist(p))} == {"human", "auto"}
+
+
+def test_auto_admit_scout_and_two_citers_only(tmp_path):
+    from .scanner import process_auto_admissions
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://scoutfind.example/", found_in="scout/2026-08-15",
+                    reason="scout (blog): researched")
+    queue_discovery(q, "https://endorsed.example/post", found_in="blog1/i1", reason="cited")
+    queue_discovery(q, "https://endorsed.example/other", found_in="blog2/i2", reason="cited")
+    queue_discovery(q, "https://oncecited.example/x", found_in="blog1/i3", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    admitted = process_auto_admissions(discovery_path=q, watchlist_path=wl,
+                                       actions=actions)
+    assert {e["id"] for e in admitted} == {"scoutfind.example", "endorsed.example"}
+    sources = load_watchlist(wl)
+    added = {s["id"]: s for s in sources}
+    assert added["scoutfind.example"]["added_by"] == "auto-d27"
+    assert added["scoutfind.example"]["verified_date"]
+    assert added["endorsed.example"] in pollable(sources)
+    statuses = {e["domain"]: e["status"] for e in load_discovery(q)}
+    assert statuses["scoutfind.example"] == "auto_admitted"
+    assert statuses["endorsed.example"] == "auto_admitted"
+    assert statuses["oncecited.example"] == "proposed"  # stays for the panel
+    entries = [json.loads(l) for l in (tmp_path / "act.jsonl").read_text().splitlines()]
+    assert sum(1 for e in entries if e["entry_type"] == "source_auto_admitted") == 2
+    # idempotent: second pass admits nothing
+    assert process_auto_admissions(discovery_path=q, watchlist_path=wl,
+                                   actions=actions) == []
+
+
+def test_auto_admit_never_readmits_blocked_or_existing(tmp_path):
+    from .scanner import process_auto_admissions
+    from .approvals import process_approvals
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://blockedone.example/", found_in="scout/2026-08-15",
+                    reason="scout")
+    entries = load_discovery(q)
+    entries[0]["status"] = "blocked"  # Coen blocked it earlier
+    q.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    wl = write_watchlist(tmp_path, [make_source(id="scoutfind.example",
+                                                url="https://scoutfind.example/")])
+    queue_discovery(q, "https://scoutfind.example/", found_in="scout/2026-08-15",
+                    reason="scout")  # already on watchlist
+    admitted = process_auto_admissions(discovery_path=q, watchlist_path=wl,
+                                       actions=ActionLog(tmp_path / "act.jsonl"))
+    assert admitted == []
+    assert len(load_watchlist(wl)) == 1
+
+
 # ---------------- approvals consumer (D26 write stage) ----------------
 
 def _approval_record(key, domain="freshquant.example", decision="approve",

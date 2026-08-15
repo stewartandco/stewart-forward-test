@@ -322,3 +322,76 @@ def test_system_prompt_states_gen1_failure_and_new_types():
     assert "trend_scan_ds" in SYSTEM_PROMPT
     assert "regime_ma_short" in SYSTEM_PROMPT
     assert "long-biased" in SYSTEM_PROMPT
+
+
+from .gauntlet import (PROTOCOL as G_PROTOCOL, window_vol, evaluate_spec,
+                       DECAY_MIN_PCT)
+
+
+def gtrade(entry_date, ret, frac=0.2):
+    return {"entry_date": entry_date, "return_net": ret, "notional_frac": frac}
+
+
+G_IS = [gtrade("2022-01-01", 0.05)] * 30 + [gtrade("2022-06-01", -0.02)] * 20
+STEADY = [0.001, 0.002, -0.001, 0.0015, 0.001] * 200
+
+
+def geval(is_t, oos_t, is_vol, oos_vol, stress=None, returns=None):
+    if stress is None:
+        stress = [gtrade(t["entry_date"], t["return_net"] - 0.001) for t in oos_t]
+    return evaluate_spec(is_t, oos_t, stress, returns or STEADY,
+                         is_vol, oos_vol, 4, 0.0001, seed=99)
+
+
+# ---------------- protocol version ----------------
+
+def test_protocol_is_v2():
+    assert G_PROTOCOL == "gauntlet-protocol-v2"
+
+
+# ---------------- window_vol ----------------
+
+def test_window_vol_splits_on_cutoff():
+    calm = [{"date": f"2022-01-{i+1:02d}", "close": 100.0} for i in range(28)]
+    wild = [{"date": f"2024-01-{i+1:02d}",
+             "close": 100.0 * (1.10 if i % 2 else 0.91)} for i in range(28)]
+    bars = {"X": calm + wild}
+    assert window_vol(bars, ["X"], "", "2023-12-31") == pytest.approx(0.0)
+    assert window_vol(bars, ["X"], "2023-12-31", "9999-12-31") > 1.0
+
+
+# ---------------- vol-normalized decay ----------------
+
+def test_vol_collapse_alone_no_longer_fails():
+    # raw edge halves, but so does vol -> normalized edge unchanged
+    oos = [gtrade("2024-02-01", 0.025)] * 12 + [gtrade("2024-06-01", -0.01)] * 8
+    raw_decay = (sum(t["return_net"] * t["notional_frac"] for t in oos) / len(oos)) \
+        / (sum(t["return_net"] * t["notional_frac"] for t in G_IS) / len(G_IS)) - 1
+    assert raw_decay < -0.4                       # would have failed v1
+    passed, reason, metrics, _ = geval(G_IS, oos, 0.80, 0.40)
+    assert metrics["edge_decay_pct"] == pytest.approx(0.0, abs=1e-6)
+    assert passed, reason
+
+
+def test_edge_falling_faster_than_vol_still_fails():
+    oos = [gtrade("2024-02-01", 0.008)] * 12 + [gtrade("2024-06-01", -0.01)] * 8
+    passed, reason, _, _ = geval(G_IS, oos, 0.80, 0.70)
+    assert not passed and reason == "edge_decay"
+
+
+def test_zero_vol_fails_closed():
+    oos = [gtrade("2024-02-01", 0.05)] * 20
+    passed, reason, _, _ = geval(G_IS, oos, 0.0, 0.40)
+    assert not passed and reason == "edge_decay"
+
+
+def test_metrics_carry_raw_and_normalized():
+    oos = [gtrade("2024-02-01", 0.025)] * 12 + [gtrade("2024-06-01", -0.01)] * 8
+    _, _, metrics, _ = geval(G_IS, oos, 0.80, 0.40)
+    assert set(metrics) == {
+        "is_edge_per_trade", "oos_edge_per_trade", "edge_decay_pct",
+        "mc_p05_equity", "p_ruin", "deflated_sharpe", "sibling_group_n",
+        "cost_stress_net_pnl", "trials_n", "is_edge_raw", "oos_edge_raw",
+        "is_vol", "oos_vol"}
+    assert metrics["is_edge_per_trade"] == pytest.approx(
+        metrics["is_edge_raw"] / metrics["is_vol"])

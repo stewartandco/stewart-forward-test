@@ -155,7 +155,9 @@ def eval_with(is_t=GOOD_IS, oos_t=GOOD_OOS, stress_oos=None, returns=None,
                       for t in oos_t]
     if returns is None:
         returns = STEADY_RETURNS
-    return evaluate_spec(is_t, oos_t, stress_oos, returns,
+    # vols of 1.0 make normalized decay == raw decay, preserving these tests'
+    # original semantics under protocol-v2
+    return evaluate_spec(is_t, oos_t, stress_oos, returns, 1.0, 1.0,
                          group_n, group_var, seed=12345)
 
 
@@ -175,7 +177,8 @@ def test_all_gates_pass():
     assert set(metrics) == {"is_edge_per_trade", "oos_edge_per_trade",
                             "edge_decay_pct", "mc_p05_equity", "p_ruin",
                             "deflated_sharpe", "sibling_group_n",
-                            "cost_stress_net_pnl"}
+                            "cost_stress_net_pnl", "trials_n", "is_edge_raw",
+                            "oos_edge_raw", "is_vol", "oos_vol"}
     assert metrics["sibling_group_n"] == 4
 
 
@@ -260,7 +263,7 @@ def gauntlet_registry(tmp_path):
 
 
 def chain_gauntlet_note(reg):
-    reg.append("note", {"text": "gauntlet-protocol-v1: test anchor"})
+    reg.append("note", {"text": "gauntlet-protocol-v2: test anchor"})
 
 
 # ---------------- selection ----------------

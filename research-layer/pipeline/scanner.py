@@ -313,6 +313,68 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
     return stats
 
 
+# ---------------- D27 quality-bar auto-admission ----------------------------
+
+AUTO_ADMIT_MIN_CITERS = 2
+
+
+def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[dict]:
+    """Admit proposals meeting the D27 mechanical bar: scout-researched, or
+    cited by >= 2 distinct verified sources. Honest provenance (added_by
+    auto-d27), chain-logged, idempotent (admitted proposals flip status).
+    Everything else stays queued for Coen."""
+    import json as _json
+    from .watchlist import load_discovery, discovery_domain
+    entries = load_discovery(discovery_path)
+    doc = _json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    known_ids = {s["id"] for s in doc["sources"]}
+    known_domains = {discovery_domain(u) for s in doc["sources"]
+                     for u in (s["url"], s["feed"]) if u}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    admitted, queue_dirty = [], False
+    for e in entries:
+        if e.get("status") != "proposed":
+            continue
+        domain = e.get("domain") or discovery_domain(e["url"])
+        citers = set(e.get("cited_by") or [e.get("found_in", "").split("/", 1)[0]])
+        is_scout = "scout" in citers or e.get("found_in", "").startswith("scout/")
+        endorsed = len(citers - {"scout"}) >= AUTO_ADMIT_MIN_CITERS
+        if not (is_scout or endorsed):
+            continue
+        if domain in known_ids or domain in known_domains:
+            e["status"] = "auto_admitted"  # already present; just close it out
+            queue_dirty = True
+            continue
+        rule = "scout-researched" if is_scout else \
+               f"cited by {len(citers)} distinct verified sources"
+        entry = {
+            "id": domain, "class": "blog", "name": domain, "url": e["url"],
+            "feed": None, "poll_minutes": DEFAULT_POLL_MINUTES_AUTO,
+            "added_by": "auto-d27", "verified_date": today,
+            "notes": (f"auto-admitted {today} per D27 ({rule}); Coen-revocable. "
+                      "feed unset (HTML diff on url)."),
+        }
+        doc["sources"].append(entry)
+        known_ids.add(domain)
+        e["status"] = "auto_admitted"
+        queue_dirty = True
+        admitted.append(entry)
+        actions.event("source_auto_admitted",
+                      {"domain": domain, "rule": rule, "url": e["url"]})
+    if admitted:
+        Path(watchlist_path).write_text(
+            _json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+    if queue_dirty:
+        Path(discovery_path).write_text(
+            "".join(_json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
+            encoding="utf-8")
+    return admitted
+
+
+DEFAULT_POLL_MINUTES_AUTO = 360
+
+
 def pending_tier3_count(registry: Registry, discovery_path) -> int:
     """The two things waiting on Coen: discovery proposals + cards in triage."""
     proposals = [d for d in load_discovery(discovery_path)
@@ -463,6 +525,14 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"approvals: +{len(approvals['approved'])} sources, "
                       f"{approvals['blocked']} blocked, "
                       f"{approvals['invalid']} invalid")
+            # D27: mechanical quality-bar admissions (scout finds, 2+ citers)
+            for entry in process_auto_admissions(
+                    discovery_path=discovery_path,
+                    watchlist_path=args.watchlist, actions=actions):
+                if entry["id"] not in next_due:
+                    sources.append(entry)
+                    next_due[entry["id"]] = 0.0
+                print(f"auto-admitted: {entry['id']} ({entry['notes'][:60]})")
             if meter.state() != "OK" and not warned_80:
                 warned_80 = True
                 actions.event("budget_alert", {"spend_usd": meter.month_spend(),
