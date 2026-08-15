@@ -428,8 +428,10 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             for e in errors:
                 print(f"    - {e}")
             continue
+        seen_names.add(name)
         specs = expand_family(fam, args.run_id, args.model, created_utc)
         collisions = []
+        fam_fps: dict[str, str] = {}
         for spec in specs:
             fp = composition_fingerprint(spec)
             if fp in known_fps:
@@ -438,13 +440,18 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             elif fp in run_fps:
                 collisions.append(
                     f"composition duplicates family {run_fps[fp]} in this run")
+            elif fp in fam_fps:
+                collisions.append(
+                    f"siblings {fam_fps[fp]} and {spec['strategy_id']} are the "
+                    f"same composition — duplicate blocks or mirrored sweep axes")
+            else:
+                fam_fps[fp] = spec["strategy_id"]
         if collisions:
             dropped += 1
             print(f"  DROPPED family {name}:")
             for c in dict.fromkeys(collisions):     # de-duplicated, ordered
                 print(f"    - {c}")
             continue
-        seen_names.add(name)
         for spec in specs:
             validator.validate(spec)   # composer bug if this raises: abort pre-write
             run_fps[composition_fingerprint(spec)] = name
