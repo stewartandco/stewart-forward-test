@@ -115,13 +115,13 @@
     {
       "id": "ssrn-new-papers",
       "class": "ssrn",
-      "name": "SSRN new-paper feeds (FEN eJournals) - URL TO BE PINNED AT VERIFICATION",
+      "name": "SSRN new papers - NOT AUTOMATABLE (see notes; Coen decision at checkpoint)",
       "url": "https://papers.ssrn.com/",
       "feed": null,
       "poll_minutes": 720,
       "added_by": "coen",
       "verified_date": null,
-      "notes": "SSRN per-eJournal RSS availability is spotty and journal IDs need confirming. At verification, pin either the eJournal RSS URLs (split into one entry per journal) or a public new-papers listing URL for HTML diff. Abstract pages are public; full-text PDFs sometimes gated - paywall flagging applies."
+      "notes": "Researched 2026-08-15: SSRN offers NO public per-eJournal RSS (rankings feeds retired; metadata feeds are institutional-contract only), and papers.ssrn.com 403s scripted fetches at the CDN (bot protection - evasion out of contract scope). Options: (a) retire this entry - SSRN papers reach us indirectly via Quantocracy/blog links (discovery queue) and arXiv q-fin overlap; (b) future: subscribe to FEN eJournal email announcements (free) and add an IMAP ingest, Tier 3 decision. Entry stays unverified/unpollable until Coen picks."
     },
     {
       "id": "fed-feds-papers",
