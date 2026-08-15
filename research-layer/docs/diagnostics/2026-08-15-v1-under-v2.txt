@@ -1,0 +1,30 @@
+PROTOCOL-V2 DIAGNOSTIC — gauntlet-protocol-v2
+registry: E:\Users\Coen\Claude\stewart-forward-test\research-layer\registry_log.jsonl   cutoff: 2023-12-31
+22 graveyarded strateg(ies) of 22 registered
+These verdicts are FINAL. This audits the gate, not the specs.
+
+fae172f81ba68878  still fails decay_norm=-47.3%  dsr=0.150  trials_n=22  [edge_decay]
+67399610cc55a813  still fails decay_norm=-34.7%  dsr=0.171  trials_n=22  [edge_decay]
+78fd19cd9b83e4c4  still fails decay_norm=-43.9%  dsr=0.175  trials_n=22  [edge_decay]
+d67b59551be353df  still fails decay_norm=-47.4%  dsr=0.186  trials_n=22  [edge_decay]
+872dcb9adf2cd9e8  still fails decay_norm=-52.5%  dsr=0.164  trials_n=22  [edge_decay]
+08528204303c889d  still fails decay_norm=-44.2%  dsr=0.250  trials_n=22  [edge_decay]
+9ef46e4dc7e968f1  still fails decay_norm=-52.5%  dsr=0.164  trials_n=22  [edge_decay]
+ddeddafaa931b864  still fails decay_norm=-44.2%  dsr=0.250  trials_n=22  [edge_decay]
+bfeb7e5265b32ff8  still fails decay_norm=-56.1%  dsr=0.152  trials_n=22  [edge_decay]
+2a81986933c36b30  still fails decay_norm=-42.6%  dsr=0.156  trials_n=22  [edge_decay]
+aa428a53305cf1f6  still fails decay_norm=-56.1%  dsr=0.152  trials_n=22  [edge_decay]
+45d5410357ff9ea3  still fails decay_norm=-42.6%  dsr=0.156  trials_n=22  [edge_decay]
+6ea757eeca03c24f  still fails decay_norm=n/a  dsr=0.000  trials_n=22  [oos_negative]
+2da71a5efe037e15  still fails decay_norm=n/a  dsr=0.000  trials_n=22  [oos_negative]
+a77fade4e6b6ba4f  still fails decay_norm=n/a  dsr=0.000  trials_n=22  [oos_negative]
+2e4155263436844e  still fails decay_norm=n/a  dsr=0.000  trials_n=22  [oos_negative]
+995293c4e2ffee18  still fails decay_norm=-46.2%  dsr=0.726  trials_n=22  [edge_decay]
+d33a2a6112ada137  still fails decay_norm=-60.0%  dsr=0.645  trials_n=22  [edge_decay]
+d38568a59f987177  still fails decay_norm=+28.6%  dsr=0.443  trials_n=22  [dsr]
+0a179103b921c404  still fails decay_norm=+13.1%  dsr=0.378  trials_n=22  [dsr]
+ca3ea8e4a14f730f  still fails decay_norm=+0.0%  dsr=0.258  trials_n=22  [dsr]
+d1fbe83eace953c6  still fails decay_norm=-19.3%  dsr=0.220  trials_n=22  [dsr]
+
+0/22 would pass under gauntlet-protocol-v2.
+Ratchet: this result may TIGHTEN the protocol, never loosen it.
