@@ -474,6 +474,114 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- inbox drop-folder ingest ----------------
+
+ARTICLE_HTML = ("<html><head><title>VIX trend following out of sample</title>"
+                "</head><body><p>We find VIX trend following works out of "
+                "sample with a Sharpe of 0.9.</p></body></html>")
+
+INBOX_CLAIMS = [{"claim": "VIX trend following works out of sample.",
+                 "quote": "VIX trend following works out of sample",
+                 "locator": "full document", "asset_classes": ["cross"],
+                 "topics": ["trend"], "horizon": "daily",
+                 "testability_score": 0.7, "data_required": ["VIX"],
+                 "notes": None}]
+
+
+def _inbox_msg():
+    return SimpleNamespace(
+        stop_reason="end_turn",
+        content=[SimpleNamespace(type="text",
+                                 text=json.dumps({"claims": INBOX_CLAIMS}))],
+        usage=SimpleNamespace(input_tokens=300, output_tokens=30,
+                              cache_read_input_tokens=0,
+                              cache_creation_input_tokens=0))
+
+
+def test_inbox_match_flagged_item_by_title():
+    from .scanner import match_flagged
+    seen = SeenStore(Path("nul") if False else Path("x"))  # not used for read
+    seen._latest = {
+        "p1": {"item_id": "p1", "source_id": "alpha-architect",
+               "status": "paywalled", "title": "VIX Trend Following Out of Sample",
+               "link": "https://alphaarchitect.com/vix-trend-following-out-of-sample/",
+               "reason": "http 403", "ts_utc": "t", "first_seen_utc": "t"},
+        "k1": {"item_id": "k1", "source_id": "blog", "status": "extracted",
+               "title": "Something else", "link": "https://x/e", "reason": None,
+               "ts_utc": "t", "first_seen_utc": "t"},
+    }
+    hit = match_flagged("VIX trend following out of sample", seen)
+    assert hit and hit["item_id"] == "p1"
+    assert match_flagged("Unrelated title entirely", seen) is None
+
+
+def test_inbox_ingests_dropped_html_and_resolves_flagged_item(tmp_path):
+    from .scanner import process_inbox
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "saved_page.html").write_text(ARTICLE_HTML, encoding="utf-8")
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    seen.record("p1", "alpha-architect", "paywalled",
+                title="VIX Trend Following Out of Sample",
+                link="https://alphaarchitect.com/vix-trend-following-out-of-sample/",
+                reason="http 403")
+    registry = Registry(tmp_path / "reg.jsonl")
+    meter = BudgetMeter(tmp_path / "led.jsonl")
+    client = StubClient([_inbox_msg()])
+    stats = process_inbox(client=client, model="claude-sonnet-5", meter=meter,
+                          seen=seen, registry=registry,
+                          actions=ActionLog(tmp_path / "act.jsonl"),
+                          inbox=inbox)
+    assert stats["files"] == 1 and stats["cards_registered"] == 1
+    card = next(iter(registry.cards(status="pending").values()))
+    assert card["source"]["url"].startswith("https://alphaarchitect.com/vix")
+    assert card["extraction"]["run_id"].endswith("-inbox")
+    assert seen.status("p1") == "extracted"
+    assert not (inbox / "saved_page.html").exists()
+    assert (inbox / "processed" / "saved_page.html").exists()
+    assert verify_chain(tmp_path / "act.jsonl")
+
+
+def test_inbox_sidecar_url_wins_and_unidentified_file_is_left(tmp_path):
+    from .scanner import process_inbox
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "a.html").write_text(ARTICLE_HTML, encoding="utf-8")
+    (inbox / "a.html.meta.json").write_text(
+        json.dumps({"url": "https://papers.ssrn.com/paper=123",
+                    "source_type": "paper"}), encoding="utf-8")
+    (inbox / "mystery.html").write_text(
+        "<html><title>No identity here</title><body>text</body></html>",
+        encoding="utf-8")
+    registry = Registry(tmp_path / "reg.jsonl")
+    client = StubClient([_inbox_msg()])
+    stats = process_inbox(client=client, model="claude-sonnet-5",
+                          meter=BudgetMeter(tmp_path / "led.jsonl"),
+                          seen=SeenStore(tmp_path / "seen.jsonl"),
+                          registry=registry,
+                          actions=ActionLog(tmp_path / "act.jsonl"),
+                          inbox=inbox)
+    card = next(iter(registry.cards(status="pending").values()))
+    assert card["source"]["url"] == "https://papers.ssrn.com/paper=123"
+    assert card["source"]["type"] == "paper"
+    assert stats["skipped_no_identity"] == 1
+    assert (inbox / "mystery.html").exists()  # left for Coen to add a sidecar
+    assert not (inbox / "a.html").exists()
+    assert not (inbox / "a.html.meta.json").exists()
+
+
+def test_inbox_cards_count_in_cumulative_total(tmp_path):
+    from .scanner import scanner_cards_total
+    from .reader import build_card
+    registry = Registry(tmp_path / "reg.jsonl")
+    meta = {"type": "paper", "title": "T", "authors": [], "year": None,
+            "url": "https://x/a", "doi": None, "isbn": None,
+            "credibility_tier": "practitioner"}
+    raw = INBOX_CLAIMS[0]
+    registry.register_card(build_card(raw, meta, "m", "2026-08-15-inbox"))
+    assert scanner_cards_total(registry) == 1
+
+
 # ---------------- 48h checkpoint report ----------------
 
 def _ev(item, src, status, first, ts=None, reason=None):

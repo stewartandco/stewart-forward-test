@@ -6,3 +6,4 @@ __pycache__/
 # committed trust asset is registry_log.jsonl, not these)
 research-layer/logs/
 *.lock
+research-layer/inbox/

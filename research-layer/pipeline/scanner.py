@@ -16,6 +16,7 @@ off-list discoveries queue as Tier 3 proposals and are never fetched.
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 import argparse
@@ -195,12 +196,120 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
 
 
 def scanner_cards_total(registry: Registry) -> int:
-    """Cumulative cards the scanner has ever registered (run_id *-scanner) -
-    unlike the pending count, this does not drop when triage clears cards."""
+    """Cumulative cards this agent has registered (scanner cycles + inbox
+    drops) - unlike the pending count, this does not drop when triage clears."""
     return sum(1 for e in registry.entries()
                if e["entry_type"] == "card_registered"
                and str(e["payload"].get("extraction", {}).get("run_id", ""))
-                   .endswith("-scanner"))
+                   .endswith(("-scanner", "-inbox")))
+
+
+# ---------------- inbox drop-folder (Coen-retrieved gated content) ----------
+
+INBOX_SUFFIXES = {".html", ".htm", ".pdf", ".txt", ".md"}
+RETRYABLE_FLAGGED = {"paywalled", "fetch_failed"}
+
+
+def _norm_title(t: str) -> str:
+    return " ".join((t or "").lower().split())
+
+
+def match_flagged(title: str, seen: SeenStore) -> dict | None:
+    """Match a dropped file's title to a flagged (paywalled/fetch_failed)
+    seen-store item so the card inherits the original URL and source."""
+    wanted = _norm_title(title)
+    if not wanted:
+        return None
+    for event in seen._latest.values():
+        if event["status"] in RETRYABLE_FLAGGED \
+                and _norm_title(event.get("title") or "") == wanted:
+            return event
+    return None
+
+
+def _inbox_identity(path: Path, title: str, seen: SeenStore):
+    """Resolve (url, source_type, matched_event) for a dropped file: sidecar
+    metadata wins, then title-match against flagged items, else None."""
+    sidecar = path.with_name(path.name + ".meta.json")
+    if sidecar.exists():
+        import json as _json
+        meta = _json.loads(sidecar.read_text(encoding="utf-8"))
+        if meta.get("url"):
+            return meta["url"], meta.get("source_type", "blog"), None
+    event = match_flagged(title, seen)
+    if event:
+        source_type = "blog"
+        return event["link"], source_type, event
+    return None
+
+
+def process_inbox(*, client, model: str, meter, seen: SeenStore,
+                  registry: Registry, actions: ActionLog,
+                  inbox: Path = LAYER / "inbox") -> dict:
+    """Ingest files Coen retrieved legitimately (paywalled/WAF-gated items)
+    through the normal extraction path. Identity comes from a .meta.json
+    sidecar URL or a title match to a flagged item; unidentifiable files are
+    left in place with a note so Coen can add a sidecar."""
+    stats = {"files": 0, "cards_registered": 0, "honesty_dropped": 0,
+             "skipped_no_identity": 0}
+    if not inbox.exists():
+        return stats
+    from .reader import read_source_text
+    files = [p for p in sorted(inbox.iterdir())
+             if p.is_file() and p.suffix.lower() in INBOX_SUFFIXES]
+    for path in files:
+        if not meter.can_spend():
+            break
+        if path.suffix.lower() in (".html", ".htm"):
+            html = path.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"<title[^>]*>(.*?)</title>", html,
+                          re.IGNORECASE | re.DOTALL)
+            title = " ".join(m.group(1).split()) if m else path.stem
+            text = html_to_text(html)
+        else:
+            text = read_source_text(path)
+            title = path.stem
+        identity = _inbox_identity(path, title, seen)
+        if identity is None:
+            stats["skipped_no_identity"] += 1
+            print(f"  inbox: no identity for {path.name} - add "
+                  f"{path.name}.meta.json with a url", file=sys.stderr)
+            continue
+        url, source_type, event = identity
+        source_meta = {"type": source_type, "title": title, "authors": [],
+                       "year": None, "url": url, "doi": None, "isbn": None,
+                       "credibility_tier": "practitioner"}
+        run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-inbox"
+        known_claims = {c["claim"] for c in registry.cards().values()}
+        registered = dropped = 0
+        for label, chunk in chunk_text(text):
+            claims, usage = extract_claims_usage(client, model, label, chunk)
+            meter.record_call(model, usage, purpose="inbox_extract")
+            for raw in claims:
+                if not quote_in_source(raw["quote"], text):
+                    dropped += 1
+                    continue
+                if raw["claim"] in known_claims:
+                    continue
+                known_claims.add(raw["claim"])
+                registry.register_card(build_card(raw, source_meta, model, run_id))
+                registered += 1
+        if event is not None:
+            seen.record(event["item_id"], event["source_id"], "extracted",
+                        reason=f"{registered} cards via inbox")
+        processed = inbox / "processed"
+        processed.mkdir(exist_ok=True)
+        path.replace(processed / path.name)
+        sidecar = path.with_name(path.name + ".meta.json")
+        if sidecar.exists():
+            sidecar.replace(processed / sidecar.name)
+        actions.event("inbox_ingested", {"file": path.name, "url": url,
+                                         "cards": registered,
+                                         "honesty_dropped": dropped})
+        stats["files"] += 1
+        stats["cards_registered"] += registered
+        stats["honesty_dropped"] += dropped
+    return stats
 
 
 def pending_tier3_count(registry: Registry, discovery_path) -> int:
@@ -331,6 +440,11 @@ def run(argv: list[str] | None = None) -> int:
                     watchlist_sources=sources, discovery_path=discovery_path,
                     screen_log=logs_dir / "screen_log.jsonl", actions=actions)
                 print(f"cycle: {stats}")
+            inbox_stats = process_inbox(
+                client=client, model=args.model, meter=meter, seen=seen,
+                registry=registry, actions=actions)
+            if inbox_stats["files"]:
+                print(f"inbox: {inbox_stats}")
             if meter.state() != "OK" and not warned_80:
                 warned_80 = True
                 actions.event("budget_alert", {"spend_usd": meter.month_spend(),
