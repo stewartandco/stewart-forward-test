@@ -40,16 +40,30 @@ COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 
 
 def composition_fingerprint(spec: dict) -> str:
-    """Identity of a STRATEGY, not of a registration: the universe and blocks
+    """Identity of a STRATEGY, not of a registration: universe and blocks
     only. Excludes strategy_id, created_utc, run_id, name, family and
-    provenance, so two registrations of the same strategy collide."""
-    blocks = sorted(
-        ({"role": b["role"], "type": b["type"],
-          "params": dict(sorted(b["params"].items()))} for b in spec["blocks"]),
-        key=lambda b: (b["role"], b["type"],
-                       json.dumps(b["params"], sort_keys=True)))
-    core = {"assets": sorted(spec["universe"]["assets"]),
-            "timeframe": spec["universe"]["timeframe"],
+    provenance, so two registrations of the same strategy collide.
+
+    Params are snapped to their grid values HERE rather than trusting the
+    caller to have done it: 2 and 2.0 must never fingerprint differently.
+    This function is the only thing standing between a buried strategy and
+    a fresh id, so it does not rely on caller discipline."""
+    blocks = []
+    for b in spec["blocks"]:
+        schema = BLOCK_TYPES.get((b["role"], b["type"]), {})
+        params = {}
+        for p, v in b["params"].items():
+            grid = schema.get(p, {}).get("grid")
+            params[p] = next((g for g in grid if g == v), v) if grid else v
+        blocks.append({"role": b["role"], "type": b["type"],
+                       "params": dict(sorted(params.items()))})
+    blocks.sort(key=lambda b: (b["role"], b["type"],
+                               json.dumps(b["params"], sort_keys=True)))
+    u = spec["universe"]
+    core = {"assets": sorted(u["assets"]),
+            "timeframe": u["timeframe"],
+            "asset_class": u.get("asset_class"),
+            "session": u.get("session"),
             "blocks": blocks}
     return hashlib.sha256(
         json.dumps(core, sort_keys=True, separators=(",", ":"),

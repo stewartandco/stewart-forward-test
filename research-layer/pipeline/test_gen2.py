@@ -192,6 +192,22 @@ def test_fingerprint_changes_with_any_param():
     assert composition_fingerprint(a) != composition_fingerprint(b)
 
 
+def test_fingerprint_snaps_params_defensively():
+    # an unsnapped int must not fingerprint differently from its float grid
+    # value — the guard cannot depend on callers having run _snap_to_grid
+    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    b = copy.deepcopy(a)
+    b["blocks"][0]["params"]["z_entry"] = 2      # grid value is 2.0
+    assert composition_fingerprint(a) == composition_fingerprint(b)
+
+
+def test_fingerprint_distinguishes_universe_fields():
+    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    b = copy.deepcopy(a)
+    b["universe"]["asset_class"] = "futures"
+    assert composition_fingerprint(a) != composition_fingerprint(b)
+
+
 def test_registered_fingerprints_maps_to_ids(tmp_path):
     from .test_composer import register_grammar
     reg = Registry(tmp_path / "log.jsonl")
