@@ -140,6 +140,30 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             if best >= p["t_min"]:
                 sig[i] = 1
 
+    elif block["type"] == "trend_scan_ds":
+        windows = list(range(20, p["max_lookback"] + 1, 10))
+        allow_long = p["direction"] in ("long", "both")
+        allow_short = p["direction"] in ("short", "both")
+        for i in range(max(windows) - 1, n):
+            best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows),
+                       key=abs)
+            if allow_long and best >= p["t_min"]:
+                sig[i] = 1
+            elif allow_short and best <= -p["t_min"]:
+                sig[i] = -1
+
+    elif block["type"] == "ma_cross_ds":
+        fast, slow = sma(closes, p["fast"]), sma(closes, p["slow"])
+        allow = {"long": (1,), "short": (-1,), "both": (1, -1)}[p["direction"]]
+        for i in range(n):
+            if fast[i] is None or slow[i] is None:
+                continue
+            state[i] = 1 if fast[i] > slow[i] else -1
+            # same enter-on-first-eligible convention as ma_cross: state is 0
+            # during warmup, so the first warm bar counts as a cross
+            if state[i] != state[i - 1] and state[i] in allow:
+                sig[i] = state[i]
+
     else:
         raise ValueError(f"no executor for entry type {block['type']!r}")
     return sig, state
@@ -156,6 +180,11 @@ def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
             ma = sma(closes, p["ma_len"])
             for i in range(n):
                 if ma[i] is None or closes[i] <= ma[i]:
+                    mask[i] = False
+        elif g["type"] == "regime_ma_short":
+            ma = sma(closes, p["ma_len"])
+            for i in range(n):
+                if ma[i] is None or closes[i] >= ma[i]:
                     mask[i] = False
         elif g["type"] == "vol_percentile":
             vol = realized_ann_vol(closes, p["lookback"])
@@ -237,7 +266,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
                     (side == 1 and b["high"] >= pos["target"]) or
                     (side == -1 and b["low"] <= pos["target"])):
                 exit_px, exit_reason = pos["target"], "target"
-            elif entry["type"] == "ma_cross" and state[i - 1] == 0:
+            elif (entry["type"] in ("ma_cross", "ma_cross_ds")
+                  and state[i - 1] != pos["side"]):
                 exit_px, exit_reason = b["open"], "signal"       # cross-down exit
             if exit_px is not None:
                 gross = pos["side"] * (exit_px / pos["entry_px"] - 1)
