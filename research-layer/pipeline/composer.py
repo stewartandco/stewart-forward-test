@@ -39,6 +39,34 @@ COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 #   slippage_ticks is inherited from spec schema v1 — see design doc.
 
 
+def composition_fingerprint(spec: dict) -> str:
+    """Identity of a STRATEGY, not of a registration: the universe and blocks
+    only. Excludes strategy_id, created_utc, run_id, name, family and
+    provenance, so two registrations of the same strategy collide."""
+    blocks = sorted(
+        ({"role": b["role"], "type": b["type"],
+          "params": dict(sorted(b["params"].items()))} for b in spec["blocks"]),
+        key=lambda b: (b["role"], b["type"],
+                       json.dumps(b["params"], sort_keys=True)))
+    core = {"assets": sorted(spec["universe"]["assets"]),
+            "timeframe": spec["universe"]["timeframe"],
+            "blocks": blocks}
+    return hashlib.sha256(
+        json.dumps(core, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def registered_fingerprints(registry: Registry) -> dict[str, str]:
+    """{composition_fingerprint: strategy_id} over every registered strategy,
+    in ANY lifecycle state — a graveyarded composition must never return."""
+    out = {}
+    for e in registry.entries():
+        if e["entry_type"] == "strategy_registered":
+            out.setdefault(composition_fingerprint(e["payload"]),
+                           e["payload"]["strategy_id"])
+    return out
+
+
 def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list[str]:
     """Return error strings; empty = family is expandable."""
     errors = []
@@ -60,6 +88,10 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
         errors.append("at least one stop block required")
     if "risk" not in roles:
         errors.append("at least one risk block required")
+    types = {b.get("type") for b in blocks}
+    if {"regime_ma", "regime_ma_short"} <= types:
+        errors.append("cannot combine regime_ma and regime_ma_short — the "
+                      "gate AND is empty, so the spec would never trade")
     for b in blocks:
         errors.extend(validate_block(b.get("role"), b.get("type"), b.get("params", {})))
 

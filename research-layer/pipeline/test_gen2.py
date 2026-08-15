@@ -152,3 +152,67 @@ def test_ma_cross_ds_short_exits_on_state_flip():
     book = simulate_asset(blocks, bars, COST)
     assert book["trades"], "expected a short trade"
     assert book["trades"][0]["side"] == "short"
+
+
+import copy
+
+from .registry import Registry
+from .composer import (composition_fingerprint, registered_fingerprints,
+                       validate_family, expand_family, run as composer_run)
+from .blocks import BLOCK_TYPES, block_type_payload
+from .test_composer import good_family, ACCEPTED
+from .test_pipeline import make_card
+
+TS = "2026-08-15T00:00:00Z"
+
+
+# ---------------- composition fingerprint ----------------
+
+def test_fingerprint_ignores_identity_fields():
+    a = expand_family(good_family(sweep=[]), "runA", "modelA", TS)[0]
+    b = expand_family(good_family(sweep=[]), "runB", "modelB",
+                      "2027-01-01T00:00:00Z")[0]
+    assert a["strategy_id"] != b["strategy_id"]      # content-addressed differ
+    assert composition_fingerprint(a) == composition_fingerprint(b)
+
+
+def test_fingerprint_ignores_block_and_asset_order():
+    a = expand_family(good_family(sweep=[], assets=["BTCUSD", "ETHUSD"]),
+                      "r", "m", TS)[0]
+    b = copy.deepcopy(a)
+    b["blocks"] = list(reversed(b["blocks"]))
+    b["universe"]["assets"] = ["ETHUSD", "BTCUSD"]
+    assert composition_fingerprint(a) == composition_fingerprint(b)
+
+
+def test_fingerprint_changes_with_any_param():
+    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    b = copy.deepcopy(a)
+    b["blocks"][0]["params"]["z_entry"] = 2.5
+    assert composition_fingerprint(a) != composition_fingerprint(b)
+
+
+def test_registered_fingerprints_maps_to_ids(tmp_path):
+    from .test_composer import register_grammar
+    reg = Registry(tmp_path / "log.jsonl")
+    register_grammar(reg)
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    spec = expand_family(good_family(sweep=[], card_ids=[card["card_id"]]),
+                         "r", "m", TS)[0]
+    reg.register_strategy(spec)
+    fps = registered_fingerprints(reg)
+    assert fps[composition_fingerprint(spec)] == spec["strategy_id"]
+
+
+# ---------------- rule 8: mutually exclusive regimes ----------------
+
+def test_family_with_both_regime_gates_rejected():
+    fam = good_family()
+    fam["blocks"].append({"role": "regime", "type": "regime_ma",
+                          "params": {"ma_len": 100}})
+    fam["blocks"].append({"role": "regime", "type": "regime_ma_short",
+                          "params": {"ma_len": 100}})
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("regime_ma and regime_ma_short" in e for e in errs)
