@@ -232,6 +232,193 @@
       "added_by": "coen",
       "verified_date": "2026-08-14",
       "notes": "Crypto bot framework; release notes occasionally carry strategy research links."
+    },
+    {
+      "id": "aqr.com",
+      "class": "blog",
+      "name": "aqr.com",
+      "url": "https://www.aqr.com/Insights/Perspectives/Factor-Timing-is-Hard",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "epchan.blogspot.de",
+      "class": "blog",
+      "name": "epchan.blogspot.de",
+      "url": "http://epchan.blogspot.de/",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "extractalpha.com",
+      "class": "blog",
+      "name": "extractalpha.com",
+      "url": "https://extractalpha.com/blog/",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "followingthetrend.com",
+      "class": "blog",
+      "name": "followingthetrend.com",
+      "url": "http://www.followingthetrend.com/",
+      "feed": "https://www.followingthetrend.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://www.followingthetrend.com/feed/"
+    },
+    {
+      "id": "investresolve.com",
+      "class": "blog",
+      "name": "investresolve.com",
+      "url": "https://investresolve.com/inc/uploads/pdf/peering-around-corners-how-to-replicate-trend-following-managed-futures-whitepaper.pdf",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "jonathankinlay.com",
+      "class": "blog",
+      "name": "jonathankinlay.com",
+      "url": "https://jonathankinlay.com/",
+      "feed": "https://jonathankinlay.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://jonathankinlay.com/feed/"
+    },
+    {
+      "id": "letianzj.github.io",
+      "class": "blog",
+      "name": "letianzj.github.io",
+      "url": "https://letianzj.github.io/",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "macrosynergy.com",
+      "class": "blog",
+      "name": "macrosynergy.com",
+      "url": "https://macrosynergy.com/research/",
+      "feed": "https://macrosynergy.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://macrosynergy.com/feed/"
+    },
+    {
+      "id": "mebanefaber.com",
+      "class": "blog",
+      "name": "mebanefaber.com",
+      "url": "http://www.mebanefaber.com/",
+      "feed": "https://mebfaber.com/feed/",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://mebfaber.com/feed/"
+    },
+    {
+      "id": "ml-quant.com",
+      "class": "aggregator",
+      "name": "ml-quant.com",
+      "url": "https://www.ml-quant.com/",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "nber.org",
+      "class": "ssrn",
+      "name": "nber.org",
+      "url": "https://www.nber.org/papers/w33674",
+      "feed": "https://back.nber.org/rss/new.xml",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://back.nber.org/rss/new.xml"
+    },
+    {
+      "id": "pyquantnews.com",
+      "class": "blog",
+      "name": "pyquantnews.com",
+      "url": "https://www.pyquantnews.com",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "quantifiedstrategies.com",
+      "class": "blog",
+      "name": "quantifiedstrategies.com",
+      "url": "https://www.quantifiedstrategies.com",
+      "feed": null,
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient."
+    },
+    {
+      "id": "quantitativo.com",
+      "class": "blog",
+      "name": "quantitativo.com",
+      "url": "https://www.quantitativo.com/",
+      "feed": "https://www.quantitativo.com/feed",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://www.quantitativo.com/feed"
+    },
+    {
+      "id": "quantseeker.com",
+      "class": "blog",
+      "name": "quantseeker.com",
+      "url": "https://www.quantseeker.com/",
+      "feed": "https://www.quantseeker.com/feed",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://www.quantseeker.com/feed"
+    },
+    {
+      "id": "realrobhanna.substack.com",
+      "class": "blog",
+      "name": "realrobhanna.substack.com",
+      "url": "https://realrobhanna.substack.com/",
+      "feed": "https://realrobhanna.substack.com/feed",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://realrobhanna.substack.com/feed"
+    },
+    {
+      "id": "vixandmore.blogspot.com",
+      "class": "blog",
+      "name": "vixandmore.blogspot.com",
+      "url": "http://vixandmore.blogspot.com/",
+      "feed": "https://vixandmore.blogspot.com/feeds/posts/default",
+      "poll_minutes": 360,
+      "added_by": "coen",
+      "verified_date": "2026-08-15",
+      "notes": "approved via morpheus-ops 2026-08-15T03:49:57Z (D26). feed unset (HTML diff on url); refine feed URL when convenient. Feed verified live https://vixandmore.blogspot.com/feeds/posts/default"
     }
   ]
 }
