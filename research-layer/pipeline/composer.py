@@ -212,6 +212,7 @@ PROPOSAL_SCHEMA = {
                 "properties": {
                     "family": {"type": "string"},
                     "rationale": {"type": "string"},
+                    "regime_hypothesis": {"type": "string"},
                     "card_ids": {"type": "array", "items": {"type": "string"}},
                     "assets": {"type": "array",
                                "items": {"enum": list(ALLOWED_ASSETS)}},
@@ -259,8 +260,8 @@ PROPOSAL_SCHEMA = {
                         },
                     },
                 },
-                "required": ["family", "rationale", "card_ids", "assets",
-                              "blocks", "sweep"],
+                "required": ["family", "rationale", "regime_hypothesis",
+                              "card_ids", "assets", "blocks", "sweep"],
                 "additionalProperties": False,
             },
         },
@@ -274,11 +275,28 @@ You are the Composer agent in Stewart & Co.'s research pipeline. You design
 candidate trading strategies for crypto daily bars (BTCUSD, ETHUSD) as
 compositions of typed blocks, grounded in accepted research cards.
 
+What happened in generation 1: three families were registered, all of them
+long-biased. Every one passed the screen and then failed the out-of-sample
+gauntlet, because their per-trade edge scaled with a price drift and a
+volatility level that did not persist. Passive buy-and-hold decayed just as
+hard over the same window. Do not simply reproduce that shape.
+
 Rules:
 - Use ONLY the block types and parameter grid values given in the grammar.
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- Every family must state a regime_hypothesis: which market conditions it
+  expects to work in, and why it is not merely levered exposure to an upward
+  drift. A family whose edge disappears when drift and volatility fall should
+  say so plainly.
+- Short-capable types exist: trend_scan_ds and ma_cross_ds take a direction
+  parameter (long, short, both), and regime_ma_short permits entries below a
+  moving average. channel_breakout and zscore_reversion already accept
+  direction: both.
+- regime_ma and regime_ma_short cannot appear in the same family — their
+  filters are mutually exclusive and the spec would never trade. Express
+  "long in one regime, short in the other" as two separate families.
 - Choose sweep axes ONLY where the cited research motivates exploring the
   parameter; sweep values must come from the declared grids. Small, motivated
   sweeps beat exhaustive ones.
@@ -396,6 +414,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
 
     created_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     accepted_ids = set(accepted)
+    known_fps = registered_fingerprints(registry)
+    run_fps: dict[str, str] = {}
     kept, dropped, seen_names = [], 0, set()
     for fam in proposals:
         name = fam.get("family", "?")
@@ -408,16 +428,33 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             for e in errors:
                 print(f"    - {e}")
             continue
-        seen_names.add(name)
         specs = expand_family(fam, args.run_id, args.model, created_utc)
+        collisions = []
+        for spec in specs:
+            fp = composition_fingerprint(spec)
+            if fp in known_fps:
+                collisions.append(
+                    f"composition already registered as {known_fps[fp]}")
+            elif fp in run_fps:
+                collisions.append(
+                    f"composition duplicates family {run_fps[fp]} in this run")
+        if collisions:
+            dropped += 1
+            print(f"  DROPPED family {name}:")
+            for c in dict.fromkeys(collisions):     # de-duplicated, ordered
+                print(f"    - {c}")
+            continue
+        seen_names.add(name)
         for spec in specs:
             validator.validate(spec)   # composer bug if this raises: abort pre-write
+            run_fps[composition_fingerprint(spec)] = name
         kept.append((fam, specs))
 
     total = sum(len(s) for _, s in kept)
     for fam, specs in kept:
         print(f"family {fam['family']}: {len(specs)} sibling(s), "
               f"cites {len(fam['card_ids'])} card(s) — {fam['rationale']}")
+        print(f"  regime hypothesis: {fam.get('regime_hypothesis', '(none)')}")
         if args.dry_run:
             for spec in specs:
                 print(json.dumps(spec, indent=2, ensure_ascii=False))

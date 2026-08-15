@@ -232,3 +232,75 @@ def test_family_with_both_regime_gates_rejected():
                           "params": {"ma_len": 100}})
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("regime_ma and regime_ma_short" in e for e in errs)
+
+
+from .composer import PROPOSAL_SCHEMA, SYSTEM_PROMPT
+from .test_composer import register_grammar
+
+
+def seeded_registry_with_spec(tmp_path):
+    """Registry with grammar, an accepted card, and one registered strategy
+    built from good_family. Returns (registry, card_id, registered_spec)."""
+    reg = Registry(tmp_path / "reg.jsonl")
+    register_grammar(reg)
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    spec = expand_family(good_family(sweep=[], card_ids=[card["card_id"]]),
+                         "seed-run", "m", TS)[0]
+    reg.register_strategy(spec)
+    return reg, card["card_id"], spec
+
+
+# ---------------- rule 7: no resurrection ----------------
+
+def test_run_drops_family_reproposing_registered_composition(tmp_path, capsys):
+    reg, cid, spec = seeded_registry_with_spec(tmp_path)
+    rc = composer_run(
+        ["--registry", str(reg.log_path), "--run-id", "gen2", "--dry-run"],
+        propose_fn=lambda cards: [good_family(sweep=[], card_ids=[cid])])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already registered" in out
+    assert spec["strategy_id"] in out
+
+
+def test_run_drops_within_run_duplicate_composition(tmp_path, capsys):
+    reg, cid, _ = seeded_registry_with_spec(tmp_path)
+    fam_a = good_family(sweep=[], card_ids=[cid], family="fam_a")
+    fam_b = good_family(sweep=[], card_ids=[cid], family="fam_b")
+    fam_a["blocks"][0]["params"]["z_entry"] = 1.5   # differs from registered
+    fam_b["blocks"][0]["params"]["z_entry"] = 1.5   # collides with fam_a
+    rc = composer_run(
+        ["--registry", str(reg.log_path), "--run-id", "gen2", "--dry-run"],
+        propose_fn=lambda cards: [fam_a, fam_b])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fam_a" in out and "DROPPED family fam_b" in out
+
+
+def test_run_allows_genuinely_new_composition(tmp_path, capsys):
+    reg, cid, _ = seeded_registry_with_spec(tmp_path)
+    fam = good_family(sweep=[], card_ids=[cid], family="fresh")
+    fam["blocks"][0]["params"]["lookback"] = 90    # not the registered one
+    rc = composer_run(
+        ["--registry", str(reg.log_path), "--run-id", "gen2", "--dry-run"],
+        propose_fn=lambda cards: [fam])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DROPPED" not in out
+    assert "1 families kept" in out
+
+
+# ---------------- prompt + schema ----------------
+
+def test_proposal_schema_requires_regime_hypothesis():
+    item = PROPOSAL_SCHEMA["properties"]["families"]["items"]
+    assert "regime_hypothesis" in item["properties"]
+    assert "regime_hypothesis" in item["required"]
+
+
+def test_system_prompt_states_gen1_failure_and_new_types():
+    assert "trend_scan_ds" in SYSTEM_PROMPT
+    assert "regime_ma_short" in SYSTEM_PROMPT
+    assert "long-biased" in SYSTEM_PROMPT
