@@ -395,3 +395,46 @@ def test_metrics_carry_raw_and_normalized():
         "is_vol", "oos_vol"}
     assert metrics["is_edge_per_trade"] == pytest.approx(
         metrics["is_edge_raw"] / metrics["is_vol"])
+
+
+# ---------------- write-free diagnostic ----------------
+
+DIAG = Path(__file__).resolve().parent.parent / "diagnose_protocol_v2.py"
+
+
+def test_diagnostic_has_no_write_path():
+    # narrow to REGISTRY writes: list.append() is legitimate Python and must
+    # not trip this guard
+    src = DIAG.read_text(encoding="utf-8")
+    for forbidden in ("record_verdict", "record_state_change",
+                      "register_strategy", "register_block_type",
+                      "register_card", "review_card", "registry.append",
+                      "write_text"):
+        assert forbidden not in src, f"diagnostic must not write: {forbidden}"
+
+
+def test_diagnostic_runs_and_reports(tmp_path, capsys):
+    import subprocess, sys
+    reg, cid, spec = seeded_registry_with_spec(tmp_path)
+    # push the spec to graveyard so the diagnostic finds it
+    reg.record_state_change(spec["strategy_id"], "screened", "t")
+    reg.record_verdict(spec["strategy_id"], "screened", "pass",
+                       {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
+                        "max_dd": -0.1}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "gauntlet", None)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "fail",
+                       {"edge_decay_pct": -60.0}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "graveyard", "edge_decay")
+    from .test_screen import write_data_dir, dated_target_hit_bars
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    n_before = sum(1 for _ in reg.entries())
+    out = subprocess.run(
+        [sys.executable, str(DIAG), "--registry", str(reg.log_path),
+         "--data-dir", str(data)],
+        capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert spec["strategy_id"] in out.stdout
+    assert "PROTOCOL-V2 DIAGNOSTIC" in out.stdout
+    # and it wrote nothing (count captured before, not hardcoded — the
+    # grammar size and hence the entry count change across tasks)
+    assert sum(1 for _ in reg.entries()) == n_before
