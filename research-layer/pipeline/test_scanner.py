@@ -474,6 +474,90 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- incident 2026-08-15: runaway retry + link soup ----------
+
+class BillingErrorClient(StubClient):
+    def __init__(self, n_errors=99):
+        super().__init__([])
+        self.n_errors = n_errors
+        outer = self
+
+        class _Messages:
+            def create(self, **kw):
+                outer.calls.append(kw)
+                raise RuntimeError(
+                    "Error code: 400 - {'type': 'error', 'error': {'type': "
+                    "'invalid_request_error', 'message': 'Your credit balance "
+                    "is too low to access the Anthropic API.'}}")
+        self.messages = _Messages()
+
+
+def test_credit_exhaustion_stops_the_batch_loop_immediately(tmp_path):
+    """The 08-15 incident: a billing 400 must abort the run, not retry every
+    batch (105k decisions / 100MB logs in 2h)."""
+    from .relevance import screen_items, ApiCreditExhausted
+    client = BillingErrorClient()
+    items = _items(60)  # 3 batches of 20
+    with pytest.raises(ApiCreditExhausted):
+        screen_items(client, "claude-sonnet-5", items,
+                     BudgetMeter(tmp_path / "led.jsonl"),
+                     tmp_path / "screen_log.jsonl")
+    assert len(client.calls) == 1  # aborted after the first failure
+
+
+def test_deferred_items_park_after_retry_cap(tmp_path):
+    from .seen import SeenStore
+    from .scanner import refeedable_deferred
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    seen.record("a", "s1", "seen", title="t", link="https://x/a")
+    for _ in range(3):
+        seen.record("a", "s1", "deferred_screen", reason="api_error",
+                    title="t", link="https://x/a")
+    seen.record("b", "s1", "deferred_screen", reason="api_error",
+                title="t", link="https://x/b")
+    refeed = refeedable_deferred(seen, max_attempts=3)
+    assert [i["item_id"] for i in refeed] == ["b"]  # 'a' parked after 3 tries
+    assert seen.status("a") == "deferred_parked"
+
+
+def test_feed_autodiscovery_from_listing_html():
+    from .feeds import discover_feed
+    html = ('<html><head><link rel="alternate" type="application/rss+xml" '
+            'href="/feed/" title="RSS"></head><body>x</body></html>')
+    assert discover_feed(html, "https://blog.example/") == "https://blog.example/feed/"
+    atom = ('<html><head><link rel="alternate" type="application/atom+xml" '
+            'href="https://blog.example/atom.xml"></head></html>')
+    assert discover_feed(atom, "https://blog.example/") == "https://blog.example/atom.xml"
+    assert discover_feed("<html><head></head></html>", "https://blog.example/") is None
+
+
+def test_html_listing_filters_to_plausible_articles_and_caps():
+    from .feeds import article_links
+    body = "".join(f'<a href="/posts/deep-dive-{i}">Post {i}</a>' for i in range(40))
+    html = ("<html><body>"
+            '<a href="/">Home</a><a href="/about">About</a>'
+            '<a href="/tag/momentum">momentum</a><a href="/category/x">cat</a>'
+            '<a href="https://other.example/thing">offsite</a>'
+            '<a href="/feed/">RSS</a><a href="/wp-login.php">login</a>'
+            f"{body}</body></html>")
+    links = article_links(html, "https://blog.example/", cap=25)
+    urls = [u for u, _ in links]
+    assert len(urls) == 25                       # per-cycle cap holds
+    assert all(u.startswith("https://blog.example/posts/") for u in urls)
+    assert not any("/tag/" in u or "/about" in u or "other.example" in u
+                   for u in urls)
+
+
+def test_poll_source_html_mode_uses_article_filter(tmp_path):
+    src = make_source(feed=None, url="https://blog.example/")
+    html = ("<html><body><a href='/nav'>Nav</a>"
+            + "".join(f"<a href='/2026/08/post-{i}'>Post {i}</a>" for i in range(5))
+            + "</body></html>")
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    got = poll_source(src, seen, _fetch_factory({src["url"]: (200, html)}))
+    assert len(got) == 5 and all("/2026/08/post-" in i["link"] for i in got)
+
+
 # ---------------- D27 quality-bar auto-admit ----------------
 
 def test_discovery_queue_accumulates_distinct_citers(tmp_path):

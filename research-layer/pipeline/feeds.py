@@ -118,6 +118,57 @@ def extract_links(html_text: str, base_url: str) -> list[tuple[str, str]]:
     return out
 
 
+_FEED_LINK = re.compile(
+    r"""<link[^>]+(?:type=["']application/(?:rss|atom)\+xml["'][^>]*"""
+    r"""href=["']([^"']+)["']|href=["']([^"']+)["'][^>]*"""
+    r"""type=["']application/(?:rss|atom)\+xml["'])""",
+    re.IGNORECASE)
+
+# Listing-page links that are navigation/taxonomy, never articles.
+NON_ARTICLE_PATTERNS = (
+    "/tag/", "/tags/", "/category/", "/categories/", "/author/", "/page/",
+    "/feed", "/rss", "/comments", "/wp-login", "/wp-admin", "/search",
+    "/about", "/contact", "/privacy", "/terms", "/subscribe", "/login",
+    "/signup", "/cart", "/shop", "/product", "?share=", "?replytocom=",
+)
+
+
+def discover_feed(html_text: str, base_url: str) -> str | None:
+    """Find a page's declared RSS/Atom feed (<link rel=alternate ...>)."""
+    m = _FEED_LINK.search(html_text)
+    if not m:
+        return None
+    href = m.group(1) or m.group(2)
+    return urljoin(base_url, href.strip()) if href else None
+
+
+def article_links(html_text: str, base_url: str,
+                  cap: int = 50) -> list[tuple[str, str]]:
+    """Same-site links that plausibly point at articles, capped per cycle.
+
+    HTML-diff mode without this treats every nav/sidebar/archive link as an
+    item - the 2026-08-15 link-soup incident (600+ 'items' from one blog)."""
+    from urllib.parse import urlsplit
+    base_host = urlsplit(base_url).netloc.lower().removeprefix("www.")
+    out = []
+    for url, text in extract_links(html_text, base_url):
+        parts = urlsplit(url)
+        if parts.netloc.lower().removeprefix("www.") != base_host:
+            continue
+        path = parts.path.rstrip("/")
+        if not path or path.count("/") < 1:       # site root / bare sections
+            continue
+        lowered = url.lower()
+        if any(p in lowered for p in NON_ARTICLE_PATTERNS):
+            continue
+        if len(path.rsplit("/", 1)[-1]) < 6:      # /nav, /x - not a slug
+            continue
+        out.append((url, text))
+        if len(out) >= cap:
+            break
+    return out
+
+
 class _TextParser(HTMLParser):
     SKIP = {"script", "style", "noscript", "template"}
 

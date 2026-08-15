@@ -15,6 +15,16 @@ from datetime import datetime, timezone
 BATCH_SIZE = 20
 SCREEN_MAX_TOKENS = 4000
 
+# Errors that will not fix themselves on the next batch: retrying them is the
+# 2026-08-15 runaway (105k logged decisions in 2h on an empty credit balance).
+FATAL_API_MARKERS = ("credit balance is too low", "billing", "quota",
+                     "authentication_error", "invalid x-api-key",
+                     "permission_error")
+
+
+class ApiCreditExhausted(RuntimeError):
+    """Billing/credential failure: abort the run, do not retry."""
+
 INTAKE_PARAMETERS = """\
 You are the intake screen for Stewart & Co.'s quantitative research pipeline.
 You see item titles and summaries from a verified source watchlist and decide,
@@ -116,11 +126,15 @@ def screen_items(client, model: str, items: list[dict], meter,
                 messages=[{"role": "user", "content": build_screen_prompt(batch)}],
             )
         except Exception as exc:
-            print(f"  screen call failed: {exc}", file=sys.stderr)
+            message = str(exc).lower()
             decisions = {it["item_id"]: ("deferred_screen", f"api_error: {exc}"[:200])
                          for it in batch}
             out.update(decisions)
             _log_decisions(log_path, model, decisions)
+            if any(marker in message for marker in FATAL_API_MARKERS):
+                print(f"  FATAL api error, aborting run: {exc}", file=sys.stderr)
+                raise ApiCreditExhausted(str(exc)) from exc
+            print(f"  screen call failed: {exc}", file=sys.stderr)
             continue
         meter.record_call(model, msg.usage, purpose="screen")
         if msg.stop_reason == "refusal":

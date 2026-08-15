@@ -26,11 +26,11 @@ from urllib.parse import urlsplit
 
 from .watchlist import (load_watchlist, pollable, queue_discovery,
                         load_discovery)
-from .feeds import (parse_feed, extract_links, item_id, html_to_text,
-                    looks_paywalled, fetch_url)
+from .feeds import (parse_feed, extract_links, article_links, discover_feed,
+                    item_id, html_to_text, looks_paywalled, fetch_url)
 from .seen import SeenStore
 from .budget import BudgetMeter
-from .relevance import screen_items
+from .relevance import screen_items, ApiCreditExhausted
 from .approvals import process_approvals
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
@@ -41,6 +41,9 @@ LAYER = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "claude-sonnet-5"  # D23 throughput-first: Sonnet for screen AND bulk extraction
 DEFAULT_READER_ENV = Path(r"E:\Users\Coen\Claude\stewartandco-agents\hubs\intelligence\agents\reader\.env")
 MAX_DISCOVERIES_PER_ITEM = 10
+HTML_ITEMS_PER_CYCLE = 25      # cap on a feedless source's per-poll candidates
+MAX_DEFER_ATTEMPTS = 3         # then park; no infinite re-feed (08-15 runaway)
+CREDIT_BACKOFF_SECONDS = 1800  # cool-off after a billing/credential failure
 
 # watchlist class -> research-card source metadata. Everything enters at
 # "practitioner" credibility (the AFML precedent: Coen's call, tighten at triage).
@@ -59,16 +62,39 @@ def poll_source(source: dict, seen: SeenStore, fetch=fetch_url) -> list[dict]:
         return []
     if source["feed"]:
         items = parse_feed(text, source["id"])
-    else:  # HTML listing diff: every on-page link is a candidate item
+    else:  # HTML listing diff, article-filtered and capped (08-15 link soup)
         items = [{"source_id": source["id"], "item_id": item_id(source["id"], link),
                   "title": title or link, "link": link, "summary": "",
                   "published": None}
-                 for link, title in extract_links(text, final_url)]
+                 for link, title in article_links(text, final_url,
+                                                  cap=HTML_ITEMS_PER_CYCLE)]
     fresh = [it for it in items if not seen.is_seen(it["item_id"])]
     for it in fresh:
         seen.record(it["item_id"], it["source_id"], "seen",
                     title=it["title"], link=it["link"])
     return fresh
+
+
+def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
+                        statuses=("deferred_screen", "deferred_budget")) -> list[dict]:
+    """Deferred items still worth retrying. Items that have been deferred
+    max_attempts times are PARKED so a persistent failure cannot spin the
+    loop forever (2026-08-15: 105k decisions / 100MB logs in two hours)."""
+    out = []
+    for status in statuses:
+        for iid, event in list(seen.items_with_status(status).items()):
+            if not event.get("link"):
+                continue
+            attempts = sum(1 for e in seen.events_for(iid)
+                           if e["status"] in statuses)
+            if attempts >= max_attempts:
+                seen.record(iid, event["source_id"], "deferred_parked",
+                            reason=f"parked after {attempts} deferrals")
+                continue
+            out.append({"source_id": event["source_id"], "item_id": iid,
+                        "title": event.get("title") or "",
+                        "link": event["link"], "summary": "", "published": None})
+    return out
 
 
 def _watchlist_domains(sources: list[dict]) -> set[str]:
@@ -489,26 +515,37 @@ def run(argv: list[str] | None = None) -> int:
             for s in due:
                 new_items.extend(poll_source(s, seen))
                 next_due[s["id"]] = now + s["poll_minutes"] * 60
-            # re-feed items deferred earlier (budget/screen misses)
-            for status in ("deferred_budget", "deferred_screen"):
-                for iid, e in list(seen.items_with_status(status).items()):
-                    if meter.can_spend() and e.get("link"):
-                        new_items.append({"source_id": e["source_id"],
-                                          "item_id": iid, "title": e.get("title") or "",
-                                          "link": e["link"], "summary": "",
-                                          "published": None})
-            if new_items:
-                stats = process_new_items(
-                    new_items, client=client, model=args.model, meter=meter,
-                    seen=seen, registry=registry, fetch=fetch_url,
-                    watchlist_sources=sources, discovery_path=discovery_path,
-                    screen_log=logs_dir / "screen_log.jsonl", actions=actions)
-                print(f"cycle: {stats}")
-            inbox_stats = process_inbox(
-                client=client, model=args.model, meter=meter, seen=seen,
-                registry=registry, actions=actions)
-            if inbox_stats["files"]:
-                print(f"inbox: {inbox_stats}")
+            # re-feed deferred items, retry-capped (parks persistent failures)
+            if meter.can_spend():
+                new_items.extend(refeedable_deferred(seen))
+            try:
+                if new_items:
+                    stats = process_new_items(
+                        new_items, client=client, model=args.model, meter=meter,
+                        seen=seen, registry=registry, fetch=fetch_url,
+                        watchlist_sources=sources, discovery_path=discovery_path,
+                        screen_log=logs_dir / "screen_log.jsonl", actions=actions)
+                    print(f"cycle: {stats}")
+                inbox_stats = process_inbox(
+                    client=client, model=args.model, meter=meter, seen=seen,
+                    registry=registry, actions=actions)
+                if inbox_stats["files"]:
+                    print(f"inbox: {inbox_stats}")
+            except ApiCreditExhausted as exc:
+                actions.event("api_unavailable", {"error": str(exc)[:300],
+                                                  "backoff_s": CREDIT_BACKOFF_SECONDS})
+                write_status(
+                    logs_dir / "status.json", overall="FAIL",
+                    summary=f"API unavailable (billing/credentials): {str(exc)[:120]}",
+                    items={"budget": meter.state(), "api": "FAIL"},
+                    pending_tier3=pending_tier3_count(registry, discovery_path),
+                    digest_file=None, next_run=None)
+                print(f"API unavailable; sleeping {CREDIT_BACKOFF_SECONDS}s: {exc}",
+                      file=sys.stderr)
+                if args.once:
+                    return 2
+                time.sleep(CREDIT_BACKOFF_SECONDS)
+                continue
             # D26: consume Coen's signed source decisions from the Morpheus panel
             import os as _os
             approvals = process_approvals(

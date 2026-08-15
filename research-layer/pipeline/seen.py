@@ -19,12 +19,21 @@ class SeenStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._latest: dict[str, dict] = {}
+        self._counts: dict[str, dict[str, int]] = {}
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as f:
                 for line in f:
                     if line.strip():
                         event = json.loads(line)
                         self._latest[event["item_id"]] = event
+                        counts = self._counts.setdefault(event["item_id"], {})
+                        counts[event["status"]] = counts.get(event["status"], 0) + 1
+
+    def events_for(self, item_id: str) -> list[dict]:
+        """Status history for one item (counts only, cheap): one synthetic
+        entry per recorded occurrence, used for retry-cap decisions."""
+        return [{"status": status} for status, n
+                in self._counts.get(item_id, {}).items() for _ in range(n)]
 
     def record(self, item_id: str, source_id: str, status: str, *,
                title: str | None = None, link: str | None = None,
@@ -44,6 +53,8 @@ class SeenStore:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
         self._latest[item_id] = event
+        counts = self._counts.setdefault(item_id, {})
+        counts[status] = counts.get(status, 0) + 1
         return event
 
     def is_seen(self, item_id: str) -> bool:
