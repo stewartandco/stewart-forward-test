@@ -55,12 +55,27 @@ BLOCK_TYPES: dict[tuple[str, str], dict] = {
         "ann_vol": {"type": "float", "grid": [0.20, 0.40]},
         "lookback": {"type": "int", "grid": [30]},
     },
+    ("entry", "trend_scan_ds"): {
+        "max_lookback": {"type": "int", "grid": [60, 90, 120]},
+        "t_min": {"type": "float", "grid": [2.0, 3.0]},
+        "direction": {"type": "str", "grid": ["long", "short", "both"]},
+    },
+    ("entry", "ma_cross_ds"): {
+        "fast": {"type": "int", "grid": [5, 10, 20]},
+        "slow": {"type": "int", "grid": [50, 100, 200]},
+        "direction": {"type": "str", "grid": ["long", "short", "both"]},
+    },
+    ("regime", "regime_ma_short"): {
+        "ma_len": {"type": "int", "grid": [100, 200]},
+    },
 }
 
 # Cross-param constraints, keyed like BLOCK_TYPES. Return list of error strings.
 CONSTRAINTS = {
     ("entry", "ma_cross"):
         lambda p: ["ma_cross: fast must be < slow"] if p["fast"] >= p["slow"] else [],
+    ("entry", "ma_cross_ds"):
+        lambda p: ["ma_cross_ds: fast must be < slow"] if p["fast"] >= p["slow"] else [],
 }
 
 
