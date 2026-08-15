@@ -31,6 +31,7 @@ from .feeds import (parse_feed, extract_links, item_id, html_to_text,
 from .seen import SeenStore
 from .budget import BudgetMeter
 from .relevance import screen_items
+from .approvals import process_approvals
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
@@ -322,18 +323,19 @@ def pending_tier3_count(registry: Registry, discovery_path) -> int:
 # ---------------- resident loop ----------------
 
 def _load_api_key(env_path: Path) -> None:
+    """Load the reader .env (sc-reader key, approval-signing key, ...) into
+    the environment; existing env vars win."""
     import os
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return
     path = Path(os.environ.get("READER_ENV_PATH", env_path))
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if line.startswith("ANTHROPIC_API_KEY=") and not line.startswith("#"):
-                os.environ["ANTHROPIC_API_KEY"] = line.split("=", 1)[1].strip()
-                return
-    raise SystemExit(f"no ANTHROPIC_API_KEY in env and none found at {path} "
-                     "(sc-reader key; see reader CONTRACT.md sec. 5)")
+            if line and not line.startswith("#") and "=" in line:
+                name, value = line.split("=", 1)
+                os.environ.setdefault(name.strip(), value.strip())
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise SystemExit(f"no ANTHROPIC_API_KEY in env and none found at {path} "
+                         "(sc-reader key; see reader CONTRACT.md sec. 5)")
 
 
 def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
@@ -445,6 +447,22 @@ def run(argv: list[str] | None = None) -> int:
                 registry=registry, actions=actions)
             if inbox_stats["files"]:
                 print(f"inbox: {inbox_stats}")
+            # D26: consume Coen's signed source decisions from the Morpheus panel
+            import os as _os
+            approvals = process_approvals(
+                queue_path=logs_dir / "approvals_queue.jsonl",
+                watchlist_path=args.watchlist,
+                discovery_path=discovery_path, actions=actions,
+                state_path=logs_dir / "approvals_state.json",
+                key=_os.environ.get("READER_APPROVAL_KEY", ""))
+            for entry in approvals["approved"]:
+                if entry["id"] not in next_due:
+                    sources.append(entry)
+                    next_due[entry["id"]] = 0.0  # poll the new source now
+            if approvals["approved"] or approvals["blocked"] or approvals["invalid"]:
+                print(f"approvals: +{len(approvals['approved'])} sources, "
+                      f"{approvals['blocked']} blocked, "
+                      f"{approvals['invalid']} invalid")
             if meter.state() != "OK" and not warned_80:
                 warned_80 = True
                 actions.event("budget_alert", {"spend_usd": meter.month_spend(),

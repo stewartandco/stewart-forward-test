@@ -474,6 +474,86 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- approvals consumer (D26 write stage) ----------------
+
+def _approval_record(key, domain="freshquant.example", decision="approve",
+                     tamper=False):
+    from .approvals import sign_record
+    rec = {"action": "source_decision", "domain": domain,
+           "url": f"https://{domain}/blog", "decision": decision,
+           "name": "Fresh Quant", "source_class": "blog",
+           "actor": "coen", "via": "morpheus-ops",
+           "ts_utc": "2026-08-15T03:00:00Z"}
+    rec["id"] = rec["domain"] + "-" + rec["ts_utc"]
+    rec["sig"] = sign_record(rec, key)
+    if tamper:
+        rec["domain"] = "evil.example"
+    return rec
+
+
+def _approvals_env(tmp_path, records):
+    q = tmp_path / "approvals_queue.jsonl"
+    q.write_text("".join(json.dumps(r) + "\n" for r in records),
+                 encoding="utf-8")
+    wl = write_watchlist(tmp_path, [make_source()])
+    disc = tmp_path / "discovery.jsonl"
+    queue_discovery(disc, "https://freshquant.example/blog",
+                    found_in="scout/2026-08-15", reason="scout: fresh")
+    return q, wl, disc
+
+
+def test_approval_admits_source_and_is_idempotent(tmp_path):
+    from .approvals import process_approvals
+    key = "k" * 64
+    q, wl, disc = _approvals_env(tmp_path, [_approval_record(key)])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    state = tmp_path / "approvals_state.json"
+    result = process_approvals(queue_path=q, watchlist_path=wl,
+                               discovery_path=disc, actions=actions,
+                               state_path=state, key=key)
+    assert len(result["approved"]) == 1
+    sources = load_watchlist(wl)
+    added = [s for s in sources if s["id"] == "freshquant.example"][0]
+    assert added["added_by"] == "coen"
+    assert added["verified_date"] == "2026-08-15"
+    assert added in pollable(sources)
+    assert [d["status"] for d in load_discovery(disc)] == ["approved"]
+    entries = [json.loads(l) for l in (tmp_path / "act.jsonl").read_text().splitlines()]
+    assert any(e["entry_type"] == "source_approved" for e in entries)
+    # idempotent: run again, nothing changes
+    again = process_approvals(queue_path=q, watchlist_path=wl,
+                              discovery_path=disc, actions=actions,
+                              state_path=state, key=key)
+    assert again["approved"] == [] and len(load_watchlist(wl)) == 2
+
+
+def test_tampered_approval_is_rejected_and_chain_logged(tmp_path):
+    from .approvals import process_approvals
+    key = "k" * 64
+    q, wl, disc = _approvals_env(tmp_path, [_approval_record(key, tamper=True)])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    result = process_approvals(queue_path=q, watchlist_path=wl,
+                               discovery_path=disc, actions=actions,
+                               state_path=tmp_path / "st.json", key=key)
+    assert result["approved"] == [] and result["invalid"] == 1
+    assert len(load_watchlist(wl)) == 1  # nothing admitted
+    entries = [json.loads(l) for l in (tmp_path / "act.jsonl").read_text().splitlines()]
+    assert any(e["entry_type"] == "approval_rejected" for e in entries)
+
+
+def test_block_flips_proposal_without_touching_watchlist(tmp_path):
+    from .approvals import process_approvals
+    key = "k" * 64
+    q, wl, disc = _approvals_env(tmp_path, [_approval_record(key, decision="block")])
+    result = process_approvals(queue_path=q, watchlist_path=wl,
+                               discovery_path=disc,
+                               actions=ActionLog(tmp_path / "act.jsonl"),
+                               state_path=tmp_path / "st.json", key=key)
+    assert result["blocked"] == 1 and result["approved"] == []
+    assert len(load_watchlist(wl)) == 1
+    assert [d["status"] for d in load_discovery(disc)] == ["blocked"]
+
+
 # ---------------- source scout (weekly) ----------------
 
 def _scout_msg(candidates, stop_reason="end_turn", searches=2):
