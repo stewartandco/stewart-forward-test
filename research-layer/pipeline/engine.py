@@ -220,9 +220,22 @@ def _tightest_stop(stops: list[dict], entry_px: float, side: int,
 
 
 def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> dict:
-    """Run one asset's book. Returns {trades, equity, position} where equity
-    is the daily mark-to-market curve starting at 1.0 and position is the
-    book's open position at the end of the run (None if flat)."""
+    """Run one asset's book.
+
+    Returns {trades, equity, position}:
+      * trades   — closed round trips
+      * equity   — daily mark-to-market curve, starting at 1.0
+      * position — the OPEN position at the end of the run, or None if flat.
+        A copy, so mutating it cannot corrupt a finished book. Its fields:
+          side          +1 long / -1 short
+          entry_px      fill price
+          entry_i       index into the `bars` list PASSED TO THIS CALL, and
+                        meaningless against any other list
+          stop, target  prices (target None if the spec has no target block)
+          deadline      time-stop bar index, or None
+          notional      absolute capital at risk
+          notional_frac notional as a fraction of equity at entry
+    """
     by_role: dict[str, list[dict]] = {}
     for b in blocks:
         by_role.setdefault(b["role"], []).append(b)
@@ -317,11 +330,12 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
             mtm = equity + pos["notional"] * unreal
         curve.append(mtm)
 
-    # `position` is the book's OPEN position at the end of the run, or None.
     # An open position never appears in `trades` (those are closed round
     # trips), so the quarantine forward runner has no other way to read the
     # current size without re-deriving the entry/stop/sizing logic here.
-    return {"trades": trades, "equity": curve, "position": pos}
+    # Copied out so callers cannot reach into the simulator's live state.
+    return {"trades": trades, "equity": curve,
+            "position": dict(pos) if pos is not None else None}
 
 
 # ---------------- spec runner + metrics ------------------------------------

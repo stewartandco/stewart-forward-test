@@ -495,14 +495,23 @@ def test_prompt_figures_match_what_was_measured():
 
 # ---------------- quarantine: the daily forward runner ----------------
 
-from .quarantine import run as quarantine_run, MIN_TRADING_DAYS
+from .quarantine import (run as quarantine_run, MIN_TRADING_DAYS,
+                         BACKFILL_LAG_DAYS, CONE_CAVEAT)
+from .common import content_id
 from .test_screen import dated_target_hit_bars, write_data_dir
 from .test_gauntlet import gauntlet_registry
 
 ENTERED = "2023-01-21"
+CAVEAT = CONE_CAVEAT.format(n=MIN_TRADING_DAYS)
 
 
-def quarantined(tmp_path):
+def flat_dated_bars(n=23, px=100.0):
+    """A never-signalling series on dated_target_hit_bars' calendar."""
+    return [{"date": f"2023-01-{i + 1:02d}", "open": px, "high": px,
+             "low": px, "close": px, "volume": 1.0} for i in range(n)]
+
+
+def quarantined(tmp_path, bars=None):
     """One strategy in quarantine state, entered 2023-01-21, over
     dated_target_hit_bars (2023-01-01 .. 2023-01-23). Its book enters long on
     2023-01-22 at 111 and exits at the 116.55 target on 2023-01-23."""
@@ -513,8 +522,33 @@ def quarantined(tmp_path):
     reg.record_state_change(spec["strategy_id"], "quarantine",
                             "gauntlet pass, group-selected",
                             ts_utc=f"{ENTERED}T00:00:00Z")
-    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()
+                                     if bars is None else bars})
     return reg, spec, data
+
+
+def quarantined_two_asset(tmp_path):
+    """Same lifecycle, but a BTCUSD+ETHUSD universe, so the per-asset
+    invariants have something to bite on. ETHUSD never signals."""
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_state_change(spec["strategy_id"], "graveyard",
+                            "replaced by the two-asset fixture")
+    two = json.loads(json.dumps(spec))
+    two["universe"] = dict(two["universe"], assets=["BTCUSD", "ETHUSD"])
+    two["strategy_id"] = None
+    two["strategy_id"] = content_id(two, "strategy_id")
+    reg.register_strategy(two)
+    reg.record_state_change(two["strategy_id"], "screened", "test")
+    reg.record_state_change(two["strategy_id"], "gauntlet", None)
+    reg.record_state_change(two["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "ETHUSD": flat_dated_bars()})
+    return reg, two, data
+
+
+def argv_for(reg, data, *rest):
+    return ["--registry", str(reg.log_path), "--data-dir", str(data), *rest]
 
 
 def decisions(reg):
@@ -570,7 +604,9 @@ def test_missing_bar_for_date_is_refused(tmp_path, capsys):
     rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
                          str(data), "--date", "2023-01-30"])
     assert rc == 1
-    assert "REFUSED" in capsys.readouterr().out
+    # stderr, like PARTIAL WRITE: a scheduled job's streams are often captured
+    # separately, and a refusal must not be buried in the report stream
+    assert "REFUSED" in capsys.readouterr().err
     assert decisions(reg) == []
 
 
@@ -608,17 +644,18 @@ def test_registry_refuses_decision_for_non_quarantined_strategy(tmp_path):
 def test_review_writes_nothing_and_reports_days(tmp_path, capsys):
     reg, spec, data = quarantined(tmp_path)
     for d in ("2023-01-22", "2023-01-23"):
-        quarantine_run(["--registry", str(reg.log_path), "--data-dir",
-                        str(data), "--date", d])
+        quarantine_run(argv_for(reg, data, "--date", d))
     n_before = sum(1 for _ in reg.entries())
     capsys.readouterr()
-    rc = quarantine_run(["--registry", str(reg.log_path), "--review"])
+    rc = quarantine_run(argv_for(reg, data, "--review"))
     assert rc == 0
     assert sum(1 for _ in reg.entries()) == n_before
     out = capsys.readouterr().out
     assert f"days 2/{MIN_TRADING_DAYS}" in out
     assert "NOT YET ELIGIBLE" in out
-    assert "NOT directly comparable" in out
+    # no cone was stored, so the caveat about the cone must not appear
+    assert "(no mc_summary.json found)" in out
+    assert CAVEAT not in out
 
 
 def test_review_reads_the_stored_mc_cone(tmp_path, capsys):
@@ -633,10 +670,228 @@ def test_review_reads_the_stored_mc_cone(tmp_path, capsys):
         encoding="utf-8")
     n_before = sum(1 for _ in reg.entries())
     capsys.readouterr()
-    rc = quarantine_run(["--registry", str(reg.log_path), "--review",
-                         "--artifacts-dir", str(tmp_path / "art")])
+    rc = quarantine_run(argv_for(reg, data, "--review",
+                                 "--artifacts-dir", str(tmp_path / "art")))
     assert rc == 0
     assert sum(1 for _ in reg.entries()) == n_before
     out = capsys.readouterr().out
     assert "p25=1.1000 p50=1.4000 p75=1.9000" in out
-    assert "NOT directly comparable" in out
+    assert CAVEAT in out
+
+
+# ---- the record must be refusable, auditable and concurrency-safe ----
+
+def test_missing_registry_is_refused_in_both_modes(tmp_path, capsys):
+    """Registry.entries() returns silently on a missing file, so a typo'd
+    path used to report success and leave an invisible hole."""
+    reg, spec, data = quarantined(tmp_path)
+    absent = str(tmp_path / "nope.jsonl")
+    for extra in (["--date", "2023-01-22"], ["--review"]):
+        rc = quarantine_run(["--registry", absent, "--data-dir", str(data),
+                             *extra])
+        assert rc == 1
+        assert "REFUSED" in capsys.readouterr().err
+    assert decisions(reg) == []
+
+
+def test_missing_data_dir_is_refused_in_both_modes(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    absent = str(tmp_path / "no-such-data")
+    for extra in (["--date", "2023-01-22"], ["--review"]):
+        rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
+                             absent, *extra])
+        assert rc == 1
+        assert "REFUSED" in capsys.readouterr().err
+    assert decisions(reg) == []
+
+
+@pytest.mark.parametrize("bad", ["not-a-date", "2023-1-22", "2023-02-30",
+                                 "2023-01", ""])
+def test_malformed_date_is_refused(tmp_path, capsys, bad):
+    reg, spec, data = quarantined(tmp_path)
+    rc = quarantine_run(argv_for(reg, data, "--date", bad))
+    assert rc == 1
+    assert decisions(reg) == []
+
+
+def test_date_and_review_are_mutually_exclusive(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    assert quarantine_run(argv_for(reg, data)) == 1
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22",
+                                   "--review")) == 1
+    assert decisions(reg) == []
+
+
+def test_review_with_nothing_in_quarantine(tmp_path, capsys):
+    reg, spec = gauntlet_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    rc = quarantine_run(argv_for(reg, data, "--review"))
+    assert rc == 0
+    assert "No strategies in 'quarantine' state." in capsys.readouterr().out
+
+
+def test_review_names_the_bar_dates_that_were_never_recorded(tmp_path, capsys):
+    """A nine-day outage and sixty consecutive days must not look the same.
+    Here 2023-01-22 is a real bar that never got a decision."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-23"))
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    assert "unrecorded bar dates in window: 1" in out
+    assert "2023-01-22" in out
+
+
+def test_review_reports_backfill_lag(tmp_path, capsys):
+    """The fixture's bars are dated 2023 but the rows are chained now, so
+    every row is visibly a backfill rather than a forward observation --
+    which is exactly the thing the audit has to be able to say."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    assert f"1 row(s) chained more than {BACKFILL_LAG_DAYS}d after their bar" in out
+
+
+def test_a_complete_record_reports_no_gaps(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    for d in ("2023-01-22", "2023-01-23"):
+        quarantine_run(argv_for(reg, data, "--date", d))
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    assert "unrecorded bar dates in window: 0" in capsys.readouterr().out
+
+
+def test_registry_refuses_a_duplicate_even_without_the_seen_prefilter(tmp_path):
+    """run()'s `seen` set is a per-process pre-filter and cannot see a
+    concurrent writer. The de-duplication that matters lives under the lock."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    row = dict(decisions(reg)[0])
+    with pytest.raises(ValueError, match="already chained"):
+        reg.record_quarantine_decision(row)
+    assert len(decisions(reg)) == 1
+
+
+@pytest.mark.parametrize("bad", [
+    {"action": "sell"}, {"action": None}, {"action": {}},
+    {"date": "2023-1-22"}, {"date": 20230122}, {"price": "111"},
+    {"price": True}, {"position_frac": None}, {"equity": float("nan")},
+    {"equity": float("inf")}, {"asset": ""},
+])
+def test_registry_rejects_meaningless_decision_values(tmp_path, bad):
+    reg, spec, data = quarantined(tmp_path)
+    row = {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+           "asset": "BTCUSD", "action": "hold", "price": 100.0,
+           "position_frac": 0.0, "equity": 1.0}
+    row.update(bad)
+    with pytest.raises(ValueError):
+        reg.record_quarantine_decision(row)
+    assert decisions(reg) == []
+
+
+def test_append_still_takes_the_lock_for_every_other_writer(tmp_path):
+    """append() was split so record_quarantine_decision could hold the lock
+    across check-then-append. Its public behaviour must not have moved."""
+    reg = Registry(tmp_path / "r.jsonl")
+    e = reg.append("note", {"text": "x"}, ts_utc="2023-01-01T00:00:00Z")
+    assert e == {"version": 1, "ts_utc": "2023-01-01T00:00:00Z",
+                 "entry_type": "note", "prev_entry_hash": "0" * 64,
+                 "payload": {"text": "x"}}
+    assert not (tmp_path / "r.jsonl.lock").exists()   # released
+    assert [x["payload"] for x in reg.entries()] == [{"text": "x"}]
+
+
+# ---- multi-asset and multi-day invariants ----
+
+def test_two_asset_universe_writes_one_row_per_asset(tmp_path, capsys):
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    rows = decisions(reg)
+    assert len(rows) == 2
+    assert {r["asset"] for r in rows} == {"BTCUSD", "ETHUSD"}
+    assert all(r["date"] == "2023-01-22" for r in rows)
+    by_asset = {r["asset"]: r for r in rows}
+    assert by_asset["BTCUSD"]["action"] == "enter_long"
+    assert by_asset["ETHUSD"]["action"] == "hold"
+    # a date counts once towards the minimum, not once per asset
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    assert f"days 1/{MIN_TRADING_DAYS}" in capsys.readouterr().out
+
+
+def test_strategy_that_never_trades_records_flat_holds(tmp_path):
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars())
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    r = decisions(reg)[-1]
+    assert r["action"] == "hold"
+    assert r["position_frac"] == pytest.approx(0.0)
+    assert r["equity"] == pytest.approx(1.0)
+
+
+def test_partial_write_is_announced_and_recovers_on_rerun(tmp_path, capsys,
+                                                          monkeypatch):
+    """The module's own crash promise: what landed stays, and re-running the
+    date completes it rather than duplicating it."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    real = Registry.record_quarantine_decision
+    calls = []
+
+    def flaky(self, payload):
+        calls.append(payload)
+        if len(calls) == 2:
+            raise RuntimeError("chain write blew up")
+        return real(self, payload)
+
+    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
+    with pytest.raises(RuntimeError):
+        quarantine_run(argv)
+    assert "PARTIAL WRITE: 1 decision(s) chained" in capsys.readouterr().err
+    assert len(decisions(reg)) == 1
+
+    monkeypatch.undo()
+    assert quarantine_run(argv) == 0
+    rows = decisions(reg)
+    assert len(rows) == 2
+    assert {r["asset"] for r in rows} == {"BTCUSD", "ETHUSD"}
+    assert "1 already present" in capsys.readouterr().out
+
+
+def test_out_of_order_backfill_matches_forward_order(tmp_path):
+    """Recording 01-23 then 01-22 must produce exactly the rows that
+    recording them in order would, because each day recomputes from bar 0."""
+    dates = ["2023-01-22", "2023-01-23"]
+    produced = {}
+    for name, order in (("fwd", dates), ("bwd", list(reversed(dates)))):
+        root = tmp_path / name
+        root.mkdir()
+        reg, spec, data = quarantined(root)
+        for d in order:
+            assert quarantine_run(argv_for(reg, data, "--date", d)) == 0
+        produced[name] = {(r["date"], r["asset"]): r for r in decisions(reg)}
+    assert produced["fwd"] == produced["bwd"]
+    assert len(produced["fwd"]) == 2
+
+
+def test_a_gap_in_an_unrelated_asset_does_not_refuse_everyone(tmp_path, capsys):
+    """The asset union is built from the strategies actually owed a decision,
+    so a strategy still before its entry date cannot block the others."""
+    reg, spec, data = quarantined(tmp_path)
+    later = json.loads(json.dumps(spec))
+    later["universe"] = dict(later["universe"], assets=["NOSUCHUSD"])
+    later["strategy_id"] = None
+    later["strategy_id"] = content_id(later, "strategy_id")
+    reg.register_strategy(later)
+    reg.record_state_change(later["strategy_id"], "screened", "test")
+    reg.record_state_change(later["strategy_id"], "gauntlet", None)
+    reg.record_state_change(later["strategy_id"], "quarantine", "test",
+                            ts_utc="2023-06-01T00:00:00Z")
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    rows = decisions(reg)
+    assert len(rows) == 1
+    assert rows[0]["strategy_id"] == spec["strategy_id"]
+    assert "not after its quarantine entry" in capsys.readouterr().out

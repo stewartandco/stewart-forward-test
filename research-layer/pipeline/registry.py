@@ -6,6 +6,7 @@ the last line of the log. Verification is verify_registry.py's job.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -20,10 +21,71 @@ VALID_TRANSITIONS = {
     "live":       {"retired", "graveyard"},
 }
 
-# exact payload shape of a quarantine_decision entry (one paper-trading day
-# per asset); verify_registry.py enforces the same set on the chain
+# Exact payload shape of a quarantine_decision entry (one paper-trading day
+# per asset), and the closed action vocabulary, which is defined nowhere else
+# in the codebase.
+#
+# NOTE: verify_registry.py does NOT yet know this entry type, so nothing
+# re-checks these invariants when the chain is walked. Until it does, the
+# writer below is the ONLY enforcement and a bad row that gets past it is
+# permanent.
 QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
                             "position_frac", "equity")
+QUARANTINE_ACTIONS = frozenset({"enter_long", "enter_short", "exit", "hold"})
+
+
+def parse_iso_date(value: object, field: str = "date") -> datetime:
+    """Strict YYYY-MM-DD.
+
+    strptime alone is NOT strict enough: it accepts '2023-1-22' for
+    '%Y-%m-%d', so the round trip is what actually pins the format.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{field} must be a YYYY-MM-DD string, got {type(value).__name__}")
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{field} {value!r} is not a valid date: {exc}") from exc
+    if dt.strftime("%Y-%m-%d") != value:
+        raise ValueError(f"{field} {value!r} is not zero-padded YYYY-MM-DD")
+    return dt
+
+
+def validated_quarantine_decision(payload: dict) -> dict:
+    """The payload shape guard, split out so it can be exercised alone.
+
+    Values matter as much as keys here: canonical_json serializes with
+    default=str and allow_nan, so a stray object would be silently stringified
+    and a NaN would be written as bare `NaN`, which is not valid strict JSON.
+    """
+    missing = [k for k in QUARANTINE_DECISION_KEYS if k not in payload]
+    if missing:
+        raise ValueError(f"quarantine decision missing {missing}")
+    extra = sorted(set(payload) - set(QUARANTINE_DECISION_KEYS))
+    if extra:
+        raise ValueError(f"quarantine decision has unknown keys {extra}")
+    for k in ("strategy_id", "asset"):
+        if not isinstance(payload[k], str) or not payload[k]:
+            raise ValueError(f"quarantine decision {k} must be a non-empty string")
+    # isinstance first: an unhashable action would make `in` raise TypeError
+    # out of a validator whose whole contract is to raise ValueError
+    if (not isinstance(payload["action"], str)
+            or payload["action"] not in QUARANTINE_ACTIONS):
+        raise ValueError(
+            f"quarantine decision action {payload['action']!r} is not one of "
+            f"{sorted(QUARANTINE_ACTIONS)}")
+    parse_iso_date(payload["date"], "quarantine decision date")
+    for k in ("price", "position_frac", "equity"):
+        v = payload[k]
+        # bool is an int subclass, so it would otherwise pass as a number
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(
+                f"quarantine decision {k} must be a number, got "
+                f"{type(v).__name__}")
+        if not math.isfinite(v):
+            raise ValueError(f"quarantine decision {k} must be finite, got {v!r}")
+    return dict(payload)
 
 
 def _now_utc() -> str:
@@ -53,15 +115,27 @@ class Registry:
         # Cross-process lock spans the head-read AND the write: two writers
         # that read the same head would fork the chain (bit twice 2026-08-14).
         with FileLock(self.log_path):
-            entry = {
-                "version": 1,
-                "ts_utc": ts_utc or _now_utc(),
-                "entry_type": entry_type,
-                "prev_entry_hash": self._head_hash(),
-                "payload": payload,
-            }
-            with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(canonical_json(entry) + "\n")
+            return self._append_locked(entry_type, payload, ts_utc)
+
+    def _append_locked(self, entry_type: str, payload: dict,
+                       ts_utc: str | None = None) -> dict:
+        """The append body, WITHOUT taking the lock.
+
+        The caller must already hold FileLock(self.log_path). FileLock is not
+        reentrant — a nested acquire blocks until it times out — so a writer
+        that needs to read-then-append atomically (see
+        record_quarantine_decision) must take the lock once and come through
+        here, never through append().
+        """
+        entry = {
+            "version": 1,
+            "ts_utc": ts_utc or _now_utc(),
+            "entry_type": entry_type,
+            "prev_entry_hash": self._head_hash(),
+            "payload": payload,
+        }
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(canonical_json(entry) + "\n")
         return entry
 
     # -- reads -------------------------------------------------------------
@@ -179,16 +253,34 @@ class Registry:
         })
 
     def record_quarantine_decision(self, payload: dict) -> dict:
-        """One paper-trading decision. Guarded so a strategy that is not in
-        quarantine can never accrue a forward record — the same invariant
-        verify_registry.py enforces on the chain."""
-        missing = [k for k in QUARANTINE_DECISION_KEYS if k not in payload]
-        if missing:
-            raise ValueError(f"quarantine decision missing {missing}")
-        extra = sorted(set(payload) - set(QUARANTINE_DECISION_KEYS))
-        if extra:
-            raise ValueError(f"quarantine decision has unknown keys {extra}")
-        sid = payload["strategy_id"]
-        if self.strategy_states().get(sid) != "quarantine":
-            raise ValueError(f"strategy {sid!r} is not in quarantine")
-        return self.append("quarantine_decision", dict(payload))
+        """One paper-trading decision, validated and de-duplicated atomically.
+
+        Two guards, both of which must hold at write time rather than at
+        check time:
+
+        * the strategy must be in quarantine, so nothing else can accrue a
+          forward record;
+        * (strategy_id, date, asset) must not already be chained. A caller's
+          in-process `seen` set cannot stop a second process — a scheduler
+          retry overlapping the daily job — from chaining the same day twice,
+          and the chain would still verify as valid.
+
+        Both therefore run inside the same lock as the append. FileLock is not
+        reentrant, so the body uses _append_locked.
+        """
+        row = validated_quarantine_decision(payload)
+        key = (row["strategy_id"], row["date"], row["asset"])
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.log_path):
+            if self.strategy_states().get(row["strategy_id"]) != "quarantine":
+                raise ValueError(
+                    f"strategy {row['strategy_id']!r} is not in quarantine")
+            for e in self.entries():
+                if e["entry_type"] != "quarantine_decision":
+                    continue
+                p = e["payload"]
+                if (p["strategy_id"], p["date"], p["asset"]) == key:
+                    raise ValueError(
+                        "quarantine decision already chained for "
+                        f"{key[0]} {key[1]} {key[2]}")
+            return self._append_locked("quarantine_decision", row)
