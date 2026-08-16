@@ -10,6 +10,14 @@ invariants:
   4. strategy_registered payloads carry no results fields
   5. lifecycle transitions follow the state machine
   6. strategy blocks reference previously registered block types
+  7. quarantine_decision entries reference a strategy CURRENTLY in quarantine,
+     and (strategy_id, date, asset) is unique
+  8. no two strategy_registered entries share a composition_fingerprint —
+     rule 7 (a buried composition never returns) verified from the chain
+     itself, not merely trusted to the composer's in-process guard
+  9. quarantine_data_snapshot dates are unique, and every quarantine_decision
+     is covered by an EARLIER snapshot for its date naming its asset — so no
+     forward record exists without the provenance of the bars behind it
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -21,6 +29,14 @@ import json
 import hashlib
 import argparse
 from pathlib import Path
+
+# Invariant 8 needs the SAME fingerprint the composer computes; a second
+# implementation here would be two hashes that must stay byte-identical
+# forever. pipeline/__init__.py is empty and composer.py keeps jsonschema and
+# anthropic function-local, so this pulls in no third-party dependency. The
+# explicit sys.path entry keeps the script runnable from any directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline.composer import composition_fingerprint          # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -64,6 +80,9 @@ def verify(log_path: Path) -> int:
     strategies: set[str] = set()
     state: dict[str, str] = {}
     by_type: dict[str, int] = {}
+    quarantine_seen: set[tuple] = set()
+    fingerprints: dict[str, str] = {}       # composition -> first strategy_id
+    snapshots: dict[str, dict] = {}         # date -> {asset: sha256}
 
     def fail(lineno: int, msg: str) -> None:
         nonlocal n_bad
@@ -133,6 +152,66 @@ def verify(log_path: Path) -> int:
                 leaked = FORBIDDEN_RESULT_KEYS & set(payload.keys())
                 if leaked:
                     fail(lineno, f"strategy {sid}: results fields in spec {sorted(leaked)}"); ok = False
+                # Wrapped because the verifier must report a malformed payload
+                # as malformed rather than crashing the whole walk — the chain
+                # is append-only and a single bad entry must not make the
+                # remaining thousands unverifiable.
+                try:
+                    fp = composition_fingerprint(payload)
+                except Exception as exc:            # malformed spec, not a dupe
+                    fail(lineno, f"strategy {sid}: cannot fingerprint ({exc})")
+                    ok = False
+                else:
+                    if fp in fingerprints:
+                        fail(lineno, f"strategy {sid}: duplicate composition "
+                                     f"already registered as {fingerprints[fp]}")
+                        ok = False
+                    else:
+                        fingerprints[fp] = sid
+
+            elif etype == "quarantine_data_snapshot":
+                d = payload.get("date")
+                digests = payload.get("data_sha256")
+                if not isinstance(digests, dict):
+                    fail(lineno, "quarantine_data_snapshot data_sha256 is not "
+                                 "an {asset: sha256} map")
+                    ok = False
+                    digests = {}
+                if not isinstance(d, str):
+                    fail(lineno, f"quarantine_data_snapshot date {d!r} is not "
+                                 f"a string")
+                    ok = False
+                elif d in snapshots:
+                    fail(lineno, f"duplicate quarantine_data_snapshot for {d}")
+                    ok = False
+                else:
+                    snapshots[d] = digests
+
+            elif etype == "quarantine_decision":
+                sid = payload.get("strategy_id")
+                if sid not in strategies:
+                    fail(lineno, f"quarantine_decision for unregistered "
+                                 f"strategy {sid!r}"); ok = False
+                elif state.get(sid) != "quarantine":
+                    fail(lineno, f"quarantine_decision for strategy {sid} in "
+                                 f"state {state.get(sid)!r}, not 'quarantine'")
+                    ok = False
+                key = (sid, payload.get("date"), payload.get("asset"))
+                if key in quarantine_seen:
+                    fail(lineno, f"duplicate quarantine_decision for {key}")
+                    ok = False
+                else:
+                    quarantine_seen.add(key)
+                # Because the walk is in chain order, `snapshots` holds only
+                # entries that appeared EARLIER, which is what makes "the
+                # provenance was recorded before the decision" checkable
+                # rather than assumed.
+                covered = snapshots.get(payload.get("date"), {})
+                if payload.get("asset") not in covered:
+                    fail(lineno, f"quarantine_decision {key}: no earlier "
+                                 f"quarantine_data_snapshot covers this "
+                                 f"date/asset")
+                    ok = False
 
             elif etype in ("verdict", "state_change"):
                 sid = payload.get("strategy_id")

@@ -32,6 +32,12 @@ Conventions:
   * `equity` is rebased to 1.0 at the last bar on or before the entry date.
   * Idempotent per (strategy_id, date, asset), so a missed day can be
     backfilled without duplicating.
+  * One `quarantine_data_snapshot` per date, chained BEFORE that date's rows,
+    recording the SHA-256 of every price file loaded. Because each day is
+    recomputed from bar 0, the identity of those files is load-bearing:
+    without it a re-fetch would silently change what a reproduction yields
+    for every historical day. Re-running a date whose recorded hashes no
+    longer match the files on disk is REFUSED, not recomputed.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -39,10 +45,12 @@ from __future__ import annotations
 
 import sys
 import json
+import hashlib
 import argparse
 from pathlib import Path
 
-from .registry import Registry, parse_iso_date, DuplicateQuarantineDecision
+from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
+                       DuplicateQuarantineSnapshot)
 from .engine import simulate_asset
 from .screen import load_bars
 
@@ -88,6 +96,48 @@ def existing_decisions(registry: Registry) -> set[tuple[str, str, str]]:
     Registry.record_quarantine_decision, which re-checks under the lock."""
     return {(d["strategy_id"], d["date"], d["asset"])
             for d in decision_entries(registry)}
+
+
+def data_snapshots(registry: Registry) -> dict[str, dict]:
+    """{date: {asset: sha256}} for every snapshot on the chain. A cheap
+    pre-read only; the authoritative uniqueness check is
+    Registry.record_quarantine_snapshot, which re-checks under the lock."""
+    return {e["payload"]["date"]: e["payload"]["data_sha256"]
+            for e in registry.entries()
+            if e["entry_type"] == "quarantine_data_snapshot"}
+
+
+def hash_price_files(data_dir: Path, assets: list[str]) -> dict[str, str]:
+    """SHA-256 of each asset's price CSV, byte for byte, exactly as screen.py
+    and gauntlet.py already record it in their artifact bundles. A third party
+    reproducing a day compares these with a plain `sha256sum` and no bespoke
+    code, which is the whole value of recording them."""
+    return {a: hashlib.sha256(
+        (data_dir / f"{a}_1d.csv").read_bytes()).hexdigest() for a in assets}
+
+
+def snapshot_conflicts(recorded: dict[str, str],
+                       current: dict[str, str]) -> list[str]:
+    """Why `current` cannot be reconciled with the snapshot already chained
+    for that date. Empty means the day may proceed.
+
+    Split out so the comparison is testable without running the whole command
+    -- the check_aligned precedent. A snapshot covering MORE assets than this
+    run needs is not a conflict: a strategy may have been buried since.
+    """
+    reasons = []
+    for asset in sorted(current):
+        if asset not in recorded:
+            reasons.append(
+                f"{asset}: the chained snapshot for this date names no hash "
+                f"for it. The chain is append-only, so the snapshot cannot be "
+                f"amended and a second one would break its uniqueness.")
+        elif recorded[asset] != current[asset]:
+            reasons.append(
+                f"{asset}: the price file changed after this date was "
+                f"recorded (chained {recorded[asset]}, on disk "
+                f"{current[asset]})")
+    return reasons
 
 
 def _rebase_index(bars: list[dict], entered: str, asset: str) -> int:
@@ -390,6 +440,30 @@ def run(argv: list[str] | None = None) -> int:
         if loaded is None:
             return 1
         bars_by_asset = loaded
+
+        # Provenance BEFORE any decision row, because invariant 9 asks for an
+        # EARLIER snapshot: recording the bars afterwards would prove nothing
+        # about what the rows were computed from.
+        digests = hash_price_files(args.data_dir, assets)
+        recorded = data_snapshots(registry).get(args.date)
+        if recorded is None:
+            try:
+                registry.record_quarantine_snapshot(
+                    {"date": args.date, "data_sha256": digests})
+            except DuplicateQuarantineSnapshot as dup:
+                # another process chained this date's provenance between the
+                # read above and this write; reconcile against what landed
+                recorded = dup.chained["data_sha256"]
+        if recorded is not None:
+            conflicts = snapshot_conflicts(recorded, digests)
+            if conflicts:
+                print(f"REFUSED: the quarantine_data_snapshot chained for "
+                      f"{args.date} does not match the price files this run "
+                      f"would use, so re-running the date would not reproduce "
+                      f"the rows already on the chain:", file=sys.stderr)
+                for reason in conflicts:
+                    print(f"  {reason}", file=sys.stderr)
+                return 1
 
     seen = existing_decisions(registry)
     n_written = n_skipped = 0

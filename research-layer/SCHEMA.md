@@ -209,6 +209,24 @@ Rules:
   like SDCA/MRS/MARS/TARS/DHRS. Graduation to live is announced in the
   registry, and the quarantine track record stays public forever.
 
+**Amendment, protocol-v3 (2026-08-16).** The deflated-Sharpe test moved from the
+`gauntlet → quarantine` gate to the `quarantine → live` gate. The threshold
+`DSR ≥ 0.95` is unchanged; only its inputs and its position change. Reason: the
+gauntlet's job is to identify strategies that are robust, positive-EV and slow
+to decay, which its other five gates test directly. DSR answers a different
+question — could a skeptical outsider distinguish this from the luckiest of N
+coin flips — and at N=56 its implied hurdle reached 1.86 annualized Sharpe
+against a best-ever-achieved 1.42, because `sqrt(V[SR])` was measured across our
+own strategies' Sharpes (−1.36 to +1.42). With only the best 30 registered the
+hurdle would have been 0.40: honestly registering failures is what made the gate
+unpassable, and a system that punishes transparency is mis-specified. At
+`quarantine → live` the statistic is computed on the quarantine forward record,
+where real capital is at stake and genuinely fresh evidence exists. The gauntlet
+still computes, records and ranks siblings by DSR — it simply no longer gates
+there. **The lifecycle state machine is unchanged**: no new transitions,
+`graveyard` stays terminal, and no previously buried strategy is revisited by
+any mechanism.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -237,6 +255,8 @@ Common envelope:
 | `strategy_registered` | full strategy spec | composer births a spec — **before any backtest** |
 | `verdict` | `{strategy_id, stage, verdict: "pass"\|"fail", metrics{}, artifacts_hash}` | each gate evaluation |
 | `state_change` | `{strategy_id, from, to, reason?}` | lifecycle transition |
+| `quarantine_decision` | `{strategy_id, date, asset, action, price, position_frac, equity}` | daily quarantine forward runner — one row per strategy per asset per trading day |
+| `quarantine_data_snapshot` | `{date, data_sha256: {asset: hex}}` | once per date, immediately before that date's decision rows — the price files those decisions were computed from |
 | `block_type_registered` | `{role, type, params_schema}` | block grammar grows |
 | `note` | `{text}` | rare human annotations (incidents, corrections) |
 
@@ -245,6 +265,28 @@ Common envelope:
 - `screened`: `{trades, net_pnl, win_rate, max_dd}`
 - `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`
 - `quarantine` (graduation review): `{days, trades, realized_edge_per_trade, projection_percentile}`
+
+A `quarantine_decision` records what a paper-traded strategy's book DID on that
+date's bar and its state at that date's close — entries fill at the open on a
+signal from the previous close, so the row is a record, not an instruction for
+the next day. `action` is one of `hold`, `enter_long`, `enter_short`, `exit`;
+`hold` covers both holding a position opened earlier and staying flat, which
+`position_frac` distinguishes. `price` is that date's **close** — the daily
+mark, NOT the fill price, which for an `exit` row will usually differ; realized
+P&L is carried by `equity`, not by `price`. `position_frac` is the fraction of
+equity committed **at entry** and stays constant for the life of the trade, so
+it is not a live exposure figure. `equity` is rebased to 1.0 at the strategy's
+quarantine-entry date, so a forward record always starts at 1.
+`(strategy_id, date, asset)` is unique and the runner is idempotent, so a
+missed day can be backfilled.
+
+Every `quarantine_decision` must be preceded by a `quarantine_data_snapshot`
+for its date naming its asset. The runner recomputes each strategy's whole book
+from the first bar every day — which is what makes a backfilled row identical
+to a live one — so the identity of the price files is load-bearing: without it,
+a re-fetch or vendor restatement would silently change what a reproduction
+yields for every historical day. Re-running a date whose recorded hashes no
+longer match the files on disk is refused rather than recomputed.
 
 `verdict.artifacts_hash` is the SHA-256 of the full backtest artifact bundle
 (equity curve CSV, trade list, config), stored off-chain; the hash makes the
@@ -265,5 +307,17 @@ bundle tamper-evident without bloating the registry.
 4. No results-bearing fields inside `strategy_registered` payloads.
 5. Lifecycle transitions follow the state machine (no skips, terminal states
    final).
+6. Every block referenced by a `strategy_registered` payload was previously
+   registered via `block_type_registered`.
+7. Every `quarantine_decision` references a strategy **currently** in
+   `quarantine` state, and `(strategy_id, date, asset)` is unique.
+8. No two `strategy_registered` entries share a `composition_fingerprint`.
+   This is rule 7 — a buried composition never returns — verified from the
+   chain itself rather than trusted to the composer's in-process guard. The
+   fingerprint covers universe and blocks only, so a re-registration under a
+   fresh `strategy_id` is caught.
+9. `quarantine_data_snapshot` dates are unique, and every `quarantine_decision`
+   is covered by an **earlier** snapshot for its date naming its asset — no
+   forward record exists without the provenance of the bars behind it.
 
 Run: `python research-layer/verify_registry.py research-layer/examples/registry_log.example.jsonl`

@@ -25,13 +25,19 @@ VALID_TRANSITIONS = {
 # per asset), and the closed action vocabulary, which is defined nowhere else
 # in the codebase.
 #
-# NOTE: verify_registry.py does NOT yet know this entry type, so nothing
-# re-checks these invariants when the chain is walked. Until it does, the
-# writer below is the ONLY enforcement and a bad row that gets past it is
-# permanent.
+# These are belt-and-braces, not the only enforcement: verify_registry.py
+# invariant 7 re-checks the state and the (strategy_id, date, asset) key from
+# the chain itself, so a row that got past this writer is still caught by
+# anyone walking the log.
 QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
                             "position_frac", "equity")
 QUARANTINE_ACTIONS = frozenset({"enter_long", "enter_short", "exit", "hold"})
+
+# The price files a day's decisions were computed from. verify_registry.py
+# invariant 9 re-checks uniqueness on `date` and that every decision has an
+# EARLIER snapshot naming its asset.
+QUARANTINE_SNAPSHOT_KEYS = ("date", "data_sha256")
+HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class DuplicateQuarantineDecision(ValueError):
@@ -41,6 +47,18 @@ class DuplicateQuarantineDecision(ValueError):
     distinguishable on purpose: a routine race (a scheduler retry overlapping
     the daily job) can be absorbed as a no-op, while a malformed payload --
     every other ValueError from this writer -- must stay fatal.
+    """
+
+
+class DuplicateQuarantineSnapshot(ValueError):
+    """A quarantine_data_snapshot for that date is already chained.
+
+    Same shape and same reason as DuplicateQuarantineDecision, but the stakes
+    are higher: two processes that both read "no snapshot for this date yet"
+    would chain two, which invariant 9 rejects -- and the chain is append-only,
+    so that failure could never be repaired. The check therefore runs under the
+    same lock as the append, and `.chained` carries the payload that won so the
+    caller can compare hashes rather than guess.
     """
 
 
@@ -96,6 +114,36 @@ def validated_quarantine_decision(payload: dict) -> dict:
         if not math.isfinite(v):
             raise ValueError(f"quarantine decision {k} must be finite, got {v!r}")
     return dict(payload)
+
+
+def validated_quarantine_snapshot(payload: dict) -> dict:
+    """The shape guard for a data snapshot, split out so it can be exercised
+    alone, exactly like validated_quarantine_decision.
+
+    The digest is checked for 64 LOWERCASE HEX characters, not merely for
+    length: this value is what an auditor compares against their own
+    `sha256sum` of the price file, so anything that is not a digest is a
+    permanent, un-amendable lie about provenance.
+    """
+    missing = [k for k in QUARANTINE_SNAPSHOT_KEYS if k not in payload]
+    if missing:
+        raise ValueError(f"quarantine snapshot missing {missing}")
+    extra = sorted(set(payload) - set(QUARANTINE_SNAPSHOT_KEYS))
+    if extra:
+        raise ValueError(f"quarantine snapshot has unknown keys {extra}")
+    parse_iso_date(payload["date"], "quarantine snapshot date")
+    digests = payload["data_sha256"]
+    if not isinstance(digests, dict) or not digests:
+        raise ValueError("data_sha256 must be a non-empty {asset: hex} map")
+    for asset, hexd in digests.items():
+        # a non-string key would be silently stringified by json.dumps, so
+        # 'BTCUSD' and any other spelling of it must be rejected here
+        if not isinstance(asset, str) or not asset:
+            raise ValueError("data_sha256 asset keys must be non-empty strings")
+        if (not isinstance(hexd, str) or len(hexd) != 64
+                or set(hexd) - HEX_DIGITS):
+            raise ValueError(f"{asset}: sha256 must be 64 lowercase hex chars")
+    return {"date": payload["date"], "data_sha256": dict(digests)}
 
 
 def _now_utc() -> str:
@@ -300,3 +348,30 @@ class Registry:
                     dup.chained = p
                     raise dup
             return self._append_locked("quarantine_decision", row)
+
+    def record_quarantine_snapshot(self, payload: dict) -> dict:
+        """The price files a day's decisions were computed from.
+
+        Chained once per date, before that date's decision rows, so an auditor
+        can tell whether a reproduction used the same bars. The runner
+        recomputes each strategy's whole book from the first bar every day, so
+        a re-fetch or vendor restatement would otherwise silently change what a
+        reproduction yields for every historical day.
+
+        Uniqueness on `date` is checked inside the lock, for the reason spelled
+        out on DuplicateQuarantineSnapshot: unlike a duplicate decision, a
+        duplicate snapshot would leave the public chain permanently invalid.
+        """
+        row = validated_quarantine_snapshot(payload)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.log_path):
+            for e in self.entries():
+                if e["entry_type"] != "quarantine_data_snapshot":
+                    continue
+                if e["payload"]["date"] == row["date"]:
+                    dup = DuplicateQuarantineSnapshot(
+                        "quarantine data snapshot already chained for "
+                        f"{row['date']}")
+                    dup.chained = e["payload"]
+                    raise dup
+            return self._append_locked("quarantine_data_snapshot", row)
