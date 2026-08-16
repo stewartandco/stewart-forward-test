@@ -1119,6 +1119,17 @@ def sha_of(data_dir, asset):
         (data_dir / f"{asset}_1d.csv").read_bytes()).hexdigest()
 
 
+def bars_sha_of(data_dir, asset, date="2023-01-22"):
+    return quarantine_mod.hash_bars_through(data_dir, asset, date)
+
+
+def snap_payload(data_dir, assets, date="2023-01-22"):
+    """A well-formed snapshot for `assets` as they are on disk right now."""
+    return {"date": date,
+            "data_sha256": {a: sha_of(data_dir, a) for a in assets},
+            "bars_sha256": {a: bars_sha_of(data_dir, a, date) for a in assets}}
+
+
 def entry_types(reg):
     return [e["entry_type"] for e in reg.entries()]
 
@@ -1138,16 +1149,13 @@ def test_first_run_chains_one_snapshot_before_the_decision_rows(tmp_path):
     assert types.count("quarantine_data_snapshot") == 1
     assert (types.index("quarantine_data_snapshot")
             < types.index("quarantine_decision"))
-    snap = snapshots(reg)[0]
-    assert snap == {"date": "2023-01-22",
-                    "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}}
+    assert snapshots(reg)[0] == snap_payload(data, ["BTCUSD"])
 
 
 def test_snapshot_covers_every_asset_the_day_loaded(tmp_path):
     reg, spec, data = quarantined_two_asset(tmp_path)
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
-    assert snapshots(reg)[0]["data_sha256"] == {
-        "BTCUSD": sha_of(data, "BTCUSD"), "ETHUSD": sha_of(data, "ETHUSD")}
+    assert snapshots(reg)[0] == snap_payload(data, ["BTCUSD", "ETHUSD"])
 
 
 def test_rerunning_a_date_chains_no_second_snapshot(tmp_path, capsys):
@@ -1172,7 +1180,7 @@ def test_a_restated_price_file_refuses_the_whole_day(tmp_path, capsys):
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
     before = sum(1 for _ in reg.entries())
-    recorded = snapshots(reg)[0]["data_sha256"]["BTCUSD"]
+    recorded = snapshots(reg)[0]["bars_sha256"]["BTCUSD"]
 
     csv_path = data / "BTCUSD_1d.csv"
     lines = csv_path.read_text(encoding="utf-8").splitlines()
@@ -1188,7 +1196,7 @@ def test_a_restated_price_file_refuses_the_whole_day(tmp_path, capsys):
     assert "REFUSED" in err
     assert "BTCUSD" in err
     assert recorded in err                      # names the chained hash
-    assert sha_of(data, "BTCUSD") in err        # and the one on disk now
+    assert bars_sha_of(data, "BTCUSD") in err   # and the recomputed one
     assert sum(1 for _ in reg.entries()) == before      # nothing written
 
 
@@ -1200,8 +1208,7 @@ def test_a_snapshot_that_misses_a_needed_asset_refuses(tmp_path, capsys):
     own quarantine entry, so its assets first appear on a date with no
     snapshot yet."""
     reg, spec, data = quarantined_two_asset(tmp_path)
-    reg.record_quarantine_snapshot(
-        {"date": "2023-01-22", "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
     err = capsys.readouterr().err
@@ -1218,8 +1225,7 @@ def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
     be repaired. The writer's check therefore runs under the same lock as the
     append, and the loser reconciles against what landed."""
     reg, spec, data = quarantined(tmp_path)
-    reg.record_quarantine_snapshot(
-        {"date": "2023-01-22", "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
     # the snapshot lands after this run reads the chain, so the pre-read
     # misses it and the writer's under-lock guard is what fires
     monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
@@ -1235,7 +1241,7 @@ def test_a_conflicting_concurrent_snapshot_refuses(tmp_path, capsys,
     the day is refused rather than recorded against unknown data."""
     reg, spec, data = quarantined(tmp_path)
     reg.record_quarantine_snapshot(
-        {"date": "2023-01-22", "data_sha256": {"BTCUSD": "b" * 64}})
+        dict(snap_payload(data, ["BTCUSD"]), bars_sha256={"BTCUSD": "b" * 64}))
     monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
@@ -1269,20 +1275,33 @@ def test_a_day_with_nobody_eligible_chains_no_snapshot(tmp_path, capsys):
     assert snapshots(reg) == []
 
 
+OK_D = {"BTCUSD": "a" * 64}
+OK_B = {"BTCUSD": "b" * 64}
+
+
 @pytest.mark.parametrize("bad", [
-    {},                                                     # both keys missing
-    {"date": "2023-01-22"},                                 # no digests
-    {"data_sha256": {"BTCUSD": "a" * 64}},                  # no date
-    {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64}, "note": "x"},
-    {"date": "2023-1-22", "data_sha256": {"BTCUSD": "a" * 64}},
-    {"date": 20230122, "data_sha256": {"BTCUSD": "a" * 64}},
-    {"date": "2023-02-30", "data_sha256": {"BTCUSD": "a" * 64}},
-    {"date": "2023-01-22", "data_sha256": {}},
-    {"date": "2023-01-22", "data_sha256": "a" * 64},
-    {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 63}},
-    {"date": "2023-01-22", "data_sha256": {"BTCUSD": "Z" * 64}},
-    {"date": "2023-01-22", "data_sha256": {"BTCUSD": None}},
-    {"date": "2023-01-22", "data_sha256": {"": "a" * 64}},
+    {},                                                     # every key missing
+    {"date": "2023-01-22", "data_sha256": OK_D},            # no bars_sha256
+    {"date": "2023-01-22", "bars_sha256": OK_B},            # no data_sha256
+    {"data_sha256": OK_D, "bars_sha256": OK_B},             # no date
+    {"date": "2023-01-22", "data_sha256": OK_D, "bars_sha256": OK_B,
+     "note": "x"},                                          # unknown key
+    {"date": "2023-1-22", "data_sha256": OK_D, "bars_sha256": OK_B},
+    {"date": 20230122, "data_sha256": OK_D, "bars_sha256": OK_B},
+    {"date": "2023-02-30", "data_sha256": OK_D, "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": {}, "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": OK_D, "bars_sha256": {}},
+    {"date": "2023-01-22", "data_sha256": "a" * 64, "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": OK_D, "bars_sha256": "b" * 64},
+    {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 63},
+     "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": {"BTCUSD": "Z" * 64},
+     "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": {"BTCUSD": None},
+     "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": {"": "a" * 64}, "bars_sha256": OK_B},
+    {"date": "2023-01-22", "data_sha256": OK_D,
+     "bars_sha256": {"ETHUSD": "b" * 64}},          # maps disagree on assets
 ])
 def test_registry_rejects_a_malformed_snapshot(tmp_path, bad):
     reg = Registry(tmp_path / "r.jsonl")
@@ -1293,7 +1312,8 @@ def test_registry_rejects_a_malformed_snapshot(tmp_path, bad):
 
 def test_registry_refuses_a_second_snapshot_for_the_same_date(tmp_path):
     reg = Registry(tmp_path / "r.jsonl")
-    payload = {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64}}
+    payload = {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64},
+               "bars_sha256": {"BTCUSD": "b" * 64}}
     reg.record_quarantine_snapshot(dict(payload))
     with pytest.raises(DuplicateQuarantineSnapshot) as e:
         reg.record_quarantine_snapshot(dict(payload))
@@ -1357,8 +1377,7 @@ def test_verifier_rejects_a_decision_with_no_earlier_snapshot(tmp_path):
                {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
                 "asset": "BTCUSD", "action": "hold", "price": 100.0,
                 "position_frac": 0.0, "equity": 1.0})
-    reg.record_quarantine_snapshot(
-        {"date": "2023-01-22", "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
     out = run_verifier(reg.log_path)
     assert out.returncode == 1
     assert "no earlier quarantine_data_snapshot" in out.stdout
@@ -1366,8 +1385,7 @@ def test_verifier_rejects_a_decision_with_no_earlier_snapshot(tmp_path):
 
 def test_verifier_rejects_a_decision_the_snapshot_does_not_name(tmp_path):
     reg, spec, data = quarantined_two_asset(tmp_path)
-    reg.record_quarantine_snapshot(
-        {"date": "2023-01-22", "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
     reg.append("quarantine_decision",
                {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
                 "asset": "ETHUSD", "action": "hold", "price": 100.0,
@@ -1380,8 +1398,7 @@ def test_verifier_rejects_a_decision_the_snapshot_does_not_name(tmp_path):
 def test_verifier_rejects_duplicate_snapshot_dates(tmp_path):
     reg, spec, data = quarantined(tmp_path)
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
-    reg.append("quarantine_data_snapshot",
-               {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64}})
+    reg.append("quarantine_data_snapshot", snap_payload(data, ["BTCUSD"]))
     out = run_verifier(reg.log_path)
     assert out.returncode == 1
     assert "duplicate quarantine_data_snapshot" in out.stdout
@@ -1392,8 +1409,8 @@ def test_verifier_reports_a_malformed_snapshot_instead_of_crashing(tmp_path):
     remaining thousands unverifiable. The walk continues and still counts
     every entry."""
     reg, spec, data = quarantined(tmp_path)
-    reg.append("quarantine_data_snapshot", {"date": "2023-01-22",
-                                            "data_sha256": 7})
+    reg.append("quarantine_data_snapshot",
+               dict(snap_payload(data, ["BTCUSD"]), data_sha256=7))
     out = run_verifier(reg.log_path)
     assert out.returncode == 1
     assert "data_sha256" in out.stdout
@@ -1439,3 +1456,197 @@ def test_schema_documents_quarantine_decision_and_the_v3_amendment():
     assert "quarantine → live" in text
     assert "composition_fingerprint" in text   # invariant 8 disclosed
     assert "`quarantine_data_snapshot`" in text
+
+
+# ---------------- bars_sha256: the hash that keeps backfill working --------
+
+import subprocess
+
+
+def read_csv_lines(data_dir, asset="BTCUSD"):
+    return (data_dir / f"{asset}_1d.csv").read_text(
+        encoding="utf-8").splitlines()
+
+
+def write_csv_lines(data_dir, lines, asset="BTCUSD", newline="\n"):
+    (data_dir / f"{asset}_1d.csv").write_bytes(
+        newline.join(lines).encode("utf-8") + newline.encode("utf-8"))
+
+
+def test_bars_hash_matches_the_documented_shell_recipe(tmp_path):
+    """The definition is only worth recording if a third party can reproduce
+    it without our code. This IS the recipe from the docstring, done by hand:
+    header + rows dated <= D, LF, one newline per line."""
+    reg, spec, data = quarantined(tmp_path)
+    lines = read_csv_lines(data)
+    kept = [lines[0]] + [l for l in lines[1:] if l.split(",")[0] <= "2023-01-22"]
+    by_hand = hashlib.sha256(
+        ("\n".join(kept) + "\n").encode("utf-8")).hexdigest()
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22") \
+        == by_hand
+    # and it is genuinely a subset: the whole file hashes differently
+    assert by_hand != sha_of(data, "BTCUSD")
+
+
+def test_bars_hash_is_stable_across_a_crlf_round_trip(tmp_path):
+    """This repo produces CRLF working copies, so a hash that moved with the
+    line endings would refuse every day on a fresh clone."""
+    reg, spec, data = quarantined(tmp_path)
+    lines = read_csv_lines(data)
+    write_csv_lines(data, lines, newline="\n")
+    lf = quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22")
+    lf_file = sha_of(data, "BTCUSD")
+    write_csv_lines(data, lines, newline="\r\n")
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22") == lf
+    # the whole-file hash DID move, which is what makes this assertion mean
+    # something rather than restating that nothing changed
+    assert sha_of(data, "BTCUSD") != lf_file
+
+
+def test_bars_hash_ignores_bars_after_the_date(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    before = quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22")
+    lines = read_csv_lines(data)
+    write_csv_lines(data, lines + ["2023-02-01,200,200,200,200,1.0"])
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22") \
+        == before
+    # ... but the later date sees it
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-02-01") \
+        != before
+
+
+def test_appending_a_later_bar_leaves_an_earlier_rerun_alone(tmp_path, capsys):
+    """THE regression this second hash exists for. Task 6 refreshes the data
+    dir before running, so guarding on the whole-file hash would refuse every
+    backfill -- the runner's primary recovery path -- even though load_bars
+    truncates at the cutoff and returns byte-identical bars."""
+    reg, spec, data = quarantined(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    quarantine_run(argv)
+    chained = snapshots(reg)[0]
+
+    write_csv_lines(data, read_csv_lines(data)
+                    + ["2023-02-01,200,200,200,200,1.0"])
+    # the refresh really did change the file, so this is not a no-op test
+    assert sha_of(data, "BTCUSD") != chained["data_sha256"]["BTCUSD"]
+    assert bars_sha_of(data, "BTCUSD") == chained["bars_sha256"]["BTCUSD"]
+
+    capsys.readouterr()
+    assert quarantine_run(argv) == 0
+    assert "1 already present" in capsys.readouterr().out
+    assert len(snapshots(reg)) == 1
+
+
+def test_a_partial_day_still_backfills_after_a_refresh(tmp_path, capsys,
+                                                       monkeypatch):
+    """The same regression at the level it actually bites: a crash leaves one
+    asset unrecorded, the data dir refreshes overnight, and the re-run must
+    complete the day rather than refuse it."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    real = Registry.record_quarantine_decision
+    calls = []
+
+    def flaky(self, payload):
+        calls.append(payload)
+        if len(calls) == 2:
+            raise RuntimeError("chain write blew up")
+        return real(self, payload)
+
+    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
+    with pytest.raises(RuntimeError):
+        quarantine_run(argv)
+    monkeypatch.undo()
+    assert len(decisions(reg)) == 1
+
+    for asset in ("BTCUSD", "ETHUSD"):          # overnight refresh
+        write_csv_lines(data, read_csv_lines(data, asset)
+                        + ["2023-02-01,200,200,200,200,1.0"], asset=asset)
+    capsys.readouterr()
+    assert quarantine_run(argv) == 0
+    assert {r["asset"] for r in decisions(reg)} == {"BTCUSD", "ETHUSD"}
+
+
+def test_restating_a_bar_at_or_before_the_date_still_refuses(tmp_path, capsys):
+    """The other half: the guard must stay a guard. A revision to a bar the
+    chained rows were computed from is exactly what it exists to catch."""
+    reg, spec, data = quarantined(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    quarantine_run(argv)
+    before = sum(1 for _ in reg.entries())
+
+    lines = read_csv_lines(data)
+    i = next(i for i, l in enumerate(lines) if l.startswith("2023-01-21,"))
+    lines[i] = "2023-01-21,100,110,100,109,1.0"
+    write_csv_lines(data, lines)
+
+    capsys.readouterr()
+    assert quarantine_run(argv) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "BTCUSD" in err
+    assert "bars up to this date have changed" in err
+    assert sum(1 for _ in reg.entries()) == before
+
+
+def test_verifier_rejects_a_snapshot_whose_maps_disagree(tmp_path):
+    """An asset hashed only one way is not fully provenanced, so it must not
+    license a decision."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    reg.append("quarantine_data_snapshot",
+               dict(snap_payload(data, ["BTCUSD", "ETHUSD"]),
+                    bars_sha256={"BTCUSD": "b" * 64}))
+    reg.append("quarantine_decision",
+               {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+                "asset": "ETHUSD", "action": "hold", "price": 100.0,
+                "position_frac": 0.0, "equity": 1.0})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "names different assets" in out.stdout
+    assert "no earlier quarantine_data_snapshot" in out.stdout
+
+
+@pytest.mark.parametrize("field,value", [
+    ("strategy_id", ["a"]), ("date", ["2023-01-22"]), ("asset", {"x": 1}),
+    ("date", 20230122), ("asset", None),
+])
+def test_verifier_reports_an_unusable_decision_key_instead_of_crashing(
+        tmp_path, field, value):
+    """Invariants 7 and 9 put (strategy_id, date, asset) in a set and use the
+    date as a dict key, so an unhashable field would raise out of the walk and
+    leave every LATER entry unverified -- the worst failure mode an
+    append-only public chain has."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    row = {"strategy_id": spec["strategy_id"], "date": "2023-01-23",
+           "asset": "BTCUSD", "action": "hold", "price": 100.0,
+           "position_frac": 0.0, "equity": 1.0}
+    row[field] = value
+    reg.append("quarantine_decision", row)
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "must be strings" in out.stdout
+    # the walk continued to the end rather than dying at the bad entry
+    n = sum(1 for _ in reg.entries())
+    assert f"Entries           : {n}" in out.stdout
+    assert "note=" in out.stdout
+
+
+def test_verifier_counts_failing_entries_not_failures(tmp_path):
+    """One entry that trips several invariants is ONE failing entry. Counting
+    problems instead made the summary claim more failures than the log has
+    lines -- '2/27 entries fail' on a 26-entry chain -- which is exactly the
+    kind of arithmetic that undermines 'verify it yourself'."""
+    reg, spec, data = quarantined(tmp_path)
+    # no snapshot on the chain and a duplicated key: two invariants, one row,
+    # chained twice
+    row = {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+           "asset": "BTCUSD", "action": "hold", "price": 100.0,
+           "position_frac": 0.0, "equity": 1.0}
+    reg.append("quarantine_decision", dict(row))
+    reg.append("quarantine_decision", dict(row))
+    out = run_verifier(reg.log_path)
+    n = sum(1 for _ in reg.entries())
+    assert f"Entries           : {n}" in out.stdout
+    assert f"2/{n} entries fail." in out.stdout

@@ -16,8 +16,9 @@ invariants:
      rule 7 (a buried composition never returns) verified from the chain
      itself, not merely trusted to the composer's in-process guard
   9. quarantine_data_snapshot dates are unique, and every quarantine_decision
-     is covered by an EARLIER snapshot for its date naming its asset — so no
-     forward record exists without the provenance of the bars behind it
+     is covered by an EARLIER snapshot for its date naming its asset in both
+     data_sha256 and bars_sha256 — so no forward record exists without the
+     provenance of the bars behind it
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -57,6 +58,11 @@ VALID_TRANSITIONS = {
 }
 TERMINAL_STATES = {"retired", "graveyard"}
 
+# A snapshot hashes each price file two ways; a decision is only provenanced
+# if its asset is named in BOTH. See pipeline/quarantine.py for why the
+# whole-file hash cannot be the one the runner guards on.
+SNAPSHOT_DIGEST_KEYS = ("data_sha256", "bars_sha256")
+
 
 def _canonical_json(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"),
@@ -73,7 +79,11 @@ def verify(log_path: Path) -> int:
         return 2
 
     prev_hash = GENESIS_HASH
-    n_ok = n_bad = 0
+    # entries walked, and entries with at least one problem. NOT a count of
+    # problems: an entry can trip several invariants at once (a decision with
+    # no snapshot AND a duplicate key), and counting those separately used to
+    # report more failures than the log has lines.
+    n_entries = n_bad = 0
     cards: set[str] = set()
     accepted: set[str] = set()
     block_types: set[tuple[str, str]] = set()
@@ -82,22 +92,22 @@ def verify(log_path: Path) -> int:
     by_type: dict[str, int] = {}
     quarantine_seen: set[tuple] = set()
     fingerprints: dict[str, str] = {}       # composition -> first strategy_id
-    snapshots: dict[str, dict] = {}         # date -> {asset: sha256}
+    snapshots: dict[str, set] = {}          # date -> assets fully provenanced
 
     def fail(lineno: int, msg: str) -> None:
-        nonlocal n_bad
         print(f"  line {lineno}: {msg}")
-        n_bad += 1
 
     with log_path.open("r", encoding="utf-8") as f:
         for lineno, raw in enumerate(f, start=1):
             raw = raw.strip()
             if not raw:
                 continue
+            n_entries += 1
             try:
                 entry = json.loads(raw)
             except json.JSONDecodeError as exc:
                 fail(lineno, f"PARSE ERROR — {exc}")
+                n_bad += 1
                 continue
 
             ok = True
@@ -171,12 +181,23 @@ def verify(log_path: Path) -> int:
 
             elif etype == "quarantine_data_snapshot":
                 d = payload.get("date")
-                digests = payload.get("data_sha256")
-                if not isinstance(digests, dict):
-                    fail(lineno, "quarantine_data_snapshot data_sha256 is not "
-                                 "an {asset: sha256} map")
+                named = []
+                for field in SNAPSHOT_DIGEST_KEYS:
+                    m = payload.get(field)
+                    if not isinstance(m, dict):
+                        fail(lineno, f"quarantine_data_snapshot {field} is "
+                                     f"not an {{asset: sha256}} map")
+                        ok = False
+                        m = {}
+                    named.append(set(m))
+                if named[0] != named[1]:
+                    fail(lineno, f"quarantine_data_snapshot names different "
+                                 f"assets in {SNAPSHOT_DIGEST_KEYS[0]} and "
+                                 f"{SNAPSHOT_DIGEST_KEYS[1]}")
                     ok = False
-                    digests = {}
+                # coverage is the INTERSECTION: an asset hashed only one way
+                # is not fully provenanced, so it must not license a decision
+                covered = named[0] & named[1]
                 if not isinstance(d, str):
                     fail(lineno, f"quarantine_data_snapshot date {d!r} is not "
                                  f"a string")
@@ -185,33 +206,45 @@ def verify(log_path: Path) -> int:
                     fail(lineno, f"duplicate quarantine_data_snapshot for {d}")
                     ok = False
                 else:
-                    snapshots[d] = digests
+                    snapshots[d] = covered
 
             elif etype == "quarantine_decision":
                 sid = payload.get("strategy_id")
-                if sid not in strategies:
-                    fail(lineno, f"quarantine_decision for unregistered "
-                                 f"strategy {sid!r}"); ok = False
-                elif state.get(sid) != "quarantine":
-                    fail(lineno, f"quarantine_decision for strategy {sid} in "
-                                 f"state {state.get(sid)!r}, not 'quarantine'")
-                    ok = False
-                key = (sid, payload.get("date"), payload.get("asset"))
-                if key in quarantine_seen:
-                    fail(lineno, f"duplicate quarantine_decision for {key}")
+                date, asset = payload.get("date"), payload.get("asset")
+                # The key goes into a set and the coverage lookup into a dict,
+                # so a non-string field here would raise out of the walk and
+                # leave every LATER entry unverified -- the worst failure mode
+                # an append-only public chain has. Report and move on instead.
+                if not all(isinstance(v, str) for v in (sid, date, asset)):
+                    fail(lineno, f"quarantine_decision strategy_id/date/asset "
+                                 f"must be strings, got "
+                                 f"{type(sid).__name__}/{type(date).__name__}/"
+                                 f"{type(asset).__name__}")
                     ok = False
                 else:
-                    quarantine_seen.add(key)
-                # Because the walk is in chain order, `snapshots` holds only
-                # entries that appeared EARLIER, which is what makes "the
-                # provenance was recorded before the decision" checkable
-                # rather than assumed.
-                covered = snapshots.get(payload.get("date"), {})
-                if payload.get("asset") not in covered:
-                    fail(lineno, f"quarantine_decision {key}: no earlier "
-                                 f"quarantine_data_snapshot covers this "
-                                 f"date/asset")
-                    ok = False
+                    if sid not in strategies:
+                        fail(lineno, f"quarantine_decision for unregistered "
+                                     f"strategy {sid!r}"); ok = False
+                    elif state.get(sid) != "quarantine":
+                        fail(lineno, f"quarantine_decision for strategy {sid} "
+                                     f"in state {state.get(sid)!r}, not "
+                                     f"'quarantine'")
+                        ok = False
+                    key = (sid, date, asset)
+                    if key in quarantine_seen:
+                        fail(lineno, f"duplicate quarantine_decision for {key}")
+                        ok = False
+                    else:
+                        quarantine_seen.add(key)
+                    # Because the walk is in chain order, `snapshots` holds
+                    # only entries that appeared EARLIER, which is what makes
+                    # "the provenance was recorded before the decision"
+                    # checkable rather than assumed.
+                    if asset not in snapshots.get(date, set()):
+                        fail(lineno, f"quarantine_decision {key}: no earlier "
+                                     f"quarantine_data_snapshot covers this "
+                                     f"date/asset")
+                        ok = False
 
             elif etype in ("verdict", "state_change"):
                 sid = payload.get("strategy_id")
@@ -229,12 +262,11 @@ def verify(log_path: Path) -> int:
                     else:
                         state[sid] = to
 
-            if ok:
-                n_ok += 1
+            if not ok:
+                n_bad += 1
 
-    total = n_ok + n_bad
     print()
-    print(f"  Entries           : {total}")
+    print(f"  Entries           : {n_entries}")
     print(f"  By type           : "
           + ", ".join(f"{t}={n}" for t, n in sorted(by_type.items())))
     print(f"  Cards registered  : {len(cards)}")
@@ -246,14 +278,14 @@ def verify(log_path: Path) -> int:
         print(f"  Funnel            : "
               + ", ".join(f"{s}={n}" for s, n in sorted(funnel.items())))
     print()
-    if n_bad == 0 and total > 0:
-        print(f"  REGISTRY VALID — all {total} entries link and satisfy invariants.")
+    if n_bad == 0 and n_entries > 0:
+        print(f"  REGISTRY VALID — all {n_entries} entries link and satisfy invariants.")
         return 0
-    elif total == 0:
+    elif n_entries == 0:
         print("  Empty log.")
         return 1
     else:
-        print(f"  REGISTRY INVALID — {n_bad}/{total} entries fail.")
+        print(f"  REGISTRY INVALID — {n_bad}/{n_entries} entries fail.")
         return 1
 
 

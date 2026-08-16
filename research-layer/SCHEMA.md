@@ -191,8 +191,8 @@ Design notes:
 |---|---|---|
 | `proposed` | Spec registered; no results | automatic → screened when compute is scheduled |
 | `screened` | Fast single pass over training data | net P&L > 0 after costs; ≥ 100 trades; else graveyard. Cheap-first: nothing else runs until this passes |
-| `gauntlet` | Full validation battery | ALL of: (a) OOS walk-forward net positive with **edge decay > −25%** (per-trade edge OOS vs IS); (b) Monte Carlo 2000 resamples, P05 equity > 0; (c) P(ruin @ risk budget) < 5%; (d) **deflated Sharpe** (Bailey & López de Prado) > 0 given sibling_group size; (e) costs at 2× assumed slippage still net positive |
-| `quarantine` | Paper-traded; decisions posted daily to the forward-test log like any production system | ≥ 60 trading days AND realized edge within Monte Carlo P25–P75 cone of the gauntlet projection |
+| `gauntlet` | Full validation battery | ALL of: (a) OOS walk-forward net positive with **edge decay > −25%** (per-trade edge OOS vs IS); (b) Monte Carlo 2000 resamples, P05 equity > 0; (c) P(ruin @ risk budget) < 5%; (d) **deflated Sharpe** (Bailey & López de Prado) > 0 given sibling_group size — *amended by protocol-v3 below: this test moved to the `quarantine → live` gate and no longer gates here*; (e) costs at 2× assumed slippage still net positive |
+| `quarantine` | Paper-traded; decisions posted daily to the forward-test log like any production system | ≥ 60 trading days AND realized edge within Monte Carlo P25–P75 cone of the gauntlet projection — *amended by protocol-v3 below: the cone criterion is not applied at this gate* |
 | `live` | Trading real capital | ongoing: rolling 90-day edge must stay above P05 cone, else auto-retire to graveyard with `reason: live_decay` |
 | `retired` | Deliberately shut down while healthy | terminal |
 | `graveyard` | Failed at any gate | terminal; `buried_at` + machine-readable `reason` required |
@@ -227,6 +227,16 @@ there. **The lifecycle state machine is unchanged**: no new transitions,
 `graveyard` stays terminal, and no previously buried strategy is revisited by
 any mechanism.
 
+The `quarantine → live` cone criterion in the table above is amended with it.
+The stored cone is a terminal-equity distribution over a strategy's **full**
+trade count, so a 60-day forward record producing a handful of trades is not
+comparable to it, and applying it would be unsound. `python -m
+pipeline.quarantine --review` therefore reports days accrued against the
+60-day minimum as its only mechanical criterion, prints the stored cone as
+information, and says in its own output that the two are not comparable. The
+graduation comparison is pre-declared separately, in its own chained note,
+alongside the relocated deflated-Sharpe test at that same gate.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -256,7 +266,7 @@ Common envelope:
 | `verdict` | `{strategy_id, stage, verdict: "pass"\|"fail", metrics{}, artifacts_hash}` | each gate evaluation |
 | `state_change` | `{strategy_id, from, to, reason?}` | lifecycle transition |
 | `quarantine_decision` | `{strategy_id, date, asset, action, price, position_frac, equity}` | daily quarantine forward runner — one row per strategy per asset per trading day |
-| `quarantine_data_snapshot` | `{date, data_sha256: {asset: hex}}` | once per date, immediately before that date's decision rows — the price files those decisions were computed from |
+| `quarantine_data_snapshot` | `{date, data_sha256: {asset: hex}, bars_sha256: {asset: hex}}` | once per date, immediately before that date's decision rows — the price data those decisions were computed from, hashed whole-file and bars-through-that-date |
 | `block_type_registered` | `{role, type, params_schema}` | block grammar grows |
 | `note` | `{text}` | rare human annotations (incidents, corrections) |
 
@@ -283,10 +293,27 @@ missed day can be backfilled.
 Every `quarantine_decision` must be preceded by a `quarantine_data_snapshot`
 for its date naming its asset. The runner recomputes each strategy's whole book
 from the first bar every day — which is what makes a backfilled row identical
-to a live one — so the identity of the price files is load-bearing: without it,
+to a live one — so the identity of the price data is load-bearing: without it,
 a re-fetch or vendor restatement would silently change what a reproduction
-yields for every historical day. Re-running a date whose recorded hashes no
-longer match the files on disk is refused rather than recomputed.
+yields for every historical day.
+
+The snapshot hashes each asset's price file two ways, and the difference
+matters:
+
+- **`data_sha256`** is the SHA-256 of the whole CSV, the same value
+  `screen.py` and `gauntlet.py` record in their artifact bundles. It is an
+  honest record of what the file looked like when the rows were written, and
+  reproduces with a plain `sha256sum`.
+- **`bars_sha256`** covers only the bars those decisions actually used: the
+  header line plus every data row dated ≤ that date, in file order,
+  LF-normalized, one `\n` per line. It reproduces as
+  `{ head -n 1 f.csv; awk -F, 'NR>1 && $1<="D"' f.csv; } | tr -d '\r' | sha256sum`.
+
+**`bars_sha256` is the one the runner guards on.** Re-running a date whose
+`bars_sha256` no longer matches is refused rather than recomputed, because
+those rows could not be reproduced. A refresh that merely appends later bars
+changes `data_sha256` but not `bars_sha256`, and is correctly a non-event —
+which is what keeps a missed day backfillable.
 
 `verdict.artifacts_hash` is the SHA-256 of the full backtest artifact bundle
 (equity curve CSV, trade list, config), stored off-chain; the hash makes the

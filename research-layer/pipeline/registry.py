@@ -33,10 +33,16 @@ QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
                             "position_frac", "equity")
 QUARANTINE_ACTIONS = frozenset({"enter_long", "enter_short", "exit", "hold"})
 
-# The price files a day's decisions were computed from. verify_registry.py
-# invariant 9 re-checks uniqueness on `date` and that every decision has an
-# EARLIER snapshot naming its asset.
-QUARANTINE_SNAPSHOT_KEYS = ("date", "data_sha256")
+# The price data a day's decisions were computed from, hashed two ways:
+# `data_sha256` is the whole file (what screen.py and gauntlet.py record for
+# the same CSVs) and `bars_sha256` covers only the bars up to and including
+# that date. The runner compares bars_sha256, never data_sha256, because
+# appending a later bar changes the file while leaving the earlier date's bars
+# identical -- guarding on the file hash would refuse every backfill.
+# verify_registry.py invariant 9 re-checks uniqueness on `date` and that every
+# decision has an EARLIER snapshot naming its asset in both maps.
+QUARANTINE_SNAPSHOT_KEYS = ("date", "data_sha256", "bars_sha256")
+QUARANTINE_SNAPSHOT_DIGEST_KEYS = ("data_sha256", "bars_sha256")
 HEX_DIGITS = frozenset("0123456789abcdef")
 
 
@@ -116,15 +122,31 @@ def validated_quarantine_decision(payload: dict) -> dict:
     return dict(payload)
 
 
-def validated_quarantine_snapshot(payload: dict) -> dict:
-    """The shape guard for a data snapshot, split out so it can be exercised
-    alone, exactly like validated_quarantine_decision.
+def _validated_digest_map(value: object, field: str) -> dict[str, str]:
+    """A non-empty {asset: sha256} map.
 
     The digest is checked for 64 LOWERCASE HEX characters, not merely for
     length: this value is what an auditor compares against their own
-    `sha256sum` of the price file, so anything that is not a digest is a
-    permanent, un-amendable lie about provenance.
+    `sha256sum`, so anything that is not a digest is a permanent,
+    un-amendable lie about provenance.
     """
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{field} must be a non-empty {{asset: hex}} map")
+    for asset, hexd in value.items():
+        # a non-string key would be silently stringified by json.dumps, so
+        # 'BTCUSD' and any other spelling of it must be rejected here
+        if not isinstance(asset, str) or not asset:
+            raise ValueError(f"{field} asset keys must be non-empty strings")
+        if (not isinstance(hexd, str) or len(hexd) != 64
+                or set(hexd) - HEX_DIGITS):
+            raise ValueError(
+                f"{field} {asset}: sha256 must be 64 lowercase hex chars")
+    return dict(value)
+
+
+def validated_quarantine_snapshot(payload: dict) -> dict:
+    """The shape guard for a data snapshot, split out so it can be exercised
+    alone, exactly like validated_quarantine_decision."""
     missing = [k for k in QUARANTINE_SNAPSHOT_KEYS if k not in payload]
     if missing:
         raise ValueError(f"quarantine snapshot missing {missing}")
@@ -132,18 +154,15 @@ def validated_quarantine_snapshot(payload: dict) -> dict:
     if extra:
         raise ValueError(f"quarantine snapshot has unknown keys {extra}")
     parse_iso_date(payload["date"], "quarantine snapshot date")
-    digests = payload["data_sha256"]
-    if not isinstance(digests, dict) or not digests:
-        raise ValueError("data_sha256 must be a non-empty {asset: hex} map")
-    for asset, hexd in digests.items():
-        # a non-string key would be silently stringified by json.dumps, so
-        # 'BTCUSD' and any other spelling of it must be rejected here
-        if not isinstance(asset, str) or not asset:
-            raise ValueError("data_sha256 asset keys must be non-empty strings")
-        if (not isinstance(hexd, str) or len(hexd) != 64
-                or set(hexd) - HEX_DIGITS):
-            raise ValueError(f"{asset}: sha256 must be 64 lowercase hex chars")
-    return {"date": payload["date"], "data_sha256": dict(digests)}
+    maps = {k: _validated_digest_map(payload[k], k)
+            for k in QUARANTINE_SNAPSHOT_DIGEST_KEYS}
+    # the two maps describe the SAME set of price files two ways; if they
+    # disagree on which assets exist, neither can be trusted as provenance
+    if set(maps["data_sha256"]) != set(maps["bars_sha256"]):
+        raise ValueError(
+            "data_sha256 and bars_sha256 must name the same assets, got "
+            f"{sorted(maps['data_sha256'])} and {sorted(maps['bars_sha256'])}")
+    return {"date": payload["date"], **maps}
 
 
 def _now_utc() -> str:
