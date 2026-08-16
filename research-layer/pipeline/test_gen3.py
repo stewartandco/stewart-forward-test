@@ -143,6 +143,35 @@ def test_tie_break_is_deterministic_and_lexicographic():
     assert first == (frozenset({ids[0]}), frozenset({ids[1]}))
 
 
+def test_tie_break_is_canonical_in_later_rounds():
+    """A tie AFTER a merge must resolve by smallest member id, not by list
+    position: the merged cluster is appended to the end of the working list,
+    so position stops tracking id order from round 2 onward."""
+    a, b, c, d, e = (ch * 16 for ch in "abcde")
+    ids = [a, b, c, d, e]
+    D = {}
+    for i in ids:
+        D[(i, i)] = 0.0
+
+    def put(x, y, v):
+        D[(x, y)] = v
+        D[(y, x)] = v
+
+    put(a, b, 0.10)                      # merges in round 1
+    put(c, d, 0.41)                      # ties with {a,b} vs {e} in round 2
+    put(a, e, 0.41)
+    put(b, e, 0.41)                      # average linkage {a,b}-{e} = 0.41
+    for x, y in ((a, c), (a, d), (b, c), (b, d), (c, e), (d, e)):
+        put(x, y, 0.90)
+
+    hist = agglomerate(ids, D)
+    second = hist[1]
+    # the winning pair must be the one containing the globally smallest id
+    assert min(min(x) for x in second) == a
+    for _ in range(5):
+        assert agglomerate(ids, D)[1] == second
+
+
 def test_silhouette_singleton_scores_zero():
     ids = ["a" * 16, "b" * 16]
     series = {ids[0]: [0.01, -0.02, 0.03], ids[1]: [-0.01, 0.03, -0.02]}
