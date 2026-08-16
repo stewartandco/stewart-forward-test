@@ -638,6 +638,30 @@ def test_html_listing_filters_to_plausible_articles_and_caps():
                    for u in urls)
 
 
+def test_article_filter_rejects_date_archives_and_listing_variants():
+    """Real URLs that survived the first filter and cost ~$7.85 to screen as
+    'Date-range archive title with no content' (08-16 checkpoint)."""
+    from .feeds import article_links
+    base = "https://blog.example/"
+    junk = [
+        "/2013_09_22_archive.html",          # blogspot date archive
+        "/2016_05_01_archive.html",
+        "/archives/2019/03",                 # dated archive index
+        "/2019/03/",                         # bare year/month
+        "/2019/",                            # bare year
+        "/weblog/2008/09/index.html",        # typepad archive index
+        "/?m=1",                             # mobile duplicate of the listing
+        "/posts/real-article?m=1",           # mobile duplicate of an article
+        "/?updated-max=2019-03-01T00:00:00",  # blogspot pagination
+        "/search/label/momentum",            # label listing
+        "/author/admin-2/",                  # author listing
+    ]
+    keep = ["/2019/03/actual-post-title.html", "/posts/volatility-parity-sizing"]
+    html = "".join(f'<a href="{u}">x</a>' for u in junk + keep)
+    urls = [u for u, _ in article_links(html, base, cap=50)]
+    assert sorted(urls) == sorted(base.rstrip("/") + k for k in keep)
+
+
 def test_poll_source_html_mode_uses_article_filter(tmp_path):
     src = make_source(feed=None, url="https://blog.example/")
     html = ("<html><body><a href='/nav'>Nav</a>"

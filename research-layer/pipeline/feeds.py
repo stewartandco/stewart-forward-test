@@ -132,6 +132,19 @@ NON_ARTICLE_PATTERNS = (
     "/signup", "/cart", "/shop", "/product", "?share=", "?replytocom=",
 )
 
+# Date archives, archive indexes and listing-pagination variants. These pass a
+# naive slug check (2013_09_22_archive.html looks like a slug) and were the
+# single biggest screening cost leak at the 2026-08-16 checkpoint.
+ARCHIVE_PATTERNS = (
+    re.compile(r"_archives?\.html?$", re.I),            # /2013_09_22_archive.html
+    re.compile(r"/archives?/\d{4}", re.I),              # /archives/2019/03
+    re.compile(r"^/(?:\d{4})(?:/\d{1,2}){0,2}/?$"),     # /2019, /2019/03, /2019/03/01
+    re.compile(r"/\d{4}/\d{1,2}/index\.html?$", re.I),  # typepad /2008/09/index.html
+)
+# Query keys that produce duplicate views of a page we already have.
+DUPLICATE_QUERY_KEYS = ("m", "updated-max", "updated-min", "max-results",
+                        "widgettype", "action", "print", "amp")
+
 
 def discover_feed(html_text: str, base_url: str) -> str | None:
     """Find a page's declared RSS/Atom feed (<link rel=alternate ...>)."""
@@ -148,19 +161,25 @@ def article_links(html_text: str, base_url: str,
 
     HTML-diff mode without this treats every nav/sidebar/archive link as an
     item - the 2026-08-15 link-soup incident (600+ 'items' from one blog)."""
-    from urllib.parse import urlsplit
+    from urllib.parse import urlsplit, parse_qsl
     base_host = urlsplit(base_url).netloc.lower().removeprefix("www.")
     out = []
     for url, text in extract_links(html_text, base_url):
         parts = urlsplit(url)
         if parts.netloc.lower().removeprefix("www.") != base_host:
             continue
-        path = parts.path.rstrip("/")
+        raw_path = parts.path
+        path = raw_path.rstrip("/")
         if not path or path.count("/") < 1:       # site root / bare sections
             continue
         lowered = url.lower()
         if any(p in lowered for p in NON_ARTICLE_PATTERNS):
             continue
+        if any(rx.search(raw_path) for rx in ARCHIVE_PATTERNS):
+            continue                              # date archive / archive index
+        if any(k.lower() in DUPLICATE_QUERY_KEYS
+               for k, _ in parse_qsl(parts.query)):
+            continue                              # duplicate view of a page
         if len(path.rsplit("/", 1)[-1]) < 6:      # /nav, /x - not a slug
             continue
         out.append((url, text))
