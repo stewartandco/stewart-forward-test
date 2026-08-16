@@ -21,7 +21,7 @@ import sys
 import time
 import argparse
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 from .watchlist import (load_watchlist, pollable, queue_discovery,
@@ -76,21 +76,35 @@ def poll_source(source: dict, seen: SeenStore, fetch=fetch_url) -> list[dict]:
     return fresh
 
 
+RESUME_STATUSES = ("deferred_screen", "deferred_budget", "seen")
+RESUME_STALE_MINUTES = 20
+
+
 def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
-                        statuses=("deferred_screen", "deferred_budget")) -> list[dict]:
-    """Deferred items still worth retrying. Items that have been deferred
-    max_attempts times are PARKED so a persistent failure cannot spin the
-    loop forever (2026-08-15: 105k decisions / 100MB logs in two hours)."""
+                        statuses=RESUME_STATUSES,
+                        stale_minutes: int = RESUME_STALE_MINUTES) -> list[dict]:
+    """Items owed another pass: deferred retries, plus 'seen' items a crash or
+    restart stranded between polling and screening (2026-08-15: 2,002 items
+    orphaned - poll_source records 'seen' first, and dedup then blocks
+    re-polling forever). 'seen' items are only resumed once they are older
+    than stale_minutes so the current cycle's own items aren't double-fed.
+    max_attempts parks persistent failures so nothing can spin the loop."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     out = []
     for status in statuses:
         for iid, event in list(seen.items_with_status(status).items()):
             if not event.get("link"):
                 continue
+            if status == "seen":
+                touched = datetime.strptime(event["ts_utc"], "%Y-%m-%dT%H:%M:%SZ") \
+                    .replace(tzinfo=timezone.utc)
+                if touched > cutoff:
+                    continue  # in flight in this cycle
             attempts = sum(1 for e in seen.events_for(iid)
                            if e["status"] in statuses)
             if attempts >= max_attempts:
                 seen.record(iid, event["source_id"], "deferred_parked",
-                            reason=f"parked after {attempts} deferrals")
+                            reason=f"parked after {attempts} attempts")
                 continue
             out.append({"source_id": event["source_id"], "item_id": iid,
                         "title": event.get("title") or "",
@@ -526,9 +540,12 @@ def run(argv: list[str] | None = None) -> int:
             for s in due:
                 new_items.extend(poll_source(s, seen))
                 next_due[s["id"]] = now + s["poll_minutes"] * 60
-            # re-feed deferred items, retry-capped (parks persistent failures)
+            # re-feed deferred + restart-orphaned items, retry-capped;
+            # dedupe so this cycle's fresh polls are never fed twice
             if meter.can_spend():
-                new_items.extend(refeedable_deferred(seen))
+                fresh_ids = {i["item_id"] for i in new_items}
+                new_items.extend(i for i in refeedable_deferred(seen)
+                                 if i["item_id"] not in fresh_ids)
             try:
                 if new_items:
                     stats = process_new_items(

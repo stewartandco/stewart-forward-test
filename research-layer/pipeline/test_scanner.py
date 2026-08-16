@@ -580,6 +580,36 @@ def test_deferred_items_park_after_retry_cap(tmp_path):
     assert seen.status("a") == "deferred_parked"
 
 
+def test_orphaned_seen_items_resume_after_restart(tmp_path):
+    """poll_source marks items 'seen' BEFORE screening; a restart in between
+    stranded them forever (2,002 items on 08-15) - dedup blocked re-polling
+    and only deferred_* was re-fed."""
+    from .scanner import refeedable_deferred
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    old = _iso(_now() - timedelta(hours=2))
+    seen.record("stranded", "s1", "seen", title="T", link="https://x/1",
+                ts_utc=old)
+    seen.record("this-cycle", "s1", "seen", title="T", link="https://x/2")
+    seen.record("done", "s1", "seen", title="T", link="https://x/3", ts_utc=old)
+    seen.record("done", "s1", "screen_kill", reason="spam")
+    got = refeedable_deferred(seen)
+    ids = [i["item_id"] for i in got]
+    assert "stranded" in ids          # resumed
+    assert "this-cycle" not in ids    # still being processed right now
+    assert "done" not in ids          # already decided
+
+
+def test_resume_respects_the_retry_cap(tmp_path):
+    from .scanner import refeedable_deferred
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    old = _iso(_now() - timedelta(hours=2))
+    for _ in range(3):
+        seen.record("cursed", "s1", "seen", title="T", link="https://x/c",
+                    ts_utc=old)
+    assert refeedable_deferred(seen) == []
+    assert seen.status("cursed") == "deferred_parked"
+
+
 def test_feed_autodiscovery_from_listing_html():
     from .feeds import discover_feed
     html = ('<html><head><link rel="alternate" type="application/rss+xml" '
