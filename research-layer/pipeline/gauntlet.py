@@ -153,16 +153,22 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   "p75": percentile(mc["terminals"], 0.75),
                   "p_ruin": mc["p_ruin"], "ruin_level": RUIN_LEVEL}
 
-    # FAIL_ORDER drives the sequence rather than merely documenting it: a gate
-    # added to `checks` but not declared in FAIL_ORDER is never evaluated, and
-    # one declared but not computed raises KeyError here, so the constant and
-    # the battery cannot silently drift apart. Every value is an
-    # already-computed scalar, so eager evaluation has no cost or side effect.
+    # FAIL_ORDER drives the sequence rather than merely documenting it. Both
+    # drift directions are closed, and only one of them fails loudly on its
+    # own: a gate declared but not computed raises KeyError below, but a gate
+    # computed and NOT declared would simply never be evaluated - silently
+    # fail-open, the dangerous direction - so the assertion catches it. Every
+    # value is an already-computed scalar, so eager evaluation has no cost or
+    # side effect.
     checks = {"oos_negative": oos_net > 0,
               "edge_decay": decay is not None and decay > DECAY_MIN_PCT,
               "mc_p05": mc_p05 > MC_P05_MIN,
               "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
               "cost_stress": stress_net > 0}
+    assert checks.keys() == set(FAIL_ORDER), (
+        f"gate battery and FAIL_ORDER disagree: "
+        f"computed-not-declared={sorted(checks.keys() - set(FAIL_ORDER))}, "
+        f"declared-not-computed={sorted(set(FAIL_ORDER) - checks.keys())}")
     for name in FAIL_ORDER:
         if not checks[name]:
             return False, name, metrics, mc_summary
@@ -314,7 +320,6 @@ def run(argv: list[str] | None = None) -> int:
     # trials. A sibling sweep is one idea at several settings, and pooling
     # structurally different families put real edge dispersion into a term
     # meant to hold sampling noise.
-    #
     check_aligned(returns_by_id)
     trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
     print(f"effective trials: {trials_n} clusters over {registered_n} "
