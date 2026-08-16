@@ -16,9 +16,14 @@ D27's honest-provenance rule).
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
+from pathlib import Path
+
+from .registry import Registry
+from .triage import apply_decisions
 
 REVIEWER = "auto-d31"
 PANEL_SIZE = 3
@@ -177,3 +182,63 @@ def build_decisions(client, model: str, pending: dict[str, dict],
         },
         "stopped": stopped,
     }
+
+
+def _client_and_meter():
+    """Real client and budget meter. Split out so tests can stub it."""
+    import anthropic
+
+    from .budget import BudgetMeter
+    logs = Path(__file__).resolve().parent.parent / "logs"
+    return anthropic.Anthropic(), BudgetMeter(logs / "budget_ledger.jsonl")
+
+
+def run(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--registry", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "registry_log.jsonl")
+    ap.add_argument("--model", default="claude-sonnet-5")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="review at most N pending cards (cost control)")
+    ap.add_argument("--apply", action="store_true",
+                    help="CHAIN the decisions. Without this it is a dry run "
+                         "that writes nothing (D29: activation is gated).")
+    args = ap.parse_args(argv)
+
+    registry = Registry(args.registry)
+    all_cards = registry.cards()
+    pending = {cid: c for cid, c in registry.cards(status="pending").items()}
+    accepted = {cid: c for cid, c in all_cards.items()
+                if (c.get("review") or {}).get("status") == "accepted"}
+    if args.limit:
+        pending = dict(list(pending.items())[:args.limit])
+    if not pending:
+        print("No pending cards.")
+        return 0
+
+    client, meter = _client_and_meter()
+    out = build_decisions(client, args.model, pending, accepted, meter)
+
+    c = out["counts"]
+    print(f"{len(pending)} pending -> {c['accepted']} auto-accepted, "
+          f"{c['duplicate']} duplicate, {c['escalated']} escalated to Coen")
+    if out["stopped"]:
+        print(f"STOPPED EARLY: {out['stopped']}")
+    for cid, reason in sorted(out["escalated"].items()):
+        print(f"  escalated {cid}: {reason}")
+
+    if not args.apply:
+        print("\nDRY RUN - nothing chained. Re-run with --apply to write.")
+        return 0
+
+    apply_decisions(registry, out["decisions"], REVIEWER)
+    print(f"{len(out['decisions'])} card_reviewed entries chained as {REVIEWER}.")
+    return 0
+
+
+def main():
+    raise SystemExit(run())
+
+
+if __name__ == "__main__":
+    main()

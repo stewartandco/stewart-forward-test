@@ -193,3 +193,55 @@ def test_a_capped_meter_stops_the_run_without_deciding(monkeypatch):
                              {}, _Capped())
     assert out["decisions"] == {}
     assert out["stopped"] == "budget"
+
+
+# ---------------- CLI: dry run is the default ----------------
+
+import json as _json
+from pathlib import Path
+
+from pipeline.registry import Registry
+
+
+def _seed(tmp_path):
+    """A registry with one accepted card and two pending."""
+    reg = Registry(tmp_path / "registry_log.jsonl")
+    for cid, claim in (("a1", "Momentum persists."), ("p1", "momentum persists"),
+                       ("p2", "Volatility clusters.")):
+        reg.append("card_registered", {
+            "card_id": cid, "claim": claim, "quote": "q",
+            "source": {"title": "t", "url": "u"},
+            "review": {"status": "pending", "reject_reason": None},
+        })
+    reg.review_card("a1", "accepted", "coen")
+    return reg
+
+
+def test_dry_run_writes_nothing_to_the_chain(tmp_path, monkeypatch):
+    reg = _seed(tmp_path)
+    before = sum(1 for _ in reg.entries())
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, True, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    rc = tb.run(["--registry", str(tmp_path / "registry_log.jsonl")])
+
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == before      # nothing chained
+
+
+def test_apply_chains_with_auto_provenance(tmp_path, monkeypatch):
+    reg = _seed(tmp_path)
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, True, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    tb.run(["--registry", str(tmp_path / "registry_log.jsonl"), "--apply"])
+
+    reviews = [e for e in reg.entries() if e["entry_type"] == "card_reviewed"]
+    auto = [r for r in reviews if r["payload"].get("reviewed_by") == "auto-d31"]
+    assert auto, "no auto-provenance reviews chained"
+    assert all(r["payload"]["reviewed_by"] != "coen" for r in auto)
+    # p1 duplicate rejected, p2 accepted
+    by_id = {r["payload"]["card_id"]: r["payload"] for r in auto}
+    assert by_id["p1"]["status"] == "rejected"
+    assert by_id["p1"]["reject_reason"] == "duplicate"
+    assert by_id["p2"]["status"] == "accepted"
