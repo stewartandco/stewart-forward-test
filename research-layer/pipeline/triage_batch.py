@@ -128,7 +128,7 @@ def review_card(client, model: str, card: dict, meter,
     for _ in range(panel_size):
         msg = client.messages.create(
             model=model,
-            max_tokens=300,
+            max_tokens=1500,   # thinking blocks eat the budget; 300 truncated the JSON
             messages=[{"role": "user", "content": prompt}],
             output_config={"format": {"type": "json_schema",
                                       "schema": VOTE_SCHEMA}},

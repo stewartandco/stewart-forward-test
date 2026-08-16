@@ -309,3 +309,23 @@ def test_a_thinking_block_before_the_json_does_not_lose_the_vote():
     votes = tb.review_card(_ThinkingClient(3), "m", CARD, _Meter())
     assert len(votes) == tb.PANEL_SIZE
     assert tb.panel_verdict(votes) == ("accepted", None)
+
+
+def test_max_tokens_leaves_room_for_thinking_plus_the_json():
+    """Live dry run 2026-08-17: 7 of 20 cards still escalated after the
+    ThinkingBlock fix, because stop_reason was max_tokens at exactly 300 - the
+    model thought, began the JSON, and was cut off mid-object. Truncated JSON
+    is a dropped vote, and we paid for every one of those tokens. The ceiling
+    must clear thinking plus a one-sentence reason."""
+    class _Recorder:
+        usage = _Usage()
+        def __init__(self):
+            self.kwargs = []
+            self.messages = self
+        def create(self, **kw):
+            self.kwargs.append(kw)
+            return _Msg('{"accept": true, "reason": "ok"}')
+
+    rec = _Recorder()
+    tb.review_card(rec, "m", CARD, _Meter())
+    assert rec.kwargs[0]["max_tokens"] >= 1000
