@@ -430,32 +430,56 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             continue
         seen_names.add(name)
         specs = expand_family(fam, args.run_id, args.model, created_utc)
-        collisions = []
+        # rule 7 is SIBLING-level under protocol-v3: a composition that is
+        # already registered (in ANY state, graveyard included) can never be
+        # re-registered, but its siblings can. A real idea comes back at
+        # neighbouring parameters; an idea that only worked at the exact
+        # buried point was overfit. Intra-family duplicates are different in
+        # kind — mirrored sweep axes are a malformed proposal, not a
+        # collision — and still drop the whole family.
         fam_fps: dict[str, str] = {}
+        kept_specs: list[dict] = []
+        notes: list[str] = []
+        malformed = False
         for spec in specs:
             fp = composition_fingerprint(spec)
-            if fp in known_fps:
-                collisions.append(
-                    f"composition already registered as {known_fps[fp]}")
-            elif fp in run_fps:
-                collisions.append(
-                    f"composition duplicates family {run_fps[fp]} in this run")
-            elif fp in fam_fps:
-                collisions.append(
+            if fp in fam_fps:
+                notes.append(
                     f"siblings {fam_fps[fp]} and {spec['strategy_id']} are the "
                     f"same composition — duplicate blocks or mirrored sweep axes")
+                malformed = True
+                break
+            fam_fps[fp] = spec["strategy_id"]
+            if fp in known_fps:
+                notes.append(f"sibling {spec['strategy_id']} dropped: "
+                             f"composition already registered as {known_fps[fp]}")
+            elif fp in run_fps:
+                notes.append(f"sibling {spec['strategy_id']} dropped: "
+                             f"composition duplicates family {run_fps[fp]} "
+                             f"in this run")
             else:
-                fam_fps[fp] = spec["strategy_id"]
-        if collisions:
+                kept_specs.append(spec)
+
+        if malformed:
             dropped += 1
             print(f"  DROPPED family {name}:")
-            for c in dict.fromkeys(collisions):     # de-duplicated, ordered
+            for c in dict.fromkeys(notes):
                 print(f"    - {c}")
             continue
-        for spec in specs:
+
+        print(f"  family {name}: {len(specs)} expanded, "
+              f"{len(specs) - len(kept_specs)} already registered, "
+              f"{len(kept_specs)} new")
+        for c in dict.fromkeys(notes):
+            print(f"    - {c}")
+        if not kept_specs:
+            dropped += 1
+            print(f"  DROPPED family {name}: every sibling already registered")
+            continue
+        for spec in kept_specs:
             validator.validate(spec)   # composer bug if this raises: abort pre-write
             run_fps[composition_fingerprint(spec)] = name
-        kept.append((fam, specs))
+        kept.append((fam, kept_specs))
 
     total = sum(len(s) for _, s in kept)
     for fam, specs in kept:

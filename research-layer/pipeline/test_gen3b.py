@@ -213,3 +213,131 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
     mc = json.loads((art / specs[0]["strategy_id"] / "gauntlet" /
                      "mc_summary.json").read_text(encoding="utf-8"))
     assert mc["p05"] <= mc["p25"] <= mc["p50"] <= mc["p75"]
+
+
+# ---------------- rule 7: sibling-level fingerprint guard ----------------
+
+from .registry import Registry
+from .composer import (run as composer_run, expand_family,
+                       composition_fingerprint)
+from .test_composer import good_family, register_grammar
+from .test_pipeline import make_card
+
+GEN3_TS = "2026-08-16T00:00:00Z"
+# ONE card object shared by CARD_ID and seeded(): build_card() stamps
+# created_utc at second resolution and the card_id is content-addressed over
+# it, so two make_card() calls straddling a second boundary produce different
+# ids — a family built from one would cite a card the registry never accepted.
+CARD = make_card()
+CARD_ID = CARD["card_id"]
+
+
+def seeded(tmp_path, pre_register=()):
+    """Registry with the grammar, one accepted card, and `pre_register`
+    already chained as strategies."""
+    reg = Registry(tmp_path / "reg.jsonl")
+    register_grammar(reg)
+    reg.register_card(CARD)
+    reg.review_card(CARD_ID, "accepted", "tester")
+    for spec in pre_register:
+        reg.register_strategy(spec)
+    return reg
+
+
+def z_family(family="zfam", z_values=(1.5, 2.0, 2.5)):
+    """A single-axis sweep over z_entry: len(z_values) siblings, one family."""
+    return good_family(family=family, card_ids=[CARD_ID],
+                       sweep=[{"block": 0, "param": "z_entry",
+                               "values": list(z_values)}])
+
+
+def pre_expand(fam):
+    """The specs a family WOULD produce, for pre-registration. Their ids
+    differ from a later composer run's (created_utc and model feed the id),
+    but their composition FINGERPRINTS are identical - and the fingerprint is
+    what rule 7 compares."""
+    return expand_family(fam, "seed-run", "m", GEN3_TS)
+
+
+def test_family_survives_partial_sibling_collision(tmp_path, capsys):
+    specs = pre_expand(z_family())
+    assert len(specs) == 3
+    reg = seeded(tmp_path, pre_register=[specs[0]])
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
+                       "--dry-run"],
+                      propose_fn=lambda cards: [z_family()])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 expanded, 1 already registered, 2 new" in out
+    assert "DROPPED family zfam" not in out
+    assert "1 families kept" in out
+
+
+def test_family_dropped_when_every_sibling_collides(tmp_path, capsys):
+    reg = seeded(tmp_path, pre_register=pre_expand(z_family()))
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
+                       "--dry-run"],
+                      propose_fn=lambda cards: [z_family()])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 expanded, 3 already registered, 0 new" in out
+    assert "every sibling already registered" in out
+    assert "DROPPED family zfam" in out
+    assert "0 families kept" in out
+
+
+def test_cross_family_run_collision_drops_the_sibling_only(tmp_path, capsys):
+    """fam_b overlaps fam_a on one sibling. fam_a wins the overlap; fam_b
+    keeps its remaining sibling instead of dying."""
+    reg = seeded(tmp_path)
+    fam_a = z_family(family="fam_a", z_values=(1.5, 2.0))
+    fam_b = z_family(family="fam_b", z_values=(2.0, 2.5))
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
+                       "--dry-run"],
+                      propose_fn=lambda cards: [fam_a, fam_b])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fam_a: 2 expanded, 0 already registered, 2 new" in out
+    assert "fam_b: 2 expanded, 1 already registered, 1 new" in out
+    assert "DROPPED family fam_b" not in out
+    assert "2 families kept" in out
+
+
+def test_intra_family_duplicate_siblings_still_kill_the_family(tmp_path, capsys):
+    """Mirrored sweep axes are a malformed proposal, not a collision."""
+    reg = seeded(tmp_path)
+    fam = good_family(family="mirrored", card_ids=[CARD_ID])
+    fam["blocks"].append({"role": "stop", "type": "atr_stop",
+                          "params": {"atr_len": 14, "mult": 2.0}})
+    fam["sweep"] = [{"block": 1, "param": "mult", "values": [2.0, 3.0]},
+                    {"block": 4, "param": "mult", "values": [3.0, 2.0]}]
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
+                       "--dry-run"],
+                      propose_fn=lambda cards: [fam])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DROPPED family mirrored" in out
+    assert "same composition" in out
+
+
+def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
+    """Not a dry run. good_family's default sweep is 3 x 3 = 9 siblings;
+    pre-register 3 of them and exactly the other 6 must reach the chain, and
+    no buried composition may be re-registered."""
+    fam = good_family(family="ninefam", card_ids=[CARD_ID])
+    specs = pre_expand(fam)
+    assert len(specs) == 9
+    buried = specs[:3]
+    reg = seeded(tmp_path, pre_register=buried)
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3"],
+                      propose_fn=lambda cards: [good_family(
+                          family="ninefam", card_ids=[CARD_ID])])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "9 expanded, 3 already registered, 6 new" in out
+    chained = [e["payload"] for e in reg.entries()
+               if e["entry_type"] == "strategy_registered"]
+    assert len(chained) == 9                      # 3 pre-existing + 6 new
+    fps = [composition_fingerprint(s) for s in chained]
+    assert len(set(fps)) == 9                     # no composition twice
+    assert set(fps) == {composition_fingerprint(s) for s in specs}
