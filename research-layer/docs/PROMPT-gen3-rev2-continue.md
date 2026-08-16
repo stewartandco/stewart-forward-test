@@ -102,7 +102,7 @@ a new `pipeline/test_gen3b.py`):
 
 **Task 3 — composer prompt carries gen-2 evidence**: replace the "What
 happened in generation 1" paragraph with measured gen-2 outcomes (reversion
-lost 46–66%; short-only fired 10–19 trades in seven years; 11 of 18 held
+lost 46–66%; short-only fired 10–19 trades in seven years; 12 of 18 held
 positive vol-normalized decay; `vol_target` produced every worst ruin/MC
 result), ending "Draw your own conclusions from those facts." Grammar
 unchanged.
