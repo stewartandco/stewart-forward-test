@@ -115,3 +115,73 @@ def silhouette(labels: dict[str, int], dmat: dict) -> list[float]:
                 for lbl, g in groups.items() if lbl != labels[i])
         out.append(0.0 if max(a, b) == 0 else (b - a) / max(a, b))
     return out
+
+
+def _sharpe(series: list[float]) -> float:
+    n = len(series)
+    if n < 2:
+        return 0.0
+    m = sum(series) / n
+    var = sum((x - m) ** 2 for x in series) / n
+    return m / math.sqrt(var) if var > 0 else 0.0
+
+
+def _sample_variance(xs: list[float]) -> float:
+    if len(xs) < 2:
+        return 0.0
+    m = sum(xs) / len(xs)
+    return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+
+
+def effective_trials(returns_by_id: dict[str, list[float]]):
+    """(k, labels, cross_cluster_sharpe_variance).
+
+    k is the number of effectively independent trials: the cluster count
+    maximising the silhouette QUALITY score mean(S)/stdev(S) over
+    k in [2, n-1] (card L6's criterion). k=n is excluded because every
+    silhouette is 0 when all clusters are singletons.
+
+    The variance returned is the sample variance across CLUSTER
+    representatives, each representative being the mean daily Sharpe of its
+    members — not the variance across all strategies, which is what
+    protocol-v2 used and what over-deflated the gate."""
+    ids = sorted(returns_by_id)
+    n = len(ids)
+    if n == 0:
+        return 0, {}, 0.0
+    if n == 1:
+        return 1, {ids[0]: 0}, 0.0
+    if n == 2:
+        return 2, {ids[0]: 0, ids[1]: 1}, _sample_variance(
+            [_sharpe(returns_by_id[i]) for i in ids])
+
+    dmat = distance_matrix(returns_by_id)
+    history = agglomerate(ids, dmat)
+    best = None            # (quality, mean_s, -k) maximised
+    for k in range(2, n):
+        labels = labels_for_k(history, ids, k)
+        vals = silhouette(labels, dmat)
+        mean_s = sum(vals) / len(vals)
+        sd = math.sqrt(_sample_variance(vals))
+        quality = mean_s / sd if sd > 0 else float("-inf")
+        key = (quality, mean_s, -k)
+        if best is None or key > best[0]:
+            best = (key, k, labels)
+    if best[0][0] == float("-inf"):
+        # every candidate had zero silhouette spread: fall back to the k with
+        # the highest mean silhouette, smallest k on ties
+        best = None
+        for k in range(2, n):
+            labels = labels_for_k(history, ids, k)
+            mean_s = sum(silhouette(labels, dmat)) / n
+            key = (mean_s, -k)
+            if best is None or key > best[0]:
+                best = (key, k, labels)
+    _, k, labels = best
+
+    groups: dict[int, list[str]] = {}
+    for i in ids:
+        groups.setdefault(labels[i], []).append(i)
+    reps = [sum(_sharpe(returns_by_id[i]) for i in g) / len(g)
+            for g in groups.values()]
+    return k, labels, _sample_variance(reps)

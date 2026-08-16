@@ -178,3 +178,65 @@ def test_silhouette_singleton_scores_zero():
     dmat = distance_matrix(series)
     vals = silhouette({ids[0]: 0, ids[1]: 1}, dmat)
     assert vals == [0.0, 0.0]
+
+
+import statistics
+
+from .cluster import effective_trials
+
+
+def sharpe_of(series):
+    m = sum(series) / len(series)
+    sd = (sum((x - m) ** 2 for x in series) / len(series)) ** 0.5
+    return m / sd if sd > 0 else 0.0
+
+
+# ---------------- effective_trials ----------------
+
+def test_effective_trials_finds_two_groups():
+    k, labels, var = effective_trials(two_group_series())
+    assert k == 2
+    assert len(set(labels.values())) == 2
+    assert var >= 0.0
+
+
+def test_effective_trials_lowers_the_hurdle_vs_naive():
+    """The property that makes v3 differ from v2 is about the HURDLE, not
+    the variance term alone. Cross-cluster dispersion can be LARGER than raw
+    dispersion — two genuinely different families really are far apart, and
+    the (k-1) divisor amplifies it — but the trial count falls faster, so
+    SR* falls. SR* is what the DSR gate compares against."""
+    from .stats import expected_max_sharpe
+    series = two_group_series()
+    k, _, clustered_var = effective_trials(series)
+    srs = [sharpe_of(s) for s in series.values()]
+    naive_var = statistics.variance(srs)
+    assert (expected_max_sharpe(k, clustered_var)
+            < expected_max_sharpe(len(srs), naive_var))
+
+
+def test_effective_trials_degenerate_sizes():
+    assert effective_trials({}) == (0, {}, 0.0)
+    one = {"a" * 16: [0.01, -0.02, 0.03]}
+    k, labels, var = effective_trials(one)
+    assert k == 1 and var == 0.0 and set(labels.values()) == {0}
+    two = {"a" * 16: [0.01, -0.02, 0.03], "b" * 16: [-0.01, 0.03, -0.02]}
+    k, labels, var = effective_trials(two)
+    assert k == 2 and len(set(labels.values())) == 2
+
+
+def test_effective_trials_is_deterministic():
+    series = two_group_series()
+    assert effective_trials(series) == effective_trials(series)
+
+
+def test_perfectly_correlated_siblings_give_zero_variance():
+    """A sibling sweep is one idea. K cannot be 1 (the search runs 2..n-1),
+    so leniency arrives through the variance term collapsing, not the count:
+    identical series -> identical Sharpes -> zero cross-cluster dispersion
+    -> SR* = 0 -> the DSR gate stops penalising the sweep."""
+    s = [0.01, -0.02, 0.03, 0.01, -0.015, 0.02]
+    series = {chr(ord("a") + i) * 16: list(s) for i in range(5)}
+    k, _, var = effective_trials(series)
+    assert k >= 2
+    assert var == pytest.approx(0.0, abs=1e-12)
