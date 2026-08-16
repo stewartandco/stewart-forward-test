@@ -343,8 +343,11 @@ bundle tamper-evident without bloating the registry.
    chain itself rather than trusted to the composer's in-process guard. The
    fingerprint covers universe and blocks only, so a re-registration under a
    fresh `strategy_id` is caught.
-9. `quarantine_data_snapshot` dates are unique, and every `quarantine_decision`
-   is covered by an **earlier** snapshot for its date naming its asset — no
-   forward record exists without the provenance of the bars behind it.
+9. `quarantine_data_snapshot` dates are unique, both digest maps name the same
+   assets, and every digest is a real 64-character lowercase SHA-256 — the
+   same check the writer applies, so a hand-appended fake cannot license a
+   date. Every `quarantine_decision` is covered by an **earlier** snapshot for
+   its date naming its asset in both maps — no forward record exists without
+   the provenance of the bars behind it.
 
 Run: `python research-layer/verify_registry.py research-layer/examples/registry_log.example.jsonl`

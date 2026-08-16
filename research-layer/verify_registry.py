@@ -15,9 +15,11 @@ invariants:
   8. no two strategy_registered entries share a composition_fingerprint —
      rule 7 (a buried composition never returns) verified from the chain
      itself, not merely trusted to the composer's in-process guard
-  9. quarantine_data_snapshot dates are unique, and every quarantine_decision
-     is covered by an EARLIER snapshot for its date naming its asset in both
-     data_sha256 and bars_sha256 — so no forward record exists without the
+  9. quarantine_data_snapshot dates are unique, both digest maps name the same
+     assets, every digest is a real 64-char lowercase sha256 (the same check
+     the writer applies, so a hand-appended fake cannot license a date), and
+     every quarantine_decision is covered by an EARLIER snapshot for its date
+     naming its asset in both maps — so no forward record exists without the
      provenance of the bars behind it
 
 Usage:
@@ -48,9 +50,13 @@ from pipeline.registry import (is_sha256_hex,                  # noqa: E402
 # retroactively flip a sound chain to INVALID. It cannot:
 #
 #   * composition_fingerprint snaps a param to a grid value only where
-#     `g == v`, i.e. it substitutes an EQUAL value. Snapping can therefore
-#     normalize representation (2 vs 2.0) but can never merge two values that
-#     differ, which is the only way it could manufacture a duplicate.
+#     `g == v`, so it can never merge two values that differ UNDER `==`.
+#     Note what that does NOT cover: the fingerprint hashes JSON, and values
+#     equal under `==` but distinct in JSON — 2 vs 2.0, true vs 1, false vs 0
+#     — ARE merged once a grid holds one of them. A grid GAINING a value is
+#     therefore a real merge vector for already-chained specs, so this leg
+#     alone does not close the hole. The additive-only guarantee below is
+#     load-bearing, not belt-and-braces.
 #   * Manufacturing one would additionally require an existing type's grid to
 #     gain a value. composer.preflight_block_types aborts the run when
 #     blocks.py mutates a chained params_schema, and Registry.register_block_type
