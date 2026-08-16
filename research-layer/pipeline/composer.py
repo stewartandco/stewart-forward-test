@@ -331,9 +331,10 @@ short-capable or symmetric. Results:
   screen outright.
 - A short-only trend family produced only 10-19 trades in seven years and
   failed the screen's trade-count floor, not its P&L gate.
-- Of the 18 that reached the gauntlet, 11 showed POSITIVE
-  volatility-normalized edge decay out of sample: the two-sided trend and
-  breakout designs held their edge per unit of available opportunity.
+- Of the 18 that reached the gauntlet, 12 showed POSITIVE
+  volatility-normalized edge decay out of sample, from +1.8% to +54.3%: the
+  two-sided trend and breakout designs held their edge per unit of available
+  opportunity.
 - Every one of the four worst ruin and Monte Carlo outcomes came from
   vol_target sizing.
 

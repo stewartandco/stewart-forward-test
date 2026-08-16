@@ -405,3 +405,25 @@ def test_prompt_still_has_grammar_guidance():
     assert "trend_scan_ds" in SYSTEM_PROMPT
     assert "regime_ma_short" in SYSTEM_PROMPT
     assert "regime_hypothesis" in SYSTEM_PROMPT
+
+
+def test_prompt_figures_match_what_was_measured():
+    """The prompt presents these to the model as measurement, not opinion, so
+    a silent edit to any figure is a correctness bug, not a wording change.
+
+    Every figure below was recomputed from registry_log.jsonl on 2026-08-16:
+    18 gen-2 gauntlet verdicts; 12 of them with POSITIVE volatility-normalized
+    edge decay, spanning +1.75% to +54.27%; forced_flow_overshoot_reversion
+    net_pnl -0.455 to -0.658 with all 8 buried `net_negative`;
+    downtrend_short_only 10-19 trades with all 8 buried `trade_count`, never
+    on P&L; and the four worst p_ruin AND the four worst mc_p05 all
+    vol_target-sized.
+
+    An earlier draft said 11, carried from a source note that quoted the right
+    range but miscounted the set."""
+    assert "Of the 18 that reached the gauntlet, 12 showed POSITIVE" in SYSTEM_PROMPT
+    assert "from +1.8% to +54.3%" in SYSTEM_PROMPT
+    assert "lost 46% to 66% in training" in SYSTEM_PROMPT
+    assert "only 10-19 trades in seven years" in SYSTEM_PROMPT
+    assert "trade-count floor, not its P&L gate" in SYSTEM_PROMPT
+    assert "four worst ruin and Monte Carlo outcomes came from" in SYSTEM_PROMPT
