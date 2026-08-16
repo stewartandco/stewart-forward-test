@@ -1,5 +1,5 @@
-"""Gauntlet battery: five-gate validation of gauntlet-state strategies on
-the 2024+ holdout, with pre-declared sibling selection.
+"""Gauntlet battery: five-gate robustness validation of gauntlet-state
+strategies on the 2024+ holdout, with pre-declared sibling selection.
 
 Usage:
     python -m pipeline.gauntlet [--registry registry_log.jsonl]
@@ -21,15 +21,26 @@ from .registry import Registry
 from .engine import run_spec
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
                     bootstrap_paths)
+from .cluster import effective_trials
 
-PROTOCOL = "gauntlet-protocol-v2"
+PROTOCOL = "gauntlet-protocol-v3"
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
 RUIN_LEVEL = 0.5
 P_RUIN_MAX = 0.05
+# protocol-v3: DSR_MIN no longer gates THIS stage. It is retained verbatim as
+# the threshold for the quarantine -> live gate, computed on the quarantine
+# forward record. See docs/2026-08-16-gen3-design.md rev 2.
 DSR_MIN = 0.95
 DEFAULT_CUTOFF = "2023-12-31"
+
+# The fixed order in which gates are evaluated and reported. 'dsr' is
+# DELIBERATELY ABSENT: protocol-v3 still computes and records the deflated
+# Sharpe, and still ranks siblings by it, but it does not gate entry to paper
+# trading. Adding it back here is a protocol change and needs its own
+# pre-declared chained note.
+FAIL_ORDER = ("oos_negative", "edge_decay", "mc_p05", "p_ruin", "cost_stress")
 
 
 def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
@@ -70,13 +81,17 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   stress_oos_trades: list[dict], daily_returns: list[float],
                   is_vol: float, oos_vol: float,
                   trials_n: int, trials_sr_var: float, seed: int,
-                  group_n: int | None = None):
-    """Run the six checks in fixed order. Returns
+                  group_n: int | None = None, registered_n: int | None = None):
+    """Run the five robustness gates in FAIL_ORDER. Returns
     (passed, fail_reason|None, metrics, mc_summary).
 
-    protocol-v2: the edge-decay gate compares VOLATILITY-NORMALIZED per-trade
-    edge, so a shrinking opportunity set is not scored as strategy decay;
-    trials_n is the registry-wide strategy count, not the sibling group."""
+    protocol-v3: the deflated Sharpe is still computed and recorded, and still
+    ranks siblings for the single quarantine slot, but it no longer gates this
+    stage - it moved to the quarantine -> live gate, where fresh forward
+    evidence exists to compute it on. trials_n is the number of effectively
+    independent trials (clusters); registered_n is the raw registration count.
+    The edge-decay gate compares VOLATILITY-NORMALIZED per-trade edge, so a
+    shrinking opportunity set is not scored as strategy decay."""
     is_c = contributions(is_trades)
     oos_c = contributions(oos_trades)
     is_raw = sum(is_c) / len(is_c) if is_c else 0.0
@@ -108,6 +123,7 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "sibling_group_n": group_n if group_n is not None else trials_n,
         "cost_stress_net_pnl": stress_net,
         "trials_n": trials_n,
+        "registered_n": registered_n if registered_n is not None else trials_n,
         "is_edge_raw": is_raw,
         "oos_edge_raw": oos_raw,
         "is_vol": is_vol,
@@ -117,6 +133,7 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   "p05": mc_p05,
                   "p25": percentile(mc["terminals"], 0.25),
                   "p50": percentile(mc["terminals"], 0.50),
+                  "p75": percentile(mc["terminals"], 0.75),
                   "p_ruin": mc["p_ruin"], "ruin_level": RUIN_LEVEL}
 
     if not oos_net > 0:
@@ -127,8 +144,6 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         return False, "mc_p05", metrics, mc_summary
     if not mc["p_ruin"] < P_RUIN_MAX:
         return False, "p_ruin", metrics, mc_summary
-    if not dsr >= DSR_MIN:
-        return False, "dsr", metrics, mc_summary
     if not stress_net > 0:
         return False, "cost_stress", metrics, mc_summary
     return True, None, metrics, mc_summary
@@ -255,12 +270,17 @@ def run(argv: list[str] | None = None) -> int:
         group_srs.setdefault(group_of[s["strategy_id"]], []).append(sr)
         all_srs.append(sr)
     group_n = {g: len(srs) for g, srs in group_srs.items()}
-    # protocol-v2: deflate against EVERY strategy ever registered against this
-    # data, not just the sibling batch — the honest multiple-testing count
-    trials_n = len(all_srs)
-    mean_sr = sum(all_srs) / len(all_srs)
-    trials_var = (sum((x - mean_sr) ** 2 for x in all_srs) / (len(all_srs) - 1)
-                  if len(all_srs) > 1 else 0.0)
+    # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
+    # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
+    # trials. A sibling sweep is one idea at several settings, and pooling
+    # structurally different families put real edge dispersion into a term
+    # meant to hold sampling noise.
+    returns_by_id = {sid: daily_returns_from_curve(r["equity"])
+                     for sid, r in full_results.items()}
+    trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
+    registered_n = len(all_srs)
+    print(f"effective trials: {trials_n} clusters over {registered_n} "
+          f"registered strategies")
 
     rows, payloads = [], []
     for s in candidates:
@@ -279,7 +299,7 @@ def run(argv: list[str] | None = None) -> int:
         passed, reason, metrics, mc_summary = evaluate_spec(
             is_t, oos_t, stress_oos, rets, is_vol, oos_vol,
             trials_n, trials_var, seed=int(sid, 16) % (2 ** 31),
-            group_n=group_n[g])
+            group_n=group_n[g], registered_n=registered_n)
         rows.append({"sid": sid, "group": g, "passed": passed,
                      "dsr": metrics["deflated_sharpe"]})
         payloads.append((s, oos_t, passed, reason, metrics, mc_summary))
@@ -310,7 +330,10 @@ def run(argv: list[str] | None = None) -> int:
             group_context = {
                 "group": group_of[sid],
                 "dsrs": {r["sid"]: r["dsr"] for r in rows
-                         if r["group"] == group_of[sid]}}
+                         if r["group"] == group_of[sid]},
+                "effective_trials": trials_n,
+                "registered_n": registered_n,
+                "cluster_labels": cluster_labels}
             bundle = write_gauntlet_artifacts(
                 args.artifacts_dir, s, oos_t, mc_summary, metrics,
                 args.cutoff, data_hashes, group_context)

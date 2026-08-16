@@ -177,8 +177,8 @@ def test_all_gates_pass():
     assert set(metrics) == {"is_edge_per_trade", "oos_edge_per_trade",
                             "edge_decay_pct", "mc_p05_equity", "p_ruin",
                             "deflated_sharpe", "sibling_group_n",
-                            "cost_stress_net_pnl", "trials_n", "is_edge_raw",
-                            "oos_edge_raw", "is_vol", "oos_vol"}
+                            "cost_stress_net_pnl", "trials_n", "registered_n",
+                            "is_edge_raw", "oos_edge_raw", "is_vol", "oos_vol"}
     assert metrics["sibling_group_n"] == 4
 
 
@@ -213,10 +213,14 @@ def test_mc_p05_fails_on_volatile_contribs():
     assert not passed and reason in ("mc_p05", "p_ruin")  # both legitimate here
 
 
-def test_dsr_fails_on_weak_curve():
+def test_weak_dsr_curve_no_longer_gates():
+    """protocol-v3: this curve's deflated Sharpe is ~0 and it still passes.
+    The five robustness gates are what this stage tests; DSR moved to the
+    quarantine -> live gate."""
     noisy = [0.001, -0.001] * 500      # SR ~ 0
-    passed, reason, _, _ = eval_with(returns=noisy)
-    assert not passed and reason == "dsr"
+    passed, reason, metrics, _ = eval_with(returns=noisy)
+    assert passed and reason is None
+    assert metrics["deflated_sharpe"] < DSR_MIN
 
 
 def test_cost_stress_fails():
@@ -263,7 +267,7 @@ def gauntlet_registry(tmp_path):
 
 
 def chain_gauntlet_note(reg):
-    reg.append("note", {"text": "gauntlet-protocol-v2: test anchor"})
+    reg.append("note", {"text": "gauntlet-protocol-v3: test anchor"})
 
 
 # ---------------- selection ----------------
