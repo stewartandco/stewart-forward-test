@@ -163,12 +163,36 @@ Mechanics worth knowing:
   quarantine slot per sibling group, selected by DSR — passers not selected
   are graveyarded as `sibling_not_selected`, visibly distinct from gate
   failure.
-- **A buried strategy cannot come back.** `graveyard` is terminal, and the
-  Composer refuses any family whose composition fingerprint matches a
-  previously-registered strategy in any state — so a dead idea cannot return
-  under a fresh id. Under `gauntlet-protocol-v2`, deflation counts every
-  strategy ever registered against this data, not just the current batch, so
-  the multiple-testing hurdle rises as the search widens.
+- **A buried composition cannot come back; a buried idea can.** `graveyard` is
+  terminal and the composition-fingerprint guard blocks re-registration in any
+  state, permanently. Under `gauntlet-protocol-v3` that guard is applied per
+  SIBLING rather than per family: a colliding sibling is dropped and its
+  family survives on the rest. With 56 compositions already buried in a modest
+  grammar, a family-level guard would have killed whole families on one
+  collision and silently prevented rediscovery. Applied per sibling it becomes
+  a robustness filter — a real idea returns at neighbouring parameters, and one
+  that worked only at the exact buried point was overfit. `verify_registry.py`
+  invariant 8 re-checks fingerprint uniqueness from the chain itself, so the
+  guarantee no longer rests on the Composer's in-process guard.
+- **The gauntlet tests robustness; quarantine does the out-of-sample work.**
+  Protocol-v3 retired the deflated-Sharpe gate from the gauntlet. Measured on
+  this registry its implied hurdle had reached **1.86 annualized Sharpe against
+  a best-ever-achieved 1.42** — driven by `sqrt(V[SR])`, the spread of our own
+  registered strategies, so honestly registering failures is what made it
+  unpassable. With only the best 30 registered the hurdle would have been 0.40.
+  The threshold is unchanged at 0.95 and now gates `quarantine → live`, where
+  genuinely fresh evidence exists to compute it on. Every gauntlet verdict
+  still records the deflated Sharpe, its variance and hurdle inputs, and
+  siblings are still ranked by it.
+- **Quarantine is a real daily forward test.** Each quarantined strategy posts
+  one `quarantine_decision` per asset per trading day, computed from bars up to
+  that day only, preceded by a `quarantine_data_snapshot` recording the SHA-256
+  of the price files behind it. Paper-trading forward on bars that did not
+  exist at selection time cannot be gamed by search — and because the runner is
+  deliberately idempotent and backfillable, selective *recording* is guarded
+  separately: `--review` reconstructs the days a strategy owed from the price
+  files themselves and reports every unrecorded date plus how long after its bar
+  each row was actually chained.
 - **Edge decay is measured per unit of opportunity.** v1 compared raw
   per-trade edge across the fence, which could not distinguish strategy
   decay from a shrinking opportunity set — over 2024+ passive buy-and-hold
@@ -180,13 +204,19 @@ Offline tests (no API key needed): `python -m pytest pipeline/`
 
 ## Status
 
-- **v1 — specification + Reader + Composer + Screen + Gauntlet**, with
-  `gauntlet-protocol-v2` superseding v1 for all future verdicts (v1 verdicts
-  stand; the strategies they buried stay buried). Quarantine wiring (daily
-  posting into the root forward-test log) is not built yet; the lifecycle
-  beyond the gauntlet verdict is exercised only by tests.
-- **Generation 1 closed at 22 proposed → 13 screened-in → 0 quarantined.**
-  The full funnel, including every kill and its reason, is computable from
-  `registry_log.jsonl` alone.
+- **Specification + Reader + Composer + Screen + Gauntlet + Quarantine**, with
+  `gauntlet-protocol-v3` superseding v2 for all future verdicts. v1 and v2
+  verdicts stand and the strategies they buried stay buried; the lifecycle
+  state machine is unchanged and `graveyard` remains terminal.
+- **Quarantine is built.** `python -m pipeline.quarantine --date YYYY-MM-DD`
+  appends a day's decisions; `--review` audits completeness and backfill lag
+  and writes nothing. Graduation is a separately human-gated decision, and the
+  `quarantine → live` gate cannot bind until a strategy accrues 60 trading
+  days.
+- **Generations 1 and 2 closed at 56 proposed → 31 screened-in → 0
+  quarantined.** The full funnel, including every kill and its reason, is
+  computable from `registry_log.jsonl` alone. Generation 2's gauntlet failed
+  all 18 survivors, 10 of them on the deflated-Sharpe gate alone — the
+  measurement that produced protocol-v3.
 - The live registry chain (`registry_log.jsonl`) is created on the Reader's
   first non-dry-run write; `verify_registry.py` validates it and the example log.
