@@ -34,6 +34,16 @@ QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
 QUARANTINE_ACTIONS = frozenset({"enter_long", "enter_short", "exit", "hold"})
 
 
+class DuplicateQuarantineDecision(ValueError):
+    """That (strategy_id, date, asset) is already on the chain.
+
+    A ValueError subclass, so callers that catch ValueError keep working, but
+    distinguishable on purpose: a routine race (a scheduler retry overlapping
+    the daily job) can be absorbed as a no-op, while a malformed payload --
+    every other ValueError from this writer -- must stay fatal.
+    """
+
+
 def parse_iso_date(value: object, field: str = "date") -> datetime:
     """Strict YYYY-MM-DD.
 
@@ -280,7 +290,7 @@ class Registry:
                     continue
                 p = e["payload"]
                 if (p["strategy_id"], p["date"], p["asset"]) == key:
-                    raise ValueError(
+                    raise DuplicateQuarantineDecision(
                         "quarantine decision already chained for "
                         f"{key[0]} {key[1]} {key[2]}")
             return self._append_locked("quarantine_decision", row)

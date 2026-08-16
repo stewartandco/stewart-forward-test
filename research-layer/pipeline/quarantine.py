@@ -42,7 +42,7 @@ import json
 import argparse
 from pathlib import Path
 
-from .registry import Registry, parse_iso_date
+from .registry import Registry, parse_iso_date, DuplicateQuarantineDecision
 from .engine import simulate_asset
 from .screen import load_bars
 
@@ -172,18 +172,27 @@ def _load_day_bars_or_refuse(data_dir: Path, assets: list[str],
     return bars_by_asset
 
 
-def _owed_dates(data_dir: Path, spec: dict, after: str,
-                through: str) -> set[str] | None:
-    """Every bar date in (after, through] across the strategy's universe, i.e.
-    the days it owed a decision. None if a price file is missing."""
-    owed: set[str] = set()
+def _owed_by_date(data_dir: Path, spec: dict, after: str,
+                  through: str) -> dict[str, set[str]] | None:
+    """{bar date: assets that owed a decision on it} over (after, through].
+    None if a price file is missing."""
+    owed: dict[str, set[str]] = {}
     for asset in spec["universe"]["assets"]:
         if not (data_dir / f"{asset}_1d.csv").exists():
             return None
         for b in load_bars(data_dir, asset, through):
             if b["date"] > after:
-                owed.add(b["date"])
+                owed.setdefault(b["date"], set()).add(asset)
     return owed
+
+
+def _truncated(items: list[str]) -> str:
+    """A bounded list that says what it dropped: a silently truncated list
+    reads as 'that was all of them'."""
+    shown = ", ".join(items[:MAX_LISTED_GAPS])
+    if len(items) > MAX_LISTED_GAPS:
+        shown += f", ... and {len(items) - MAX_LISTED_GAPS} more"
+    return shown
 
 
 def _report_completeness(registry_rows: list[dict], spec: dict | None,
@@ -195,22 +204,32 @@ def _report_completeness(registry_rows: list[dict], spec: dict | None,
         print("  completeness: no decisions chained yet")
         return
 
-    recorded = {r["date"] for r in registry_rows}
-    through = max(recorded)
+    recorded_by_date: dict[str, set[str]] = {}
+    for r in registry_rows:
+        recorded_by_date.setdefault(r["date"], set()).add(r["asset"])
+    through = max(recorded_by_date)
+
     if spec is None or entered is None:
         print("  completeness: cannot audit (no spec or entry date on chain)")
     else:
-        owed = _owed_dates(data_dir, spec, entered, through)
+        owed = _owed_by_date(data_dir, spec, entered, through)
         if owed is None:
             print("  completeness: cannot audit (price file missing for part "
                   "of the universe)")
         else:
-            missing = sorted(owed - recorded)
-            shown = ", ".join(missing[:MAX_LISTED_GAPS])
-            if len(missing) > MAX_LISTED_GAPS:
-                shown += f", ... (+{len(missing) - MAX_LISTED_GAPS} more)"
+            missing = sorted(d for d in owed if d not in recorded_by_date)
             print(f"  unrecorded bar dates in window: {len(missing)}"
-                  + (f"  ({shown})" if missing else ""))
+                  + (f"  ({_truncated(missing)})" if missing else ""))
+            # a date where some assets recorded and others did not is
+            # incompleteness of the same kind, and would sit in the record
+            # indefinitely if the re-run never happens
+            partial = []
+            for date in sorted(owed):
+                gap = owed[date] - recorded_by_date.get(date, set())
+                if gap and date in recorded_by_date:
+                    partial.append(f"{date} missing {', '.join(sorted(gap))}")
+            print(f"  partially recorded dates: {len(partial)}"
+                  + (f"  ({_truncated(partial)})" if partial else ""))
 
     lags = [(parse_iso_date(r["ts_utc"][:10]) - parse_iso_date(r["date"])).days
             for r in registry_rows]
@@ -350,7 +369,19 @@ def run(argv: list[str] | None = None) -> int:
                 if key in seen:
                     n_skipped += 1
                     continue
-                registry.record_quarantine_decision(row)
+                try:
+                    registry.record_quarantine_decision(row)
+                except DuplicateQuarantineDecision:
+                    # Another process chained this row between our snapshot of
+                    # `seen` and this write. The structural guarantee held --
+                    # no duplicate exists -- so a scheduler retry overlapping
+                    # the daily job resolves quietly and truthfully instead of
+                    # paging someone. Only this case is absorbed; every other
+                    # ValueError from the writer means a malformed payload and
+                    # stays fatal.
+                    seen.add(key)
+                    n_skipped += 1
+                    continue
                 seen.add(key)
                 n_written += 1
                 print(f"{sid}  {row['asset']}  {row['action']:<11} "

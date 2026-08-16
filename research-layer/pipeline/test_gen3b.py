@@ -495,8 +495,12 @@ def test_prompt_figures_match_what_was_measured():
 
 # ---------------- quarantine: the daily forward runner ----------------
 
+from datetime import datetime, timedelta
+
+from . import quarantine as quarantine_mod
 from .quarantine import (run as quarantine_run, MIN_TRADING_DAYS,
-                         BACKFILL_LAG_DAYS, CONE_CAVEAT)
+                         BACKFILL_LAG_DAYS, CONE_CAVEAT, MAX_LISTED_GAPS)
+from .registry import DuplicateQuarantineDecision
 from .common import content_id
 from .test_screen import dated_target_hit_bars, write_data_dir
 from .test_gauntlet import gauntlet_registry
@@ -505,10 +509,12 @@ ENTERED = "2023-01-21"
 CAVEAT = CONE_CAVEAT.format(n=MIN_TRADING_DAYS)
 
 
-def flat_dated_bars(n=23, px=100.0):
+def flat_dated_bars(n=23, px=100.0, start="2023-01-01"):
     """A never-signalling series on dated_target_hit_bars' calendar."""
-    return [{"date": f"2023-01-{i + 1:02d}", "open": px, "high": px,
-             "low": px, "close": px, "volume": 1.0} for i in range(n)]
+    d0 = datetime.strptime(start, "%Y-%m-%d")
+    return [{"date": (d0 + timedelta(days=i)).strftime("%Y-%m-%d"),
+             "open": px, "high": px, "low": px, "close": px, "volume": 1.0}
+            for i in range(n)]
 
 
 def quarantined(tmp_path, bars=None):
@@ -760,7 +766,97 @@ def test_a_complete_record_reports_no_gaps(tmp_path, capsys):
         quarantine_run(argv_for(reg, data, "--date", d))
     capsys.readouterr()
     quarantine_run(argv_for(reg, data, "--review"))
-    assert "unrecorded bar dates in window: 0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "unrecorded bar dates in window: 0" in out
+    assert "partially recorded dates: 0" in out
+
+
+def test_review_flags_a_partially_recorded_date(tmp_path, capsys, monkeypatch):
+    """One asset recorded and the other not is incompleteness of the same
+    kind as a wholly missing day, and it would sit there indefinitely if the
+    re-run never happens. It gets its own line, naming the missing asset."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    real = Registry.record_quarantine_decision
+    calls = []
+
+    def flaky(self, payload):
+        calls.append(payload)
+        if len(calls) == 2:                      # BTCUSD lands, ETHUSD does not
+            raise RuntimeError("chain write blew up")
+        return real(self, payload)
+
+    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
+    with pytest.raises(RuntimeError):
+        quarantine_run(argv)
+    monkeypatch.undo()
+    assert len(decisions(reg)) == 1
+
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    assert "unrecorded bar dates in window: 0" in out
+    assert "partially recorded dates: 1" in out
+    assert "2023-01-22 missing ETHUSD" in out
+
+
+def test_a_truncated_gap_list_says_what_it_dropped(tmp_path, capsys):
+    """A bounded list that stops silently reads as 'that was all of them'."""
+    bars = flat_dated_bars(n=60)                 # 2023-01-01 .. 2023-03-01
+    reg, spec, data = quarantined(tmp_path, bars=bars)
+    last = bars[-1]["date"]
+    quarantine_run(argv_for(reg, data, "--date", last))
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    # every bar after the 2023-01-21 entry except the one day recorded
+    owed = [b["date"] for b in bars if b["date"] > ENTERED]
+    n_missing = len(owed) - 1
+    assert n_missing > MAX_LISTED_GAPS
+    assert f"unrecorded bar dates in window: {n_missing}" in out
+    assert f"... and {n_missing - MAX_LISTED_GAPS} more" in out
+    # the listing itself is capped, not merely annotated
+    line = next(l for l in out.splitlines() if "unrecorded bar dates" in l)
+    assert line.count("2023-") == MAX_LISTED_GAPS
+
+
+def test_a_concurrent_writer_is_absorbed_not_crashed(tmp_path, capsys,
+                                                     monkeypatch):
+    """A scheduler retry overlapping the daily job is routine. The registry
+    still refuses the duplicate structurally; run() reports it as already
+    present rather than paging someone with a traceback."""
+    reg, spec, data = quarantined(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    quarantine_run(argv)
+    assert len(decisions(reg)) == 1
+    # the row lands after this run snapshots `seen`, so the pre-filter misses
+    # it and the registry's under-lock guard is what fires
+    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    capsys.readouterr()
+    rc = quarantine_run(argv)
+    assert rc == 0
+    assert len(decisions(reg)) == 1
+    assert "0 decision(s) chained, 1 already present" in capsys.readouterr().out
+
+
+def test_only_the_duplicate_case_is_absorbed(tmp_path, capsys, monkeypatch):
+    """A malformed payload must still be fatal: run() catches
+    DuplicateQuarantineDecision, not ValueError."""
+    reg, spec, data = quarantined(tmp_path)
+
+    def bad(self, payload):
+        raise ValueError("malformed payload")
+
+    monkeypatch.setattr(Registry, "record_quarantine_decision", bad)
+    with pytest.raises(ValueError, match="malformed payload"):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert "PARTIAL WRITE" in capsys.readouterr().err
+    assert decisions(reg) == []
+
+
+def test_duplicate_error_is_a_valueerror_subclass():
+    """Existing callers that catch ValueError must keep working."""
+    assert issubclass(DuplicateQuarantineDecision, ValueError)
 
 
 def test_registry_refuses_a_duplicate_even_without_the_seen_prefilter(tmp_path):
