@@ -184,3 +184,56 @@ Two live open questions, both deliberately undecided and both requiring
    data (currently: never; the fingerprint guard blocks it).
 2. The live gate's final calibration — formulation is specified, the number
    is not, and it cannot bind for 60+ trading days.
+
+---
+
+## ALSO REQUESTED (2026-08-16, Coen) — integrate the existing paper-traded systems
+
+Coen has **strategies already in paper trading from earlier, separate work**
+that he wants integrated into this stack. Do NOT bolt this on ad hoc — it is
+a design question and must go through `superpowers:brainstorming` → spec →
+plan → subagent execution like every other build here. It can be scoped
+before or after gen-3; ask Coen which he wants first.
+
+**Where they live** (a different project from this repo):
+`E:\Users\Coen\Claude\trading-systems\` — see the vault notes
+`project_paper_trading_bot.md` (the status note) and
+`SOPs/sop-trading-system-build.md` (its 7-phase build process incl. witnessed
+incubation). As of the vault index: 5 registered systems incubating (A1,
+XRP-B1, R5, Q9 on decay-watch, plus BUNDLE-EW-4 `4e9281c0…` SR 1.96 with a
+breadth overlay), plus HOUSE-CORE (VT-EW, `1c07ba89…`) registered 2026-08-06.
+Pine layer is 6/6 parity-confirmed. Automation already runs daily:
+`15_PaperBot` 08:10 and `16_TestnetBot` 08:12 via Task Scheduler.
+
+**The integrity problem to solve — state it plainly in whatever you design.**
+These systems did not come out of this funnel. They have no research cards,
+no `strategy_spec` in the block grammar, no composition fingerprint, and no
+screen or gauntlet verdict. The research-layer chain currently guarantees
+that anything in `quarantine` got there by passing pre-registered gates. If
+externally-originated systems are imported as ordinary quarantine entries,
+that guarantee silently becomes false and the funnel's central claim —
+"verify my funnel, every survivor passed these gates" — is laundered.
+
+Options worth brainstorming (not a decision, a starting set):
+
+1. **Import with explicit external provenance.** A new entry type or a
+   required `origin: "external"` + `origin_ref` field, a distinct lifecycle
+   entry point, and funnel statistics that report internal and external
+   populations separately so the 56→31→0 figure stays honest.
+2. **Cross-reference only.** The research layer records that these systems
+   exist and where their track record lives, but they never enter its
+   lifecycle. Cleanest for the chain's claims; does least for Coen.
+3. **Retro-qualify.** Run them through the existing screen and gauntlet on
+   the same data and fence, and let them enter quarantine only if they pass —
+   with the caveat, stated on-chain, that their parameters were chosen
+   before those gates existed, so their "out-of-sample" period is not
+   genuinely out of sample for them.
+
+Whatever is chosen, the same standing rules apply: pre-declare it in a chained
+note before importing anything, never let external systems inflate or dilute
+the funnel counts without a visible split, and never re-judge existing
+verdicts. Also confirm with Coen whether the two paper-trading loops
+(`15_PaperBot` and this repo's new `pipeline/quarantine.py`) should stay
+independent or converge — running two unsynchronised daily writers against
+different logs is exactly the concurrency hazard that has already bitten this
+repo twice.
