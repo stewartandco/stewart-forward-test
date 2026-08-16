@@ -484,3 +484,55 @@ def test_normalize_proposal_converts_param_lists():
                                     {"name": "slow", "value": 100}]}]}]
     out = normalize_proposal(fams)
     assert out[0]["blocks"][0]["params"] == {"fast": 10, "slow": 100}
+
+
+# ---------------- universe sweep across the declared grid ----------------
+
+from . import composer
+from pipeline import cells as cells_mod
+
+
+def _family(blocks):
+    return {"family": "f", "blocks": blocks,
+            "universe": {"asset_class": "crypto", "assets": ["BTCUSD"],
+                         "timeframe": "1d"},
+            "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005}}
+
+
+def test_expand_universe_produces_one_spec_per_cell():
+    base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    out = composer.expand_universe(base, cells_mod.phase_cells(1))
+    assert len(out) == 20
+    assert {(s["universe"]["assets"][0], s["universe"]["timeframe"]) for s in out} \
+        == set(cells_mod.phase_cells(1))
+
+
+def test_each_cell_is_a_single_asset_book():
+    """A cell is one asset at one timeframe - the unit of survival. The 2-asset
+    mean-combine path stays for the legacy BTC+ETH specs only."""
+    base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    for s in composer.expand_universe(base, [("ETHUSDT", "15m")]):
+        assert s["universe"]["assets"] == ["ETHUSDT"]
+        assert s["universe"]["timeframe"] == "15m"
+
+
+def test_cells_fingerprint_differently_so_they_register_side_by_side():
+    """composition_fingerprint hashes assets and timeframe, so the same blocks
+    on two cells are genuinely different strategies and the resurrection guard
+    does not collide them."""
+    base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    a, b = composer.expand_universe(base, [("ETHUSDT", "15m"), ("BTCUSDT", "4h")])
+    assert composer.composition_fingerprint(a) != composer.composition_fingerprint(b)
+
+
+def test_the_same_cell_twice_still_fingerprints_identically():
+    base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    a = composer.expand_universe(base, [("ETHUSDT", "15m")])[0]
+    b = composer.expand_universe(base, [("ETHUSDT", "15m")])[0]
+    assert composer.composition_fingerprint(a) == composer.composition_fingerprint(b)
+
+
+def test_undeclared_cells_are_refused():
+    base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    with pytest.raises(ValueError):
+        composer.expand_universe(base, [("DOGEUSDT", "1h")])

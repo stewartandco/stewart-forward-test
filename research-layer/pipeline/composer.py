@@ -372,6 +372,31 @@ Rules:
   support only two good families, propose two."""
 
 
+def expand_universe(spec: dict, cells: list[tuple[str, str]]) -> list[dict]:
+    """One spec per declared cell.
+
+    A CELL is one asset at one timeframe, and it is the unit of survival:
+    excluding a strategy that only works on 15m ETH is exactly what this
+    exists to prevent. Each (blocks, cell) pair is a separate registered
+    strategy and therefore a separate TRIAL - composition_fingerprint already
+    hashes assets and timeframe, so they register side by side without
+    tripping the resurrection guard.
+
+    The 2-asset mean-combine path in engine.run_spec is untouched and still
+    serves the legacy BTC+ETH 1d specs.
+    """
+    from .cells import validate_cell
+
+    out = []
+    for asset, timeframe in cells:
+        validate_cell(asset, timeframe)
+        s = json.loads(json.dumps(spec))          # deep copy, no shared state
+        s["universe"] = dict(s.get("universe", {}),
+                             assets=[asset], timeframe=timeframe)
+        out.append(s)
+    return out
+
+
 def grammar_summary() -> str:
     lines = []
     for (role, btype), schema in BLOCK_TYPES.items():
