@@ -34,7 +34,7 @@ def _now_utc() -> str:
 
 
 class BudgetMeter:
-    def __init__(self, ledger_path: str | Path, monthly_cap_usd: float = 25.0,
+    def __init__(self, ledger_path: str | Path, monthly_cap_usd: float = 50.0,
                  warn_frac: float = 0.8):
         self.ledger_path = Path(ledger_path)
         self.monthly_cap_usd = monthly_cap_usd

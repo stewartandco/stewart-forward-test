@@ -474,6 +474,66 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
     assert not verify_chain(p)
 
 
+# ---------------- D28: cap raise + tightened intake bar -------------------
+
+def test_default_monthly_cap_is_50():
+    from .scanner import run as scanner_run
+    import inspect
+    from .budget import BudgetMeter
+    assert BudgetMeter(Path("nul-unused")).monthly_cap_usd == 50.0
+    src = inspect.getsource(scanner_run)
+    assert '"--cap", type=float, default=50.0' in src.replace("'", '"')
+
+
+def test_low_testability_keeps_are_recorded_but_not_extracted():
+    """Extraction is the dominant cost ($0.072/item): only high-testability
+    keeps earn a full fetch."""
+    items = _items(3)
+    data = {"decisions": [
+        {"id": "i0", "keep": True, "reason": "explicit backtestable rule",
+         "testability": 0.9},
+        {"id": "i1", "keep": True, "reason": "vague directional musing",
+         "testability": 0.2},
+        {"id": "i2", "keep": False, "reason": "marketing", "testability": 0.0},
+    ]}
+    out = parse_screen_response(items, data)
+    assert out["i0"][0] == "screen_keep"
+    assert out["i1"][0] == "screen_keep_low"   # logged, never extracted
+    assert out["i2"][0] == "screen_kill"
+
+
+def test_missing_testability_defaults_to_pass():
+    out = parse_screen_response(_items(1),
+                                {"decisions": [{"id": "i0", "keep": True,
+                                                "reason": "r"}]})
+    assert out["i0"][0] == "screen_keep"
+
+
+def test_thin_pages_skip_extraction(tmp_path):
+    src = make_source()
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    items = [{"source_id": src["id"], "item_id": "thin", "title": "T",
+              "link": "https://example.org/thin", "summary": "s",
+              "published": None}]
+    seen.record("thin", src["id"], "seen", title="T",
+                link="https://example.org/thin")
+    client = StubClient([_screen_msg([{"id": "thin", "keep": True,
+                                       "reason": "looks testable",
+                                       "testability": 0.9}])])
+    registry = Registry(tmp_path / "reg.jsonl")
+    stats = process_new_items(
+        items, client=client, model="claude-sonnet-5",
+        meter=BudgetMeter(tmp_path / "led.jsonl"), seen=seen, registry=registry,
+        fetch=_fetch_factory({"https://example.org/thin":
+                              (200, "<html><body><p>Short teaser.</p></body></html>")}),
+        watchlist_sources=[src], discovery_path=tmp_path / "d.jsonl",
+        screen_log=tmp_path / "s.jsonl", actions=ActionLog(tmp_path / "a.jsonl"))
+    assert stats["thin_content"] == 1
+    assert stats["cards_registered"] == 0
+    assert seen.status("thin") == "thin_content"
+    assert registry.cards() == {}
+
+
 # ---------------- incident 2026-08-15: runaway retry + link soup ----------
 
 class BillingErrorClient(StubClient):
@@ -1043,8 +1103,11 @@ def test_full_funnel_registers_pending_card_and_flags_paywall(tmp_path):
     fetch = _fetch_factory({src["feed"]: (200, RSS_XML)})
     new_items = poll_source(src, seen, fetch)
 
+    # realistic article length: the thin-content guard skips sub-1200-char pages
+    filler = ("<p>We test the effect across a long sample of daily bars and "
+              "report the resulting risk-adjusted performance in detail.</p>" * 12)
     article = ("<html><body><p>We find that momentum persists in crypto for "
-               "20 days after formation.</p>"
+               "20 days after formation.</p>" + filler +
                '<a href="https://citedblog.example/research">cited</a>'
                "</body></html>")
     pages = {

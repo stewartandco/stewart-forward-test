@@ -43,6 +43,7 @@ DEFAULT_READER_ENV = Path(r"E:\Users\Coen\Claude\stewartandco-agents\hubs\intell
 MAX_DISCOVERIES_PER_ITEM = 10
 HTML_ITEMS_PER_CYCLE = 25      # cap on a feedless source's per-poll candidates
 MAX_DEFER_ATTEMPTS = 3         # then park; no infinite re-feed (08-15 runaway)
+MIN_ARTICLE_CHARS = 1200       # below this a fetched page is a teaser, not an article
 CREDIT_BACKOFF_SECONDS = 1800  # cool-off after a billing/credential failure
 
 # watchlist class -> research-card source metadata. Everything enters at
@@ -154,8 +155,9 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
                       watchlist_sources: list[dict], discovery_path,
                       screen_log, actions: ActionLog) -> dict:
     stats = {"items": len(new_items), "screen_keep": 0, "screen_kill": 0,
-             "deferred": 0, "paywalled": 0, "fetch_failed": 0,
-             "extracted": 0, "cards_registered": 0, "honesty_dropped": 0}
+             "screen_keep_low": 0, "deferred": 0, "paywalled": 0,
+             "fetch_failed": 0, "thin_content": 0, "extracted": 0,
+             "cards_registered": 0, "honesty_dropped": 0}
     if not new_items:
         return stats
 
@@ -170,6 +172,8 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             stats["screen_keep"] += 1
         elif status == "screen_kill":
             stats["screen_kill"] += 1
+        elif status == "screen_keep_low":
+            stats["screen_keep_low"] += 1   # on the record, never extracted
         else:
             stats["deferred"] += 1
     actions.event("screen_batch", {"n": len(new_items),
@@ -197,6 +201,12 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             stats["paywalled"] += 1
             continue
         page_text = html_to_text(html)
+        if len(page_text) < MIN_ARTICLE_CHARS:
+            # teaser/landing page: extraction would spend $0.07 on nothing
+            seen.record(item["item_id"], item["source_id"], "thin_content",
+                        reason=f"{len(page_text)} chars < {MIN_ARTICLE_CHARS}")
+            stats["thin_content"] += 1
+            continue
         try:
             registered, dropped = _extract_item(
                 client, model, item, src_by_id[item["source_id"]], page_text,
@@ -475,7 +485,8 @@ def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--once", action="store_true", help="one cycle, then exit")
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--cap", type=float, default=25.0, help="monthly USD cap")
+    ap.add_argument("--cap", type=float, default=50.0,
+                    help="monthly USD cap (D28: raised from 25)")
     ap.add_argument("--watchlist", type=Path,
                     default=LAYER / "sources" / "verified_sources.json")
     ap.add_argument("--registry", type=Path, default=LAYER / "registry_log.jsonl")

@@ -28,21 +28,39 @@ class ApiCreditExhausted(RuntimeError):
 INTAKE_PARAMETERS = """\
 You are the intake screen for Stewart & Co.'s quantitative research pipeline.
 You see item titles and summaries from a verified source watchlist and decide,
-for each, whether it is worth full extraction into research cards.
+for each, whether it earns a full extraction into research cards. Extraction
+is expensive and the corpus is already large, so the bar is HIGH: keep only
+items that look like they carry a specific, backtestable finding.
 
-KEEP only items likely to contain testable claims about: trading signals or
-edges, portfolio construction, execution, risk management, market
-microstructure, or regime detection. The bar is a claim that could in
-principle be backtested with market data.
+KEEP requires all three:
+  1. A specific claimed relationship or effect (not a topic, not a question,
+     not general commentary) about signals/edges, portfolio construction,
+     execution, risk, microstructure, or regime detection.
+  2. Enough specificity that a rule could be written from it - an instrument
+     or asset class, a direction, a horizon, or a stated condition.
+  3. Some indication of evidence or method: data, a backtest, a study, a
+     model, or quantified results.
 
-KILL (with a one-line reason) anything that is: real-estate content,
-alpha-free blogspam or listicles, product/course/service marketing, macro news
-without a stated mechanism, job posts, event announcements, or pure
-software-release housekeeping with no research content.
+KILL (one-line reason) anything else, including: real-estate content;
+alpha-free blogspam or listicles; product, course, tool or service marketing;
+macro or market news without a stated mechanism; market recaps and daily
+commentary; opinion, philosophy or career pieces; educational explainers of
+well-known concepts; link roundups and newsletters that only summarise other
+posts; book reviews; podcast, webinar, conference or event announcements; job
+posts; and software-release housekeeping.
 
-Be strict: when a title/summary gives no evidence of a testable claim, kill
-it. Never invent content that is not in the title or summary. Return one
-decision per item id, using exactly the ids given."""
+Also rate testability 0-1: how directly the item's apparent claim could
+become a backtest rule (1.0 = explicit rule with named data and results;
+0.5 = a concrete claim needing interpretation; 0.2 = vague or qualitative).
+Items below 0.5 are logged but not extracted, so rate honestly rather than
+generously.
+
+Be strict: when a title/summary gives no evidence of a specific testable
+finding, kill it. Never invent content that is not in the title or summary.
+Return one decision per item id, using exactly the ids given."""
+
+# Keeps below this testability are recorded but never fetched/extracted.
+EXTRACT_MIN_TESTABILITY = 0.5
 
 SCREEN_SCHEMA = {
     "type": "object",
@@ -55,8 +73,9 @@ SCREEN_SCHEMA = {
                     "id": {"type": "string"},
                     "keep": {"type": "boolean"},
                     "reason": {"type": "string"},
+                    "testability": {"type": "number"},
                 },
-                "required": ["id", "keep", "reason"],
+                "required": ["id", "keep", "reason", "testability"],
                 "additionalProperties": False,
             },
         },
@@ -85,8 +104,17 @@ def parse_screen_response(items: list[dict], data: dict) -> dict[str, tuple[str,
     for d in data.get("decisions", []):
         if d["id"] not in known:
             continue
-        status = "screen_keep" if d["keep"] else "screen_kill"
-        out[d["id"]] = (status, d["reason"])
+        if not d["keep"]:
+            out[d["id"]] = ("screen_kill", d["reason"])
+            continue
+        # Missing score = pass (older/looser responses stay backwards compatible)
+        score = d.get("testability")
+        score = EXTRACT_MIN_TESTABILITY if score is None else float(score)
+        status = ("screen_keep" if score >= EXTRACT_MIN_TESTABILITY
+                  else "screen_keep_low")
+        reason = d["reason"] if status == "screen_keep" else \
+            f"{d['reason']} (testability {score:.2f} < {EXTRACT_MIN_TESTABILITY})"
+        out[d["id"]] = (status, reason)
     for it in items:
         if it["item_id"] not in out:
             out[it["item_id"]] = ("deferred_screen", "screen_missing")
