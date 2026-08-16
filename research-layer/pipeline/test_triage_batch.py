@@ -269,3 +269,41 @@ def test_the_client_loads_the_reader_env_rather_than_inventing_its_own(monkeypat
     monkeypatch.setenv("READER_ENV_PATH", str(env))
     client, meter = tb._client_and_meter()
     assert client is not None and meter is not None
+
+
+# ---------------- thinking blocks are not the answer ----------------
+
+class _Block:
+    def __init__(self, type_, text=None):
+        self.type = type_
+        if text is not None:
+            self.text = text
+
+
+class _ThinkingMsg:
+    """What the API actually returns when the model thinks: content[0] is a
+    ThinkingBlock with no .text at all."""
+    usage = _Usage()
+
+    def __init__(self, payload):
+        self.content = [_Block("thinking"), _Block("text", payload)]
+
+
+class _ThinkingClient:
+    def __init__(self, n):
+        self._n = n
+        self.messages = self
+
+    def create(self, **kw):
+        self._n -= 1
+        return _ThinkingMsg('{"accept": true, "reason": "faithful"}')
+
+
+def test_a_thinking_block_before_the_json_does_not_lose_the_vote():
+    """Live dry run 2026-08-17: 15 of 20 cards escalated as incomplete_panel
+    because content[0] was a ThinkingBlock, which has no .text, so every vote
+    raised AttributeError and was dropped. The JSON is in the first TEXT block,
+    not the first block."""
+    votes = tb.review_card(_ThinkingClient(3), "m", CARD, _Meter())
+    assert len(votes) == tb.PANEL_SIZE
+    assert tb.panel_verdict(votes) == ("accepted", None)

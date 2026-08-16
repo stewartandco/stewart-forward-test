@@ -135,8 +135,12 @@ def review_card(client, model: str, card: dict, meter,
         )
         meter.record_call(model, msg.usage, "triage")
         try:
-            vote = json.loads(msg.content[0].text)
-        except (json.JSONDecodeError, AttributeError, IndexError):
+            # The first block is NOT necessarily the answer: when the model
+            # thinks, content[0] is a ThinkingBlock with no .text at all. Take
+            # the first TEXT block, the same way relevance/reader/composer do.
+            text = next(b.text for b in msg.content if b.type == "text")
+            vote = json.loads(text)
+        except (json.JSONDecodeError, AttributeError, IndexError, StopIteration):
             continue          # lost vote -> short panel -> escalation
         votes.append({"accept": bool(vote.get("accept")),
                       "reason": str(vote.get("reason", ""))})
