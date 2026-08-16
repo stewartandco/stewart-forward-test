@@ -83,7 +83,9 @@ class _Msg:
     usage = _Usage()
 
     def __init__(self, payload):
-        self.content = [type("B", (), {"text": payload})()]
+        # Real content blocks always carry .type; the first fake here omitted
+        # it, which hid the ThinkingBlock bug the 2026-08-17 dry run found.
+        self.content = [type("B", (), {"type": "text", "text": payload})()]
 
 
 class _FakeClient:
