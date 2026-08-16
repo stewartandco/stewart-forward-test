@@ -16,6 +16,12 @@ until something survived.
 
 Per the ratchet in the v2 note: this diagnostic may only TIGHTEN protocol-v2,
 never loosen it, and any change requires a fresh pre-declared note.
+
+This script is PINNED to protocol-v2 and does not track the live gauntlet.
+protocol-v3 retired the deflated-Sharpe gate from `gauntlet.evaluate_spec`, so
+the sixth gate is re-applied locally here, in v2's position, against a local
+copy of v2's threshold. A frozen audit must keep reporting what v2 actually
+said even after the live protocol moves on.
 """
 from __future__ import annotations
 
@@ -27,8 +33,15 @@ from pipeline.registry import Registry
 from pipeline.engine import run_spec
 from pipeline.stats import sharpe
 from pipeline.screen import load_bars
-from pipeline.gauntlet import (PROTOCOL, split_trades, evaluate_spec,
+from pipeline.gauntlet import (split_trades, evaluate_spec,
                                window_vol, daily_returns_from_curve, stressed)
+
+# Pinned deliberately: NOT imported from pipeline.gauntlet. This audit is
+# frozen at the protocol it names, so it must not drift when the live protocol
+# moves. DSR_MIN_V2 is likewise a local literal, so retuning the live DSR_MIN
+# cannot retroactively change what this historical audit reports.
+PROTOCOL = "gauntlet-protocol-v2"
+DSR_MIN_V2 = 0.95
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,6 +95,14 @@ def main(argv: list[str] | None = None) -> int:
             window_vol(bars, univ, "", args.cutoff),
             window_vol(bars, univ, args.cutoff, "9999-12-31"),
             trials_n, trials_var, seed=int(sid, 16) % (2 ** 31))
+        # protocol-v2 had a sixth gate that gauntlet.evaluate_spec no longer
+        # applies. Re-apply it here, in v2's position (fifth, before
+        # cost_stress), so this script audits the gates it names. Reaching v2's
+        # dsr check means passing the four gates ahead of it, i.e. the current
+        # reason is None or the later cost_stress.
+        if not m["deflated_sharpe"] >= DSR_MIN_V2 and reason in (None,
+                                                                 "cost_stress"):
+            passed, reason = False, "dsr"
         n_pass += bool(passed)
         d = m["edge_decay_pct"]
         print(f"{sid}  {'WOULD PASS' if passed else 'still fails':<11} "

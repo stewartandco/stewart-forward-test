@@ -178,6 +178,7 @@ def test_all_gates_pass():
                             "edge_decay_pct", "mc_p05_equity", "p_ruin",
                             "deflated_sharpe", "sibling_group_n",
                             "cost_stress_net_pnl", "trials_n", "registered_n",
+                            "trials_sr_var", "expected_max_sharpe", "protocol",
                             "is_edge_raw", "oos_edge_raw", "is_vol", "oos_vol"}
     assert metrics["sibling_group_n"] == 4
 

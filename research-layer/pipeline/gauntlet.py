@@ -7,7 +7,9 @@ Usage:
         [--cutoff 2023-12-31] [--dry-run]
 
 Real runs HARD-REFUSE unless a note starting with PROTOCOL is chained.
-Gates and amendments per docs/2026-08-14-gauntlet-design.md.
+Current gates and amendments per docs/2026-08-16-gen3-design.md (rev 2);
+docs/2026-08-14-gauntlet-design.md is the HISTORICAL v1 spec and still
+describes the deflated-Sharpe gate that protocol-v3 retired.
 """
 from __future__ import annotations
 
@@ -32,6 +34,9 @@ P_RUIN_MAX = 0.05
 # protocol-v3: DSR_MIN no longer gates THIS stage. It is retained verbatim as
 # the threshold for the quarantine -> live gate, computed on the quarantine
 # forward record. See docs/2026-08-16-gen3-design.md rev 2.
+# SCHEMA.md's gauntlet criterion (d) still lists the deflated Sharpe as a
+# gauntlet gate; it is amended by the chained protocol-v3 note, and the SCHEMA
+# text itself is updated in this plan's verifier task.
 DSR_MIN = 0.95
 DEFAULT_CUTOFF = "2023-12-31"
 
@@ -123,7 +128,19 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "sibling_group_n": group_n if group_n is not None else trials_n,
         "cost_stress_net_pnl": stress_net,
         "trials_n": trials_n,
-        "registered_n": registered_n if registered_n is not None else trials_n,
+        # no fallback: registered_n exists to be the honest raw registration
+        # count that trials_n no longer is (clusters <= registrations), so an
+        # omitted value records null rather than a fabricated number.
+        "registered_n": registered_n,
+        # recorded so a recorded deflated_sharpe is reproducible from the
+        # entry alone: under v3 the variance comes from cluster
+        # representatives, which needs the clustering and every strategy's
+        # daily returns to recompute.
+        "trials_sr_var": trials_sr_var,
+        "expected_max_sharpe": sr_star,
+        # in-entry discriminator: trials_n means "registered strategies" under
+        # v2 and "clusters" under v3, under the same key.
+        "protocol": PROTOCOL,
         "is_edge_raw": is_raw,
         "oos_edge_raw": oos_raw,
         "is_vol": is_vol,
@@ -136,16 +153,19 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   "p75": percentile(mc["terminals"], 0.75),
                   "p_ruin": mc["p_ruin"], "ruin_level": RUIN_LEVEL}
 
-    if not oos_net > 0:
-        return False, "oos_negative", metrics, mc_summary
-    if decay is None or not decay > DECAY_MIN_PCT:
-        return False, "edge_decay", metrics, mc_summary
-    if not mc_p05 > MC_P05_MIN:
-        return False, "mc_p05", metrics, mc_summary
-    if not mc["p_ruin"] < P_RUIN_MAX:
-        return False, "p_ruin", metrics, mc_summary
-    if not stress_net > 0:
-        return False, "cost_stress", metrics, mc_summary
+    # FAIL_ORDER drives the sequence rather than merely documenting it: a gate
+    # added to `checks` but not declared in FAIL_ORDER is never evaluated, and
+    # one declared but not computed raises KeyError here, so the constant and
+    # the battery cannot silently drift apart. Every value is an
+    # already-computed scalar, so eager evaluation has no cost or side effect.
+    checks = {"oos_negative": oos_net > 0,
+              "edge_decay": decay is not None and decay > DECAY_MIN_PCT,
+              "mc_p05": mc_p05 > MC_P05_MIN,
+              "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
+              "cost_stress": stress_net > 0}
+    for name in FAIL_ORDER:
+        if not checks[name]:
+            return False, name, metrics, mc_summary
     return True, None, metrics, mc_summary
 
 
@@ -168,6 +188,24 @@ def select_survivors(rows: list[dict]) -> tuple[set[str], set[str]]:
 def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:
     return [equity[i][1] / equity[i - 1][1] - 1
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
+
+
+def check_aligned(returns_by_id: dict[str, list[float]]) -> None:
+    """Fail closed on ragged return series before clustering.
+
+    cluster.correlation compares series BY INDEX and explicitly leaves
+    alignment to the caller. Two things make length data-dependent:
+    daily_returns_from_curve drops steps at non-positive equity (shortening
+    AND shifting the series of a strategy that blows up), and run_spec builds
+    each curve over the shortest common calendar of THAT spec's assets. A
+    mismatch would silently correlate different dates, giving a wrong k and a
+    wrong recorded deflated Sharpe with no error, so refuse instead."""
+    lengths = {sid: len(r) for sid, r in returns_by_id.items()}
+    if len(set(lengths.values())) > 1:
+        raise ValueError(
+            "cannot cluster ragged return series: every strategy must share "
+            "one calendar, got "
+            + ", ".join(f"{sid}={n}" for sid, n in sorted(lengths.items())))
 
 
 def stressed(spec: dict) -> dict:
@@ -255,30 +293,30 @@ def run(argv: list[str] | None = None) -> int:
         data_hashes[a] = hashlib.sha256(
             (args.data_dir / f"{a}_1d.csv").read_bytes()).hexdigest()
 
-    # group SR variance needs every sibling's full-run curve (incl. graveyarded)
+    # clustering needs every sibling's full-run curve (incl. graveyarded)
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
                 for s in all_specs}
-    group_srs: dict[str, list[float]] = {}
-    all_srs: list[float] = []
     full_results: dict[str, dict] = {}
+    returns_by_id: dict[str, list[float]] = {}
     for s in all_specs:
+        sid = s["strategy_id"]
         res = run_spec(s, {a: bars_by_asset[a]
                            for a in s["universe"]["assets"]})
-        full_results[s["strategy_id"]] = res
-        rets = daily_returns_from_curve(res["equity"])
-        sr = sharpe(rets)
-        group_srs.setdefault(group_of[s["strategy_id"]], []).append(sr)
-        all_srs.append(sr)
-    group_n = {g: len(srs) for g, srs in group_srs.items()}
+        full_results[sid] = res
+        returns_by_id[sid] = daily_returns_from_curve(res["equity"])
+    group_n: dict[str, int] = {}
+    for g in group_of.values():
+        group_n[g] = group_n.get(g, 0) + 1
+    registered_n = len(all_specs)
+
     # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
     # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
     # trials. A sibling sweep is one idea at several settings, and pooling
     # structurally different families put real edge dispersion into a term
     # meant to hold sampling noise.
-    returns_by_id = {sid: daily_returns_from_curve(r["equity"])
-                     for sid, r in full_results.items()}
+    #
+    check_aligned(returns_by_id)
     trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
-    registered_n = len(all_srs)
     print(f"effective trials: {trials_n} clusters over {registered_n} "
           f"registered strategies")
 
@@ -291,7 +329,7 @@ def run(argv: list[str] | None = None) -> int:
                                for a in s["universe"]["assets"]})
         is_t, oos_t = split_trades(res["trades"], args.cutoff)
         _, stress_oos = split_trades(stress_res["trades"], args.cutoff)
-        rets = daily_returns_from_curve(res["equity"])
+        rets = returns_by_id[sid]
         g = group_of[sid]
         assets = s["universe"]["assets"]
         is_vol = window_vol(bars_by_asset, assets, "", args.cutoff)
@@ -309,7 +347,7 @@ def run(argv: list[str] | None = None) -> int:
               f"decay={'n/a' if d is None else f'{d:+.1f}%'}  "
               f"p05={metrics['mc_p05_equity']:.3f}  "
               f"ruin={metrics['p_ruin']:.3f}  "
-              f"dsr={metrics['deflated_sharpe']:.3f}  "
+              f"[info dsr={metrics['deflated_sharpe']:.3f}]  "
               f"stress={metrics['cost_stress_net_pnl']:+.4f}"
               + (f"  [{reason}]" if reason else ""))
 
