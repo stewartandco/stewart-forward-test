@@ -186,6 +186,22 @@ def _owed_by_date(data_dir: Path, spec: dict, after: str,
     return owed
 
 
+def _last_bar_date(data_dir: Path, spec: dict) -> str | None:
+    """The newest bar available across the strategy's universe, or None if any
+    price file is missing or empty. This is where the completeness window has
+    to end: a record that stopped writing must not audit as complete."""
+    latest = None
+    for asset in spec["universe"]["assets"]:
+        if not (data_dir / f"{asset}_1d.csv").exists():
+            return None
+        bars = load_bars(data_dir, asset, "9999-12-31")
+        if not bars:
+            return None
+        if latest is None or bars[-1]["date"] > latest:
+            latest = bars[-1]["date"]
+    return latest
+
+
 def _truncated(items: list[str]) -> str:
     """A bounded list that says what it dropped: a silently truncated list
     reads as 'that was all of them'."""
@@ -200,19 +216,24 @@ def _report_completeness(registry_rows: list[dict], spec: dict | None,
     """The audit half of --review: what is missing, and how late what is there
     arrived. Both are computed from evidence already on the chain and on disk,
     not from anything the runner asserts about itself."""
-    if not registry_rows:
-        print("  completeness: no decisions chained yet")
-        return
-
     recorded_by_date: dict[str, set[str]] = {}
     for r in registry_rows:
         recorded_by_date.setdefault(r["date"], set()).add(r["asset"])
-    through = max(recorded_by_date)
 
     if spec is None or entered is None:
         print("  completeness: cannot audit (no spec or entry date on chain)")
     else:
-        owed = _owed_by_date(data_dir, spec, entered, through)
+        # The window ends at the last bar that EXISTS, not at the last one
+        # RECORDED. Ending it at the last recorded date would make a record
+        # that has simply STOPPED audit as complete — a job dead for three
+        # weeks would report zero unrecorded dates, and an ongoing outage is
+        # exactly the failure most likely to persist unattended. This
+        # over-reports by at most one day when --review runs before the day's
+        # job; over-reporting by one beats under-reporting the last fifteen.
+        last_bar = _last_bar_date(data_dir, spec)
+        through = max([last_bar] + list(recorded_by_date)) if last_bar else None
+        owed = (_owed_by_date(data_dir, spec, entered, through)
+                if through else None)
         if owed is None:
             print("  completeness: cannot audit (price file missing for part "
                   "of the universe)")
@@ -231,13 +252,24 @@ def _report_completeness(registry_rows: list[dict], spec: dict | None,
             print(f"  partially recorded dates: {len(partial)}"
                   + (f"  ({_truncated(partial)})" if partial else ""))
 
+    if not registry_rows:
+        return
     lags = [(parse_iso_date(r["ts_utc"][:10]) - parse_iso_date(r["date"])).days
             for r in registry_rows]
+    # A NEGATIVE lag means a row was chained before its own bar date existed —
+    # the closest thing this system can produce to a fabricated forward
+    # observation, since it means the price file carried a bar for a day that
+    # had not happened. It must never fall into the reassuring branch below.
+    early = [n for n in lags if n < 0]
+    if early:
+        print(f"  WARNING: {len(early)} row(s) chained BEFORE their own bar "
+              f"date (min {min(lags)}d) — a decision was recorded against a "
+              f"bar that did not exist at write time")
     late = [n for n in lags if n > BACKFILL_LAG_DAYS]
     if late:
         print(f"  backfill lag: max {max(lags)}d, {len(late)} row(s) chained "
               f"more than {BACKFILL_LAG_DAYS}d after their bar")
-    else:
+    elif not early:
         print(f"  backfill lag: max {max(lags)}d, every row chained within "
               f"{BACKFILL_LAG_DAYS}d of its bar")
 
@@ -371,7 +403,7 @@ def run(argv: list[str] | None = None) -> int:
                     continue
                 try:
                     registry.record_quarantine_decision(row)
-                except DuplicateQuarantineDecision:
+                except DuplicateQuarantineDecision as dup:
                     # Another process chained this row between our snapshot of
                     # `seen` and this write. The structural guarantee held --
                     # no duplicate exists -- so a scheduler retry overlapping
@@ -379,6 +411,13 @@ def run(argv: list[str] | None = None) -> int:
                     # paging someone. Only this case is absorbed; every other
                     # ValueError from the writer means a malformed payload and
                     # stays fatal.
+                    #
+                    # But absorb ONLY when the chained row is identical to the
+                    # one just computed. Same key with different numbers means
+                    # the data or the spec moved underneath us, and silently
+                    # discarding the losing row would hide exactly that.
+                    if getattr(dup, "chained", None) != row:
+                        raise
                     seen.add(key)
                     n_skipped += 1
                     continue

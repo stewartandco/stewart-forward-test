@@ -290,7 +290,13 @@ class Registry:
                     continue
                 p = e["payload"]
                 if (p["strategy_id"], p["date"], p["asset"]) == key:
-                    raise DuplicateQuarantineDecision(
+                    dup = DuplicateQuarantineDecision(
                         "quarantine decision already chained for "
                         f"{key[0]} {key[1]} {key[2]}")
+                    # Carry the chained payload so a caller can tell a benign
+                    # race (identical row, recomputed by a second process)
+                    # from a genuine conflict (same key, DIFFERENT numbers —
+                    # which means the data or the spec moved underneath us).
+                    dup.chained = p
+                    raise dup
             return self._append_locked("quarantine_decision", row)

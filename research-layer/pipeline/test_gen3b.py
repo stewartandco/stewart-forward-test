@@ -795,9 +795,12 @@ def test_review_flags_a_partially_recorded_date(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     quarantine_run(argv_for(reg, data, "--review"))
     out = capsys.readouterr().out
-    assert "unrecorded bar dates in window: 0" in out
     assert "partially recorded dates: 1" in out
     assert "2023-01-22 missing ETHUSD" in out
+    # 2023-01-23 has a bar and no decision at all, so it is a WHOLLY missing
+    # date, reported separately from the partial one. The window runs to the
+    # last bar that exists, not to the last row recorded.
+    assert "unrecorded bar dates in window: 1  (2023-01-23)" in out
 
 
 def test_a_truncated_gap_list_says_what_it_dropped(tmp_path, capsys):
@@ -887,7 +890,7 @@ def test_registry_rejects_meaningless_decision_values(tmp_path, bad):
     assert decisions(reg) == []
 
 
-def test_append_still_takes_the_lock_for_every_other_writer(tmp_path):
+def test_append_public_behaviour_is_unchanged(tmp_path):
     """append() was split so record_quarantine_decision could hold the lock
     across check-then-append. Its public behaviour must not have moved."""
     reg = Registry(tmp_path / "r.jsonl")
@@ -1001,3 +1004,102 @@ def test_a_gap_in_an_unrelated_asset_does_not_refuse_everyone(tmp_path, capsys):
     assert len(rows) == 1
     assert rows[0]["strategy_id"] == spec["strategy_id"]
     assert "not after its quarantine entry" in capsys.readouterr().out
+
+
+def test_review_reports_a_record_that_has_stopped(tmp_path, capsys):
+    """The audit window ends at the last bar that EXISTS, not the last one
+    recorded. Ending it at the last recorded date made a job that died weeks
+    ago report a clean bill of health -- and an ongoing outage is precisely
+    the failure most likely to persist unattended."""
+    bars = flat_dated_bars(n=40)                 # 2023-01-01 .. 2023-02-09
+    reg, spec, data = quarantined(tmp_path, bars=bars)
+    # record only the first two days after entry, then "stop"
+    for d in ("2023-01-22", "2023-01-23"):
+        quarantine_run(argv_for(reg, data, "--date", d))
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    # entry 2023-01-21, bars to 2023-02-09 -> 19 owed days, 2 recorded.
+    # Under the old window (ending at the last RECORDED date) this read 0.
+    assert "unrecorded bar dates in window: 17" in out
+    # 17 > MAX_LISTED_GAPS, so the trailing dates are truncated -- and the
+    # truncation says so rather than implying the list was complete
+    assert f"... and {17 - MAX_LISTED_GAPS} more" in out
+
+
+def test_review_audits_a_strategy_that_never_recorded_anything(tmp_path, capsys):
+    """Zero rows must not read as 'nothing to see'. A strategy quarantined
+    weeks ago with no decisions owes every bar since its entry."""
+    bars = flat_dated_bars(n=40)
+    reg, spec, data = quarantined(tmp_path, bars=bars)
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    # entry 2023-01-21, bars run to 2023-02-09 -> 19 owed days, none recorded
+    assert "unrecorded bar dates in window: 19" in out
+
+
+def test_review_warns_when_a_row_predates_its_own_bar(tmp_path, capsys):
+    """A row chained BEFORE its bar date means a decision was recorded against
+    a bar that had not happened -- the closest thing this system can produce
+    to a fabricated forward observation. It must never land in the
+    'every row chained within Nd' branch."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    row = decisions(reg)[0]
+    # chain a second asset's row stamped a month BEFORE its bar date
+    reg.append("quarantine_decision", dict(row, asset="ETHUSD"),
+               ts_utc="2022-12-21T00:00:00Z")
+    capsys.readouterr()
+    quarantine_run(argv_for(reg, data, "--review"))
+    out = capsys.readouterr().out
+    assert "chained BEFORE their own bar date" in out
+    assert "every row chained within" not in out
+
+
+def test_rebase_refuses_when_no_bar_precedes_the_entry(tmp_path):
+    """Silently rebasing on the first available bar would fold pre-quarantine
+    performance into the forward record."""
+    with pytest.raises(ValueError, match="no bar on or before"):
+        quarantine_mod._rebase_index(
+            [{"date": "2023-05-01"}], "2023-01-01", "BTCUSD")
+
+
+def test_a_duplicate_with_different_content_is_fatal(tmp_path, capsys,
+                                                     monkeypatch):
+    """'Already present' must mean already present AND identical. Same key
+    with different numbers means the data or the spec moved underneath us,
+    and discarding the losing row in silence would hide exactly that.
+
+    `existing_decisions` is stubbed empty so the cheap `seen` pre-filter
+    misses and the writer's own guard -- the one that holds under a real
+    race, inside the lock -- is what gets exercised."""
+    reg, spec, data = quarantined(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    quarantine_run(argv)
+    row = decisions(reg)[0]
+    assert len(decisions(reg)) == 1
+    # replace the chained row with the same key carrying different numbers
+    lines = reg.log_path.read_text(encoding="utf-8").splitlines()
+    reg.log_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    reg.append("quarantine_decision", dict(row, equity=9.9999))
+
+    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    with pytest.raises(DuplicateQuarantineDecision):
+        quarantine_run(argv)
+
+
+def test_an_identical_duplicate_is_still_absorbed(tmp_path, capsys,
+                                                  monkeypatch):
+    """The other half of the same rule: a benign race -- a second process
+    recomputing the SAME row -- resolves quietly, rc 0, counted honestly."""
+    reg, spec, data = quarantined(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    quarantine_run(argv)
+    assert len(decisions(reg)) == 1
+    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    capsys.readouterr()
+    rc = quarantine_run(argv)
+    assert rc == 0
+    assert len(decisions(reg)) == 1
+    assert "0 decision(s) chained, 1 already present" in capsys.readouterr().out
