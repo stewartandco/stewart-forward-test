@@ -411,19 +411,47 @@ def test_prompt_figures_match_what_was_measured():
     """The prompt presents these to the model as measurement, not opinion, so
     a silent edit to any figure is a correctness bug, not a wording change.
 
-    Every figure below was recomputed from registry_log.jsonl on 2026-08-16:
-    18 gen-2 gauntlet verdicts; 12 of them with POSITIVE volatility-normalized
-    edge decay, spanning +1.75% to +54.27%; forced_flow_overshoot_reversion
-    net_pnl -0.455 to -0.658 with all 8 buried `net_negative`;
-    downtrend_short_only 10-19 trades with all 8 buried `trade_count`, never
-    on P&L; and the four worst p_ruin AND the four worst mc_p05 all
-    vol_target-sized.
+    This is a WORDING GUARD, not a recomputation: it pins the prompt's text
+    against figures recorded here, deliberately rather than reading
+    registry_log.jsonl, which a concurrent scanner session is appending to and
+    which would make the suite non-hermetic. Provenance lives in this
+    docstring instead. Every figure was recomputed from the chain 2026-08-16:
 
-    An earlier draft said 11, carried from a source note that quoted the right
-    range but miscounted the set."""
+      gen 1: 22 specs, 13 passed the screen, all 13 failed the gauntlet.
+      gen 2: 34 specs, 18 passed the screen, all 18 failed the gauntlet.
+      forced_flow_overshoot_reversion: net_pnl -0.455..-0.658, 8/8 buried
+        `net_negative` - the same reason gen 1's reversion family died.
+      downtrend_short_only: 10-19 trades, 8/8 buried `trade_count`, and 4 of
+        the 8 also had negative net_pnl (-0.070..-0.148).
+      decay: 12 of 18 positive, +1.75%..+54.27%; the other 6 down to -69.79%;
+        both surviving families appear in BOTH groups.
+      sizing: ALL 18 gauntlet entrants were vol_target, so the worst-4 p_ruin
+        and worst-4 mc_p05 being vol_target carries no comparison at all.
+      screen window: 2017-08-17 to the 2023-12-31 fence = 6.37 years.
+
+    Two errors reached the prompt and were caught by review, not by this test:
+    an earlier draft said 11 of 18 (a source note quoted the right range but
+    miscounted the set), and an inherited sentence claimed every gen-1 spec
+    passed the screen when 9 of 22 did not. Both had propagated under the
+    'as measured, not as opinion' banner, which is exactly the claim that
+    makes a wrong figure a defect rather than a wording choice."""
+    # gen-1 figures - the inherited sentence that was wrong went unpinned
+    assert "13 of its 22 specs" in SYSTEM_PROMPT
+    assert "all 13 then failed out of sample" in SYSTEM_PROMPT
+    # gen-2 headline verdict, which an earlier draft omitted entirely while
+    # keeping a flattering sub-metric
+    assert "It still passed nothing." in SYSTEM_PROMPT
+    assert "18 of its 34 specs" in SYSTEM_PROMPT
+    assert "all 18 then failed the gauntlet" in SYSTEM_PROMPT
+    # measured detail
     assert "Of the 18 that reached the gauntlet, 12 showed POSITIVE" in SYSTEM_PROMPT
     assert "from +1.8% to +54.3%" in SYSTEM_PROMPT
-    assert "lost 46% to 66% in training" in SYSTEM_PROMPT
-    assert "only 10-19 trades in seven years" in SYSTEM_PROMPT
-    assert "trade-count floor, not its P&L gate" in SYSTEM_PROMPT
-    assert "four worst ruin and Monte Carlo outcomes came from" in SYSTEM_PROMPT
+    assert "The other 6" in SYSTEM_PROMPT and "-69.8%" in SYSTEM_PROMPT
+    assert "lost 46% to 66% over the training window" in SYSTEM_PROMPT
+    assert "only 10-19 trades in six and a half years" in SYSTEM_PROMPT
+    assert "Four of its eight specs were also" in SYSTEM_PROMPT
+    # the sizing bullet must keep its no-contrast-group caveat, or it reads as
+    # a finding when all 18 entrants shared the one sizing rule
+    assert "All 18 used vol_target sizing" in SYSTEM_PROMPT
+    assert "nothing here compares sizing rules" in SYSTEM_PROMPT
+    assert "Treat sizing as untested, not as settled." in SYSTEM_PROMPT

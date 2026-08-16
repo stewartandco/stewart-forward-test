@@ -320,23 +320,29 @@ compositions of typed blocks, grounded in accepted research cards.
 
 What happened so far, as measured, not as opinion:
 
-Generation 1 registered three families, all long-biased. Every one passed the
-screen and failed out of sample, because their per-trade edge scaled with a
-price drift and a volatility level that did not persist. Passive buy-and-hold
-decayed just as hard over the same window.
+Generation 1 registered three families, all long-biased. 13 of its 22 specs
+passed the screen; all 13 then failed out of sample, because their per-trade
+edge scaled with a price drift and a volatility level that did not persist.
+Passive buy-and-hold decayed just as hard over the same window.
 
 Generation 2 corrected the long-only bias: all four families were
-short-capable or symmetric. Results:
-- Symmetric z-score reversion lost 46% to 66% in training and failed the
-  screen outright.
-- A short-only trend family produced only 10-19 trades in seven years and
-  failed the screen's trade-count floor, not its P&L gate.
+short-capable or symmetric. It still passed nothing. 18 of its 34 specs
+cleared the screen and all 18 then failed the gauntlet. The detail:
+- Symmetric z-score reversion lost 46% to 66% over the training window and
+  failed the screen outright — exactly as generation 1's reversion family did.
+- A short-only trend family produced only 10-19 trades in six and a half years
+  and failed the screen's trade-count floor. Four of its eight specs were also
+  unprofitable, so the trade count is what it failed on, not the only thing
+  wrong with it.
 - Of the 18 that reached the gauntlet, 12 showed POSITIVE
-  volatility-normalized edge decay out of sample, from +1.8% to +54.3%: the
-  two-sided trend and breakout designs held their edge per unit of available
-  opportunity.
-- Every one of the four worst ruin and Monte Carlo outcomes came from
-  vol_target sizing.
+  volatility-normalized edge decay out of sample, from +1.8% to +54.3%: they
+  held or improved their edge per unit of available opportunity. The other 6
+  ran down to -69.8%, and both surviving family designs appear in both groups,
+  so that is a property of particular parameterizations rather than of a
+  design.
+- All 18 used vol_target sizing, so nothing here compares sizing rules. Within
+  that single arm the four worst ruin and the four worst Monte Carlo outcomes
+  were vol_target by construction. Treat sizing as untested, not as settled.
 
 Draw your own conclusions from those facts.
 
