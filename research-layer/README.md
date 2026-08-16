@@ -19,7 +19,7 @@ that died — is provable after the fact.
 | [`schemas/research_card.schema.json`](./schemas/research_card.schema.json) | JSON Schema — research card |
 | [`schemas/strategy_spec.schema.json`](./schemas/strategy_spec.schema.json) | JSON Schema — strategy specification |
 | [`schemas/registry_entry.schema.json`](./schemas/registry_entry.schema.json) | JSON Schema — registry log entry (the hash-chained unit) |
-| [`verify_registry.py`](./verify_registry.py) | Standalone chain walker for `registry_log.jsonl`, mirroring the root `verify.py` |
+| [`verify_registry.py`](./verify_registry.py) | Chain walker + invariant checker for `registry_log.jsonl`, mirroring the root `verify.py`. Needs the `pipeline/` package beside it (see below) |
 | [`examples/`](./examples) | Worked examples: a research card, a strategy spec, and a valid chained registry log |
 | [`pipeline/`](./pipeline) | Reader pilot: registry writer, Claude-powered card extraction, and human triage CLI |
 
@@ -109,6 +109,29 @@ python -m pipeline.gauntlet
 # 6. Verify the chain any time
 python verify_registry.py registry_log.jsonl
 ```
+
+`verify_registry.py` re-walks the hash chain and then checks nine invariants:
+
+1. Chain integrity (`prev_entry_hash` links, genesis = 64 zeros).
+2. `verdict` / `state_change` entries reference a registered `strategy_id`.
+3. Strategies cite ≥ 1 `card_id` that was registered **and** accepted.
+4. `strategy_registered` payloads carry no results fields.
+5. Lifecycle transitions follow the state machine; terminal states are final.
+6. Strategy blocks reference previously registered block types.
+7. Every `quarantine_decision` references a strategy **currently** in
+   `quarantine`, and `(strategy_id, date, asset)` is unique.
+8. No two `strategy_registered` entries share a `composition_fingerprint` —
+   "a buried composition never returns", checkable from the chain rather than
+   trusted to the Composer's in-process guard.
+9. `quarantine_data_snapshot` dates are unique, and every
+   `quarantine_decision` is covered by an **earlier** snapshot naming its
+   asset with a well-formed digest.
+
+Invariant 8 is why the script is **not** self-contained: it imports
+`composition_fingerprint` from `pipeline/composer.py` rather than
+reimplementing it, so the two hashes cannot drift. Copy the whole directory,
+not just the script and the log. It still pulls in no third-party
+dependency — only Python's standard library.
 
 Mechanics worth knowing:
 

@@ -1650,3 +1650,218 @@ def test_verifier_counts_failing_entries_not_failures(tmp_path):
     n = sum(1 for _ in reg.entries())
     assert f"Entries           : {n}" in out.stdout
     assert f"2/{n} entries fail." in out.stdout
+
+
+# ---- the walk must survive any single malformed entry --------------------
+
+def walk_reached_the_end(reg, out):
+    """The property every guard below exists to preserve: the verifier
+    reported the problem, kept walking, and still accounted for the entries
+    AFTER the bad one."""
+    n = sum(1 for _ in reg.entries())
+    assert f"Entries           : {n}" in out.stdout, out.stdout
+    assert "note=" in out.stdout, out.stdout
+
+
+@pytest.mark.parametrize("etype", ["quarantine_data_snapshot",
+                                   "quarantine_decision",
+                                   "strategy_registered"])
+@pytest.mark.parametrize("payload", ["oops", 7, ["a"], None])
+def test_verifier_survives_a_non_dict_payload(tmp_path, etype, payload):
+    """REGRESSION: before the global guard, a payload of "oops" raised
+    AttributeError out of the walk. Every entry after it went unverified --
+    and at ddc0838 the same chain verified clean, because these entry types
+    matched no branch and the payload was never dereferenced."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append(etype, payload)
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "payload is not a JSON object" in out.stdout
+    walk_reached_the_end(reg, out)
+
+
+def test_verifier_survives_an_entry_that_is_not_an_object(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    with reg.log_path.open("a", encoding="utf-8") as f:
+        f.write('["not", "an", "object"]\n')
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "entry is not a JSON object" in out.stdout
+    # the head still advanced, so the FOLLOWING entry is not falsely accused
+    assert "BROKEN CHAIN" not in out.stdout
+    walk_reached_the_end(reg, out)
+
+
+@pytest.mark.parametrize("mangle", [
+    {"provenance": "nope"},
+    {"provenance": {"card_ids": "not-a-list"}},
+    {"provenance": {"card_ids": [["unhashable"]]}},
+    {"provenance": {"card_ids": [1, 2]}},
+    {"blocks": "nope"},
+    {"blocks": ["not-an-object"]},
+    {"blocks": [{"role": ["unhashable"], "type": "x"}]},
+    {"blocks": [{"role": "entry"}]},
+])
+def test_verifier_survives_a_malformed_strategy_spec(tmp_path, mangle):
+    """set() of a non-iterable, and a tuple containing a list, both raise --
+    and both are reachable from a hand-appended spec."""
+    reg = seeded(tmp_path)
+    spec = pre_expand(good_family(family="mangled", card_ids=[CARD_ID]))[0]
+    reg.append("strategy_registered", dict(json.loads(json.dumps(spec)), **mangle))
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    walk_reached_the_end(reg, out)
+
+
+def test_verifier_survives_a_non_string_snapshot_date(tmp_path):
+    """A list date raises `unhashable type` on the snapshots dict lookup."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append("quarantine_data_snapshot",
+               dict(snap_payload(data, ["BTCUSD"]), date=["2023-01-22"]))
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "is not a string" in out.stdout
+    walk_reached_the_end(reg, out)
+
+
+def test_duplicate_composition_names_the_original_not_none(tmp_path):
+    """An unnamed spec must not become the first holder of a fingerprint, or
+    the duplicate that follows reports 'already registered as None' and the
+    real culprit goes unnamed."""
+    reg = seeded(tmp_path)
+    spec = pre_expand(good_family(family="anon", card_ids=[CARD_ID]))[0]
+    anon = json.loads(json.dumps(spec))
+    del anon["strategy_id"]
+    reg.append("strategy_registered", anon)
+    reg.append("strategy_registered", spec)
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "already registered as None" not in out.stdout
+
+
+# ---- the verifier must reject digests the writer rejects ------------------
+
+def test_verifier_rejects_a_snapshot_digest_that_is_not_a_digest(tmp_path):
+    """Invariant 8's own principle applied to invariant 9: the chain must not
+    have to trust the in-process guard. A fabricated digest that the writer
+    refuses must not verify clean, or an outsider cannot tell a real
+    provenance record from an invented one."""
+    reg, spec, data = quarantined(tmp_path)
+    fake = dict(snap_payload(data, ["BTCUSD"]),
+                data_sha256={"BTCUSD": "not-a-hash"},
+                bars_sha256={"BTCUSD": "not-a-hash"})
+    # the writer refuses this payload outright ...
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        reg.record_quarantine_snapshot(dict(fake))
+    # ... so the verifier must too, when it is chained around the writer
+    reg.append("quarantine_data_snapshot", fake)
+    reg.append("quarantine_decision",
+               {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+                "asset": "BTCUSD", "action": "hold", "price": 100.0,
+                "position_frac": 0.0, "equity": 1.0})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "not a sha256 digest" in out.stdout
+    # and the day's decisions FAIL CLOSED: a fake digest licenses nothing
+    assert "no earlier quarantine_data_snapshot" in out.stdout
+
+
+@pytest.mark.parametrize("bad", ["not-a-hash", "A" * 64, "a" * 63, "a" * 65,
+                                 None, 64, "", " " * 64])
+def test_verifier_and_writer_agree_on_what_a_digest_is(bad):
+    """One implementation, asserted directly: a second copy in the verifier is
+    the drift hazard invariant 8 avoided for the fingerprint."""
+    from .registry import is_sha256_hex
+    assert is_sha256_hex(bad) is False
+    assert is_sha256_hex("a" * 64) is True
+    assert is_sha256_hex(hashlib.sha256(b"x").hexdigest()) is True
+
+
+def test_a_snapshot_with_no_usable_bars_hash_refuses_rather_than_crashing(
+        tmp_path, capsys):
+    """`recorded.get("bars_sha256") or {}` in run(): a snapshot chained around
+    the writer may carry no usable map, and snapshot_conflicts(None, ...)
+    raises. Fail CLOSED instead -- every asset uncovered, day refused."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append("quarantine_data_snapshot",
+               {"date": "2023-01-22",
+                "data_sha256": {"BTCUSD": sha_of(data, "BTCUSD")}})
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "BTCUSD" in err
+    assert decisions(reg) == []
+
+
+def test_data_snapshots_keeps_the_first_payload_for_a_date(tmp_path):
+    """Last-wins would have made this the one place in the system where a
+    duplicate snapshot silently took effect; the writer refuses the second and
+    the verifier reports it, so the reader must keep the first too."""
+    reg, spec, data = quarantined(tmp_path)
+    first = snap_payload(data, ["BTCUSD"])
+    reg.append("quarantine_data_snapshot", first)
+    reg.append("quarantine_data_snapshot",
+               dict(first, bars_sha256={"BTCUSD": "c" * 64}))
+    assert quarantine_mod.data_snapshots(reg)["2023-01-22"] == first
+
+
+# ---- hash_bars_through edge cases ----------------------------------------
+
+def test_bars_hash_on_a_file_with_no_trailing_newline(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    lines = read_csv_lines(data)
+    expected = quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22")
+    (data / "BTCUSD_1d.csv").write_bytes("\n".join(lines).encode("utf-8"))
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22") \
+        == expected
+
+
+def test_bars_hash_on_a_header_only_file(tmp_path):
+    """No bars at or before the date is not an error here -- run() refuses the
+    day long before this -- but it must hash the header rather than blow up."""
+    reg, spec, data = quarantined(tmp_path)
+    header = read_csv_lines(data)[0]
+    write_csv_lines(data, [header])
+    assert quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22") \
+        == hashlib.sha256((header + "\n").encode("utf-8")).hexdigest()
+    # and a date before every bar behaves the same way on a full file
+    reg2, spec2, data2 = quarantined(tmp_path / "b")
+    assert quarantine_mod.hash_bars_through(data2, "BTCUSD", "1999-01-01") \
+        == hashlib.sha256(
+            (read_csv_lines(data2)[0] + "\n").encode("utf-8")).hexdigest()
+
+
+def test_bars_hash_refuses_an_empty_price_file(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    (data / "BTCUSD_1d.csv").write_bytes(b"")
+    with pytest.raises(ValueError, match="price file is empty"):
+        quarantine_mod.hash_bars_through(data, "BTCUSD", "2023-01-22")
+
+
+@pytest.mark.parametrize("etype,payload", [
+    ("card_registered", {"card_id": ["x"]}),
+    ("card_reviewed", {"card_id": ["x"], "status": "accepted"}),
+    ("block_type_registered", {"role": ["x"], "type": "y"}),
+    ("block_type_registered", {"role": "entry", "type": {"a": 1}}),
+    ("strategy_registered", {"strategy_id": ["x"]}),
+    ("verdict", {"strategy_id": ["x"]}),
+    ("state_change", {"strategy_id": ["x"], "from": "a", "to": "b"}),
+])
+def test_verifier_survives_an_unhashable_key_field(tmp_path, etype, payload):
+    """The whole crash class, not one instance of it. Every one of these
+    fields goes into a set or becomes a dict key, so a list raises TypeError
+    out of the walk and leaves every LATER entry unverified. All six of these
+    still crashed after the payload/provenance/blocks guards went in."""
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append(etype, payload)
+    reg.append("note", {"text": "an entry after the bad one"})
+    out = run_verifier(reg.log_path)
+    assert "Traceback" not in out.stderr, out.stderr
+    assert out.returncode == 1
+    assert "must be a non-empty string" in out.stdout
+    walk_reached_the_end(reg, out)

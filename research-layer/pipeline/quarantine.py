@@ -104,10 +104,17 @@ def existing_decisions(registry: Registry) -> set[tuple[str, str, str]]:
 def data_snapshots(registry: Registry) -> dict[str, dict]:
     """{date: payload} for every snapshot on the chain. A cheap pre-read only;
     the authoritative uniqueness check is Registry.record_quarantine_snapshot,
-    which re-checks under the lock."""
-    return {e["payload"]["date"]: e["payload"]
-            for e in registry.entries()
-            if e["entry_type"] == "quarantine_data_snapshot"}
+    which re-checks under the lock.
+
+    FIRST payload wins on a duplicated date, matching the writer (which
+    refuses the second) and verify_registry.py (which reports it and keeps the
+    first). A last-wins dict comprehension would have made this the one place
+    in the system where a duplicate snapshot silently took effect."""
+    out: dict[str, dict] = {}
+    for e in registry.entries():
+        if e["entry_type"] == "quarantine_data_snapshot":
+            out.setdefault(e["payload"]["date"], e["payload"])
+    return out
 
 
 def hash_price_files(data_dir: Path, assets: list[str]) -> dict[str, str]:
@@ -142,11 +149,23 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
 
     LF normalization is load-bearing because this repo produces CRLF working
     copies; screen.py's bundle_hash sets the same precedent.
+
+    Rows are hashed in FILE order, deliberately, even though load_bars sorts
+    them: the shell recipe cannot sort, and a hash an auditor cannot reproduce
+    is worth nothing. The cost is fail-closed -- a file whose rows get
+    reordered without changing a single value hashes differently and the day
+    is refused, which is the safe direction to be wrong in.
     """
     raw = (data_dir / f"{asset}_1d.csv").read_bytes().replace(b"\r\n", b"\n")
     lines = raw.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()                       # trailing newline, not a row
+    if not lines:
+        # unreachable from run(), which refuses a date with no bar long
+        # before this, but this is a public helper with a general contract
+        raise ValueError(
+            f"{asset}: price file is empty, so there is nothing to hash as "
+            f"the provenance of {date}")
     header, rows = lines[0], lines[1:]
     cutoff = date.encode()
     # dates are zero-padded ISO, so bytewise <= is the same ordering load_bars

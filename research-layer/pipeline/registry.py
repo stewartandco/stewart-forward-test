@@ -122,14 +122,24 @@ def validated_quarantine_decision(payload: dict) -> dict:
     return dict(payload)
 
 
-def _validated_digest_map(value: object, field: str) -> dict[str, str]:
-    """A non-empty {asset: sha256} map.
-
-    The digest is checked for 64 LOWERCASE HEX characters, not merely for
+def is_sha256_hex(value: object) -> bool:
+    """64 LOWERCASE HEX characters, checked as a digest and not merely for
     length: this value is what an auditor compares against their own
     `sha256sum`, so anything that is not a digest is a permanent,
     un-amendable lie about provenance.
+
+    Public because verify_registry.py applies the SAME test when it walks the
+    chain -- a verifier that accepted digests this writer rejects would leave
+    an outsider unable to tell a real provenance record from a fabricated one,
+    which is the whole job of the entry type. One implementation, so the two
+    cannot drift.
     """
+    return (isinstance(value, str) and len(value) == 64
+            and not set(value) - HEX_DIGITS)
+
+
+def _validated_digest_map(value: object, field: str) -> dict[str, str]:
+    """A non-empty {asset: sha256} map."""
     if not isinstance(value, dict) or not value:
         raise ValueError(f"{field} must be a non-empty {{asset: hex}} map")
     for asset, hexd in value.items():
@@ -137,8 +147,7 @@ def _validated_digest_map(value: object, field: str) -> dict[str, str]:
         # 'BTCUSD' and any other spelling of it must be rejected here
         if not isinstance(asset, str) or not asset:
             raise ValueError(f"{field} asset keys must be non-empty strings")
-        if (not isinstance(hexd, str) or len(hexd) != 64
-                or set(hexd) - HEX_DIGITS):
+        if not is_sha256_hex(hexd):
             raise ValueError(
                 f"{field} {asset}: sha256 must be 64 lowercase hex chars")
     return dict(value)
