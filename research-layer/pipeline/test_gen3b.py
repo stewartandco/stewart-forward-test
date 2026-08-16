@@ -491,3 +491,152 @@ def test_prompt_figures_match_what_was_measured():
     assert "All 18 used vol_target sizing" in SYSTEM_PROMPT
     assert "nothing here compares sizing rules" in SYSTEM_PROMPT
     assert "registered on 4 specs and has never reached the" in SYSTEM_PROMPT
+
+
+# ---------------- quarantine: the daily forward runner ----------------
+
+from .quarantine import run as quarantine_run, MIN_TRADING_DAYS
+from .test_screen import dated_target_hit_bars, write_data_dir
+from .test_gauntlet import gauntlet_registry
+
+ENTERED = "2023-01-21"
+
+
+def quarantined(tmp_path):
+    """One strategy in quarantine state, entered 2023-01-21, over
+    dated_target_hit_bars (2023-01-01 .. 2023-01-23). Its book enters long on
+    2023-01-22 at 111 and exits at the 116.55 target on 2023-01-23."""
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.append("note", {"text": "gauntlet-protocol-v3: test anchor"})
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"deflated_sharpe": 0.5}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "quarantine",
+                            "gauntlet pass, group-selected",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    return reg, spec, data
+
+
+def decisions(reg):
+    return [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_decision"]
+
+
+def test_decision_row_shape_and_values_on_entry_day(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
+                         str(data), "--date", "2023-01-22"])
+    assert rc == 0
+    rows = decisions(reg)
+    assert len(rows) == 1
+    r = rows[0]
+    assert set(r) == {"strategy_id", "date", "asset", "action", "price",
+                      "position_frac", "equity"}
+    assert r["strategy_id"] == spec["strategy_id"]
+    assert r["date"] == "2023-01-22"
+    assert r["asset"] == "BTCUSD"
+    assert r["action"] == "enter_long"
+    assert r["price"] == pytest.approx(111.0)
+    # f=0.01, stop distance 5% of 111 -> notional_frac 0.2
+    assert r["position_frac"] == pytest.approx(0.2)
+    # entered at the open and marked at the same close -> unrealised 0
+    assert r["equity"] == pytest.approx(1.0)
+
+
+def test_decision_on_exit_day(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                    "--date", "2023-01-23"])
+    r = decisions(reg)[-1]
+    assert r["action"] == "exit"
+    assert r["price"] == pytest.approx(118.0)
+    assert r["position_frac"] == pytest.approx(0.0)
+    # target 116.55 from entry 111 -> gross 0.05, net 0.05 - 2*0.0015 = 0.047,
+    # sized 0.2 -> equity 1 + 0.2*0.047
+    assert r["equity"] == pytest.approx(1.0094)
+
+
+def test_decision_uses_only_bars_up_to_the_date(tmp_path):
+    """The data dir holds 2023-01-23 too. A 2023-01-22 decision that leaked
+    it would report the exit instead of the entry."""
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                    "--date", "2023-01-22"])
+    assert decisions(reg)[-1]["action"] == "enter_long"
+
+
+def test_missing_bar_for_date_is_refused(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
+                         str(data), "--date", "2023-01-30"])
+    assert rc == 1
+    assert "REFUSED" in capsys.readouterr().out
+    assert decisions(reg) == []
+
+
+def test_rerunning_a_date_is_a_noop(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    argv = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--date", "2023-01-22"]
+    quarantine_run(argv)
+    n_after_first = sum(1 for _ in reg.entries())
+    capsys.readouterr()
+    rc = quarantine_run(argv)
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == n_after_first
+    assert "1 already present" in capsys.readouterr().out
+
+
+def test_dates_at_or_before_entry_are_skipped(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
+                         str(data), "--date", ENTERED])
+    assert rc == 0
+    assert decisions(reg) == []
+    assert "not after its quarantine entry" in capsys.readouterr().out
+
+
+def test_registry_refuses_decision_for_non_quarantined_strategy(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)          # still in 'gauntlet'
+    with pytest.raises(ValueError, match="not in quarantine"):
+        reg.record_quarantine_decision(
+            {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+             "asset": "BTCUSD", "action": "hold", "price": 100.0,
+             "position_frac": 0.0, "equity": 1.0})
+
+
+def test_review_writes_nothing_and_reports_days(tmp_path, capsys):
+    reg, spec, data = quarantined(tmp_path)
+    for d in ("2023-01-22", "2023-01-23"):
+        quarantine_run(["--registry", str(reg.log_path), "--data-dir",
+                        str(data), "--date", d])
+    n_before = sum(1 for _ in reg.entries())
+    capsys.readouterr()
+    rc = quarantine_run(["--registry", str(reg.log_path), "--review"])
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == n_before
+    out = capsys.readouterr().out
+    assert f"days 2/{MIN_TRADING_DAYS}" in out
+    assert "NOT YET ELIGIBLE" in out
+    assert "NOT directly comparable" in out
+
+
+def test_review_reads_the_stored_mc_cone(tmp_path, capsys):
+    """The cone is reported, never applied. Hand-checked against a fixture
+    mc_summary.json so the reader knows exactly what it is looking at."""
+    reg, spec, data = quarantined(tmp_path)
+    bundle = tmp_path / "art" / spec["strategy_id"] / "gauntlet"
+    bundle.mkdir(parents=True)
+    (bundle / "mc_summary.json").write_text(json.dumps(
+        {"seed": 1, "paths": 2000, "p05": 0.8123, "p25": 1.1000,
+         "p50": 1.4000, "p75": 1.9000, "p_ruin": 0.01, "ruin_level": 0.5}),
+        encoding="utf-8")
+    n_before = sum(1 for _ in reg.entries())
+    capsys.readouterr()
+    rc = quarantine_run(["--registry", str(reg.log_path), "--review",
+                         "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+    assert sum(1 for _ in reg.entries()) == n_before
+    out = capsys.readouterr().out
+    assert "p25=1.1000 p50=1.4000 p75=1.9000" in out
+    assert "NOT directly comparable" in out

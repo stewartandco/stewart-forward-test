@@ -20,6 +20,11 @@ VALID_TRANSITIONS = {
     "live":       {"retired", "graveyard"},
 }
 
+# exact payload shape of a quarantine_decision entry (one paper-trading day
+# per asset); verify_registry.py enforces the same set on the chain
+QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
+                            "position_frac", "equity")
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -150,7 +155,9 @@ class Registry:
                 raise ValueError(f"block type {b['role']}/{b['type']} not registered")
         return self.append("strategy_registered", spec)
 
-    def record_state_change(self, strategy_id: str, to: str, reason: str | None = None) -> dict:
+    def record_state_change(self, strategy_id: str, to: str,
+                            reason: str | None = None,
+                            ts_utc: str | None = None) -> dict:
         states = self.strategy_states()
         if strategy_id not in states:
             raise ValueError(f"unknown strategy {strategy_id!r}")
@@ -160,7 +167,7 @@ class Registry:
         return self.append("state_change", {
             "strategy_id": strategy_id, "from": frm, "to": to,
             "reason": reason, "buried_at": frm if to == "graveyard" else None,
-        })
+        }, ts_utc=ts_utc)
 
     def record_verdict(self, strategy_id: str, stage: str, verdict: str,
                        metrics: dict, artifacts_hash: str) -> dict:
@@ -170,3 +177,18 @@ class Registry:
             "strategy_id": strategy_id, "stage": stage, "verdict": verdict,
             "metrics": metrics, "artifacts_hash": artifacts_hash,
         })
+
+    def record_quarantine_decision(self, payload: dict) -> dict:
+        """One paper-trading decision. Guarded so a strategy that is not in
+        quarantine can never accrue a forward record — the same invariant
+        verify_registry.py enforces on the chain."""
+        missing = [k for k in QUARANTINE_DECISION_KEYS if k not in payload]
+        if missing:
+            raise ValueError(f"quarantine decision missing {missing}")
+        extra = sorted(set(payload) - set(QUARANTINE_DECISION_KEYS))
+        if extra:
+            raise ValueError(f"quarantine decision has unknown keys {extra}")
+        sid = payload["strategy_id"]
+        if self.strategy_states().get(sid) != "quarantine":
+            raise ValueError(f"strategy {sid!r} is not in quarantine")
+        return self.append("quarantine_decision", dict(payload))
