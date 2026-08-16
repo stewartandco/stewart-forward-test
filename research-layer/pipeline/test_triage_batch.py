@@ -37,3 +37,34 @@ def test_duplicates_are_found_against_the_accepted_corpus_only():
     }
     dupes = tb.find_duplicates(pending, accepted)
     assert dupes == {"c9": "c1"}
+
+
+# ---------------- the panel: unanimity or escalate ----------------
+
+def _votes(*verdicts):
+    """Fake panel results: each reviewer returns accept True/False + a note."""
+    return [{"accept": v, "reason": "" if v else "claim exceeds quote"}
+            for v in verdicts]
+
+
+def test_unanimous_accept_is_the_only_path_to_auto_accept():
+    assert tb.panel_verdict(_votes(True, True, True)) == ("accepted", None)
+
+
+def test_any_dissent_leaves_the_card_pending_not_rejected():
+    """Dissent escalates to Coen. It must never auto-REJECT - the panel is not
+    trusted to destroy research, only to wave through what it all agrees on."""
+    assert tb.panel_verdict(_votes(True, True, False)) == (None, "dissent")
+    assert tb.panel_verdict(_votes(False, False, False)) == (None, "dissent")
+
+
+def test_a_short_panel_escalates_rather_than_deciding():
+    """If a reviewer errored or was skipped, we have fewer than PANEL_SIZE
+    opinions and cannot claim unanimity."""
+    assert tb.panel_verdict(_votes(True, True)) == (None, "incomplete_panel")
+    assert tb.panel_verdict([]) == (None, "incomplete_panel")
+
+
+def test_decisions_use_auto_provenance_never_coen():
+    assert tb.REVIEWER == "auto-d31"
+    assert "coen" not in tb.REVIEWER

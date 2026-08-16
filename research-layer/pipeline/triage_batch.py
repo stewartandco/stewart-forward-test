@@ -50,3 +50,19 @@ def find_duplicates(pending: dict[str, dict],
         if hit:
             out[cid] = hit
     return out
+
+
+def panel_verdict(votes: list[dict]) -> tuple[str | None, str | None]:
+    """Collapse reviewer votes into (decision, escalation_reason).
+
+    Returns ("accepted", None) on unanimous accept from a full panel.
+    Returns (None, reason) otherwise - the card stays PENDING for Coen.
+
+    The panel may never auto-reject. It is trusted to wave through what it
+    unanimously agrees on, not to destroy research on a majority opinion.
+    """
+    if len(votes) < PANEL_SIZE:
+        return None, "incomplete_panel"
+    if all(v.get("accept") for v in votes):
+        return "accepted", None
+    return None, "dissent"
