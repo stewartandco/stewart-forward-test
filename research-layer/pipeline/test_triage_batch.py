@@ -68,3 +68,79 @@ def test_a_short_panel_escalates_rather_than_deciding():
 def test_decisions_use_auto_provenance_never_coen():
     assert tb.REVIEWER == "auto-d31"
     assert "coen" not in tb.REVIEWER
+
+
+# ---------------- the reviewer call ----------------
+
+class _Usage:
+    input_tokens = 500
+    output_tokens = 40
+    cache_read_input_tokens = 0
+    cache_creation_input_tokens = 0
+
+
+class _Msg:
+    usage = _Usage()
+
+    def __init__(self, payload):
+        self.content = [type("B", (), {"text": payload})()]
+
+
+class _FakeClient:
+    """Returns a canned JSON payload per call, and records the prompts."""
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+        self.prompts = []
+        self.messages = self
+
+    def create(self, **kw):
+        self.prompts.append(kw["messages"][0]["content"])
+        return _Msg(self._payloads.pop(0))
+
+
+class _Meter:
+    def __init__(self):
+        self.calls = []
+
+    def record_call(self, model, usage, purpose, **kw):
+        self.calls.append(purpose)
+        return 0.0
+
+    def can_spend(self):
+        return True
+
+
+CARD = {"claim": "Momentum persists after earnings surprises.",
+        "quote": "We document return continuation in the weeks after an "
+                 "earnings announcement.",
+        "source": {"title": "Post-Earnings Drift", "url": "http://x"}}
+
+
+def test_review_card_returns_one_vote_per_reviewer():
+    client = _FakeClient(['{"accept": true, "reason": ""}'] * 3)
+    meter = _Meter()
+    votes = tb.review_card(client, "claude-sonnet-5", CARD, meter)
+    assert len(votes) == tb.PANEL_SIZE
+    assert all(v["accept"] for v in votes)
+    assert meter.calls == ["triage"] * tb.PANEL_SIZE
+
+
+def test_the_prompt_carries_both_the_claim_and_its_quote():
+    """Overreach is only judgable against the quote. A prompt missing it would
+    be asking the model whether the claim sounds plausible, which is a
+    different and useless question."""
+    client = _FakeClient(['{"accept": true, "reason": ""}'] * 3)
+    tb.review_card(client, "m", CARD, _Meter())
+    assert CARD["claim"] in client.prompts[0]
+    assert CARD["quote"] in client.prompts[0]
+
+
+def test_an_unparseable_reviewer_reply_drops_that_vote_and_escalates():
+    """A malformed reply must not be read as agreement. Losing the vote makes
+    the panel short, and a short panel escalates."""
+    client = _FakeClient(['{"accept": true, "reason": ""}',
+                          'not json',
+                          '{"accept": true, "reason": ""}'])
+    votes = tb.review_card(client, "m", CARD, _Meter())
+    assert len(votes) == 2
+    assert tb.panel_verdict(votes) == (None, "incomplete_panel")

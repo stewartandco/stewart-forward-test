@@ -17,6 +17,7 @@ D27's honest-provenance rule).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 REVIEWER = "auto-d31"
@@ -66,3 +67,72 @@ def panel_verdict(votes: list[dict]) -> tuple[str | None, str | None]:
     if all(v.get("accept") for v in votes):
         return "accepted", None
     return None, "dissent"
+
+
+VOTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "accept": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["accept", "reason"],
+    "additionalProperties": False,
+}
+
+REVIEW_PROMPT = """You are checking ONE research card for OVERREACH.
+
+The card's claim must not assert more than its verbatim quote supports. This is
+the only thing you are judging. You are NOT judging whether the claim is true,
+useful, novel, well-written, or tradeable - later stages test all of that.
+
+Reject (accept=false) when the claim:
+- asserts a stronger, broader or more general relationship than the quote states
+- turns a suggestion, proposal or planned test into a result
+- reverses, inverts or changes the direction the quote describes
+- adds an asset class, horizon or condition the quote does not mention
+
+Accept (accept=true) when the claim is a faithful, possibly narrower,
+restatement of what the quote actually says.
+
+CLAIM:
+{claim}
+
+VERBATIM QUOTE FROM THE SOURCE:
+{quote}
+
+SOURCE: {title}
+
+Answer with accept and a one-sentence reason. If you reject, name the specific
+words in the claim that the quote does not support."""
+
+
+def review_card(client, model: str, card: dict, meter,
+                panel_size: int = PANEL_SIZE) -> list[dict]:
+    """Ask `panel_size` independent reviewers whether this card overreaches.
+
+    Each reviewer is a separate call - no shared context, so one reviewer's
+    reasoning cannot anchor another's. A malformed reply drops that vote rather
+    than being read as agreement; the resulting short panel escalates.
+    """
+    prompt = REVIEW_PROMPT.format(
+        claim=card.get("claim", ""),
+        quote=card.get("quote", ""),
+        title=(card.get("source") or {}).get("title", "unknown"))
+
+    votes = []
+    for _ in range(panel_size):
+        msg = client.messages.create(
+            model=model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema",
+                                      "schema": VOTE_SCHEMA}},
+        )
+        meter.record_call(model, msg.usage, "triage")
+        try:
+            vote = json.loads(msg.content[0].text)
+        except (json.JSONDecodeError, AttributeError, IndexError):
+            continue          # lost vote -> short panel -> escalation
+        votes.append({"accept": bool(vote.get("accept")),
+                      "reason": str(vote.get("reason", ""))})
+    return votes
