@@ -14,8 +14,11 @@ from __future__ import annotations
 ASSETS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT")
 TIMEFRAMES = ("15m", "30m", "1h", "4h", "12h", "1d")
 
-# Phase 1 defers the two most expensive timeframes: 15m is 74.4% of all bars
-# in the grid, and 30m is not in the cache yet. Phase 2 is everything.
+# Phase 1 defers the two most expensive timeframes. 15m alone is 74.4% of all
+# bars in the grid, and both it and 30m are deferred until the chain has
+# produced its first survivor - not because the data is missing (all 30 cells
+# are cached as of 2026-08-17) but because they are the least likely to
+# survive costs at that bar size. Phase 2 is everything.
 PHASE_1_TIMEFRAMES = ("1h", "4h", "12h", "1d")
 
 
