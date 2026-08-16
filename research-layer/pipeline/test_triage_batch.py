@@ -245,3 +245,27 @@ def test_apply_chains_with_auto_provenance(tmp_path, monkeypatch):
     assert by_id["p1"]["status"] == "rejected"
     assert by_id["p1"]["reject_reason"] == "duplicate"
     assert by_id["p2"]["status"] == "accepted"
+
+
+# ---------------- the client must load the reader key ----------------
+
+def test_missing_api_key_fails_with_a_clear_message_not_an_sdk_traceback(monkeypatch):
+    """The first live dry run died 30 frames deep in the anthropic SDK with
+    'Could not resolve authentication method'. The CLI must say what is wrong
+    and where the key lives, in one line."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("READER_ENV_PATH", "no-such-file.env")
+    with pytest.raises(SystemExit) as e:
+        tb._client_and_meter()
+    assert "ANTHROPIC_API_KEY" in str(e.value)
+
+
+def test_the_client_loads_the_reader_env_rather_than_inventing_its_own(monkeypatch, tmp_path):
+    """Reuse scanner._load_api_key - one loader, one source of truth for where
+    the sc-reader key lives."""
+    env = tmp_path / "reader.env"
+    env.write_text("ANTHROPIC_API_KEY=sk-test-not-a-real-key\n", encoding="utf-8")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("READER_ENV_PATH", str(env))
+    client, meter = tb._client_and_meter()
+    assert client is not None and meter is not None

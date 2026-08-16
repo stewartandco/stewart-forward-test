@@ -185,10 +185,20 @@ def build_decisions(client, model: str, pending: dict[str, dict],
 
 
 def _client_and_meter():
-    """Real client and budget meter. Split out so tests can stub it."""
+    """Real client and budget meter. Split out so tests can stub it.
+
+    The sc-reader key lives in the reader's .env, not in the ambient
+    environment, so load it the way every other entry point does. Without this
+    the first live run dies thirty frames deep in the anthropic SDK on
+    "Could not resolve authentication method", which says nothing about where
+    the key actually belongs.
+    """
     import anthropic
 
     from .budget import BudgetMeter
+    from .scanner import DEFAULT_READER_ENV, _load_api_key
+
+    _load_api_key(DEFAULT_READER_ENV)      # raises SystemExit with the path
     logs = Path(__file__).resolve().parent.parent / "logs"
     return anthropic.Anthropic(), BudgetMeter(logs / "budget_ledger.jsonl")
 
