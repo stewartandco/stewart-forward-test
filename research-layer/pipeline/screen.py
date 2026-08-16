@@ -27,13 +27,20 @@ GATE_MIN_TRADES = 40
 DEFAULT_CUTOFF = "2023-12-31"
 
 
-def load_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
-    path = data_dir / f"{asset}_1d.csv"
+def load_bars(data_dir: Path, asset: str, cutoff: str,
+              timeframe: str = "1d") -> list[dict]:
+    """Bars for one cell, up to and including the cutoff DATE.
+
+    The fence compares the date part only. A naive string compare is wrong for
+    intraday bars: "2023-12-31 00:00:00" > "2023-12-31" is True in Python, so
+    every intraday bar on the cutoff day would be silently dropped.
+    """
+    path = data_dir / f"{asset}_{timeframe}.csv"
     bars = []
     with path.open("r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row["date"] > cutoff:
-                continue                      # the train fence
+            if row["date"][:10] > cutoff[:10]:
+                continue                      # the train fence, date-inclusive
             bars.append({"date": row["date"], "open": float(row["open"]),
                          "high": float(row["high"]), "low": float(row["low"]),
                          "close": float(row["close"]),

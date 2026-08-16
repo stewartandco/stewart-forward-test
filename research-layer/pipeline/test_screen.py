@@ -581,3 +581,42 @@ def test_screen_detects_orphan_even_with_verdict(tmp_path, capsys):
                      "--dry-run"])
     assert rc == 1
     assert "ORPHANED" in capsys.readouterr().out
+
+
+# ---------------- timeframe-aware loading + the intraday fence ----------------
+
+from . import screen
+
+
+def _write_csv(path, rows):
+    path.write_text("date,open,high,low,close,volume\n" +
+                    "".join(f"{d},1,2,0.5,1.5,10\n" for d in rows),
+                    encoding="utf-8")
+
+
+def test_load_bars_reads_the_requested_timeframe(tmp_path):
+    _write_csv(tmp_path / "BTCUSDT_4h.csv", ["2023-12-30 00:00:00",
+                                             "2023-12-30 04:00:00"])
+    bars = screen.load_bars(tmp_path, "BTCUSDT", "2023-12-31", timeframe="4h")
+    assert len(bars) == 2
+
+
+def test_the_train_fence_keeps_the_whole_cutoff_day_on_intraday_bars(tmp_path):
+    """String comparison makes '2023-12-31 00:00:00' > '2023-12-31' TRUE, so a
+    naive fence silently drops every intraday bar on the cutoff day. The fence
+    is meant to be inclusive of the cutoff DATE."""
+    _write_csv(tmp_path / "ETHUSDT_1h.csv", [
+        "2023-12-31 00:00:00", "2023-12-31 23:00:00",   # on the fence: KEEP
+        "2024-01-01 00:00:00",                           # past it: DROP
+    ])
+    bars = screen.load_bars(tmp_path, "ETHUSDT", "2023-12-31", timeframe="1h")
+    assert [b["date"] for b in bars] == ["2023-12-31 00:00:00",
+                                         "2023-12-31 23:00:00"]
+
+
+def test_daily_loading_is_unchanged(tmp_path):
+    """The 56 existing specs must load exactly as before."""
+    _write_csv(tmp_path / "BTCUSD_1d.csv", ["2023-12-30", "2023-12-31",
+                                            "2024-01-02"])
+    bars = screen.load_bars(tmp_path, "BTCUSD", "2023-12-31")
+    assert [b["date"] for b in bars] == ["2023-12-30", "2023-12-31"]
