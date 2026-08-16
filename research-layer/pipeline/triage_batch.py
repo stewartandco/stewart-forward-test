@@ -136,3 +136,44 @@ def review_card(client, model: str, card: dict, meter,
         votes.append({"accept": bool(vote.get("accept")),
                       "reason": str(vote.get("reason", ""))})
     return votes
+
+
+def build_decisions(client, model: str, pending: dict[str, dict],
+                    accepted: dict[str, dict], meter,
+                    panel_size: int = PANEL_SIZE) -> dict:
+    """Turn pending cards into a decision list without chaining anything.
+
+    Returns {decisions, escalated, counts, stopped}. `decisions` is the shape
+    triage.apply_decisions consumes: {card_id: (status, reject_reason|None)}.
+    `escalated` cards are deliberately absent from `decisions` - they stay
+    pending, which is what puts them in Coen's Tier 3 queue.
+    """
+    dupes = find_duplicates(pending, accepted)
+    decisions: dict[str, tuple[str, str | None]] = {
+        cid: ("rejected", "duplicate") for cid in dupes}
+    escalated: dict[str, str] = {}
+    stopped = None
+
+    for cid, card in pending.items():
+        if cid in dupes:
+            continue                       # already decided, never pay for it
+        if not meter.can_spend():
+            stopped = "budget"
+            break
+        decision, reason = panel_verdict(
+            review_card(client, model, card, meter, panel_size))
+        if decision == "accepted":
+            decisions[cid] = ("accepted", None)
+        else:
+            escalated[cid] = reason
+
+    return {
+        "decisions": decisions,
+        "escalated": escalated,
+        "counts": {
+            "accepted": sum(1 for v in decisions.values() if v[0] == "accepted"),
+            "duplicate": len(dupes),
+            "escalated": len(escalated),
+        },
+        "stopped": stopped,
+    }

@@ -144,3 +144,52 @@ def test_an_unparseable_reviewer_reply_drops_that_vote_and_escalates():
     votes = tb.review_card(client, "m", CARD, _Meter())
     assert len(votes) == 2
     assert tb.panel_verdict(votes) == (None, "incomplete_panel")
+
+
+# ---------------- the decision list ----------------
+
+def test_build_decisions_splits_duplicates_accepts_and_escalations(monkeypatch):
+    accepted = {"a1": {"claim": "Momentum persists after earnings surprises."}}
+    pending = {
+        "p1": {"claim": "momentum persists after earnings surprises",
+               "quote": "q", "source": {}},                       # duplicate
+        "p2": {"claim": "Volatility clusters.", "quote": "q", "source": {}},
+        "p3": {"claim": "Skew predicts crashes.", "quote": "q", "source": {}},
+    }
+    # p2 unanimous accept; p3 dissent
+    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None:
+                        _votes(True, True, True)
+                        if card["claim"].startswith("Volatility")
+                        else _votes(True, False, True))
+
+    out = tb.build_decisions(None, "m", pending, accepted, _Meter())
+
+    assert out["decisions"]["p1"] == ("rejected", "duplicate")
+    assert out["decisions"]["p2"] == ("accepted", None)
+    assert "p3" not in out["decisions"]            # escalated, stays pending
+    assert out["escalated"]["p3"] == "dissent"
+    assert out["counts"] == {"accepted": 1, "duplicate": 1, "escalated": 1}
+
+
+def test_duplicates_are_not_sent_to_the_panel(monkeypatch):
+    """Paying three reviewers to judge a card we already know is a duplicate is
+    money lit on fire."""
+    called = []
+    monkeypatch.setattr(tb, "review_card",
+                        lambda c, m, card, meter: called.append(card) or _votes(True, True, True))
+    accepted = {"a1": {"claim": "X."}}
+    tb.build_decisions(None, "m", {"p1": {"claim": "x", "quote": "q", "source": {}}},
+                       accepted, _Meter())
+    assert called == []
+
+
+def test_a_capped_meter_stops_the_run_without_deciding(monkeypatch):
+    class _Capped(_Meter):
+        def can_spend(self):
+            return False
+
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, True, True))
+    out = tb.build_decisions(None, "m", {"p1": {"claim": "y", "quote": "q", "source": {}}},
+                             {}, _Capped())
+    assert out["decisions"] == {}
+    assert out["stopped"] == "budget"
