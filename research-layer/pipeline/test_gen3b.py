@@ -219,7 +219,7 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
 
 from .registry import Registry
 from .composer import (run as composer_run, expand_family,
-                       composition_fingerprint, screen_siblings)
+                       composition_fingerprint, screen_siblings, SYSTEM_PROMPT)
 from .test_composer import good_family, register_grammar
 from .test_pipeline import make_card
 
@@ -384,3 +384,24 @@ def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
     fps = [composition_fingerprint(s) for s in chained]
     assert len(set(fps)) == 9                     # no composition twice
     assert set(fps) == {composition_fingerprint(s) for s in specs}
+
+
+# ---------------- composer prompt: generation-2 evidence ----------------
+
+def test_prompt_carries_gen2_evidence():
+    for marker in ("reversion", "vol_target", "10-19 trades",
+                   "volatility-normalized", "Draw your own conclusions"):
+        assert marker in SYSTEM_PROMPT, marker
+
+
+def test_prompt_drops_the_generation_1_only_framing():
+    # the old paragraph told the model what NOT to do; the new one states
+    # measured outcomes and lets it conclude
+    assert "Do not simply reproduce that shape." not in SYSTEM_PROMPT
+    assert "What happened in generation 1:" not in SYSTEM_PROMPT
+
+
+def test_prompt_still_has_grammar_guidance():
+    assert "trend_scan_ds" in SYSTEM_PROMPT
+    assert "regime_ma_short" in SYSTEM_PROMPT
+    assert "regime_hypothesis" in SYSTEM_PROMPT
