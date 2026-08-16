@@ -219,7 +219,7 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
 
 from .registry import Registry
 from .composer import (run as composer_run, expand_family,
-                       composition_fingerprint)
+                       composition_fingerprint, screen_siblings)
 from .test_composer import good_family, register_grammar
 from .test_pipeline import make_card
 
@@ -255,17 +255,34 @@ def pre_expand(fam):
     """The specs a family WOULD produce, for pre-registration. Their ids
     differ from a later composer run's (created_utc and model feed the id),
     but their composition FINGERPRINTS are identical - and the fingerprint is
-    what rule 7 compares."""
+    what rule 7 compares. expand_family deep-copies its input, so the same
+    family object can be handed straight to the composer afterwards."""
     return expand_family(fam, "seed-run", "m", GEN3_TS)
 
 
-def test_family_survives_partial_sibling_collision(tmp_path, capsys):
+def test_screen_siblings_never_returns_a_guarded_fingerprint():
+    """The invariant the public chain rests on, asserted on the return value
+    rather than on a log line: nothing rule 7 guards can survive screening."""
     specs = pre_expand(z_family())
+    known = {composition_fingerprint(specs[0]): "b" * 16}
+    run = {composition_fingerprint(specs[1]): "fam_earlier"}
+    kept, drop_notes, malformed = screen_siblings(specs, known, run)
+    assert malformed is False
+    assert [s["strategy_id"] for s in kept] == [specs[2]["strategy_id"]]
+    for s in kept:
+        fp = composition_fingerprint(s)
+        assert fp not in known and fp not in run
+    assert len(drop_notes) == 2
+
+
+def test_family_survives_partial_sibling_collision(tmp_path, capsys):
+    fam = z_family()
+    specs = pre_expand(fam)
     assert len(specs) == 3
     reg = seeded(tmp_path, pre_register=[specs[0]])
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
                        "--dry-run"],
-                      propose_fn=lambda cards: [z_family()])
+                      propose_fn=lambda cards: [fam])
     assert rc == 0
     out = capsys.readouterr().out
     assert "3 expanded, 1 already registered, 2 new" in out
@@ -298,26 +315,53 @@ def test_cross_family_run_collision_drops_the_sibling_only(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "fam_a: 2 expanded, 0 already registered, 2 new" in out
-    assert "fam_b: 2 expanded, 1 already registered, 1 new" in out
+    assert ("fam_b: 2 expanded, 0 already registered, "
+            "1 duplicated in this run, 1 new") in out
     assert "DROPPED family fam_b" not in out
     assert "2 families kept" in out
 
 
+def test_run_duplicates_are_never_reported_as_already_registered(tmp_path, capsys):
+    """Nothing is registered in this run's chain, so neither the count nor
+    the drop reason may claim a buried composition. The two diagnoses differ:
+    a chain collision is expected saturation as the grammar space fills, a
+    family proposed twice under two names is a proposal-quality defect."""
+    reg = seeded(tmp_path)
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
+                       "--dry-run"],
+                      propose_fn=lambda cards: [z_family(family="fam_a"),
+                                                z_family(family="fam_b")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ("fam_b: 3 expanded, 0 already registered, "
+            "3 duplicated in this run, 0 new") in out
+    assert ("DROPPED family fam_b: every sibling already registered "
+            "or duplicated in this run") in out
+    assert not [e for e in reg.entries()
+                if e["entry_type"] == "strategy_registered"]
+
+
 def test_intra_family_duplicate_siblings_still_kill_the_family(tmp_path, capsys):
-    """Mirrored sweep axes are a malformed proposal, not a collision."""
+    """Mirrored sweep axes are a malformed proposal, not a collision.
+
+    NOT a dry run on purpose: this is the one path where screening abandons
+    a partially accumulated kept_specs (three siblings survive before the
+    mirrored pair is reached), so only the caller's early exit stops them
+    reaching the chain. Assert the chain, not just the message."""
     reg = seeded(tmp_path)
     fam = good_family(family="mirrored", card_ids=[CARD_ID])
     fam["blocks"].append({"role": "stop", "type": "atr_stop",
                           "params": {"atr_len": 14, "mult": 2.0}})
     fam["sweep"] = [{"block": 1, "param": "mult", "values": [2.0, 3.0]},
                     {"block": 4, "param": "mult", "values": [3.0, 2.0]}]
-    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
-                       "--dry-run"],
+    rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3"],
                       propose_fn=lambda cards: [fam])
     assert rc == 0
     out = capsys.readouterr().out
     assert "DROPPED family mirrored" in out
     assert "same composition" in out
+    assert not [e for e in reg.entries()
+                if e["entry_type"] == "strategy_registered"]
 
 
 def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
@@ -330,8 +374,7 @@ def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
     buried = specs[:3]
     reg = seeded(tmp_path, pre_register=buried)
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3"],
-                      propose_fn=lambda cards: [good_family(
-                          family="ninefam", card_ids=[CARD_ID])])
+                      propose_fn=lambda cards: [fam])
     assert rc == 0
     out = capsys.readouterr().out
     assert "9 expanded, 3 already registered, 6 new" in out

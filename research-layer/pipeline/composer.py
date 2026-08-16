@@ -81,6 +81,49 @@ def registered_fingerprints(registry: Registry) -> dict[str, str]:
     return out
 
 
+def screen_siblings(specs: list[dict], known_fps: dict[str, str],
+                    run_fps: dict[str, str]) -> tuple[list[dict], list[str], bool]:
+    """Rule 7 at SIBLING level -> (kept_specs, drop_notes, malformed).
+
+    A composition already registered in ANY lifecycle state, graveyard
+    included, can never be re-registered — but its siblings can. A real idea
+    comes back at neighbouring parameters; one that worked only at the exact
+    buried point was overfit and deserved burying. So a collision drops that
+    sibling alone and the family survives on the rest.
+
+    Intra-family duplicates are different in kind: two siblings that are the
+    same composition mean duplicate blocks or mirrored sweep axes, which is a
+    malformed proposal rather than a collision. malformed=True means the
+    caller drops the whole family and ignores kept_specs.
+
+    The invariant the public chain rests on: no returned spec's fingerprint
+    is in known_fps or in run_fps."""
+    fam_fps: dict[str, str] = {}
+    kept_specs: list[dict] = []
+    drop_notes: list[str] = []
+    for spec in specs:
+        fp = composition_fingerprint(spec)
+        if fp in fam_fps:
+            # Return on the FIRST duplicate rather than listing every one:
+            # the family is already dead, and one named pair diagnoses the
+            # mirrored axis better than its downstream consequences do.
+            drop_notes.append(
+                f"siblings {fam_fps[fp]} and {spec['strategy_id']} are the "
+                f"same composition — duplicate blocks or mirrored sweep axes")
+            return kept_specs, drop_notes, True
+        fam_fps[fp] = spec["strategy_id"]
+        if fp in known_fps:
+            drop_notes.append(f"sibling {spec['strategy_id']} dropped: "
+                              f"composition already registered as {known_fps[fp]}")
+        elif fp in run_fps:
+            drop_notes.append(f"sibling {spec['strategy_id']} dropped: "
+                              f"composition duplicates family {run_fps[fp]} "
+                              f"in this run")
+        else:
+            kept_specs.append(spec)
+    return kept_specs, drop_notes, False
+
+
 def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list[str]:
     """Return error strings; empty = family is expandable."""
     errors = []
@@ -430,51 +473,37 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             continue
         seen_names.add(name)
         specs = expand_family(fam, args.run_id, args.model, created_utc)
-        # rule 7 is SIBLING-level under protocol-v3: a composition that is
-        # already registered (in ANY state, graveyard included) can never be
-        # re-registered, but its siblings can. A real idea comes back at
-        # neighbouring parameters; an idea that only worked at the exact
-        # buried point was overfit. Intra-family duplicates are different in
-        # kind — mirrored sweep axes are a malformed proposal, not a
-        # collision — and still drop the whole family.
-        fam_fps: dict[str, str] = {}
-        kept_specs: list[dict] = []
-        notes: list[str] = []
-        malformed = False
-        for spec in specs:
-            fp = composition_fingerprint(spec)
-            if fp in fam_fps:
-                notes.append(
-                    f"siblings {fam_fps[fp]} and {spec['strategy_id']} are the "
-                    f"same composition — duplicate blocks or mirrored sweep axes")
-                malformed = True
-                break
-            fam_fps[fp] = spec["strategy_id"]
-            if fp in known_fps:
-                notes.append(f"sibling {spec['strategy_id']} dropped: "
-                             f"composition already registered as {known_fps[fp]}")
-            elif fp in run_fps:
-                notes.append(f"sibling {spec['strategy_id']} dropped: "
-                             f"composition duplicates family {run_fps[fp]} "
-                             f"in this run")
-            else:
-                kept_specs.append(spec)
-
+        kept_specs, drop_notes, malformed = screen_siblings(
+            specs, known_fps, run_fps)
         if malformed:
             dropped += 1
             print(f"  DROPPED family {name}:")
-            for c in dict.fromkeys(notes):
-                print(f"    - {c}")
+            for note in drop_notes:
+                print(f"    - {note}")
             continue
 
-        print(f"  family {name}: {len(specs)} expanded, "
-              f"{len(specs) - len(kept_specs)} already registered, "
-              f"{len(kept_specs)} new")
-        for c in dict.fromkeys(notes):
-            print(f"    - {c}")
+        # Split the two drop causes: a chain collision is expected saturation
+        # as the grammar space fills, while a family duplicated under two
+        # names in one run is a proposal-quality defect. Reporting both as
+        # "already registered" would send the operator after the wrong thing.
+        # Counting known_fps over `specs` cannot double-count a survivor —
+        # screen_siblings guarantees no kept fingerprint is in known_fps, and
+        # a repeated fingerprint would have returned malformed above.
+        n_buried = sum(1 for s in specs
+                       if composition_fingerprint(s) in known_fps)
+        n_dupe = len(specs) - len(kept_specs) - n_buried
+        dupe_txt = f", {n_dupe} duplicated in this run" if n_dupe else ""
+        print(f"  family {name}: {len(specs)} expanded, {n_buried} already "
+              f"registered{dupe_txt}, {len(kept_specs)} new")
+        for note in drop_notes:
+            print(f"    - {note}")
         if not kept_specs:
+            # expand_family always yields at least one combo, so an empty
+            # kept_specs here is always a genuine all-collide, never a
+            # vacuous family reported as one.
             dropped += 1
-            print(f"  DROPPED family {name}: every sibling already registered")
+            print(f"  DROPPED family {name}: every sibling already registered"
+                  + (" or duplicated in this run" if n_dupe else ""))
             continue
         for spec in kept_specs:
             validator.validate(spec)   # composer bug if this raises: abort pre-write
