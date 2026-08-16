@@ -871,7 +871,17 @@ def test_out_of_order_backfill_matches_forward_order(tmp_path):
         reg, spec, data = quarantined(root)
         for d in order:
             assert quarantine_run(argv_for(reg, data, "--date", d)) == 0
-        produced[name] = {(r["date"], r["asset"]): r for r in decisions(reg)}
+        rows = decisions(reg)
+        # strategy_id is content-addressed from a card that make_card() stamps
+        # with the wall clock, so two fixtures built either side of a second
+        # boundary carry different ids. That is a property of the fixture, not
+        # of ordering: assert it per-registry, and leave it out of the
+        # cross-order comparison so this cannot flake.
+        assert {r["strategy_id"] for r in rows} == {spec["strategy_id"]}
+        produced[name] = {
+            (r["date"], r["asset"]): {k: v for k, v in r.items()
+                                      if k != "strategy_id"}
+            for r in rows}
     assert produced["fwd"] == produced["bwd"]
     assert len(produced["fwd"]) == 2
 
