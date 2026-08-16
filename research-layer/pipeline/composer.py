@@ -329,7 +329,8 @@ Generation 2 corrected the long-only bias: all four families were
 short-capable or symmetric. It still passed nothing. 18 of its 34 specs
 cleared the screen and all 18 then failed the gauntlet. The detail:
 - Symmetric z-score reversion lost 46% to 66% over the training window and
-  failed the screen outright — exactly as generation 1's reversion family did.
+  failed the screen outright — the same way generation 1's reversion family
+  died, on net_negative.
 - A short-only trend family produced only 10-19 trades in six and a half years
   and failed the screen's trade-count floor. Four of its eight specs were also
   unprofitable, so the trade count is what it failed on, not the only thing
@@ -337,12 +338,13 @@ cleared the screen and all 18 then failed the gauntlet. The detail:
 - Of the 18 that reached the gauntlet, 12 showed POSITIVE
   volatility-normalized edge decay out of sample, from +1.8% to +54.3%: they
   held or improved their edge per unit of available opportunity. The other 6
-  ran down to -69.8%, and both surviving family designs appear in both groups,
-  so that is a property of particular parameterizations rather than of a
-  design.
+  ran down to -69.8%, and both families that reached the gauntlet appear in
+  both groups.
 - All 18 used vol_target sizing, so nothing here compares sizing rules. Within
   that single arm the four worst ruin and the four worst Monte Carlo outcomes
-  were vol_target by construction. Treat sizing as untested, not as settled.
+  were vol_target by construction. The grammar's other sizing rule,
+  fixed_fraction, has been registered on 4 specs and has never reached the
+  gauntlet.
 
 Draw your own conclusions from those facts.
 

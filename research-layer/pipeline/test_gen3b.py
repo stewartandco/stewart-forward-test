@@ -388,10 +388,46 @@ def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
 
 # ---------------- composer prompt: generation-2 evidence ----------------
 
-def test_prompt_carries_gen2_evidence():
-    for marker in ("reversion", "vol_target", "10-19 trades",
-                   "volatility-normalized", "Draw your own conclusions"):
-        assert marker in SYSTEM_PROMPT, marker
+EVIDENCE_HEAD = "What happened so far, as measured, not as opinion:"
+EVIDENCE_TAIL = "Draw your own conclusions from those facts."
+
+# Bare imperatives. The evidence block states what was measured and lets the
+# model conclude; the Rules: block below it is where instructions belong.
+IMPERATIVES = ("Treat ", "Do ", "Don't ", "Avoid ", "Prefer ", "Use ",
+               "Consider ", "Ensure ", "Make sure ", "Note that ")
+
+
+def evidence_block() -> str:
+    """The measured-outcomes paragraph only, excluding the Rules: block."""
+    start = SYSTEM_PROMPT.index(EVIDENCE_HEAD)
+    end = SYSTEM_PROMPT.index(EVIDENCE_TAIL)
+    return SYSTEM_PROMPT[start + len(EVIDENCE_HEAD):end]
+
+
+def test_prompt_frames_evidence_not_instruction():
+    """The point of this paragraph is that the model draws its OWN conclusions
+    from measurements. An imperative smuggled in here pre-empts that, and does
+    it on whichever topic the author felt strongest about - which is exactly
+    where the evidence is likely to be weakest.
+
+    This is not hypothetical. The bullet on sizing once ended 'Treat sizing as
+    untested, not as settled.' - grammatically the same form as the
+    'Do not simply reproduce that shape.' directive this whole task existed to
+    delete, sitting two lines above the invitation to conclude, on the one
+    topic where the sample has a single arm. It was replaced with the fact
+    that licenses the inference instead: fixed_fraction exists in the grammar,
+    is registered on 4 specs, and has never reached the gauntlet."""
+    assert EVIDENCE_TAIL in SYSTEM_PROMPT
+    assert "volatility-normalized" in SYSTEM_PROMPT
+    body = evidence_block()
+    for line in body.splitlines():
+        stripped = line.lstrip("- ").strip()
+        for imp in IMPERATIVES:
+            assert not stripped.startswith(imp), (
+                f"bare imperative in the evidence block: {line.strip()!r}")
+    # the directives the v3 rewrite removed must not creep back
+    assert "Do not simply reproduce" not in SYSTEM_PROMPT
+    assert "Treat sizing as untested" not in SYSTEM_PROMPT
 
 
 def test_prompt_drops_the_generation_1_only_framing():
@@ -454,4 +490,4 @@ def test_prompt_figures_match_what_was_measured():
     # a finding when all 18 entrants shared the one sizing rule
     assert "All 18 used vol_target sizing" in SYSTEM_PROMPT
     assert "nothing here compares sizing rules" in SYSTEM_PROMPT
-    assert "Treat sizing as untested, not as settled." in SYSTEM_PROMPT
+    assert "registered on 4 specs and has never reached the" in SYSTEM_PROMPT
