@@ -653,14 +653,19 @@ def stamped_target_hit_bars(step_hours):
     return bars
 
 
-def cell_registry(root, universes):
+def cell_registry(root, universes, card=None):
     """Registry with grammar, an accepted card, and one proposed spec per
-    (assets, timeframe) universe."""
+    (assets, timeframe) universe.
+
+    `card` lets a caller reuse ONE card across several registries. make_card()
+    stamps created_utc from the wall clock at 1s resolution, and that feeds
+    card_id -> provenance.card_ids -> strategy_id, so two registries built
+    either side of a second boundary carry different strategy_ids."""
     from .common import content_id
     reg = Registry(root / "reg.jsonl")
     for key in BLOCK_TYPES:
         reg.register_block_type(block_type_payload(*key))
-    card = make_card()
+    card = card if card is not None else make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
     specs = []
@@ -796,11 +801,14 @@ def test_serial_and_parallel_runs_produce_identical_verdicts(tmp_path):
     universes = [(["ETHUSDT"], "4h"), (["ETHUSDT"], "1h")]
     cells = {("ETHUSDT", "4h"): stamped_target_hit_bars(4),
              ("ETHUSDT", "1h"): stamped_target_hit_bars(1)}
+    # one card for both registries: a fresh card per loop iteration would carry
+    # a later created_utc, and that reaches strategy_id through provenance
+    card = make_card()
     runs = []
     for workers in ("1", "2"):
         root = tmp_path / f"w{workers}"
         root.mkdir()
-        reg, specs = cell_registry(root, universes)
+        reg, specs = cell_registry(root, universes, card=card)
         data = write_cell_data_dir(root, cells)
         chain_protocol_note(reg)
         rc = screen_run(["--registry", str(reg.log_path),
