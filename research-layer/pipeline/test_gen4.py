@@ -27,16 +27,30 @@ def test_coarse_types_are_untouched():
 
 
 def test_all_80_existing_fingerprints_unchanged():
-    """Adding block types must not perturb a single chained fingerprint."""
-    seen = 0
+    """Adding dense block types must not perturb a single chained fingerprint.
+
+    Proven by recomputing every chained fingerprint against a grammar with the
+    dense types REMOVED and requiring identical output. Comparing
+    composition_fingerprint(p) to itself would be a tautology that passes even
+    if every fingerprint had drifted.
+    """
+    payloads = []
     for line in REGISTRY.open(encoding="utf-8"):
         e = json.loads(line)
-        if e.get("entry_type") != "strategy_registered":
-            continue
-        p = e["payload"]
-        assert composition_fingerprint(p) == composition_fingerprint(p)
-        seen += 1
-    assert seen == 80
+        if e.get("entry_type") == "strategy_registered":
+            payloads.append(e["payload"])
+    assert len(payloads) == 80
+    with_dense = [composition_fingerprint(p) for p in payloads]
+    original = dict(BLOCK_TYPES)
+    try:
+        BLOCK_TYPES.clear()
+        BLOCK_TYPES.update({k: v for k, v in original.items() if k not in DENSE})
+        without_dense = [composition_fingerprint(p) for p in payloads]
+    finally:
+        BLOCK_TYPES.clear()
+        BLOCK_TYPES.update(original)
+    assert with_dense == without_dense
+    assert len(set(with_dense)) == 80, "fingerprint collision among chained specs"
 
 
 from pipeline.engine import run_spec
