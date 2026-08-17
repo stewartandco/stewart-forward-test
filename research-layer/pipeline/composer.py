@@ -40,7 +40,11 @@ SIBLING_CAP_DEFAULT = 60
 SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
                    ("entry", "ma_cross_dense"),
                    ("entry", "trend_scan_dense"),
-                   ("stop", "atr_stop_dense")}
+                   ("entry", "zscore_reversion_dense"),
+                   ("stop", "atr_stop_dense"),
+                   ("target", "r_multiple_dense"),
+                   ("filter", "vol_percentile_dense"),
+                   ("regime", "regime_ma_short_dense")}
 ALLOWED_ASSETS = ("BTCUSD", "ETHUSD")
 UNIVERSE_BASE = {"asset_class": "crypto", "timeframe": "1d", "session": "24x7"}
 COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}

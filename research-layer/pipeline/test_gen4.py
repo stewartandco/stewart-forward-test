@@ -14,7 +14,9 @@ from pipeline.composer import composition_fingerprint
 REGISTRY = Path(__file__).resolve().parent.parent / "registry_log.jsonl"
 
 DENSE = [("entry", "channel_breakout_dense"), ("entry", "ma_cross_dense"),
-         ("entry", "trend_scan_dense"), ("stop", "atr_stop_dense")]
+         ("entry", "trend_scan_dense"), ("stop", "atr_stop_dense"),
+         ("entry", "zscore_reversion_dense"), ("target", "r_multiple_dense"),
+         ("filter", "vol_percentile_dense"), ("regime", "regime_ma_short_dense")]
 
 # Single source of truth for "which (role, type) pairs exist" — imported by
 # test_composer.py and test_gen2.py so a future grammar change fails with a
@@ -39,6 +41,10 @@ EXPECTED_BLOCK_TYPES = frozenset({
     ("entry", "ma_cross_dense"),
     ("entry", "trend_scan_dense"),
     ("stop", "atr_stop_dense"),
+    ("entry", "zscore_reversion_dense"),
+    ("target", "r_multiple_dense"),
+    ("filter", "vol_percentile_dense"),
+    ("regime", "regime_ma_short_dense"),
 })
 
 # Each dense entry twin next to the coarse/direction-capable twin it must
@@ -49,6 +55,10 @@ TWINS = [
     (("entry", "ma_cross_ds"), ("entry", "ma_cross_dense")),
     (("entry", "trend_scan_ds"), ("entry", "trend_scan_dense")),
     (("stop", "atr_stop"), ("stop", "atr_stop_dense")),
+    (("entry", "zscore_reversion"), ("entry", "zscore_reversion_dense")),
+    (("target", "r_multiple"), ("target", "r_multiple_dense")),
+    (("filter", "vol_percentile"), ("filter", "vol_percentile_dense")),
+    (("regime", "regime_ma_short"), ("regime", "regime_ma_short_dense")),
 ]
 
 
@@ -58,6 +68,22 @@ def test_dense_types_exist_with_expected_grids():
     assert BLOCK_TYPES[("entry", "ma_cross_dense")]["slow"]["grid"] == [50, 80, 130, 200]
     assert BLOCK_TYPES[("entry", "trend_scan_dense")]["max_lookback"]["grid"] == [60, 75, 90, 105, 120]
     assert BLOCK_TYPES[("stop", "atr_stop_dense")]["mult"]["grid"] == [1.5, 2.0, 2.5, 3.0, 3.5]
+    assert BLOCK_TYPES[("target", "r_multiple_dense")]["r"]["grid"] == [1.0, 1.5, 2.0, 2.5, 3.0]
+    assert BLOCK_TYPES[("filter", "vol_percentile_dense")]["lookback"]["grid"] == [90, 120, 150, 180]
+    assert BLOCK_TYPES[("filter", "vol_percentile_dense")]["max_pctile"]["grid"] == [0.6, 0.7, 0.8, 0.9, 1.0]
+    assert BLOCK_TYPES[("regime", "regime_ma_short_dense")]["ma_len"]["grid"] == [50, 100, 150, 200, 250]
+    assert BLOCK_TYPES[("entry", "zscore_reversion_dense")]["lookback"]["grid"] == [20, 40, 60, 75, 90]
+    assert BLOCK_TYPES[("entry", "zscore_reversion_dense")]["z_entry"]["grid"] == [1.5, 1.75, 2.0, 2.25, 2.5]
+
+
+def test_zscore_reversion_dense_direction_excludes_short():
+    """The engine's zscore short branch is `elif p["direction"] == "both" and
+    z >= p["z_entry"]` — there is no standalone short-only branch, so a
+    "short" value would match nothing and silently emit zero signals rather
+    than error. Pin long/both only, same as the coarse twin and same as
+    channel_breakout_dense for the identical reason."""
+    assert BLOCK_TYPES[("entry", "zscore_reversion_dense")]["direction"]["grid"] == ["long", "both"]
+    assert BLOCK_TYPES[("entry", "zscore_reversion")]["direction"]["grid"] == ["long", "both"]
 
 
 def test_coarse_types_are_untouched():
@@ -65,6 +91,10 @@ def test_coarse_types_are_untouched():
     assert BLOCK_TYPES[("entry", "channel_breakout")]["lookback"]["grid"] == [20, 55, 100]
     assert BLOCK_TYPES[("stop", "atr_stop")]["mult"]["grid"] == [1.5, 2.0, 3.0]
     assert BLOCK_TYPES[("risk", "fixed_fraction")]["f"]["grid"] == [0.01, 0.02]
+    assert BLOCK_TYPES[("entry", "zscore_reversion")]["z_entry"]["grid"] == [1.5, 2.0, 2.5]
+    assert BLOCK_TYPES[("target", "r_multiple")]["r"]["grid"] == [1.0, 1.5, 2.0, 3.0]
+    assert BLOCK_TYPES[("filter", "vol_percentile")]["max_pctile"]["grid"] == [0.8, 0.9, 1.0]
+    assert BLOCK_TYPES[("regime", "regime_ma_short")]["ma_len"]["grid"] == [100, 200]
 
 
 @pytest.mark.parametrize("coarse_key,dense_key", TWINS)
@@ -104,19 +134,34 @@ def test_all_80_existing_fingerprints_unchanged():
 from pipeline.engine import run_spec
 
 
-def _spec(entry_type, entry_params, stop_type="atr_stop", stop_params=None):
+def _spec(entry_type, entry_params, stop_type="atr_stop", stop_params=None,
+         target=None, filter_block=None, regime_block=None):
+    """target/filter_block/regime_block are optional (type, params) pairs,
+    so a test can vary just the block under comparison and leave the rest of
+    the spec (entry, stop, exit, risk) identical between the coarse and
+    dense run."""
+    blocks = [
+        {"role": "entry", "type": entry_type, "params": entry_params},
+        {"role": "stop", "type": stop_type,
+         "params": stop_params or {"atr_len": 14, "mult": 2.0}},
+        {"role": "exit", "type": "time_stop", "params": {"max_bars": 20}},
+        {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+    ]
+    if regime_block is not None:
+        rtype, rparams = regime_block
+        blocks.append({"role": "regime", "type": rtype, "params": rparams})
+    if filter_block is not None:
+        ftype, fparams = filter_block
+        blocks.append({"role": "filter", "type": ftype, "params": fparams})
+    if target is not None:
+        ttype, tparams = target
+        blocks.append({"role": "target", "type": ttype, "params": tparams})
     return {
         "strategy_id": "t" * 16,
         "universe": {"assets": ["BTCUSD"], "timeframe": "1d",
                      "session": "24x7", "asset_class": "crypto"},
         "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005},
-        "blocks": [
-            {"role": "entry", "type": entry_type, "params": entry_params},
-            {"role": "stop", "type": stop_type,
-             "params": stop_params or {"atr_len": 14, "mult": 2.0}},
-            {"role": "exit", "type": "time_stop", "params": {"max_bars": 20}},
-            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
-        ],
+        "blocks": blocks,
     }
 
 
@@ -160,6 +205,59 @@ def test_trend_scan_dense_twin_reproduces_its_coarse_twin_exactly():
     assert len(coarse["trades"]) > 0
 
 
+def test_zscore_reversion_dense_twin_reproduces_its_coarse_twin_exactly():
+    bars = _load_bars()
+    entry_params = {"lookback": 60, "z_entry": 2.0, "direction": "both"}
+    coarse = run_spec(_spec("zscore_reversion", entry_params), bars)
+    dense = run_spec(_spec("zscore_reversion_dense", entry_params), bars)
+    assert coarse["trades"] == dense["trades"]
+    assert coarse["equity"] == dense["equity"]
+    assert len(coarse["trades"]) > 0
+
+
+def test_r_multiple_dense_target_reproduces_its_coarse_twin_exactly():
+    """Task 2c claim under test: targets dispatch by ROLE, not by type name
+    — simulate_asset reads by_role.get('target') then
+    targets[0]['params']['r'], never switching on the type string — so
+    r_multiple_dense needs no engine change. Proven here rather than trusted:
+    same entry/stop/exit/risk, only the target block's type differs."""
+    bars = _load_bars()
+    entry_params = {"lookback": 55, "direction": "both"}
+    coarse = run_spec(_spec("channel_breakout", entry_params,
+                            target=("r_multiple", {"r": 1.5})), bars)
+    dense = run_spec(_spec("channel_breakout", entry_params,
+                           target=("r_multiple_dense", {"r": 1.5})), bars)
+    assert coarse["trades"] == dense["trades"]
+    assert coarse["equity"] == dense["equity"]
+    assert len(coarse["trades"]) > 0
+
+
+def test_vol_percentile_dense_filter_reproduces_its_coarse_twin_exactly():
+    bars = _load_bars()
+    entry_params = {"lookback": 55, "direction": "both"}
+    filt_params = {"lookback": 90, "max_pctile": 0.9}
+    coarse = run_spec(_spec("channel_breakout", entry_params,
+                            filter_block=("vol_percentile", filt_params)), bars)
+    dense = run_spec(_spec("channel_breakout", entry_params,
+                           filter_block=("vol_percentile_dense", filt_params)), bars)
+    assert coarse["trades"] == dense["trades"]
+    assert coarse["equity"] == dense["equity"]
+    assert len(coarse["trades"]) > 0
+
+
+def test_regime_ma_short_dense_gate_reproduces_its_coarse_twin_exactly():
+    bars = _load_bars()
+    entry_params = {"lookback": 55, "direction": "both"}
+    regime_params = {"ma_len": 100}
+    coarse = run_spec(_spec("channel_breakout", entry_params,
+                            regime_block=("regime_ma_short", regime_params)), bars)
+    dense = run_spec(_spec("channel_breakout", entry_params,
+                           regime_block=("regime_ma_short_dense", regime_params)), bars)
+    assert coarse["trades"] == dense["trades"]
+    assert coarse["equity"] == dense["equity"]
+    assert len(coarse["trades"]) > 0
+
+
 from pipeline.composer import validate_family, SIBLING_CAP_DEFAULT, SWEEPABLE_TYPES
 
 
@@ -194,7 +292,11 @@ def test_sweepable_set_is_exactly_the_dense_types():
     assert SWEEPABLE_TYPES == {("entry", "channel_breakout_dense"),
                                ("entry", "ma_cross_dense"),
                                ("entry", "trend_scan_dense"),
-                               ("stop", "atr_stop_dense")}
+                               ("entry", "zscore_reversion_dense"),
+                               ("stop", "atr_stop_dense"),
+                               ("target", "r_multiple_dense"),
+                               ("filter", "vol_percentile_dense"),
+                               ("regime", "regime_ma_short_dense")}
 
 
 def test_sibling_cap_is_sixty():

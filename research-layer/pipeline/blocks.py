@@ -94,6 +94,34 @@ BLOCK_TYPES: dict[tuple[str, str], dict] = {
         "atr_len": {"type": "int", "grid": [14]},
         "mult": {"type": "float", "grid": [1.5, 2.0, 2.5, 3.0, 3.5]},
     },
+
+    # --- protocol-v4 dense twins, round 2 (task 2c) -------------------------
+    # The first round covered only the four axes it (wrongly) claimed were
+    # exhaustive. These four close the remaining non-risk gap: r_multiple.r,
+    # vol_percentile.max_pctile, regime_ma_short.ma_len and
+    # zscore_reversion's own axes. Risk types (fixed_fraction, vol_target)
+    # stay twin-less on purpose — sizing is a labelled arm, not a robustness
+    # axis to be plateau-tested.
+    ("target", "r_multiple_dense"): {
+        "r": {"type": "float", "grid": [1.0, 1.5, 2.0, 2.5, 3.0]},
+    },
+    ("filter", "vol_percentile_dense"): {
+        "lookback": {"type": "int", "grid": [90, 120, 150, 180]},
+        "max_pctile": {"type": "float", "grid": [0.6, 0.7, 0.8, 0.9, 1.0]},
+    },
+    ("regime", "regime_ma_short_dense"): {
+        "ma_len": {"type": "int", "grid": [50, 100, 150, 200, 250]},
+    },
+    # direction is long/both ONLY, matching the coarse type: the engine's
+    # short branch is `elif p["direction"] == "both" and z >= p["z_entry"]`,
+    # so a "short" value would match no branch and silently emit zero
+    # signals rather than error — see
+    # test_zscore_reversion_dense_direction_excludes_short.
+    ("entry", "zscore_reversion_dense"): {
+        "lookback": {"type": "int", "grid": [20, 40, 60, 75, 90]},
+        "z_entry": {"type": "float", "grid": [1.5, 1.75, 2.0, 2.25, 2.5]},
+        "direction": {"type": "str", "grid": ["long", "both"]},
+    },
 }
 
 # Cross-param constraints, keyed like BLOCK_TYPES. Return list of error strings.

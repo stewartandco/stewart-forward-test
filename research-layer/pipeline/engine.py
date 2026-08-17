@@ -121,7 +121,7 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             elif p["direction"] == "both" and closes[i] < lo:
                 sig[i] = -1
 
-    elif block["type"] == "zscore_reversion":
+    elif block["type"] in ("zscore_reversion", "zscore_reversion_dense"):
         mean, sd = sma(closes, p["lookback"]), stdev(closes, p["lookback"])
         for i in range(n):
             if mean[i] is None or sd[i] is None or sd[i] == 0:
@@ -181,12 +181,12 @@ def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
             for i in range(n):
                 if ma[i] is None or closes[i] <= ma[i]:
                     mask[i] = False
-        elif g["type"] == "regime_ma_short":
+        elif g["type"] in ("regime_ma_short", "regime_ma_short_dense"):
             ma = sma(closes, p["ma_len"])
             for i in range(n):
                 if ma[i] is None or closes[i] >= ma[i]:
                     mask[i] = False
-        elif g["type"] == "vol_percentile":
+        elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
             vol = realized_ann_vol(closes, p["lookback"])
             for i in range(n):
                 r = percentile_rank(vol, i, 365)
