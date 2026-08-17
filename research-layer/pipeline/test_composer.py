@@ -183,20 +183,23 @@ from .composer import validate_family, expand_family, SIBLING_CAP_DEFAULT
 
 
 def good_family(**overrides):
+    # protocol-v4: only dense block types may carry a sweep axis, so the
+    # default fixture sweeps trend_scan_dense (entry) and atr_stop_dense
+    # (stop) rather than the coarse zscore_reversion/atr_stop grammar.
     fam = {
-        "family": "zscore_dip_buyer",
-        "rationale": "Mean reversion PT/SL asymmetry per accepted cards.",
+        "family": "trend_scan_family",
+        "rationale": "Trend continuation signal, dense-grid threshold sweep, PT/SL risk.",
         "card_ids": ["aaaaaaaaaaaaaaaa"],
         "assets": ["BTCUSD"],
         "blocks": [
-            {"role": "entry", "type": "zscore_reversion",
-             "params": {"lookback": 60, "z_entry": 2.0, "direction": "long"}},
-            {"role": "stop", "type": "atr_stop", "params": {"atr_len": 14, "mult": 2.0}},
+            {"role": "entry", "type": "trend_scan_dense",
+             "params": {"max_lookback": 60, "t_min": 2.0, "direction": "long"}},
+            {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 2.0}},
             {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
             {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
         ],
         "sweep": [
-            {"block": 0, "param": "z_entry", "values": [1.5, 2.0, 2.5]},
+            {"block": 0, "param": "t_min", "values": [2.0, 2.5, 3.0]},
             {"block": 1, "param": "mult", "values": [1.5, 2.0, 3.0]},
         ],
     }
@@ -239,7 +242,7 @@ def test_family_with_two_entries_rejected():
 
 
 def test_sweep_values_off_grid_rejected():
-    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2.0, 9.9]}])
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0, 9.9]}])
     assert any("not a subset" in e for e in validate_family(fam, ACCEPTED, 25))
 
 
@@ -250,10 +253,10 @@ def test_sweep_unknown_param_rejected():
 
 def test_sibling_cap_rejects_not_clips():
     fam = good_family(sweep=[
-        {"block": 0, "param": "z_entry", "values": [1.5, 2.0, 2.5]},
-        {"block": 0, "param": "lookback", "values": [20, 60, 90]},
-        {"block": 1, "param": "mult", "values": [1.5, 2.0, 3.0]},
-    ])  # 27 siblings
+        {"block": 0, "param": "t_min", "values": [2.0, 2.5, 3.0]},
+        {"block": 0, "param": "max_lookback", "values": [60, 75, 90, 105, 120]},
+        {"block": 1, "param": "mult", "values": [1.5, 2.0, 2.5, 3.0, 3.5]},
+    ])  # 3 x 5 x 5 = 75 siblings
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("sibling" in e and "cap" in e for e in errs)
 
@@ -269,14 +272,14 @@ def test_bad_asset_rejected():
 
 
 def test_sweep_int_value_accepted_against_float_grid():
-    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2, 2.5]}])
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2, 2.5]}])
     assert validate_family(fam, ACCEPTED, 25) == []
 
 
 def test_duplicate_sweep_axis_rejected():
     fam = good_family(sweep=[
-        {"block": 0, "param": "z_entry", "values": [1.5, 2.0]},
-        {"block": 0, "param": "z_entry", "values": [2.5]},
+        {"block": 0, "param": "t_min", "values": [2.0, 2.5]},
+        {"block": 0, "param": "t_min", "values": [3.0]},
     ])
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("duplicate sweep axis" in e for e in errs)
@@ -289,7 +292,7 @@ TS = "2026-08-06T12:00:00Z"
 
 def test_expansion_count_is_axis_product():
     specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
-    assert len(specs) == 9  # 3 z_entry x 3 mult
+    assert len(specs) == 9  # 3 t_min x 3 mult
 
 
 def test_expansion_is_deterministic():
@@ -301,10 +304,10 @@ def test_expansion_is_deterministic():
 def test_siblings_share_group_and_vary_swept_params():
     specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
     groups = {s["provenance"]["sibling_group_id"] for s in specs}
-    assert groups == {"zscore_dip_buyer-run1"}
-    z_values = {s["blocks"][0]["params"]["z_entry"] for s in specs}
-    assert z_values == {1.5, 2.0, 2.5}
-    lookbacks = {s["blocks"][0]["params"]["lookback"] for s in specs}
+    assert groups == {"trend_scan_family-run1"}
+    t_values = {s["blocks"][0]["params"]["t_min"] for s in specs}
+    assert t_values == {2.0, 2.5, 3.0}
+    lookbacks = {s["blocks"][0]["params"]["max_lookback"] for s in specs}
     assert lookbacks == {60}  # base param untouched
 
 
@@ -336,9 +339,9 @@ def test_long_family_name_truncation_keeps_names_unique():
 
 
 def test_int_and_float_sweep_values_hash_identically():
-    a = expand_family(good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2]}]),
+    a = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2]}]),
                       "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(sweep=[{"block": 0, "param": "z_entry", "values": [2.0]}]),
+    b = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}]),
                       "run1", "claude-opus-5", TS)
     assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
@@ -350,7 +353,7 @@ def test_asset_order_does_not_change_identity():
 
 
 def test_duplicate_values_in_sweep_axis_rejected():
-    fam = good_family(sweep=[{"block": 0, "param": "z_entry", "values": [1.5, 1.5, 2.0]}])
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0, 2.0, 2.5]}])
     errs = validate_family(fam, ACCEPTED, 25)
     assert any("duplicate values" in e for e in errs)
 

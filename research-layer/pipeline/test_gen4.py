@@ -1,7 +1,8 @@
 """protocol-v4 tests: dense twin block types and their behavioural and
-schema parity with the coarse grammar they shadow. The sweepable-axis rule
-and the neighbourhood cap are Task 2 work and are not covered here.
-"""
+schema parity with the coarse grammar they shadow, plus the sweepable-axis
+rule (only dense block types may carry a sweep axis) and the sibling cap
+(raised from 25 to 60 so a family with two dense geometry axes plus a sizing
+arm still fits)."""
 import json
 from pathlib import Path
 
@@ -157,3 +158,44 @@ def test_trend_scan_dense_twin_reproduces_its_coarse_twin_exactly():
     assert coarse["trades"] == dense["trades"]
     assert coarse["equity"] == dense["equity"]
     assert len(coarse["trades"]) > 0
+
+
+from pipeline.composer import validate_family, SIBLING_CAP_DEFAULT, SWEEPABLE_TYPES
+
+
+def _fam(sweep_type, sweep_param, values):
+    return {
+        "family": "t", "rationale": "t", "card_ids": [],
+        "assets": ["BTCUSD"],
+        "blocks": [
+            {"role": "entry", "type": sweep_type,
+             "params": {"lookback": 55, "direction": "both"}
+             if "channel" in sweep_type else {"max_lookback": 60, "t_min": 2.0,
+                                              "direction": "both"}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "sweep": [{"block": 0, "param": sweep_param, "values": values}],
+    }
+
+
+def test_sweeping_a_coarse_type_is_rejected():
+    errs = validate_family(_fam("channel_breakout", "lookback", [20, 55]),
+                           accepted_ids=set(), sibling_cap=60)
+    assert any("not sweepable" in e for e in errs), errs
+
+
+def test_sweeping_a_dense_type_is_accepted():
+    errs = validate_family(_fam("channel_breakout_dense", "lookback", [35, 55, 75]),
+                           accepted_ids=set(), sibling_cap=60)
+    assert not [e for e in errs if "sweepable" in e], errs
+
+
+def test_sweepable_set_is_exactly_the_dense_types():
+    assert SWEEPABLE_TYPES == {("entry", "channel_breakout_dense"),
+                               ("entry", "ma_cross_dense"),
+                               ("entry", "trend_scan_dense"),
+                               ("stop", "atr_stop_dense")}
+
+
+def test_sibling_cap_is_sixty():
+    assert SIBLING_CAP_DEFAULT == 60

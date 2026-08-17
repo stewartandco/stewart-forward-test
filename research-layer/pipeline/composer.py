@@ -31,7 +31,16 @@ from .blocks import BLOCK_TYPES, validate_block, block_type_payload
 
 PIPELINE_VERSION = "g1.0.0"
 DEFAULT_MODEL = "claude-opus-5"
-SIBLING_CAP_DEFAULT = 25
+SIBLING_CAP_DEFAULT = 60
+
+# protocol-v4: a family may only sweep axes on a dense block type. Mixing a
+# dense axis with a coarse one manufactures fake cliffs in plateau selection —
+# channel_breakout lookback 55 -> 100 is a different strategy, not a
+# perturbation. Coarse types stay usable at FIXED values.
+SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
+                   ("entry", "ma_cross_dense"),
+                   ("entry", "trend_scan_dense"),
+                   ("stop", "atr_stop_dense")}
 ALLOWED_ASSETS = ("BTCUSD", "ETHUSD")
 UNIVERSE_BASE = {"asset_class": "crypto", "timeframe": "1d", "session": "24x7"}
 COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
@@ -164,6 +173,10 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
         if p not in schema:
             errors.append(f"sweep axis param {p!r} not in {key[0]}/{key[1]}")
             continue
+        if key not in SWEEPABLE_TYPES:
+            errors.append(
+                f"{key[0]}/{key[1]} is not sweepable — protocol-v4 allows "
+                f"sweep axes only on dense block types {sorted(SWEEPABLE_TYPES)}")
         if (i, p) in seen_axes:
             errors.append(f"duplicate sweep axis {p!r} on block {i}")
         seen_axes.add((i, p))

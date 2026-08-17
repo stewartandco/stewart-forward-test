@@ -189,7 +189,7 @@ def test_fingerprint_ignores_block_and_asset_order():
 def test_fingerprint_changes_with_any_param():
     a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
     b = copy.deepcopy(a)
-    b["blocks"][0]["params"]["z_entry"] = 2.5
+    b["blocks"][0]["params"]["t_min"] = 2.5
     assert composition_fingerprint(a) != composition_fingerprint(b)
 
 
@@ -198,7 +198,7 @@ def test_fingerprint_snaps_params_defensively():
     # value — the guard cannot depend on callers having run _snap_to_grid
     a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
     b = copy.deepcopy(a)
-    b["blocks"][0]["params"]["z_entry"] = 2      # grid value is 2.0
+    b["blocks"][0]["params"]["t_min"] = 2      # grid value is 2.0
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
@@ -270,8 +270,8 @@ def test_run_drops_within_run_duplicate_composition(tmp_path, capsys):
     reg, cid, _ = seeded_registry_with_spec(tmp_path)
     fam_a = good_family(sweep=[], card_ids=[cid], family="fam_a")
     fam_b = good_family(sweep=[], card_ids=[cid], family="fam_b")
-    fam_a["blocks"][0]["params"]["z_entry"] = 1.5   # differs from registered
-    fam_b["blocks"][0]["params"]["z_entry"] = 1.5   # collides with fam_a
+    fam_a["blocks"][0]["params"]["t_min"] = 2.5   # differs from registered
+    fam_b["blocks"][0]["params"]["t_min"] = 2.5   # collides with fam_a
     rc = composer_run(
         ["--registry", str(reg.log_path), "--run-id", "gen2", "--dry-run"],
         propose_fn=lambda cards: [fam_a, fam_b])
@@ -283,7 +283,7 @@ def test_run_drops_within_run_duplicate_composition(tmp_path, capsys):
 def test_run_allows_genuinely_new_composition(tmp_path, capsys):
     reg, cid, _ = seeded_registry_with_spec(tmp_path)
     fam = good_family(sweep=[], card_ids=[cid], family="fresh")
-    fam["blocks"][0]["params"]["lookback"] = 90    # not the registered one
+    fam["blocks"][0]["params"]["max_lookback"] = 90    # not the registered one
     rc = composer_run(
         ["--registry", str(reg.log_path), "--run-id", "gen2", "--dry-run"],
         propose_fn=lambda cards: [fam])
@@ -298,7 +298,7 @@ def test_run_drops_family_with_duplicate_sibling_compositions(tmp_path, capsys):
     fam = good_family(card_ids=[cid], family="mirrored")
     # a second stop of the same type + mirrored sweep axes expand to two
     # siblings that are the SAME composition under different ids
-    fam["blocks"].append({"role": "stop", "type": "atr_stop",
+    fam["blocks"].append({"role": "stop", "type": "atr_stop_dense",
                           "params": {"atr_len": 14, "mult": 2.0}})
     fam["sweep"] = [{"block": 1, "param": "mult", "values": [2.0, 3.0]},
                     {"block": 4, "param": "mult", "values": [3.0, 2.0]}]

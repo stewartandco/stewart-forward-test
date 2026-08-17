@@ -72,10 +72,10 @@ BLOCK_TYPES: dict[tuple[str, str], dict] = {
     # --- protocol-v4 dense twins -------------------------------------------
     # Chained schemas are immutable (composer.preflight_block_types), so
     # plateau selection gets density through NEW types rather than by widening
-    # the coarse ones. These are intended to become the only sweepable axis
-    # once Task 2 lands the enforcement (composer.validate_family) and the
-    # neighbourhood cap; neither exists yet, so nothing here restricts
-    # sweeping today.
+    # the coarse ones. These are the ONLY sweepable block types: composer.
+    # validate_family rejects any sweep axis whose block is not one of
+    # composer.SWEEPABLE_TYPES, and the sibling cap is 60 to give dense
+    # sweeps room. Coarse types remain fully usable, just at fixed values.
     ("entry", "channel_breakout_dense"): {
         "lookback": {"type": "int", "grid": [20, 35, 55, 75, 100]},
         "direction": {"type": "str", "grid": ["long", "both"]},
