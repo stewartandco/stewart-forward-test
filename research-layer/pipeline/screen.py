@@ -4,7 +4,7 @@ pre-declared gate, chain verdicts + lifecycle transitions, write artifacts.
 Usage:
     python -m pipeline.screen [--registry registry_log.jsonl]
         [--data-dir data] [--artifacts-dir artifacts]
-        [--cutoff 2023-12-31] [--dry-run]
+        [--cutoff 2023-12-31] [--workers N] [--dry-run]
 
 A real (non-dry) run HARD-REFUSES unless a `note` entry whose text starts
 with the PROTOCOL string below is already on the chain — the gate and fence
@@ -19,6 +19,8 @@ import hashlib
 import argparse
 from pathlib import Path
 
+from .cells import cell_id
+from .parallel import run_all, CellError
 from .registry import Registry
 from .engine import run_spec
 
@@ -47,6 +49,29 @@ def load_bars(data_dir: Path, asset: str, cutoff: str,
                          "volume": float(row["volume"])})
     bars.sort(key=lambda b: b["date"])
     return bars
+
+
+class SpecJob:
+    """One spec's evaluation, picklable so it can cross a process boundary.
+
+    The gate threshold travels WITH the job rather than being read from the
+    module global inside the worker: a subprocess re-imports this module and
+    would otherwise see the shipped 40 even when the parent is running a
+    different gate.
+    """
+
+    def __init__(self, min_trades: int):
+        self.min_trades = min_trades
+
+    def __call__(self, item: tuple[dict, dict]) -> tuple[dict, bool, str | None]:
+        spec, bars_by_asset = item
+        result = run_spec(spec, bars_by_asset)
+        m = result["metrics"]
+        passed = m["trades"] >= self.min_trades and m["net_pnl"] > 0
+        reason = None
+        if not passed:
+            reason = "trade_count" if m["trades"] < self.min_trades else "net_negative"
+        return result, passed, reason
 
 
 def protocol_note_chained(registry: Registry) -> bool:
@@ -94,6 +119,8 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--artifacts-dir", type=Path,
                     default=Path(__file__).resolve().parent.parent / "artifacts")
     ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="fan-out width; 0 = cpu_count-1, 1 = serial")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -123,22 +150,36 @@ def run(argv: list[str] | None = None) -> int:
         print("No strategies in 'proposed' state.")
         return 0
 
-    assets = sorted({a for s in specs for a in s["universe"]["assets"]})
-    bars_by_asset, data_hashes = {}, {}
-    for a in assets:
-        bars_by_asset[a] = load_bars(args.data_dir, a, args.cutoff)
-        data_hashes[a] = hashlib.sha256(
-            (args.data_dir / f"{a}_1d.csv").read_bytes()).hexdigest()
+    # A CELL is (asset, timeframe) — the unit that is loaded and hashed. Keying
+    # the manifest by bare asset would let ETHUSDT_1h and ETHUSDT_4h overwrite
+    # each other, and the manifest is the record of which bytes produced which
+    # verdict. Specs with no timeframe are the legacy dailies.
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in specs for a in s["universe"]["assets"]})
+    bars_by_cell, data_hashes = {}, {}
+    for asset, tf in cells_needed:
+        bars_by_cell[(asset, tf)] = load_bars(args.data_dir, asset,
+                                              args.cutoff, timeframe=tf)
+        path = args.data_dir / f"{asset}_{tf}.csv"
+        data_hashes[cell_id(asset, tf)] = hashlib.sha256(
+            path.read_bytes()).hexdigest()
+
+    jobs = []
+    for spec in specs:
+        tf = spec["universe"].get("timeframe", "1d")
+        jobs.append((spec, {a: bars_by_cell[(a, tf)]
+                            for a in spec["universe"]["assets"]}))
+
+    # ordered results; the engine is pure, so fan-out changes scheduling only
+    evaluated = run_all(SpecJob(GATE_MIN_TRADES), jobs, workers=args.workers)
 
     results = []
-    for spec in specs:
-        result = run_spec(spec, {a: bars_by_asset[a]
-                                 for a in spec["universe"]["assets"]})
+    for spec, outcome in zip(specs, evaluated):
+        if isinstance(outcome, CellError):
+            # a verdict chain must not silently graveyard a spec that crashed
+            raise RuntimeError(f"{spec['strategy_id']}: {outcome}")
+        result, passed, reason = outcome
         m = result["metrics"]
-        passed = m["trades"] >= GATE_MIN_TRADES and m["net_pnl"] > 0
-        reason = None
-        if not passed:
-            reason = "trade_count" if m["trades"] < GATE_MIN_TRADES else "net_negative"
         results.append((spec, result, passed, reason))
         print(f"{spec['strategy_id']}  {'PASS' if passed else 'fail':<4} "
               f"trades={m['trades']:>3}  pnl={m['net_pnl']:+.4f}  "

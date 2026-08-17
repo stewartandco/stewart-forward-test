@@ -620,3 +620,194 @@ def test_daily_loading_is_unchanged(tmp_path):
                                             "2024-01-02"])
     bars = screen.load_bars(tmp_path, "BTCUSD", "2023-12-31")
     assert [b["date"] for b in bars] == ["2023-12-30", "2023-12-31"]
+
+
+# ---------------- the runner fans out across cells ----------------
+
+import hashlib
+
+from .cells import cell_id
+
+
+def write_cell_data_dir(tmp_path, bars_by_cell):
+    """Data dir keyed by CELL, so one asset can carry several timeframes."""
+    d = tmp_path / "data"
+    d.mkdir(exist_ok=True)
+    for (asset, tf), bars in bars_by_cell.items():
+        with (d / f"{asset}_{tf}.csv").open("w", newline="",
+                                            encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["date", "open", "high", "low",
+                                              "close", "volume"])
+            w.writeheader()
+            w.writerows(bars)
+    return d
+
+
+def stamped_target_hit_bars(step_hours):
+    """dated_target_hit_bars with intraday timestamps step_hours apart, so a
+    4h file and a 1h file of the same asset differ in bytes AND in dates."""
+    bars = dated_target_hit_bars()
+    for i, b in enumerate(bars):
+        h = i * step_hours
+        b["date"] = f"2023-01-{1 + h // 24:02d} {h % 24:02d}:00:00"
+    return bars
+
+
+def cell_registry(root, universes):
+    """Registry with grammar, an accepted card, and one proposed spec per
+    (assets, timeframe) universe."""
+    from .common import content_id
+    reg = Registry(root / "reg.jsonl")
+    for key in BLOCK_TYPES:
+        reg.register_block_type(block_type_payload(*key))
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+    specs = []
+    for i, (assets, tf) in enumerate(universes):
+        spec = {
+            "strategy_id": None, "version": 1,
+            "created_utc": "2026-08-13T00:00:00Z",
+            "name": f"cell test {i}", "family": "breakout_test",
+            "universe": {"assets": list(assets), "asset_class": "crypto",
+                         "timeframe": tf, "session": "24x7"},
+            "blocks": [
+                {"role": "entry", "type": "channel_breakout",
+                 "params": {"lookback": 20, "direction": "long"}},
+                {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+                {"role": "target", "type": "r_multiple", "params": {"r": 1.0}},
+                {"role": "exit", "type": "time_stop",
+                 "params": {"max_bars": 40}},
+                {"role": "risk", "type": "fixed_fraction",
+                 "params": {"f": 0.01}},
+            ],
+            "provenance": {"card_ids": [card["card_id"]],
+                           "parent_strategy_id": None,
+                           "sibling_group_id": "g-test", "generation": 0},
+            "generator": {"agent": "composer", "model": "m",
+                          "pipeline_version": "g1.0.0", "run_id": "t"},
+            "cost_model": dict(COST),
+        }
+        spec["strategy_id"] = content_id(spec, "strategy_id")
+        reg.register_strategy(spec)
+        specs.append(spec)
+    return reg, specs
+
+
+def sha256_of(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verdict_rows(reg):
+    return [(e["payload"]["strategy_id"], e["payload"]["verdict"],
+             e["payload"]["metrics"], e["payload"]["artifacts_hash"])
+            for e in reg.entries() if e["entry_type"] == "verdict"]
+
+
+def test_runner_loads_the_specs_timeframe_not_the_daily_file(tmp_path):
+    """A 4h spec must read ETHUSDT_4h.csv. The 1d file is a decoy: a runner
+    that still hardcodes _1d hashes the wrong bytes."""
+    reg, (spec,) = cell_registry(tmp_path, [(["ETHUSDT"], "4h")])
+    four_h = stamped_target_hit_bars(4)
+    data = write_cell_data_dir(tmp_path, {
+        ("ETHUSDT", "4h"): four_h,
+        ("ETHUSDT", "1d"): dated_target_hit_bars(),      # must NOT be read
+    })
+    chain_protocol_note(reg)
+    art = tmp_path / "art"
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art)])
+    assert rc == 0
+    bundle = art / spec["strategy_id"]
+    cfg = json.loads((bundle / "config.json").read_text())
+    assert cfg["data_sha256"] == {
+        cell_id("ETHUSDT", "4h"): sha256_of(data / "ETHUSDT_4h.csv")}
+    # the equity calendar proves which bars were actually simulated
+    rows = list(csv.reader((bundle / "equity.csv").read_text().splitlines()))
+    assert rows[1][0] == four_h[0]["date"]
+
+
+def test_data_hashes_are_keyed_by_cell_so_two_timeframes_cannot_collide(tmp_path):
+    """ETHUSDT_1h and ETHUSDT_4h must both survive in the manifest. Keying by
+    bare asset lets one overwrite the other, and the manifest is the record of
+    which bytes produced which verdict."""
+    reg, specs = cell_registry(tmp_path, [(["ETHUSDT"], "4h"),
+                                          (["ETHUSDT"], "1h")])
+    data = write_cell_data_dir(tmp_path, {
+        ("ETHUSDT", "4h"): stamped_target_hit_bars(4),
+        ("ETHUSDT", "1h"): stamped_target_hit_bars(1)})
+    chain_protocol_note(reg)
+    art = tmp_path / "art"
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art), "--workers", "1"])
+    assert rc == 0
+    cfg = json.loads((art / specs[0]["strategy_id"] / "config.json").read_text())
+    assert set(cfg["data_sha256"]) == {"ETHUSDT_4h", "ETHUSDT_1h"}
+    assert cfg["data_sha256"]["ETHUSDT_4h"] == sha256_of(data / "ETHUSDT_4h.csv")
+    assert cfg["data_sha256"]["ETHUSDT_1h"] == sha256_of(data / "ETHUSDT_1h.csv")
+    assert cfg["data_sha256"]["ETHUSDT_4h"] != cfg["data_sha256"]["ETHUSDT_1h"]
+
+
+def test_legacy_two_asset_daily_spec_loads_and_hashes_the_same_bytes(tmp_path):
+    """The 56 registered specs are 1d. They must read the same _1d.csv files
+    and hash the same bytes as before; only the manifest KEY gains its
+    timeframe."""
+    reg, (spec,) = cell_registry(tmp_path, [(["BTCUSD", "ETHUSD"], "1d")])
+    bars = dated_target_hit_bars()
+    data = write_data_dir(tmp_path, {"BTCUSD": bars,
+                                     "ETHUSD": [dict(b) for b in bars]})
+    chain_protocol_note(reg)
+    art = tmp_path / "art"
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art)])
+    assert rc == 0
+    cfg = json.loads((art / spec["strategy_id"] / "config.json").read_text())
+    assert cfg["data_sha256"] == {
+        cell_id("BTCUSD", "1d"): sha256_of(data / "BTCUSD_1d.csv"),
+        cell_id("ETHUSD", "1d"): sha256_of(data / "ETHUSD_1d.csv")}
+    v = verdict_rows(reg)
+    assert len(v) == 1 and v[0][1] == "fail"
+    assert v[0][2]["trades"] == 2            # one trade per asset, as before
+
+
+def test_workers_threads_through_to_run_all(tmp_path, monkeypatch):
+    reg, (spec,) = cell_registry(tmp_path, [(["BTCUSD"], "1d")])
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    chain_protocol_note(reg)
+    seen = {}
+    real_run_all = screen.run_all
+
+    def spy(fn, items, workers=0):
+        seen["workers"] = workers
+        seen["n_items"] = len(items)
+        return real_run_all(fn, items, workers=1)
+
+    monkeypatch.setattr("pipeline.screen.run_all", spy)
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art"),
+                     "--workers", "3"])
+    assert rc == 0
+    assert seen["workers"] == 3
+    assert seen["n_items"] == 1
+
+
+def test_serial_and_parallel_runs_produce_identical_verdicts(tmp_path):
+    """The engine is pure, so fan-out changes scheduling only."""
+    universes = [(["ETHUSDT"], "4h"), (["ETHUSDT"], "1h")]
+    cells = {("ETHUSDT", "4h"): stamped_target_hit_bars(4),
+             ("ETHUSDT", "1h"): stamped_target_hit_bars(1)}
+    runs = []
+    for workers in ("1", "2"):
+        root = tmp_path / f"w{workers}"
+        root.mkdir()
+        reg, specs = cell_registry(root, universes)
+        data = write_cell_data_dir(root, cells)
+        chain_protocol_note(reg)
+        rc = screen_run(["--registry", str(reg.log_path),
+                         "--data-dir", str(data),
+                         "--artifacts-dir", str(root / "art"),
+                         "--workers", workers])
+        assert rc == 0
+        runs.append(verdict_rows(reg))
+    assert len(runs[0]) == 2
+    assert runs[0] == runs[1]
