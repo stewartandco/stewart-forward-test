@@ -51,6 +51,15 @@ that must be made before it can be specced. Those are real open questions, not
 rhetorical ones — several are coupled, and Scope 1 flags its own coupling
 explicitly.
 
+**One of Scope 1's decisions is already closed.** The successor gate standard
+does **not** apply retroactively to the three strategies in quarantine; they
+keep their protocol-v3 verdicts. Coen decided this on 2026-08-17 and it is
+already chained as the `quarantine-standard-asymmetry` note (entry 2308, commit
+`1b5da5e`), pre-declared before the successor standard exists so the exemption
+cannot have been chosen after seeing whom it helps. The successor protocol note
+should cross-reference that note rather than restate it. Do not re-litigate it
+and do not ask Coen again.
+
 ## State at handoff (2026-08-17)
 
 - `stewart-forward-test`: chain **2307 entries VALID**, funnel 77 graveyard / 3

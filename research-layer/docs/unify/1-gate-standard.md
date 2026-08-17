@@ -52,14 +52,21 @@ have to explain which."
 
 ## Decisions needed before this can be specced
 
-1. **Does the new standard apply to the three already in quarantine?** They
-   entered under protocol-v3 having cleared five gates. Applying a stricter
-   standard retroactively would re-judge decided evidence — normally forbidden.
-   Not applying it means the first three quarantine members are held to a weaker
-   bar than everything after them, permanently. Neither is free. **My lean:** let
-   them stand, record the asymmetry explicitly in the protocol note, and let
-   quarantine's forward record be the leveller — it is the same evidence either
-   way after 60 days.
+1. ~~**Does the new standard apply to the three already in quarantine?**~~
+   **DECIDED — Coen, 2026-08-17, and already chained.** It does not. The three
+   keep their protocol-v3 verdicts. Re-judging decided evidence under a later
+   rule is forbidden here and is the same rule that keeps 77 strategies buried.
+   The cost is recorded rather than repaired: those three were admitted on a
+   weaker bar than anything after them, permanently, and `ad654fd8097717bd` in
+   particular was chosen by the point-winner rule this scope is expected to
+   remove. Quarantine's forward record is the leveller — after 60 trading days
+   they are assessed on identical forward evidence.
+
+   **This was pre-declared BEFORE the successor standard exists**, deliberately,
+   so the exemption cannot have been chosen after seeing whether it helps
+   anyone. See the `quarantine-standard-asymmetry` note on-chain (entry 2308,
+   commit `1b5da5e`). Do not re-litigate; do not re-ask Coen. The successor
+   protocol note should cross-reference it rather than restate it.
 2. **What is N?** The SOP says N is read from a `trials_log` of every config ever
    scored, never estimated, and that "CSCV/DSR computed over hidden trials is
    itself a lie." The research layer's Composer performs an unlogged internal
