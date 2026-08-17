@@ -120,3 +120,37 @@ def bootstrap_paths(contribs: list[float], n_paths: int, seed: int,
             ruined += 1
     terminals.sort()
     return {"terminals": terminals, "p_ruin": ruined / n_paths}
+
+
+def harvey_liu_haircut(sr_annual: float, t_years: float,
+                       n_trials: int) -> dict:
+    """Multiple-testing haircut on an annualized Sharpe (Harvey & Liu, SSRN
+    2345489). Nonlinear by construction — a strong Sharpe loses proportionally
+    less than a weak one, which is why the SOP forbids a flat 50% haircut.
+
+    Harvey & Liu give three adjustments; this uses Bonferroni, the most
+    conservative. The haircut is RECORDED in the verdict, never gated on, so
+    erring conservative costs nothing.
+    """
+    if sr_annual <= 0 or t_years <= 0:
+        return {"sr_observed": sr_annual, "sr_haircut": 0.0,
+                "haircut_pct": 100.0, "p_raw": None, "p_adjusted": None,
+                "method": "bonferroni"}
+    t_stat = sr_annual * math.sqrt(t_years)
+    p_raw = 2.0 * (1.0 - normal_cdf(t_stat))
+    p_adj = min(1.0, p_raw * max(1, n_trials))
+    if p_adj >= 1.0:
+        sr_haircut = 0.0
+    elif p_adj <= 0.0:
+        # normal_cdf saturates to exactly 1.0 for large t_stat (float64 has no
+        # precision left out there), so p_raw -- and hence p_adj -- can come
+        # out exactly 0.0. inv_normal_cdf(1.0) is undefined (raises), and the
+        # correct reading of p==0 is "as significant as this float can show",
+        # i.e. no haircut at all, not a crash and not a fabricated haircut.
+        sr_haircut = sr_annual
+    else:
+        t_adj = inv_normal_cdf(1.0 - p_adj / 2.0)
+        sr_haircut = max(0.0, t_adj / math.sqrt(t_years))
+    return {"sr_observed": sr_annual, "sr_haircut": sr_haircut,
+            "haircut_pct": 100.0 * (1.0 - sr_haircut / sr_annual),
+            "p_raw": p_raw, "p_adjusted": p_adj, "method": "bonferroni"}

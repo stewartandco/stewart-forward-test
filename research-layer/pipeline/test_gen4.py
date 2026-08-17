@@ -4,6 +4,7 @@ rule (only dense block types may carry a sweep axis) and the sibling cap
 (raised from 25 to 60 so a family with two dense geometry axes plus a sizing
 arm still fits)."""
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -301,3 +302,42 @@ def test_sweepable_set_is_exactly_the_dense_types():
 
 def test_sibling_cap_is_sixty():
     assert SIBLING_CAP_DEFAULT == 60
+
+
+from pipeline.stats import harvey_liu_haircut
+
+
+def test_haircut_is_nonlinear_smaller_for_stronger_sharpes():
+    weak = harvey_liu_haircut(0.6, t_years=6.4, n_trials=4)
+    strong = harvey_liu_haircut(1.7, t_years=6.4, n_trials=4)
+    assert strong["haircut_pct"] < weak["haircut_pct"]
+    assert 0.0 <= strong["haircut_pct"] <= 100.0
+
+
+def test_more_trials_means_a_bigger_haircut():
+    few = harvey_liu_haircut(1.3, t_years=6.4, n_trials=4)
+    many = harvey_liu_haircut(1.3, t_years=6.4, n_trials=80)
+    assert many["haircut_pct"] > few["haircut_pct"]
+
+
+def test_a_nonpositive_sharpe_is_fully_haircut_not_negative():
+    out = harvey_liu_haircut(-0.4, t_years=6.4, n_trials=4)
+    assert out["sr_haircut"] == 0.0
+    assert out["haircut_pct"] == 100.0
+
+
+def test_haircut_states_its_method():
+    assert harvey_liu_haircut(1.0, 6.4, 4)["method"] == "bonferroni"
+
+
+def test_saturated_normal_cdf_does_not_break_the_haircut():
+    # t_stat = 4.0 * sqrt(6.4) ~= 10.1 -- large enough that normal_cdf(t_stat)
+    # saturates to exactly 1.0 in float64, making p_raw exactly 0.0. This has
+    # broken this repo before (inv_normal_cdf raises on p<=0 or p>=1); confirm
+    # the haircut handles it without crashing and without a negative/NaN result.
+    out = harvey_liu_haircut(4.0, t_years=6.4, n_trials=4)
+    assert out["p_raw"] == 0.0
+    assert out["p_adjusted"] == 0.0
+    assert 0.0 <= out["haircut_pct"] <= 100.0
+    assert out["sr_haircut"] >= 0.0
+    assert not math.isnan(out["haircut_pct"])
