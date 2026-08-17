@@ -28,7 +28,8 @@ def run_verifier(log_path):
 
 def test_grammar_has_twelve_types_with_required_roles():
     roles = {role for role, _ in BLOCK_TYPES}
-    assert len(BLOCK_TYPES) == 15
+    # protocol-v4 added 4 dense twin types (2026-08-17); count grows to 19.
+    assert len(BLOCK_TYPES) == 19
     assert {"entry", "stop", "target", "exit", "risk", "filter", "regime"} <= roles
 
 
@@ -95,7 +96,8 @@ def test_block_types_roundtrip(tmp_path):
     assert reg.block_types() == set()
     register_grammar(reg)
     assert ("entry", "ma_cross") in reg.block_types()
-    assert len(reg.block_types()) == 15
+    # protocol-v4 added 4 dense twin types (2026-08-17); count grows to 19.
+    assert len(reg.block_types()) == 19
 
 
 def test_register_grammar_is_idempotent(tmp_path):
@@ -385,7 +387,8 @@ def test_run_registers_blocks_then_specs(tmp_path):
         propose_fn=lambda cards: [good_family(card_ids=[cid])])
     assert rc == 0
     reg = Registry(path)
-    assert len(reg.block_types()) == 15
+    # protocol-v4 added 4 dense twin types (2026-08-17); count grows to 19.
+    assert len(reg.block_types()) == 19
     states = reg.strategy_states()
     assert len(states) == 9 and set(states.values()) == {"proposed"}
     out = run_verifier(path)
