@@ -251,6 +251,22 @@ def test_sweep_unknown_param_rejected():
     assert any("zz" in e for e in validate_family(fam, ACCEPTED, 25))
 
 
+def test_two_value_sweep_axis_rejected():
+    """protocol-v4: plateau selection (pipeline/plateau.py) requires a
+    registered sibling on both sides of every swept axis, so a two-value
+    sweep can never produce a survivor -- both of its points are grid
+    edges. The Composer must not let a family burn a generation on that."""
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0, 2.5]}])
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("t_min" in e and "at least 3" in e for e in errs)
+
+
+def test_single_value_sweep_axis_rejected():
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}])
+    errs = validate_family(fam, ACCEPTED, 25)
+    assert any("t_min" in e and "at least 3" in e for e in errs)
+
+
 def test_sibling_cap_rejects_not_clips():
     fam = good_family(sweep=[
         {"block": 0, "param": "t_min", "values": [2.0, 2.5, 3.0]},
@@ -272,7 +288,7 @@ def test_bad_asset_rejected():
 
 
 def test_sweep_int_value_accepted_against_float_grid():
-    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2, 2.5]}])
+    fam = good_family(sweep=[{"block": 0, "param": "t_min", "values": [2, 2.5, 3.0]}])
     assert validate_family(fam, ACCEPTED, 25) == []
 
 

@@ -189,6 +189,16 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
             errors.append(f"sweep values for {p!r} not a subset of grid {schema[p]['grid']}")
         if len(set(values)) != len(values):
             errors.append(f"duplicate values in sweep axis {p!r}")
+        # protocol-v4: plateau selection (pipeline/plateau.py) requires a
+        # registered sibling on BOTH sides of every swept axis, so a two-value
+        # axis can never produce a survivor -- both of its points are grid
+        # edges. Reject it here rather than let a family burn a whole
+        # generation on a sweep that is structurally unpromotable.
+        if len(values) < 3:
+            errors.append(
+                f"sweep axis {p!r} declares {len(values)} value(s) — needs at "
+                f"least 3: with two, both points are grid edges and plateau "
+                f"selection can never produce a survivor")
 
     if not errors:
         n = prod(len(ax["values"]) for ax in fam.get("sweep", [])) if fam.get("sweep") else 1

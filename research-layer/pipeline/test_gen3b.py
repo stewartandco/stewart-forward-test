@@ -247,11 +247,14 @@ def seeded(tmp_path, pre_register=()):
     return reg
 
 
-def z_family(family="zfam", z_values=(2.0, 2.5, 3.0)):
-    """A single-axis sweep over t_min (trend_scan_dense): len(z_values)
-    siblings, one family."""
+def z_family(family="zfam", z_values=(60, 75, 90)):
+    """A single-axis sweep over max_lookback (trend_scan_dense): len(z_values)
+    siblings, one family. max_lookback's grid has 5 points ([60, 75, 90, 105,
+    120]), unlike t_min's 3 ([2.0, 2.5, 3.0]) -- protocol-v4's minimum-3-values
+    rule means a 3-point grid has no room for two DIFFERENT 3+-value subsets
+    to partially overlap, which callers below need."""
     return good_family(family=family, card_ids=[CARD_ID],
-                       sweep=[{"block": 0, "param": "t_min",
+                       sweep=[{"block": 0, "param": "max_lookback",
                                "values": list(z_values)}])
 
 
@@ -309,18 +312,18 @@ def test_family_dropped_when_every_sibling_collides(tmp_path, capsys):
 
 def test_cross_family_run_collision_drops_the_sibling_only(tmp_path, capsys):
     """fam_b overlaps fam_a on one sibling. fam_a wins the overlap; fam_b
-    keeps its remaining sibling instead of dying."""
+    keeps its remaining siblings instead of dying."""
     reg = seeded(tmp_path)
-    fam_a = z_family(family="fam_a", z_values=(2.0, 2.5))
-    fam_b = z_family(family="fam_b", z_values=(2.5, 3.0))
+    fam_a = z_family(family="fam_a", z_values=(60, 75, 90))
+    fam_b = z_family(family="fam_b", z_values=(90, 105, 120))
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
                        "--dry-run"],
                       propose_fn=lambda cards: [fam_a, fam_b])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "fam_a: 2 expanded, 0 already registered, 2 new" in out
-    assert ("fam_b: 2 expanded, 0 already registered, "
-            "1 duplicated in this run, 1 new") in out
+    assert "fam_a: 3 expanded, 0 already registered, 3 new" in out
+    assert ("fam_b: 3 expanded, 0 already registered, "
+            "1 duplicated in this run, 2 new") in out
     assert "DROPPED family fam_b" not in out
     assert "2 families kept" in out
 
@@ -349,15 +352,17 @@ def test_intra_family_duplicate_siblings_still_kill_the_family(tmp_path, capsys)
     """Mirrored sweep axes are a malformed proposal, not a collision.
 
     NOT a dry run on purpose: this is the one path where screening abandons
-    a partially accumulated kept_specs (three siblings survive before the
-    mirrored pair is reached), so only the caller's early exit stops them
-    reaching the chain. Assert the chain, not just the message."""
+    a partially accumulated kept_specs (several siblings survive before the
+    first mirrored pair is reached), so only the caller's early exit stops
+    them reaching the chain. Assert the chain, not just the message."""
     reg = seeded(tmp_path)
     fam = good_family(family="mirrored", card_ids=[CARD_ID])
     fam["blocks"].append({"role": "stop", "type": "atr_stop_dense",
                           "params": {"atr_len": 14, "mult": 2.0}})
-    fam["sweep"] = [{"block": 1, "param": "mult", "values": [2.0, 3.0]},
-                    {"block": 4, "param": "mult", "values": [3.0, 2.0]}]
+    # protocol-v4 requires >= 3 values per swept axis, so the mirrored pair
+    # sweeps the same 3-value set on both blocks rather than a 2-value one
+    fam["sweep"] = [{"block": 1, "param": "mult", "values": [2.0, 3.0, 3.5]},
+                    {"block": 4, "param": "mult", "values": [3.5, 3.0, 2.0]}]
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3"],
                       propose_fn=lambda cards: [fam])
     assert rc == 0
