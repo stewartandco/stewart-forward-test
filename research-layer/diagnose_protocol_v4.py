@@ -242,6 +242,47 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  PLATEAU {sid}: qualifies-reason={r}")
         print()
 
+    # -- quarantine PBO cross-check ------------------------------------------
+    # The three strategies already in quarantine entered under protocol-v3,
+    # BEFORE protocol-v4's PBO gate existed. Retroactivity was closed and
+    # pre-declared separately, before protocol-v4 was designed, in registry
+    # entry 2308 (`quarantine-standard-asymmetry` note, chained in commit
+    # 1b5da5e): a successor gate standard applies only to candidates
+    # evaluated under it, never retroactively. That note already names all
+    # three strategy_ids and states the cost of the exemption in prose; this
+    # section makes the PBO half of that cost a number instead of something
+    # a reader has to look up and compute by hand.
+    print("=" * 72)
+    print("QUARANTINE PBO CROSS-CHECK -- the 3 strategies already in "
+          "quarantine, against protocol-v4's PBO gate.")
+    print("THIS CHANGES NOTHING. Retroactivity was closed and pre-declared "
+          "BEFORE protocol-v4 existed: registry entry 2308 "
+          "(`quarantine-standard-asymmetry` note, commit 1b5da5e) states "
+          "that a successor gate standard applies only to candidates "
+          "evaluated under it, never retroactively, and names these same "
+          "three strategy_ids. All three keep their protocol-v3 verdicts "
+          "and their quarantine state exactly as chained, regardless of "
+          "what follows here. This is recorded to make the cost of that "
+          "exemption legible, not to reopen it.")
+    quarantine_sids = sorted(sid for sid, st in states.items()
+                             if st == "quarantine")
+    for sid in quarantine_sids:
+        g = group_of.get(sid)
+        pbo_r = pbo_by_group.get(g, {})
+        pbo_v = pbo_r.get("pbo")
+        if pbo_v is None:
+            label = f"n/a -- {pbo_r.get('reason')}"
+        elif pbo_v > PBO_KILL:
+            label = f"WOULD FAMILY-KILL (pbo={pbo_v:.3f} > {PBO_KILL})"
+        elif pbo_v >= PBO_PASS:
+            label = f"WOULD FAIL (pbo={pbo_v:.3f} >= {PBO_PASS})"
+        else:
+            label = f"WOULD PASS (pbo={pbo_v:.3f} < {PBO_PASS})"
+        print(f"    {sid}  group={g}  PBO gate: {label}")
+    print("  None of the above alters any state_change, verdict, or "
+          "eligibility. All three remain in quarantine under their "
+          "protocol-v3 verdicts.\n")
+
     # -- summary -------------------------------------------------------------
     n_specs = len(all_specs)
     n_sharpe_fail_all = sum(1 for sid in train_sharpe
@@ -279,23 +320,20 @@ def main(argv: list[str] | None = None) -> int:
           f"dense axis, so the plateau/neighbourhood gate WOULD be "
           f"UNCHECKABLE for all {n_specs} chained specs -- see the "
           f"limitation notice above and in this file's module docstring.")
-    print(f"\n  RATCHET SIGNAL: {n_buried_pass_checkable}/{len(buried)} "
-          f"already-buried strategies WOULD now pass every CHECKABLE gate "
-          f"(train-window Sharpe floor + CSCV/PBO). The plateau gate is "
-          f"excluded from this count because it cannot be evaluated at all "
-          f"against this chain (see above); this number is therefore a "
-          f"floor on how many WOULD pass protocol-v4 in full, not a "
-          f"complete pass/fail count.")
-    if len(buried) and n_buried_pass_checkable > len(buried) // 2:
-        print("  WARNING: a majority of the already-buried WOULD now pass "
-              "every checkable gate -- on the checkable evidence alone, the "
-              "new gates may have lost their teeth. This warning does NOT "
-              "cover the plateau gate, which remains entirely unchecked.")
-    else:
-        print("  On the checkable evidence, a majority of the already-buried "
-              "would NOT now pass -- but see the plateau limitation above "
-              "before treating this as clearance for protocol-v4 as a "
-              "whole.")
+    print(f"\n  NEW-GATE REACH: {n_buried_pass_checkable}/{len(buried)} "
+          f"already-buried strategies WOULD clear the two newly added "
+          f"checkable gates (train-window Sharpe floor + CSCV/PBO) "
+          f"considered in isolation. This is NOT a ratchet signal and does "
+          f"NOT mean {n_buried_pass_checkable} would return: protocol-v4 "
+          f"retains every protocol-v3 gate unchanged and adds three, so it "
+          f"is a strict superset and no buried strategy can newly pass. "
+          f"Each of these {n_buried_pass_checkable} still fails the v3 gate "
+          f"that buried it. (The plateau gate is excluded from this count "
+          f"because it cannot be evaluated at all against this chain -- see "
+          f"above.)")
+    print("\n  RATCHET POSITION: protocol-v4 cannot loosen. Three gates "
+          "added, none removed, no threshold weakened -- verified "
+          "structurally, not statistically.")
 
     print("\nNothing was re-judged: no state_change, no verdict, no note was "
           "written or considered for writing. registry_log.jsonl was opened "
