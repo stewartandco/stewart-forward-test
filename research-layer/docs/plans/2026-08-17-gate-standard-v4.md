@@ -379,6 +379,121 @@ git show HEAD --stat
 
 ---
 
+## Task 2c: The remaining four dense twins
+
+**Files:**
+- Modify: `pipeline/blocks.py`, `pipeline/engine.py`, `pipeline/composer.py` (`SWEEPABLE_TYPES`)
+- Test: `pipeline/test_gen4.py`
+
+**Why this task exists.** The spec claimed the first four dense twins "cover exactly the axes gen-1 through gen-3 actually swept." That claim was wrong. Enumerating every swept axis across all 12 chained families shows four non-risk axes with no twin: `r_multiple.r` (4 families), `vol_percentile.max_pctile` (2), `regime_ma_short.ma_len` (2), and `zscore_reversion.lookback`/`.z_entry` (1). Without twins for these, a v4 family cannot sweep target, filter, regime or mean-reversion geometry — and `tstat_trend_both_asymmetric_payoff`, one of the three strategies currently in quarantine, swept `r_multiple.r`. Coen chose to add all four (2026-08-18).
+
+Risk axes (`fixed_fraction.f`, `vol_target.ann_vol`) stay twin-less deliberately — the spec excludes them from the plateau and handles sizing as labelled arms.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `pipeline/test_gen4.py`. Extend the existing `TWINS` list to all eight pairs and `EXPECTED_BLOCK_TYPES` to 23 entries, then add:
+
+```python
+def test_zscore_dense_keeps_long_and_both_only():
+    """The engine emits a zscore short ONLY when direction == 'both' (see the
+    zscore branch in engine.entry_signals). A 'short' grid value would produce
+    no signals at all rather than an error, so the dense twin must NOT offer
+    one. Same reason channel_breakout_dense is long/both."""
+    assert BLOCK_TYPES[("entry", "zscore_reversion_dense")]["direction"]["grid"] == ["long", "both"]
+
+
+def test_r_multiple_dense_needs_no_engine_branch():
+    """r_multiple is dispatched by ROLE (engine.simulate_asset reads
+    by_role['target'][0]['params']['r']), not by type name, so the dense twin
+    works with no engine change. Proven, not assumed."""
+    coarse = _spec("channel_breakout_dense", {"lookback": 55, "direction": "both"})
+    dense = _spec("channel_breakout_dense", {"lookback": 55, "direction": "both"})
+    for b in coarse["blocks"]:
+        if b["role"] == "target":
+            b["type"] = "r_multiple"
+    for b in dense["blocks"]:
+        if b["role"] == "target":
+            b["type"] = "r_multiple_dense"
+    from pipeline.screen import load_bars
+    root = Path(__file__).resolve().parent.parent
+    bars = {"BTCUSD": load_bars(root / "data", "BTCUSD", "9999-12-31")}
+    a, b = run_spec(coarse, bars), run_spec(dense, bars)
+    assert len(a["trades"]) > 0
+    assert a["trades"] == b["trades"]
+```
+
+`_spec` must be extended to accept target/exit blocks so the above can run; give it a `target_type="r_multiple"` parameter defaulting to the coarse type.
+
+Add behavioural-equivalence tests for `zscore_reversion_dense`, `regime_ma_short_dense` and `vol_percentile_dense` against their coarse twins at shared grid points, each asserting a non-zero trade count.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest pipeline/test_gen4.py -q`
+Expected: FAIL with `KeyError: ('target', 'r_multiple_dense')`.
+
+- [ ] **Step 3: Add the four types to `BLOCK_TYPES`**
+
+```python
+    ("target", "r_multiple_dense"): {
+        "r": {"type": "float", "grid": [1.0, 1.5, 2.0, 2.5, 3.0]},
+    },
+    ("filter", "vol_percentile_dense"): {
+        "lookback": {"type": "int", "grid": [90, 120, 150, 180]},
+        "max_pctile": {"type": "float", "grid": [0.6, 0.7, 0.8, 0.9, 1.0]},
+    },
+    ("regime", "regime_ma_short_dense"): {
+        "ma_len": {"type": "int", "grid": [50, 100, 150, 200, 250]},
+    },
+    ("entry", "zscore_reversion_dense"): {
+        "lookback": {"type": "int", "grid": [20, 40, 60, 75, 90]},
+        "z_entry": {"type": "float", "grid": [1.5, 1.75, 2.0, 2.25, 2.5]},
+        "direction": {"type": "str", "grid": ["long", "both"]},
+    },
+```
+
+**Do not add `"short"` to the zscore direction grid.** The engine only emits a zscore short when `direction == "both"`; `"short"` would silently produce nothing.
+
+- [ ] **Step 4: Wire THREE of them into the engine**
+
+`r_multiple_dense` needs no engine change — targets are role-dispatched. The other three are type-dispatched and need their branch conditions widened:
+
+| Site | From | To |
+|---|---|---|
+| `entry_signals`, ~line 124 | `elif block["type"] == "zscore_reversion":` | `elif block["type"] in ("zscore_reversion", "zscore_reversion_dense"):` |
+| `gate_mask`, ~line 184 | `elif g["type"] == "regime_ma_short":` | `elif g["type"] in ("regime_ma_short", "regime_ma_short_dense"):` |
+| `gate_mask`, ~line 189 | `elif g["type"] == "vol_percentile":` | `elif g["type"] in ("vol_percentile", "vol_percentile_dense"):` |
+
+Verify the line text before editing; do not trust the numbers.
+
+- [ ] **Step 5: Extend `SWEEPABLE_TYPES` to all eight**
+
+```python
+SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
+                   ("entry", "ma_cross_dense"),
+                   ("entry", "trend_scan_dense"),
+                   ("entry", "zscore_reversion_dense"),
+                   ("stop", "atr_stop_dense"),
+                   ("target", "r_multiple_dense"),
+                   ("filter", "vol_percentile_dense"),
+                   ("regime", "regime_ma_short_dense")}
+```
+
+Update `test_sweepable_set_is_exactly_the_dense_types` to match.
+
+- [ ] **Step 6: Run tests, then the scoped suite**
+
+Run: `python -m pytest pipeline/test_gen4.py -q`, then the scoped command.
+Confirm `preflight_block_types(Registry('registry_log.jsonl'))` still returns `[]` — 23 in-code types against 15 chained, with none of the 15 mutated.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add pipeline/blocks.py pipeline/engine.py pipeline/composer.py pipeline/test_gen4.py && git commit -m "feat(grammar): dense twins for target, filter, regime and zscore axes"
+git show HEAD --stat
+```
+
+---
+
 ## Task 2b: Log the batch-gate drift
 
 **Files:**
@@ -834,6 +949,22 @@ def test_a_scoreless_sibling_is_below_plateau_but_not_a_cliff():
     fam = [sib("a", 35, None), sib("b", 55, 1.0), sib("c", 75, 1.0)]
     ok, reason = qualifies(fam[1], fam, GRIDS)
     assert ok is False and reason == "neighbour_below_plateau"
+
+
+def test_a_family_with_no_swept_axis_fails_rather_than_passing_vacuously():
+    """The bypass this guard exists to close: empty grids give no neighbours,
+    so every other clause would pass and an unswept family would clear a
+    robustness gate on no evidence at all."""
+    fam = [sib("solo", 55, 1.0)]
+    ok, reason = qualifies(fam[0], fam, {})
+    assert ok is False and reason == "no_swept_axis"
+
+
+def test_an_unswept_family_selects_nobody():
+    fam = [sib("solo", 55, 1.0)]
+    winner, detail = select_survivor(fam, {})
+    assert winner is None
+    assert detail["solo"]["reason"] == "no_swept_axis"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -924,7 +1055,16 @@ def plateau_members(family: list[dict],
 
 def qualifies(sibling: dict, family: list[dict], grids: dict[str, list],
               ratio: float = PLATEAU_RATIO) -> tuple[bool, str | None]:
-    """Plateau qualification. Returns (ok, reason_when_not)."""
+    """Plateau qualification. Returns (ok, reason_when_not).
+
+    A family with no swept dense axis FAILS. Without a neighbourhood there is
+    no robustness evidence, and every other clause here would pass vacuously:
+    empty grids give no neighbours, no neighbours give nothing to fail on, and
+    a lone sibling is trivially >= 0.9 of its own score. A gate that passes on
+    the absence of evidence is not a gate.
+    """
+    if not grids:
+        return False, "no_swept_axis"
     plat = plateau_members(family, ratio)
     if sibling["sid"] not in plat:
         return False, "below_plateau"

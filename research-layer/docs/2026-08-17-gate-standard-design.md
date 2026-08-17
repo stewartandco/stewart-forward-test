@@ -178,12 +178,30 @@ one dense axis with one coarse axis manufactures fake cliffs — `lookback` 55 �
 
 | New type | Dense grid |
 |---|---|
-| `entry/channel_breakout_d` | `lookback [20,35,55,75,100]`, `direction [long,both]` |
-| `entry/ma_cross_d` | `fast [5,8,13,20,34]`, `slow [50,80,130,200]` |
-| `entry/trend_scan_d` | `max_lookback [60,75,90,105,120]`, `t_min [2.0,2.5,3.0]` |
-| `stop/atr_stop_d` | `atr_len [14]`, `mult [1.5,2.0,2.5,3.0,3.5]` |
+| `entry/channel_breakout_dense` | `lookback [20,35,55,75,100]`, `direction [long,both]` |
+| `entry/ma_cross_dense` | `fast [5,8,13,20,34]`, `slow [50,80,130,200]` |
+| `entry/trend_scan_dense` | `max_lookback [60,75,90,105,120]`, `t_min [2.0,2.5,3.0]` |
+| `stop/atr_stop_dense` | `atr_len [14]`, `mult [1.5,2.0,2.5,3.0,3.5]` |
+| `target/r_multiple_dense` | `r [1.0,1.5,2.0,2.5,3.0]` |
+| `filter/vol_percentile_dense` | `lookback [90,120,150,180]`, `max_pctile [0.6,0.7,0.8,0.9,1.0]` |
+| `regime/regime_ma_short_dense` | `ma_len [50,100,150,200,250]` |
+| `entry/zscore_reversion_dense` | `lookback [20,40,60,75,90]`, `z_entry [1.5,1.75,2.0,2.25,2.5]`, `direction ["long","both"]` |
 
-These cover exactly the axes gen-1 through gen-3 actually swept.
+**Corrected 2026-08-18.** This table originally listed only the first four and
+claimed they "cover exactly the axes gen-1 through gen-3 actually swept." That
+was wrong. Enumerating every swept axis across all 12 chained families found
+four non-risk axes with no twin — `r_multiple.r` (swept by 4 families),
+`vol_percentile.max_pctile` (2), `regime_ma_short.ma_len` (2), and
+`zscore_reversion.lookback`/`.z_entry` (1). One consequence was concrete:
+`tstat_trend_both_asymmetric_payoff`, one of the three strategies in
+quarantine, swept `r_multiple.r`, so its family shape could not have been
+expressed as a sweep under the original four. Coen chose to add all four
+(2026-08-18). Risk axes remain twin-less by design.
+
+`zscore_reversion_dense` deliberately keeps `direction ["long","both"]` rather
+than gaining `"short"`: the engine emits a zscore short only when `direction ==
+"both"`, so a `"short"` grid value would produce no signals rather than an
+error. `channel_breakout_dense` is long/both for the same reason.
 
 ### Risk axes
 
