@@ -129,8 +129,19 @@ tightening, permitted freely by the ratchet below.
 ## Ratchet position
 
 **This protocol only tightens.** Three gates are added; none is removed; no
-threshold is loosened. It therefore carries none of the evidence-and-argument
-burden that protocol-v3 had to discharge when it relocated the deflated Sharpe.
+threshold is loosened. Every protocol-v3 gate is retained unchanged, so v4 is a
+strict superset and no buried strategy can newly pass under it. That is a
+structural fact rather than a statistical one, and it means the ratchet cannot
+be tripped by this protocol. It therefore carries none of the
+evidence-and-argument burden that protocol-v3 had to discharge when it
+relocated the deflated Sharpe.
+
+The write-free diagnostic run before this note was chained confirms the added
+gates bite rather than decorate. Of the 12 sibling groups on the chain, CSCV
+would **family-kill 3** (PBO 0.902, 0.824, 0.629) and **fail 3 more** (0.451,
+0.449, 0.342), leaving 6 passing — so the PBO gate alone would have eliminated
+half the families ever registered. Twenty-four of the 80 registered strategies
+would fail the Sharpe floor, all 24 of them already dead at the screen.
 
 The standing rule is unchanged: a future protocol may tighten freely, and any
 loosening requires the evidence and the argument on the chain before the results
@@ -144,6 +155,23 @@ this protocol existed, as the `quarantine-standard-asymmetry` note — registry
 entry 2308, commit `1b5da5e`. It is cross-referenced here rather than restated,
 because it was deliberately pre-declared before the successor standard existed
 so that the exemption could not have been chosen after seeing whom it helps.
+
+**What that exemption actually costs, now that it can be measured.** The
+asymmetry note said the three were admitted on a weaker bar than anything after
+them. Under this protocol's PBO gate, that is no longer abstract:
+
+| Quarantined | Family | PBO | Under v4 |
+|---|---|---|---|
+| `9b6753a48c4d0ccd` | `channel_breakout_both_fixedfrac` | 0.342 | **would fail** |
+| `ad654fd8097717bd` | `channel_breakout_both_voltarget_control` | 0.184 | would pass |
+| `ef7712f41e2188e2` | `tstat_trend_both_asymmetric_payoff` | 0.118 | would pass |
+
+One of the three would not have reached quarantine under the standard now being
+declared. It keeps its place. This is recorded to make the cost of the
+exemption legible, not to reopen it — reopening it would be exactly the
+retroactive re-judging that the exemption, and the rule keeping 77 strategies
+buried, both exist to forbid. Quarantine's forward record remains the leveller:
+after 60 trading days all three are assessed on identical forward evidence.
 
 ## What is knowingly not corrected
 
