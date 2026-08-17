@@ -25,20 +25,23 @@ def test_dominant_config_gives_low_pbo():
     assert out["pbo"] < 0.2, out
 
 
-def test_pure_noise_gives_pbo_near_one_half():
+def test_pure_noise_averages_to_pbo_one_half():
     """With no real edge the in-sample winner is a coin flip out of sample.
 
-    Seed picked deliberately: with only 8 configs and 8 blocks, a single
-    noise realization is a high-variance PBO estimate (verified empirically:
-    ~1 in 3 seeds land outside (0.25, 0.75) even with a provably correct,
-    unbiased implementation -- mean across 200 seeds is 0.495). Seed 12 lands
-    at exactly 0.5; this pins a non-flaky realization, it does not mask a bug.
+    Asserted on the MEAN over 30 independent draws rather than a single one.
+    At 8 configs and s=8 a single PBO estimate has sd ~0.23 -- a third of seeds
+    fall outside (0.25, 0.75) -- so a single-seed assertion is either flaky or
+    pinned to a hand-picked seed and proves nothing about the estimator. The
+    mean of 30 draws has sd ~0.042, which does test unbiasedness.
     """
-    rng = random.Random(12)
-    series = {f"n{i}": [rng.gauss(0, 0.01) for _ in range(320)]
-              for i in range(8)}
-    out = cscv_pbo(series, s=8)
-    assert 0.25 < out["pbo"] < 0.75, out
+    vals = []
+    for seed in range(30):
+        rng = random.Random(seed)
+        series = {f"n{i}": [rng.gauss(0, 0.01) for _ in range(320)]
+                  for i in range(8)}
+        vals.append(cscv_pbo(series, s=8)["pbo"])
+    mean = sum(vals) / len(vals)
+    assert 0.40 < mean < 0.60, f"mean PBO {mean:.3f} over {len(vals)} draws"
 
 
 def test_is_deterministic():
