@@ -200,7 +200,10 @@ def good_family(**overrides):
         ],
         "sweep": [
             {"block": 0, "param": "t_min", "values": [2.0, 2.5, 3.0]},
-            {"block": 1, "param": "mult", "values": [1.5, 2.0, 3.0]},
+            # contiguous on atr_stop_dense's grid [1.5, 2.0, 2.5, 3.0, 3.5] --
+            # [1.5, 2.0, 3.0] would skip 2.5 and fail validate_family's
+            # neighbourhood-contiguity rule (protocol-v4).
+            {"block": 1, "param": "mult", "values": [1.5, 2.0, 2.5]},
         ],
     }
     fam.update(overrides)

@@ -199,6 +199,29 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
                 f"sweep axis {p!r} declares {len(values)} value(s) — needs at "
                 f"least 3: with two, both points are grid edges and plateau "
                 f"selection can never produce a survivor")
+        # protocol-v4: gauntlet.py reads a swept axis's neighbours off the
+        # PARAMETER'S DECLARED GRID (BLOCK_TYPES[key][p]["grid"]), never off
+        # the family's own swept subset. A family that sweeps {20, 55, 100}
+        # on channel_breakout_dense.lookback (full grid [20, 35, 55, 75, 100])
+        # would pass the >=3 check above and then silently produce ZERO
+        # survivors: 55's true grid neighbours are 35 and 75, and neither was
+        # ever registered, so every point reads as edge_of_grid. Defining
+        # neighbours relative to the family's own values instead is not an
+        # option here — that would make the 20->55 jump count as a one-step
+        # perturbation, which is exactly the coarse-grid problem the dense
+        # block types exist to eliminate. "One step" means one declared-grid
+        # step, so the swept values must be contiguous on that grid.
+        grid = schema.get(p, {}).get("grid")
+        if grid and values and set(values) <= set(grid):
+            idxs = sorted(grid.index(v) for v in set(values))
+            gap_vals = [grid[j] for j in range(idxs[0], idxs[-1] + 1)
+                       if j not in idxs]
+            if gap_vals:
+                errors.append(
+                    f"sweep axis {p!r} values {sorted(set(values))} are not "
+                    f"contiguous on grid {grid} — skips {gap_vals}, so a "
+                    f"one-grid-step neighbour is never registered and the "
+                    f"axis cannot form a neighbourhood")
 
     if not errors:
         n = prod(len(ax["values"]) for ax in fam.get("sweep", [])) if fam.get("sweep") else 1

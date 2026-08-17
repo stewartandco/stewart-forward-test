@@ -304,6 +304,35 @@ def test_sibling_cap_is_sixty():
     assert SIBLING_CAP_DEFAULT == 60
 
 
+# ---------------- task 8c: swept values must be contiguous on the grid ----
+
+def test_gapped_sweep_is_rejected_for_noncontiguity():
+    """{20, 55, 100} on channel_breakout_dense.lookback (full grid
+    [20, 35, 55, 75, 100]) passes the >=3-values rule but strands 55 with
+    grid neighbours 35/75 that were never registered — gauntlet.py reads
+    neighbours off the DECLARED grid, not the family's own swept subset."""
+    errs = validate_family(_fam("channel_breakout_dense", "lookback", [20, 55, 100]),
+                           accepted_ids=set(), sibling_cap=60)
+    assert any("35" in e and "75" in e and "not contiguous" in e for e in errs), errs
+
+
+def test_contiguous_sweep_is_accepted_for_contiguity():
+    errs = validate_family(_fam("channel_breakout_dense", "lookback", [35, 55, 75]),
+                           accepted_ids=set(), sibling_cap=60)
+    assert not [e for e in errs if "contiguous" in e], errs
+
+
+def test_two_value_message_fires_before_contiguity_message():
+    """A two-value, non-contiguous sweep trips BOTH rules -- order the
+    checks so the clearer "needs at least 3" message comes first."""
+    errs = validate_family(_fam("channel_breakout_dense", "lookback", [20, 100]),
+                           accepted_ids=set(), sibling_cap=60)
+    three_value_idx = next(i for i, e in enumerate(errs) if "at least 3" in e)
+    contiguity_idxs = [i for i, e in enumerate(errs) if "not contiguous" in e]
+    assert contiguity_idxs, errs
+    assert three_value_idx < contiguity_idxs[0]
+
+
 from pipeline.stats import harvey_liu_haircut
 
 
