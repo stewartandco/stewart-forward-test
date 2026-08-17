@@ -40,17 +40,20 @@ def geval(trials_n=3, trials_var=0.0001, returns=None, group_n=4,
 
 # ---------------- protocol-v3: the DSR gate is gone ----------------
 
-def test_protocol_is_v3():
-    assert PROTOCOL == "gauntlet-protocol-v3"
+def test_protocol_is_current():
+    # this suite pins v3's BEHAVIOUR (the retired DSR gate), not v3's version
+    # string; protocol-v4 kept every one of those behaviours and added three
+    # gates on top, so the anchor tracks the current protocol.
+    assert PROTOCOL == "gauntlet-protocol-v4"
 
 
 def test_fail_order_excludes_dsr():
-    assert FAIL_ORDER == ("oos_negative", "edge_decay", "mc_p05", "p_ruin",
-                          "cost_stress")
+    assert FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
+                          "mc_p05", "p_ruin", "cost_stress", "pbo", "plateau")
     assert "dsr" not in FAIL_ORDER
 
 
-def test_low_dsr_passes_all_five_gates():
+def test_low_dsr_passes_every_gate():
     """The whole point of rev 2: a strategy the retired gate would have
     killed outright now passes, because the five robustness gates are what
     this stage is for. trials_n=500 with variance 4.0 drives the hurdle far
@@ -92,7 +95,7 @@ def test_metrics_carry_the_protocol_discriminator():
     """trials_n means 'registered strategies' under v2 and 'clusters' under
     v3, under the same key, so the entry must say which produced it."""
     _, _, metrics, _ = geval()
-    assert metrics["protocol"] == PROTOCOL == "gauntlet-protocol-v3"
+    assert metrics["protocol"] == PROTOCOL == "gauntlet-protocol-v4"
 
 
 def test_mc_summary_carries_the_full_cone():
@@ -174,7 +177,7 @@ def multi_strategy_registry(tmp_path, n=3):
                            {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
                             "max_dd": -0.1}, "0" * 64)
         reg.record_state_change(sid, "gauntlet", None)
-    reg.append("note", {"text": "gauntlet-protocol-v3: test anchor"})
+    reg.append("note", {"text": "gauntlet-protocol-v4: test anchor"})
     return reg, specs
 
 
@@ -200,7 +203,7 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
         assert m["registered_n"] == 3        # honest raw registration count
         assert m["trials_n"] == 2            # effectively independent trials
         assert m["trials_n"] < m["registered_n"]
-        assert m["protocol"] == "gauntlet-protocol-v3"
+        assert m["protocol"] == "gauntlet-protocol-v4"
 
     cfg = json.loads((art / specs[0]["strategy_id"] / "gauntlet" /
                       "config.json").read_text(encoding="utf-8"))

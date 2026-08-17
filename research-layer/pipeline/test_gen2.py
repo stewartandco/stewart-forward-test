@@ -346,10 +346,11 @@ def geval(is_t, oos_t, is_vol, oos_vol, stress=None, returns=None):
 
 # ---------------- protocol version ----------------
 
-def test_protocol_is_v3():
-    # migrated with the gauntlet: protocol-v3 retired the DSR gate, so the
-    # gen-2 suite's anchor tracks the current protocol string.
-    assert G_PROTOCOL == "gauntlet-protocol-v3"
+def test_protocol_is_current():
+    # migrated with the gauntlet: v3 retired the DSR gate and v4 added the
+    # Sharpe floor, PBO and plateau gates, so the gen-2 suite's anchor tracks
+    # the current protocol string rather than the one it was written against.
+    assert G_PROTOCOL == "gauntlet-protocol-v4"
 
 
 # ---------------- window_vol ----------------
@@ -396,7 +397,7 @@ def test_metrics_carry_raw_and_normalized():
         "mc_p05_equity", "p_ruin", "deflated_sharpe", "sibling_group_n",
         "cost_stress_net_pnl", "trials_n", "registered_n", "trials_sr_var",
         "expected_max_sharpe", "protocol", "is_edge_raw", "oos_edge_raw",
-        "is_vol", "oos_vol"}
+        "is_vol", "oos_vol", "train_sharpe", "pbo"}
     assert metrics["is_edge_per_trade"] == pytest.approx(
         metrics["is_edge_raw"] / metrics["is_vol"])
 

@@ -466,3 +466,25 @@ def test_regime_ma_uses_exactly_ma_len_bars_not_off_by_one():
     bars = [{"date": f"d{i:04d}", "close": 100 + 5 * i} for i in range(45)]
     labels = regime_by_date(bars, ma_len=5)
     assert labels["d0012"] == "trend_up"
+
+
+from pipeline.gauntlet import FAIL_ORDER, PROTOCOL, SR_FLOOR, PBO_PASS, PBO_KILL
+
+
+def test_protocol_is_v4():
+    assert PROTOCOL == "gauntlet-protocol-v4"
+
+
+def test_fail_order_puts_the_cheap_reject_first_and_family_gates_last():
+    assert FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
+                          "mc_p05", "p_ruin", "cost_stress", "pbo", "plateau")
+
+
+def test_dsr_is_still_absent_from_the_gate_order():
+    assert "dsr" not in FAIL_ORDER
+
+
+def test_thresholds_match_the_sop():
+    assert SR_FLOOR == 0.4
+    assert PBO_PASS == 0.20
+    assert PBO_KILL == 0.50

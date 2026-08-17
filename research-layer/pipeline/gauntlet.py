@@ -1,5 +1,9 @@
-"""Gauntlet battery: five-gate robustness validation of gauntlet-state
+"""Gauntlet battery: eight-gate robustness validation of gauntlet-state
 strategies on the 2024+ holdout, with pre-declared sibling selection.
+
+protocol-v4 adds a train-window Sharpe floor, a CSCV overfitting gate and a
+plateau gate, and replaces point-winner sibling selection (highest deflated
+Sharpe) with neighbourhood-floor selection. See pipeline/plateau.py.
 
 Usage:
     python -m pipeline.gauntlet [--registry registry_log.jsonl]
@@ -22,10 +26,14 @@ from pathlib import Path
 from .registry import Registry
 from .engine import run_spec
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
-                    bootstrap_paths)
+                    bootstrap_paths, harvey_liu_haircut)
 from .cluster import effective_trials
+from .pbo import cscv_pbo
+from .plateau import annualized_sharpe, select_survivor, qualifies
+from .walkforward import walkforward_report
+from .regime import regime_by_date, regime_split
 
-PROTOCOL = "gauntlet-protocol-v3"
+PROTOCOL = "gauntlet-protocol-v4"
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
@@ -40,12 +48,24 @@ P_RUIN_MAX = 0.05
 DSR_MIN = 0.95
 DEFAULT_CUTOFF = "2023-12-31"
 
+# protocol-v4 additions. SR_FLOOR is knowingly non-binding today — every one of
+# the 43 strategies that has ever reached this stage scored at least 0.577 on
+# the train window, and all 24 sub-0.4 specs died at the screen. It is adopted
+# so the two pipelines read identically, and it will bite if the screen is ever
+# loosened.
+SR_FLOOR = 0.4
+PBO_PASS = 0.20      # < this passes
+PBO_KILL = 0.50      # > this kills the whole sibling group
+CSCV_SPLITS = 16
+PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
+
 # The fixed order in which gates are evaluated and reported. 'dsr' is
-# DELIBERATELY ABSENT: protocol-v3 still computes and records the deflated
-# Sharpe, and still ranks siblings by it, but it does not gate entry to paper
-# trading. Adding it back here is a protocol change and needs its own
-# pre-declared chained note.
-FAIL_ORDER = ("oos_negative", "edge_decay", "mc_p05", "p_ruin", "cost_stress")
+# DELIBERATELY ABSENT: protocol-v4 still computes and records the deflated
+# Sharpe, but it does not gate entry to paper trading and — new in v4 — it no
+# longer ranks siblings either; neighbourhood floor does. Adding it back here
+# is a protocol change and needs its own pre-declared chained note.
+FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
+              "p_ruin", "cost_stress", "pbo", "plateau")
 
 
 def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
@@ -86,14 +106,23 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   stress_oos_trades: list[dict], daily_returns: list[float],
                   is_vol: float, oos_vol: float,
                   trials_n: int, trials_sr_var: float, seed: int,
-                  group_n: int | None = None, registered_n: int | None = None):
-    """Run the five robustness gates in FAIL_ORDER. Returns
+                  group_n: int | None = None, registered_n: int | None = None,
+                  train_sharpe: float | None = None,
+                  pbo_value: float | None = None,
+                  plateau_ok: bool | None = None):
+    """Run the robustness gates in FAIL_ORDER. Returns
     (passed, fail_reason|None, metrics, mc_summary).
 
-    protocol-v3: the deflated Sharpe is still computed and recorded, and still
-    ranks siblings for the single quarantine slot, but it no longer gates this
-    stage - it moved to the quarantine -> live gate, where fresh forward
-    evidence exists to compute it on. trials_n is the number of effectively
+    protocol-v4 adds three gates whose inputs are computed OUTSIDE this
+    function, because two of them are properties of the whole sibling group
+    rather than of one spec. `None` on any of the three means "not supplied by
+    this caller" and passes, so direct callers written against v3 keep their
+    meaning; main() always supplies all three.
+
+    The deflated Sharpe is still computed and recorded, but under v3 it stopped
+    gating this stage (it moved to the quarantine -> live gate, where fresh
+    forward evidence exists to compute it on) and under v4 it stopped ranking
+    siblings too. trials_n is the number of effectively
     independent trials (clusters); registered_n is the raw registration count.
     The edge-decay gate compares VOLATILITY-NORMALIZED per-trade edge, so a
     shrinking opportunity set is not scored as strategy decay."""
@@ -145,6 +174,11 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "oos_edge_raw": oos_raw,
         "is_vol": is_vol,
         "oos_vol": oos_vol,
+        # protocol-v4: the train-window annualized Sharpe the floor gate read,
+        # and the sibling group's CSCV overfitting probability. Both are None
+        # when the caller did not supply them.
+        "train_sharpe": train_sharpe,
+        "pbo": pbo_value,
     }
     mc_summary = {"seed": seed, "paths": MC_PATHS,
                   "p05": mc_p05,
@@ -160,11 +194,14 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
     # fail-open, the dangerous direction - so the assertion catches it. Every
     # value is an already-computed scalar, so eager evaluation has no cost or
     # side effect.
-    checks = {"oos_negative": oos_net > 0,
+    checks = {"sharpe_floor": train_sharpe is None or train_sharpe >= SR_FLOOR,
+              "oos_negative": oos_net > 0,
               "edge_decay": decay is not None and decay > DECAY_MIN_PCT,
               "mc_p05": mc_p05 > MC_P05_MIN,
               "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
-              "cost_stress": stress_net > 0}
+              "cost_stress": stress_net > 0,
+              "pbo": pbo_value is None or pbo_value < PBO_PASS,
+              "plateau": plateau_ok is not False}
     assert checks.keys() == set(FAIL_ORDER), (
         f"gate battery and FAIL_ORDER disagree: "
         f"computed-not-declared={sorted(checks.keys() - set(FAIL_ORDER))}, "
@@ -175,19 +212,23 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
     return True, None, metrics, mc_summary
 
 
-def select_survivors(rows: list[dict]) -> tuple[set[str], set[str]]:
-    """Pre-declared selection: per sibling group, the passer with the highest
-    DSR (tie: lexicographically smallest sid) -> quarantine; other passers ->
-    sibling_not_selected. rows: [{sid, group, passed, dsr}]."""
+def select_survivors(rows: list[dict], grids_by_group: dict,
+                     family_by_group: dict) -> tuple[set[str], set[str]]:
+    """protocol-v4 selection: per sibling group, the candidate with the
+    strongest NEIGHBOURHOOD FLOOR among plateau-qualifying gauntlet passers.
+
+    This function no longer reads any point metric. Under protocol-v3 it sorted
+    on -dsr and took the winner, which is precisely the point-winner selection
+    the SOP forbids.
+    """
     quarantine, not_selected = set(), set()
-    groups: dict[str, list[dict]] = {}
-    for r in rows:
-        if r["passed"]:
-            groups.setdefault(r["group"], []).append(r)
-    for group_rows in groups.values():
-        ranked = sorted(group_rows, key=lambda r: (-r["dsr"], r["sid"]))
-        quarantine.add(ranked[0]["sid"])
-        not_selected.update(r["sid"] for r in ranked[1:])
+    for group, family in sorted(family_by_group.items()):
+        grids = grids_by_group.get(group, {})
+        winner, _detail = select_survivor(family, grids)
+        passers = {s["sid"] for s in family if s["gauntlet_passed"]}
+        if winner is not None:
+            quarantine.add(winner)
+        not_selected.update(passers - {winner})
     return quarantine, not_selected
 
 
@@ -325,6 +366,76 @@ def run(argv: list[str] | None = None) -> int:
     print(f"effective trials: {trials_n} clusters over {registered_n} "
           f"registered strategies")
 
+    # protocol-v4: plateau selection needs every sibling's train-window score,
+    # its dense-axis coordinates, and whether it died at the screen on
+    # turnover. Screen deaths are read from the chain, not re-derived.
+    # `gauntlet_passed` starts False and is filled in below, once this run's
+    # verdicts exist.
+    screen_tc_fail = {
+        e["payload"]["strategy_id"]
+        for e in registry.entries()
+        if e["entry_type"] == "state_change"
+        and e["payload"].get("to") == "graveyard"
+        and e["payload"].get("reason") == "trade_count"}
+
+    def train_curve(sid):
+        return [(d, v) for d, v in full_results[sid]["equity"]
+                if d <= args.cutoff]
+
+    train_sharpe = {s["strategy_id"]: annualized_sharpe(
+        train_curve(s["strategy_id"])) for s in all_specs}
+
+    from .composer import SWEEPABLE_TYPES
+    from .blocks import BLOCK_TYPES
+    family_by_group, grids_by_group = {}, {}
+    for s in all_specs:
+        sid, g = s["strategy_id"], s["provenance"]["sibling_group_id"]
+        axes = {}
+        for b in s["blocks"]:
+            key = (b["role"], b["type"])
+            if key not in SWEEPABLE_TYPES:
+                continue
+            for p, v in b["params"].items():
+                if isinstance(BLOCK_TYPES[key].get(p, {}).get("grid"), list):
+                    axes[f"{b['type']}.{p}"] = v
+                    grids_by_group.setdefault(g, {})[f"{b['type']}.{p}"] = \
+                        BLOCK_TYPES[key][p]["grid"]
+        family_by_group.setdefault(g, []).append(
+            {"sid": sid, "axes": axes, "score": train_sharpe[sid],
+             "screen_trade_count_fail": sid in screen_tc_fail,
+             "gauntlet_passed": False})
+
+    # Prune axes that do not actually vary within a group, or a fixed parameter
+    # generates phantom neighbours: a whole family sitting at atr_len=14 would
+    # otherwise be read as a swept axis with every sibling its own island.
+    for g, fam in family_by_group.items():
+        varying = {a for a in grids_by_group.get(g, {})
+                   if len({s["axes"].get(a) for s in fam}) > 1}
+        grids_by_group[g] = {a: v for a, v in grids_by_group.get(g, {}).items()
+                             if a in varying}
+        for s in fam:
+            s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
+
+    # PBO over the TRAIN window only — the 2024+ holdout has been consumed
+    # three times already and protocol-v4 does not consume it a fourth. The
+    # matrix includes EVERY sibling, screen deaths included; computing it over
+    # passers only would filter on performance and understate overfitting.
+    n_train = len([d for d, _ in full_results[all_specs[0]["strategy_id"]]["equity"]
+                   if d <= args.cutoff])
+    pbo_by_group = {}
+    for g, fam in family_by_group.items():
+        series = {s["sid"]: daily_returns_from_curve(train_curve(s["sid"]))
+                  for s in fam}
+        pbo_by_group[g] = cscv_pbo(series, s=CSCV_SPLITS)
+        v = pbo_by_group[g]["pbo"]
+        print(f"  PBO {g}: "
+              f"{'n/a — ' + pbo_by_group[g]['reason'] if v is None else f'{v:.3f}'}"
+              f"  ({pbo_by_group[g]['n_configs']} configs)")
+    killed_groups = {g for g, r in pbo_by_group.items()
+                     if r["pbo"] is not None and r["pbo"] > PBO_KILL}
+    for g in sorted(killed_groups):
+        print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f} > {PBO_KILL}")
+
     rows, payloads = [], []
     for s in candidates:
         sid = s["strategy_id"]
@@ -339,10 +450,32 @@ def run(argv: list[str] | None = None) -> int:
         assets = s["universe"]["assets"]
         is_vol = window_vol(bars_by_asset, assets, "", args.cutoff)
         oos_vol = window_vol(bars_by_asset, assets, args.cutoff, "9999-12-31")
+        ok_plateau, _reason = qualifies(
+            next(x for x in family_by_group[g] if x["sid"] == sid),
+            family_by_group[g], grids_by_group.get(g, {}))
         passed, reason, metrics, mc_summary = evaluate_spec(
             is_t, oos_t, stress_oos, rets, is_vol, oos_vol,
             trials_n, trials_var, seed=int(sid, 16) % (2 ** 31),
-            group_n=group_n[g], registered_n=registered_n)
+            group_n=group_n[g], registered_n=registered_n,
+            train_sharpe=train_sharpe[sid],
+            pbo_value=pbo_by_group[g]["pbo"],
+            plateau_ok=ok_plateau)
+        if g in killed_groups:
+            passed, reason = False, "pbo_family_kill"
+
+        # Corroborating numbers: RECORDED, never gating. The haircut and the
+        # walk-forward read the train window; the regime split reads the OOS
+        # trades, matching the other OOS metrics beside it.
+        metrics["haircut"] = harvey_liu_haircut(
+            train_sharpe[sid] or 0.0,
+            t_years=n_train / 365.0, n_trials=trials_n)
+        train_dates = [d for d, _ in full_results[sid]["equity"]
+                       if d <= args.cutoff]
+        metrics["walkforward"] = walkforward_report(
+            [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
+            train_dates, n_folds=3, purge_bars=PURGE_BARS)
+        btc = bars_by_asset.get("BTCUSD") or bars_by_asset[sorted(bars_by_asset)[0]]
+        metrics["regime"] = regime_split(oos_t, regime_by_date(btc))
         rows.append({"sid": sid, "group": g, "passed": passed,
                      "dsr": metrics["deflated_sharpe"]})
         payloads.append((s, oos_t, passed, reason, metrics, mc_summary))
@@ -356,7 +489,12 @@ def run(argv: list[str] | None = None) -> int:
               f"stress={metrics['cost_stress_net_pnl']:+.4f}"
               + (f"  [{reason}]" if reason else ""))
 
-    quarantine, not_selected = select_survivors(rows)
+    passed_by_sid = {r["sid"]: r["passed"] for r in rows}
+    for fam in family_by_group.values():
+        for s in fam:
+            s["gauntlet_passed"] = passed_by_sid.get(s["sid"], False)
+    quarantine, not_selected = select_survivors(
+        rows, grids_by_group, family_by_group)
     n_pass = sum(1 for r in rows if r["passed"])
     if args.dry_run:
         print(f"\nDRY RUN — {len(rows)} evaluated, {n_pass} pass; "
