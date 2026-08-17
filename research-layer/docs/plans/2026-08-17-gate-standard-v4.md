@@ -1842,15 +1842,17 @@ def test_selection_no_longer_follows_dsr():
 python -m pipeline.gauntlet --dry-run
 ```
 
-Expected: it prints per-group PBO lines and a `DRY RUN — ... nothing written.` summary. It **must** refuse a real run, because no `gauntlet-protocol-v4` note is chained yet — that refusal is correct and is the pre-declaration guard working.
+**Expect it to print `No strategies in 'gauntlet' state.` and return 0.** The funnel is fully resolved — 77 graveyard, 3 quarantine, nothing in `gauntlet` — so `main()` returns before the family view, PBO or plateau code is ever reached. This run proves the module still imports and the CLI still works; it does **not** exercise anything new.
 
-Confirm nothing was written:
+Because the live dry-run cannot reach the new paths, **the synthetic end-to-end test in Step 10 is the only real verification of them** and must actually drive a registry fixture through `main()` with candidates in `gauntlet` state, asserting the PBO line prints and plateau reasons appear.
+
+Confirm nothing was written. **Do not use `git status`** — the concurrent session keeps `registry_log.jsonl` permanently dirty, so a status check false-alarms. Check for entry types only this code could produce:
 
 ```bash
-git status --short registry_log.jsonl
+git diff research-layer/registry_log.jsonl | grep -c '"entry_type": "verdict"\|"entry_type": "state_change"'
 ```
 
-Expected: no output.
+Expected: `0`. The scanner only appends `card_registered` and `card_reviewed`, so any `verdict` or `state_change` in the working diff came from this code and is a real problem.
 
 - [ ] **Step 12: Run the full scoped suite**
 

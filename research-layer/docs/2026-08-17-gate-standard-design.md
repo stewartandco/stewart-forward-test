@@ -233,7 +233,25 @@ per-outcome variants.
 1. `best` = highest objective score in the family.
 2. `plateau(F)` = every sibling scoring ≥ 0.9 × `best`.
 3. A candidate qualifies only if **it and all of its ±1-step geometry
-   neighbours** are in `plateau(F)`.
+   neighbours** are in `plateau(F)`, **and every swept axis has a sibling one
+   step below AND one step above it** (reason `edge_of_grid` otherwise).
+
+   **Added 2026-08-18 (Coen).** The original wording said "all of its ±1-step
+   neighbours", which is vacuously satisfied when a neighbour does not exist —
+   so a candidate at the edge of a grid qualified on half the evidence. That
+   is not academic: in a real fixture a candidate scoring 1.00 with one
+   neighbour at 0.95 tied with one scoring 0.98 whose neighbours were 0.95 and
+   0.99, and won the tie-break. The candidate with less evidence was
+   advantaged, partially reinstating the point-winner bias this gate exists to
+   remove. Both failure shapes disqualify: sitting at grid index 0 or `len-1`,
+   and sitting mid-grid with a neighbouring grid point that was never
+   registered as a sibling.
+
+   Two consequences, accepted deliberately: a **two-value sweep can never
+   produce a survivor** (both points are edges), and on a three-value sweep
+   only the middle point is eligible. `composer.validate_family` therefore
+   requires at least three values per swept axis, so the Composer cannot waste
+   a generation on a structurally unpromotable family.
 4. Any neighbour that died at screen on `trade_count` is a **cliff** and
    disqualifies the candidate outright (D3).
 
