@@ -596,3 +596,27 @@ def test_thresholds_match_the_sop():
     assert SR_FLOOR == 0.4
     assert PBO_PASS == 0.20
     assert PBO_KILL == 0.50
+
+
+def test_the_diagnostic_writes_nothing():
+    """Asserted mechanically. A diagnostic that quietly touched the chain would
+    be the worst possible bug in this repo.
+
+    KNOWN FLAKE SOURCE: a concurrent session shares this working tree and
+    actively appends to registry_log.jsonl (a scanner cycle can land
+    mid-run), so this can fail spuriously with a hash mismatch that has
+    nothing to do with diagnose_protocol_v4.py. If it fails, re-run once and
+    check `git diff research-layer/registry_log.jsonl` -- if the added lines
+    are `card_registered` / `card_reviewed`, that is the scanner, not this
+    script. Only `verdict` or `state_change` entries in the diff would
+    implicate the diagnostic.
+    """
+    import subprocess, sys, hashlib
+    root = Path(__file__).resolve().parent.parent
+    before = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
+    r = subprocess.run([sys.executable, "diagnose_protocol_v4.py"],
+                       cwd=root, capture_output=True, text=True, timeout=1800)
+    after = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert before == after, "diagnostic mutated registry_log.jsonl"
+    assert "WOULD" in r.stdout
