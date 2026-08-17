@@ -244,6 +244,7 @@ import sys
 
 from .registry import Registry
 from .gauntlet import run as gauntlet_run, select_survivors
+from .plateau import qualifies
 from .test_screen import (screening_registry, chain_protocol_note,
                           write_data_dir, dated_target_hit_bars)
 
@@ -312,47 +313,67 @@ def test_select_survivors_one_slot_per_group():
 
 
 def test_select_survivors_floor_tie_breaks_by_id():
-    fam = {"g1": [sib("b" * 16, 35, 0.99, True),
-                  sib("a" * 16, 20, 0.99, True)]}
+    """20 and 35 are both grid edges/edge-adjacent in the original two-point
+    version of this fixture, which the edge_of_grid rule now disqualifies
+    outright -- neither could ever have won, so the tie-break was no longer
+    being exercised. Populating the full grid makes 'a', 'm' and 'b'
+    (35/55/75) all interior and genuinely tied at floor 0.99; the low/high
+    edge fillers are disqualified regardless of their score."""
+    fam = {"g1": [sib("e" * 16, 20, 0.99, False),
+                  sib("a" * 16, 35, 0.99, True),
+                  sib("m" * 16, 55, 0.99, True),
+                  sib("b" * 16, 75, 0.99, True),
+                  sib("f" * 16, 100, 0.99, False)]}
     grids = {"g1": {"lookback": LOOKBACK_GRID}}
     quarantine, not_selected = select_survivors(rows_for(fam), grids, fam)
     assert quarantine == {"a" * 16}
-    assert not_selected == {"b" * 16}
+    assert not_selected == {"m" * 16, "b" * 16}
 
 
 def test_selection_no_longer_follows_dsr():
     """The v3 rule would take 'hi'; the v4 rule takes the better neighbourhood.
 
     'hi' posts the best point score of every gauntlet passer, which is exactly
-    what protocol-v3 sorted on. Under v4 it is disqualified outright: its only
-    neighbour 'nb' sits below the plateau, so its ridge is one grid step wide.
-    'lo' scores lower but sits between two plateau members.
+    what protocol-v3 sorted on. Under v4 it is disqualified outright, and
+    doubly so: it sits at the low grid edge (edge_of_grid fires first), and
+    even judged only on its single neighbour, 'nb' sits below the plateau —
+    its ridge is one grid step wide either way. 'ed' (100, the high edge) is
+    likewise disqualified by edge_of_grid regardless of its score. 'lo' is
+    the only interior, plateau-qualifying candidate: it scores lower than
+    'hi' but sits between two plateau members with both sides registered.
     """
     grids = {"lookback": LOOKBACK_GRID}
-    fam = [sib("hi", 20, 1.00, True),     # best point score, bad neighbourhood
-           sib("nb", 35, 0.80, False),    # below 0.9 x 1.00 -> kills 'hi'
+    fam = [sib("hi", 20, 1.00, True),     # best point score, low grid edge
+           sib("nb", 35, 0.80, False),    # below 0.9 x 1.00
            sib("rt", 55, 0.96, False),
-           sib("lo", 75, 0.98, True),     # worse point score, good neighbours
-           sib("ed", 100, 0.97, False)]
+           sib("lo", 75, 0.98, True),     # worse point score, interior, both sides registered
+           sib("ed", 100, 0.97, False)]   # high grid edge
     q, _ = select_survivors(rows_for({"g": fam}), {"g": grids}, {"g": fam})
     assert q == {"lo"}
 
 
-def test_an_edge_of_grid_candidate_is_judged_on_a_smaller_neighbourhood():
-    """Recorded because it is a real property of the rule, not an accident.
+def test_an_edge_of_grid_candidate_is_disqualified_not_merely_outcompeted():
+    """protocol-v4 addendum: an edge candidate is disqualified outright,
+    never left to win or lose on floor comparison alone.
 
-    A candidate at either end of a swept grid has ONE neighbour, so its
-    neighbourhood floor is a minimum over two scores instead of three. Here
-    'hi' (lookback 20, the low edge) and 'lo' (lookback 55, interior) both
-    floor at 0.95 — 'lo' is dragged down by a neighbour 'hi' never has to
-    answer for — and the sid tie-break hands the slot to the edge candidate.
-    Half the evidence, equal standing.
+    This fixture used to demonstrate the opposite: 'hi' (lookback 20, the
+    low edge) has ONE neighbour, so its floor was a minimum over two scores
+    (1.00, 0.95) instead of three, and that floor (0.95) tied 'lo' (55,
+    interior, dragged down by the same neighbour 'nb') — the sid tie-break
+    then handed the slot to 'hi', the candidate with LESS evidence. That was
+    exactly the point-winner-shaped bias this gate exists to remove, so
+    Coen closed it: 'hi' now fails edge_of_grid before floors are ever
+    compared, and 'lo' — the only interior, plateau-qualifying passer —
+    wins on its own merits instead.
     """
     grids = {"lookback": LOOKBACK_GRID}
     fam = [sib("lo", 55, 0.98, True), sib("hi", 20, 1.00, True),
            sib("nb", 35, 0.95, False), sib("rt", 75, 0.99, False)]
+    hi = next(s for s in fam if s["sid"] == "hi")
+    ok, reason = qualifies(hi, fam, grids)
+    assert ok is False and reason == "edge_of_grid"
     q, _ = select_survivors(rows_for({"g": fam}), {"g": grids}, {"g": fam})
-    assert q == {"hi"}
+    assert q == {"lo"}
 
 
 # ---------------- CLI guards ----------------
@@ -455,18 +476,23 @@ V4_WICK = 90
 
 
 def v4_spike_positions():
-    """Breakout triples separated by alternating 40- and 60-bar gaps.
+    """Breakout triples separated by a uniform 60-bar gap.
 
     A spike fires for lookback L only when the gap back to the previous spike
     is at least L + 3 (the previous triple's 120 high has to fall out of the
-    window). So 20 and 35 take every spike, 55 takes only the 60-gap half, and
-    75 and 100 take none — a real plateau with a real cliff beyond it.
+    window). 60 >= L + 3 for L in {20, 35, 55}, so those three take every
+    spike and post byte-identical trades; 60 < L + 3 for L in {75, 100}, so
+    those two take none. This is deliberately a real plateau with a real
+    cliff beyond it — protocol-v4's edge_of_grid rule additionally requires
+    35 and 55 need registered neighbours on BOTH sides to claim it, and only
+    35 has that (its neighbours 20 and 55 are both healthy; 55's high
+    neighbour, 75, is dead), so 35 is the sole two-sided-healthy candidate
+    even though its point score never distinguishes it from 20 or 55.
     """
-    out, p, gaps, k = [], 150, (40, 60), 0
+    out, p, gap = [], 150, 60
     while p < V4_BARS - 5:
         out.append(p)
-        p += gaps[k % 2]
-        k += 1
+        p += gap
     return out
 
 
@@ -561,9 +587,13 @@ def test_protocol_v4_end_to_end_sweep(tmp_path, capsys):
         for e in reg.entries() if e["entry_type"] == "state_change"
         and e["payload"]["to"] == "graveyard"
         and e["payload"]["from"] == "gauntlet"}
-    # lookback 35 posts the SAME trades as the winner and clears gates 1-7; it
-    # dies purely because its 55 neighbour fell off the plateau
-    assert graveyard_reason[by_lb[35]] == "plateau"
+    # 20, 35 and 55 all post byte-identical trades (checked below) and clear
+    # every point-metric gate; edge_of_grid still disqualifies 20 (the low
+    # grid edge — no registered neighbour below it) and 55 (its high
+    # neighbour, 75, is dead) even though neither one's OWN score is at
+    # fault. 35 is the only sibling with a registered, healthy neighbour on
+    # BOTH sides.
+    assert graveyard_reason[by_lb[20]] == "plateau"
     assert graveyard_reason[by_lb[55]] == "plateau"
     # the two dead long arms never get that far — no OOS trades at all
     assert graveyard_reason[by_lb[75]] == "oos_negative"
@@ -573,17 +603,21 @@ def test_protocol_v4_end_to_end_sweep(tmp_path, capsys):
     # the neighbourhood rule picks, not the one with the best point score
     states = reg.strategy_states()
     quarantined = [sid for sid, st in states.items() if st == "quarantine"]
-    assert quarantined == [by_lb[20]]
-    assert all(states[by_lb[lb]] == "graveyard" for lb in (35, 55, 75, 100))
-    # and the point metric could not have chosen between them: 20 and 35 post
-    # byte-identical trades, so protocol-v3's -dsr sort would have tied and
-    # fallen through to a lexicographic id compare. Only the neighbourhood
-    # separates them, which is the whole change.
+    assert quarantined == [by_lb[35]]
+    assert all(states[by_lb[lb]] == "graveyard" for lb in (20, 55, 75, 100))
+    # and the point metric could not have chosen between any of the three:
+    # 20, 35 and 55 post byte-identical trades, so protocol-v3's -dsr sort
+    # would have tied all three and fallen through to a lexicographic id
+    # compare — which could just as easily have handed the slot to 20, the
+    # candidate with the least evidence. Only the neighbourhood, and
+    # specifically the both-sides requirement, separates 35 from the other
+    # two.
     assert (verdicts[by_lb[20]]["metrics"]["deflated_sharpe"]
-            == verdicts[by_lb[35]]["metrics"]["deflated_sharpe"])
+            == verdicts[by_lb[35]]["metrics"]["deflated_sharpe"]
+            == verdicts[by_lb[55]]["metrics"]["deflated_sharpe"])
 
     # the recorded verdict carries the v4 numbers, gating and corroborating
-    m = verdicts[by_lb[20]]["metrics"]
+    m = verdicts[by_lb[35]]["metrics"]
     assert m["protocol"] == "gauntlet-protocol-v4"
     assert m["train_sharpe"] > SR_FLOOR
     assert 0.0 <= m["pbo"] < PBO_PASS
@@ -613,7 +647,7 @@ def test_pbo_family_kill_never_buries_a_strategys_own_first_failure(
 
     Six gates run before 'pbo' in FAIL_ORDER, so a member that was already
     independently broken has a more specific reason than the family kill. This
-    fixture's real PBO is ~0.002, so the threshold is dropped to force the kill
+    fixture's real PBO is ~0.0, so the threshold is dropped to force the kill
     on a family whose members otherwise fail — and pass — for their own
     distinct reasons. Overwriting `reason` unconditionally would record all
     five as 'pbo_family_kill' in an append-only chain, permanently.
@@ -633,10 +667,14 @@ def test_pbo_family_kill_never_buries_a_strategys_own_first_failure(
                for e in reg.entries() if e["entry_type"] == "state_change"
                and e["payload"]["to"] == "graveyard"
                and e["payload"]["from"] == "gauntlet"}
-    # only the sibling that had nothing else wrong takes the kill as its reason
-    assert reasons[by_lb[20]] == "pbo_family_kill"
-    # the others keep their own first failure in FAIL_ORDER
-    assert reasons[by_lb[35]] == "plateau"
+    # 35 is the only sibling with a registered, healthy neighbour on both
+    # sides (see v4_spike_positions), so it is the only one that had nothing
+    # else wrong and takes the kill as its reason.
+    assert reasons[by_lb[35]] == "pbo_family_kill"
+    # the others keep their own first failure in FAIL_ORDER — 20 and 55 fail
+    # edge_of_grid/neighbour_below_plateau under the "plateau" gate name
+    # regardless of the kill
+    assert reasons[by_lb[20]] == "plateau"
     assert reasons[by_lb[55]] == "plateau"
     assert reasons[by_lb[75]] == "oos_negative"
     assert reasons[by_lb[100]] == "oos_negative"

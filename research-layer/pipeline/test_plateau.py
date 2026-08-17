@@ -87,7 +87,15 @@ def test_only_gauntlet_passers_can_be_selected():
 
 
 def test_ties_break_lexicographically_on_sid():
-    fam = [sib("zz", 35, 1.0), sib("aa", 55, 1.0), sib("mm", 75, 1.0)]
+    """Every grid point is populated so 'zz', 'mm' and 'aa' are all interior
+    (both neighbours registered) and genuinely tie at floor 1.0; the low/high
+    edge fillers are disqualified by edge_of_grid and cannot win regardless.
+    An earlier version of this fixture populated only 35/55/75, which under
+    the edge-of-grid rule left 'aa' (55) the sole qualifier and stopped
+    testing any tie-break at all.
+    """
+    fam = [sib("edge_lo", 20, 1.0), sib("zz", 35, 1.0), sib("mm", 55, 1.0),
+           sib("aa", 75, 1.0), sib("edge_hi", 100, 1.0)]
     winner, _ = select_survivor(fam, GRIDS)
     assert winner == "aa"
 
@@ -126,7 +134,51 @@ def test_tie_break_picks_the_smallest_sid_even_at_differing_lengths():
     returned the LONGER sid rather than the smallest. Every other fixture uses
     one-character sids, which is why nothing caught it; real strategy ids are
     16 hex characters.
+
+    Every grid point is populated so 'aab', 'aa' and 'b' are all interior and
+    genuinely tie at floor 1.0 -- an earlier version of this fixture only
+    populated 35/55/75, which under the edge-of-grid rule left 'aa' (55) the
+    sole qualifier and stopped exercising the differing-length comparison.
     """
-    fam = [sib("aab", 35, 1.0), sib("aa", 55, 1.0), sib("b", 75, 1.0)]
+    fam = [sib("edge_lo", 20, 1.0), sib("aab", 35, 1.0), sib("aa", 55, 1.0),
+           sib("b", 75, 1.0), sib("edge_hi", 100, 1.0)]
     winner, _ = select_survivor(fam, GRIDS)
     assert winner == "aa"
+
+
+def test_low_edge_candidate_is_disqualified():
+    fam = [sib("a", 20, 1.0), sib("b", 35, 1.0), sib("c", 55, 1.0)]
+    ok, reason = qualifies(fam[0], fam, GRIDS)
+    assert ok is False and reason == "edge_of_grid"
+
+
+def test_high_edge_candidate_is_disqualified():
+    fam = [sib("a", 55, 1.0), sib("b", 75, 1.0), sib("c", 100, 1.0)]
+    ok, reason = qualifies(fam[2], fam, GRIDS)
+    assert ok is False and reason == "edge_of_grid"
+
+
+def test_a_mid_grid_candidate_with_an_unregistered_neighbour_is_disqualified():
+    """55 sits at a genuinely interior grid index (neither 0 nor len-1) and
+    its high side, 75, is registered -- but nothing was ever expanded at 35,
+    its low side. A valid grid value with no sibling there is the same fact
+    as sitting at the boundary: this configuration was never perturbed
+    toward 35, so it disqualifies the same way.
+    """
+    fam = [sib("a", 55, 1.0), sib("b", 75, 1.0)]
+    ok, reason = qualifies(fam[0], fam, GRIDS)
+    assert ok is False and reason == "edge_of_grid"
+
+
+def test_a_two_value_sweep_can_never_produce_a_survivor():
+    """Coen accepted this consequence explicitly: with only two grid values,
+    both candidates are edges, so no sibling can ever have neighbours on
+    both sides. pipeline/composer.py:validate_family enforces a minimum of
+    three values per swept axis so a family cannot be composed into this
+    trap in the first place.
+    """
+    fam = [sib("a", 20, 1.0), sib("b", 35, 1.0)]
+    winner, detail = select_survivor(fam, {"lookback": [20, 35]})
+    assert winner is None
+    assert detail["a"]["reason"] == "edge_of_grid"
+    assert detail["b"]["reason"] == "edge_of_grid"
