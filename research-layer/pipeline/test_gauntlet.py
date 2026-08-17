@@ -590,8 +590,67 @@ def test_protocol_v4_end_to_end_sweep(tmp_path, capsys):
     assert set(m["walkforward"]) >= {"folds", "folds_positive", "majority_pass",
                                      "catastrophic", "purge_bars"}
     assert m["walkforward"]["purge_bars"] == PURGE_BARS
-    assert set(m["regime"]) == {"trend_up", "trend_down", "chop", "unlabelled"}
+    assert set(m["regime"]["buckets"]) == {"trend_up", "trend_down", "chop",
+                                           "unlabelled"}
     assert 0.0 <= m["haircut"]["haircut_pct"] <= 100.0
+    # every corroborating block names the window it was computed over, so a
+    # reader of the chain never has to infer it
+    assert m["haircut"]["window"] == "train"
+    assert m["walkforward"]["window"] == "train"
+    assert m["regime"]["window"] == "oos"
+    # this family was not PBO-killed, and the flag is present anyway
+    assert m["pbo_family_kill"] is False
+    assert all(v["metrics"]["pbo_family_kill"] is False
+               for v in verdicts.values())
 
+    out_v = run_verifier(reg.log_path)
+    assert out_v.returncode == 0, out_v.stdout
+
+
+def test_pbo_family_kill_never_buries_a_strategys_own_first_failure(
+        tmp_path, capsys, monkeypatch):
+    """The kill is a GROUP verdict; it must not rewrite a MEMBER's reason.
+
+    Six gates run before 'pbo' in FAIL_ORDER, so a member that was already
+    independently broken has a more specific reason than the family kill. This
+    fixture's real PBO is ~0.002, so the threshold is dropped to force the kill
+    on a family whose members otherwise fail — and pass — for their own
+    distinct reasons. Overwriting `reason` unconditionally would record all
+    five as 'pbo_family_kill' in an append-only chain, permanently.
+    """
+    from . import gauntlet as gauntlet_mod
+    monkeypatch.setattr(gauntlet_mod, "PBO_KILL", -1.0)
+
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art"),
+                       "--cutoff", V4_CUTOFF])
+    assert rc == 0
+    assert "PBO FAMILY KILL: v4_sweep-t" in capsys.readouterr().out
+
+    reasons = {e["payload"]["strategy_id"]: e["payload"]["reason"]
+               for e in reg.entries() if e["entry_type"] == "state_change"
+               and e["payload"]["to"] == "graveyard"
+               and e["payload"]["from"] == "gauntlet"}
+    # only the sibling that had nothing else wrong takes the kill as its reason
+    assert reasons[by_lb[20]] == "pbo_family_kill"
+    # the others keep their own first failure in FAIL_ORDER
+    assert reasons[by_lb[35]] == "plateau"
+    assert reasons[by_lb[55]] == "plateau"
+    assert reasons[by_lb[75]] == "oos_negative"
+    assert reasons[by_lb[100]] == "oos_negative"
+
+    # the family-level fact is still recorded on every member, reason aside
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+                for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+    assert all(v["metrics"]["pbo_family_kill"] is True
+               for v in verdicts.values())
+    assert all(v["verdict"] == "fail" for v in verdicts.values())
+
+    # a killed family takes no quarantine slot
+    assert not [sid for sid, st in reg.strategy_states().items()
+                if st == "quarantine"]
     out_v = run_verifier(reg.log_path)
     assert out_v.returncode == 0, out_v.stdout

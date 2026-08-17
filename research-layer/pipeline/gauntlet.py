@@ -420,8 +420,6 @@ def run(argv: list[str] | None = None) -> int:
     # three times already and protocol-v4 does not consume it a fourth. The
     # matrix includes EVERY sibling, screen deaths included; computing it over
     # passers only would filter on performance and understate overfitting.
-    n_train = len([d for d, _ in full_results[all_specs[0]["strategy_id"]]["equity"]
-                   if d <= args.cutoff])
     pbo_by_group = {}
     for g, fam in family_by_group.items():
         series = {s["sid"]: daily_returns_from_curve(train_curve(s["sid"]))
@@ -460,22 +458,38 @@ def run(argv: list[str] | None = None) -> int:
             train_sharpe=train_sharpe[sid],
             pbo_value=pbo_by_group[g]["pbo"],
             plateau_ok=ok_plateau)
-        if g in killed_groups:
+        # A PBO family kill is recorded on EVERY member of the group, but it
+        # only becomes the fail REASON for a strategy that had nothing else
+        # wrong. Six gates precede 'pbo' in FAIL_ORDER, so overwriting `reason`
+        # unconditionally would bury a strategy's own first failure — in an
+        # append-only chain, permanently. The flag is written on the normal
+        # path too, so the key is always present rather than sometimes-missing.
+        metrics["pbo_family_kill"] = g in killed_groups
+        if metrics["pbo_family_kill"] and passed:
             passed, reason = False, "pbo_family_kill"
 
-        # Corroborating numbers: RECORDED, never gating. The haircut and the
-        # walk-forward read the train window; the regime split reads the OOS
-        # trades, matching the other OOS metrics beside it.
-        metrics["haircut"] = harvey_liu_haircut(
-            train_sharpe[sid] or 0.0,
-            t_years=n_train / 365.0, n_trials=trials_n)
+        # Corroborating numbers: RECORDED, never gating. Each carries the
+        # WINDOW it was computed over, because a verdict is a public
+        # append-only record and a reader must not have to infer that.
         train_dates = [d for d, _ in full_results[sid]["equity"]
                        if d <= args.cutoff]
-        metrics["walkforward"] = walkforward_report(
-            [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
-            train_dates, n_folds=3, purge_bars=PURGE_BARS)
+        metrics["haircut"] = dict(
+            harvey_liu_haircut(train_sharpe[sid] or 0.0,
+                               t_years=len(train_dates) / 365.0,
+                               n_trials=trials_n),
+            window="train")
+        metrics["walkforward"] = dict(
+            walkforward_report(
+                [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
+                train_dates, n_folds=3, purge_bars=PURGE_BARS),
+            window="train")
         btc = bars_by_asset.get("BTCUSD") or bars_by_asset[sorted(bars_by_asset)[0]]
-        metrics["regime"] = regime_split(oos_t, regime_by_date(btc))
+        # `buckets` is nested rather than flattened alongside `window`:
+        # regime.BUCKETS is a closed vocabulary and the map's values are all
+        # per-bucket stat dicts, so a bare string sibling would break anyone
+        # iterating it.
+        metrics["regime"] = {"window": "oos",
+                             "buckets": regime_split(oos_t, regime_by_date(btc))}
         rows.append({"sid": sid, "group": g, "passed": passed,
                      "dsr": metrics["deflated_sharpe"]})
         payloads.append((s, oos_t, passed, reason, metrics, mc_summary))
