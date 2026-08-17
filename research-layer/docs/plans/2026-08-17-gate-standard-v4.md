@@ -352,7 +352,7 @@ In `validate_family`, inside the existing `for ax in fam.get("sweep", []):` loop
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest pipeline/test_gen4.py -q`
-Expected: 8 passed.
+Expected: 14 passed (10 from Task 1's hardened set, plus these 4).
 
 - [ ] **Step 5: Fix any existing composer tests that sweep coarse types**
 
@@ -360,11 +360,17 @@ Run: `python -m pytest pipeline/test_composer.py -q`
 
 Existing fixtures sweep coarse types and will now fail. For each failure, change the fixture's block type to the dense twin and its sweep values to dense-grid members. **Do not** relax the new rule to make old fixtures pass — the rule is the feature.
 
-- [ ] **Step 6: Run the full scoped suite**
+- [ ] **Step 6: Re-tighten the comments Task 1 softened**
 
-Expected: **379 passed**, zero failures.
+Task 1 reworded two comments to say the sweepable-axis rule did not exist yet, because at that point it did not. It does now. Update both to describe the shipped behaviour:
+- the dense-twins header comment in `pipeline/blocks.py`
+- the module docstring in `pipeline/test_gen4.py`
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Run the full scoped suite**
+
+Expected: **385 passed**, zero failures.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add pipeline/composer.py pipeline/test_gen4.py pipeline/test_composer.py && git commit -m "feat(composer): only dense types are sweepable; sibling cap 60"
