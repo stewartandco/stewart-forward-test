@@ -929,13 +929,31 @@ def test_a_candidate_below_plateau_disqualifies_itself():
 
 
 def test_selection_prefers_the_best_worst_neighbour_not_the_point_winner():
-    """'b' is the point winner but sits beside a weak neighbour; 'd' scores
-    lower yet its whole neighbourhood is strong. Plateau selection takes 'd'."""
+    """'b' is the point winner but sits beside a weak neighbour; 'c' scores
+    lower yet its whole neighbourhood is strong. Plateau selection takes 'c'.
+
+    Floors: a=0.92, b=0.92, c=0.985, d=0.93, e=0.93 — 'c' wins outright, so
+    the test does not lean on any tie-break. An earlier version of this
+    fixture scored d and e at 0.98, which produced a three-way c/d/e tie at
+    0.98 and asserted 'd', a value no floor-based rule can return.
+    """
     fam = [sib("a", 20, 0.92), sib("b", 35, 1.00), sib("c", 55, 0.99),
-           sib("d", 75, 0.98), sib("e", 100, 0.98)]
+           sib("d", 75, 0.985), sib("e", 100, 0.93)]
     winner, detail = select_survivor(fam, GRIDS)
-    assert winner == "d", detail
+    assert winner == "c", detail
     assert max(fam, key=lambda s: s["score"])["sid"] == "b"
+
+
+def test_tie_break_picks_the_smallest_sid_even_at_differing_lengths():
+    """Regression: the original tie-break key `[-ord(c) for c in sid]` compared
+    LISTS, so "aa" -> [-97,-97] sorts below "aab" -> [-97,-97,-98] and max()
+    returned the LONGER sid rather than the smallest. Every other fixture uses
+    one-character sids, which is why nothing caught it; real strategy ids are
+    16 hex characters.
+    """
+    fam = [sib("aab", 35, 1.0), sib("aa", 55, 1.0), sib("b", 75, 1.0)]
+    winner, _ = select_survivor(fam, GRIDS)
+    assert winner == "aa"
 
 
 def test_only_gauntlet_passers_can_be_selected():
@@ -1113,9 +1131,12 @@ def select_survivor(family: list[dict], grids: dict[str, list],
             eligible.append(s)
     if not eligible:
         return None, detail
-    winner = max(eligible,
-                 key=lambda s: (neighbourhood_floor(s, family, grids),
-                                [-ord(c) for c in s["sid"]]))
+    # Descending floor, then ascending sid. NOT max() with an ord-based key:
+    # that compares lists, so "aa" -> [-97,-97] ranks below "aab" ->
+    # [-97,-97,-98] and the LONGER sid wins. Strategy ids are 16 hex chars.
+    winner = sorted(eligible,
+                    key=lambda s: (-neighbourhood_floor(s, family, grids),
+                                   s["sid"]))[0]
     return winner["sid"], detail
 ```
 
