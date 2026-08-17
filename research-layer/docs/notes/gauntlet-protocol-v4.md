@@ -86,9 +86,19 @@ point metric of any kind.
 
 Two consequences follow and are accepted deliberately: a two-value sweep can
 never produce a survivor, because both points are grid edges; and on a
-three-value sweep only the middle point is eligible. The Composer's validator
-therefore requires at least three values on every swept axis, so a family cannot
-be registered in a shape that is structurally unpromotable.
+three-value sweep only the middle point is eligible.
+
+The Composer's validator therefore enforces two things, so that a family cannot
+be registered in a shape that is structurally unpromotable: every swept axis
+carries **at least three values**, and those values are **contiguous on the
+parameter's declared grid**. Contiguity is not a convenience. Neighbours are
+defined against the declared grammar grid, so a family sweeping `{20, 55, 100}`
+out of a grid of `[20, 35, 55, 75, 100]` would satisfy the three-value rule and
+still yield nothing, because the middle point's real neighbours at 35 and 75
+were never registered. The alternative — defining neighbours against whichever
+values a family happened to sweep — was rejected: it would make a 20-to-55 jump
+count as a one-step perturbation, which is precisely the coarse-grid problem the
+dense block types were introduced to eliminate.
 
 The single objective used throughout is the **train-window annualized Sharpe**,
 computed identically for every sibling regardless of its screen or gauntlet
