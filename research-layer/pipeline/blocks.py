@@ -72,22 +72,25 @@ BLOCK_TYPES: dict[tuple[str, str], dict] = {
     # --- protocol-v4 dense twins -------------------------------------------
     # Chained schemas are immutable (composer.preflight_block_types), so
     # plateau selection gets density through NEW types rather than by widening
-    # the coarse ones. Only these may be swept; see composer.validate_family.
-    ("entry", "channel_breakout_d"): {
+    # the coarse ones. These are intended to become the only sweepable axis
+    # once Task 2 lands the enforcement (composer.validate_family) and the
+    # neighbourhood cap; neither exists yet, so nothing here restricts
+    # sweeping today.
+    ("entry", "channel_breakout_dense"): {
         "lookback": {"type": "int", "grid": [20, 35, 55, 75, 100]},
         "direction": {"type": "str", "grid": ["long", "both"]},
     },
-    ("entry", "ma_cross_d"): {
+    ("entry", "ma_cross_dense"): {
         "fast": {"type": "int", "grid": [5, 8, 13, 20, 34]},
         "slow": {"type": "int", "grid": [50, 80, 130, 200]},
         "direction": {"type": "str", "grid": ["long", "short", "both"]},
     },
-    ("entry", "trend_scan_d"): {
+    ("entry", "trend_scan_dense"): {
         "max_lookback": {"type": "int", "grid": [60, 75, 90, 105, 120]},
         "t_min": {"type": "float", "grid": [2.0, 2.5, 3.0]},
         "direction": {"type": "str", "grid": ["long", "short", "both"]},
     },
-    ("stop", "atr_stop_d"): {
+    ("stop", "atr_stop_dense"): {
         "atr_len": {"type": "int", "grid": [14]},
         "mult": {"type": "float", "grid": [1.5, 2.0, 2.5, 3.0, 3.5]},
     },
@@ -99,8 +102,8 @@ CONSTRAINTS = {
         lambda p: ["ma_cross: fast must be < slow"] if p["fast"] >= p["slow"] else [],
     ("entry", "ma_cross_ds"):
         lambda p: ["ma_cross_ds: fast must be < slow"] if p["fast"] >= p["slow"] else [],
-    ("entry", "ma_cross_d"):
-        lambda p: ["ma_cross_d: fast must be < slow"] if p["fast"] >= p["slow"] else [],
+    ("entry", "ma_cross_dense"):
+        lambda p: ["ma_cross_dense: fast must be < slow"] if p["fast"] >= p["slow"] else [],
 }
 
 

@@ -15,9 +15,9 @@ from .blocks import BLOCK_TYPES, CONSTRAINTS, validate_block
 
 # ---------------- grammar additions ----------------
 
-def test_grammar_has_fifteen_types():
-    # protocol-v4 added 4 dense twin types (2026-08-17); count grows to 19.
-    assert len(BLOCK_TYPES) == 19
+def test_grammar_matches_expected_block_types():
+    from .test_gen4 import EXPECTED_BLOCK_TYPES
+    assert set(BLOCK_TYPES) == EXPECTED_BLOCK_TYPES
 
 
 def test_new_types_present_with_direction_grids():

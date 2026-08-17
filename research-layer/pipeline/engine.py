@@ -111,7 +111,7 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             if state[i] == 1 and (i == 0 or state[i - 1] == 0):
                 sig[i] = 1
 
-    elif block["type"] in ("channel_breakout", "channel_breakout_d"):
+    elif block["type"] in ("channel_breakout", "channel_breakout_dense"):
         lb = p["lookback"]
         for i in range(lb, n):
             hi = max(b["high"] for b in bars[i - lb:i])
@@ -140,7 +140,7 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             if best >= p["t_min"]:
                 sig[i] = 1
 
-    elif block["type"] in ("trend_scan_ds", "trend_scan_d"):
+    elif block["type"] in ("trend_scan_ds", "trend_scan_dense"):
         windows = list(range(20, p["max_lookback"] + 1, 10))
         allow_long = p["direction"] in ("long", "both")
         allow_short = p["direction"] in ("short", "both")
@@ -152,7 +152,7 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
             elif allow_short and best <= -p["t_min"]:
                 sig[i] = -1
 
-    elif block["type"] in ("ma_cross_ds", "ma_cross_d"):
+    elif block["type"] in ("ma_cross_ds", "ma_cross_dense"):
         fast, slow = sma(closes, p["fast"]), sma(closes, p["slow"])
         allow = {"long": (1,), "short": (-1,), "both": (1, -1)}[p["direction"]]
         for i in range(n):
@@ -208,7 +208,7 @@ def _tightest_stop(stops: list[dict], entry_px: float, side: int,
         p = s["params"]
         if s["type"] == "pct_stop":
             dist = entry_px * p["pct"]
-        elif s["type"] in ("atr_stop", "atr_stop_d"):
+        elif s["type"] in ("atr_stop", "atr_stop_dense"):
             atr = atr_series[(p["atr_len"],)][i]
             if atr is None:
                 return None
@@ -250,7 +250,7 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
     mask = gate_mask(gates, bars) if gates else [True] * len(bars)
     atr_series = {}
     for s in stops:
-        if s["type"] in ("atr_stop", "atr_stop_d"):
+        if s["type"] in ("atr_stop", "atr_stop_dense"):
             atr_series[(s["params"]["atr_len"],)] = atr_wilder(bars, s["params"]["atr_len"])
     closes = [b["close"] for b in bars]
     vol_series = (realized_ann_vol(closes, risk["params"]["lookback"])
@@ -280,7 +280,7 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
                     (side == 1 and b["high"] >= pos["target"]) or
                     (side == -1 and b["low"] <= pos["target"])):
                 exit_px, exit_reason = pos["target"], "target"
-            elif (entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_d")
+            elif (entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_dense")
                   and state[i - 1] != pos["side"]):
                 exit_px, exit_reason = b["open"], "signal"       # cross-down exit
             if exit_px is not None:
