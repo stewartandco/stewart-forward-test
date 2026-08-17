@@ -13,7 +13,11 @@ from .registry import Registry
 
 AGENT = "reader"
 DOMAIN = "intelligence"
-CONTRACT_VERSION = "1.1"
+# Mirrors the Reader's CONTRACT.md in stewartandco-agents, which is the source
+# of truth. Bump this in the SAME change as the contract: a version recorded
+# only in the contract has not shipped, and this field is what the dashboard
+# reads to say which rules the agent is running under.
+CONTRACT_VERSION = "1.6"
 
 
 class ActionLog:

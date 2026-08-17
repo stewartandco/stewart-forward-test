@@ -7,6 +7,15 @@ import pytest
 from pipeline import pipeline_status as ps
 
 
+def test_status_reports_the_pipeline_contract_version_in_force():
+    """The pipeline contract went to v1.1 on 2026-08-17 (D35: the kill switch
+    moved off the shared sc-reader key onto a pipeline.halted artifact). Same
+    drift the Reader had: ratified in the contract, never emitted by the code.
+    """
+    assert ps.CONTRACT_VERSION == "1.1"
+    assert ps.build(stage_results={}, spent=0.0)["contract_version"] == "1.1"
+
+
 def test_conforms_to_the_agent_status_convention():
     doc = ps.build(stage_results={}, spent=0.0)
     for key in ("agent", "domain", "ts_utc", "overall", "summary", "items"):

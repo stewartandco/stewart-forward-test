@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 
 AGENT = "pipeline"
 DOMAIN = "intelligence"
-CONTRACT_VERSION = "1.0"
+# Mirrors hubs/intelligence/agents/pipeline/CONTRACT.md in stewartandco-agents.
+# Bump in the same change as the contract; see scanstatus.py for why.
+CONTRACT_VERSION = "1.1"
 
 PUSH_TRIGGERS = ("chain_invalid", "budget_cap", "quarantine_gap", "run_aborted")
 

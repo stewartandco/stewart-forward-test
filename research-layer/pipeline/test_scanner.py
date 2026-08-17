@@ -66,9 +66,25 @@ def test_committed_watchlist_loads_and_gate_tracks_verification():
     assert len(sources) >= 15
     classes = {s["class"] for s in sources}
     assert classes == {"arxiv", "aggregator", "blog", "ssrn", "central_bank", "github"}
-    # The gate admits exactly the Coen-stamped entries, nothing else.
-    stamped = {s["id"] for s in sources if s["added_by"] == "coen" and s["verified_date"]}
+    # The gate admits exactly the entries stamped by a recognised admission
+    # path, and nothing else.
+    #
+    # This used to read `added_by == "coen"` alone, which was the whole story
+    # until D27 (2026-08-15) authorised mechanical auto-admit for scout-found
+    # and citation-endorsed domains, stamped `auto-d27` and NEVER `coen`. The
+    # assertion was never updated, so it passed on the committed watchlist
+    # (192 sources, all Coen's) and failed on any machine where the scanner had
+    # actually run and admitted some (203 sources, 11 of them auto-d27). A test
+    # that reads a live, agent-mutated file has to encode the rules the agent
+    # is actually running under.
+    #
+    # What must NOT weaken: no source is pollable without a verified_date, and
+    # no admission path exists beyond these two. That is D23's Tier 3 gate.
+    ADMISSION_PATHS = {"coen", "auto-d27"}
+    stamped = {s["id"] for s in sources
+               if s["added_by"] in ADMISSION_PATHS and s["verified_date"]}
     assert {s["id"] for s in pollable(sources)} == stamped
+    assert {s["added_by"] for s in sources} <= ADMISSION_PATHS
     # The SSRN placeholder stays out until its URL is pinned.
     assert "ssrn-new-papers" not in stamped
 
@@ -430,7 +446,12 @@ def test_write_status_matches_convention(tmp_path):
                  pending_tier3=7, digest_file="digest_20260814.txt")
     st = json.loads(p.read_text(encoding="utf-8"))
     assert st["agent"] == "reader" and st["domain"] == "intelligence"
-    assert st["contract_version"] == "1.1"
+    # Source of truth is the Reader's CONTRACT.md in stewartandco-agents, not
+    # this file. It reached v1.6 on 2026-08-17 (D34 audit + D35 kill switch)
+    # while the runtime still emitted "1.1" -- five versions of drift on the
+    # one field a dashboard reads to say which rules an agent is running under.
+    # A decision that only changed a contract has not shipped.
+    assert st["contract_version"] == "1.6"
     assert st["overall"] == "OK"
     assert st["items"]["budget"] == "OK"
     assert st["pending_tier3"] == 7
@@ -476,13 +497,23 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
 
 # ---------------- D28: cap raise + tightened intake bar -------------------
 
-def test_default_monthly_cap_is_50():
+def test_default_monthly_cap_is_35_per_d33():
+    """D33 (2026-08-17) cut the Reader's standing budget from 50 to 35 so that
+    Reader plus the new pipeline line (20) sits inside D28's Intelligence band
+    of 30-60. The decision was ratified in the contract and the vault, and the
+    runtime kept metering against 50 -- which put the 80% alert at 40 instead
+    of 28, i.e. the alert would not have fired until after the real cap.
+
+    Both defaults move together: BudgetMeter's and the CLI's. They are the
+    same number in two places, and the CLI one is what an operator actually
+    gets.
+    """
     from .scanner import run as scanner_run
     import inspect
     from .budget import BudgetMeter
-    assert BudgetMeter(Path("nul-unused")).monthly_cap_usd == 50.0
+    assert BudgetMeter(Path("nul-unused")).monthly_cap_usd == 35.0
     src = inspect.getsource(scanner_run)
-    assert '"--cap", type=float, default=50.0' in src.replace("'", '"')
+    assert '"--cap", type=float, default=35.0' in src.replace("'", '"')
 
 
 def test_low_testability_keeps_are_recorded_but_not_extracted():
