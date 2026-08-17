@@ -191,7 +191,7 @@ Design notes:
 |---|---|---|
 | `proposed` | Spec registered; no results | automatic → screened when compute is scheduled |
 | `screened` | Fast single pass over training data | net P&L > 0 after costs; ≥ 100 trades; else graveyard. Cheap-first: nothing else runs until this passes |
-| `gauntlet` | Full validation battery | ALL of: (a) OOS walk-forward net positive with **edge decay > −25%** (per-trade edge OOS vs IS); (b) Monte Carlo 2000 resamples, P05 equity > 0; (c) P(ruin @ risk budget) < 5%; (d) **deflated Sharpe** (Bailey & López de Prado) > 0 given sibling_group size — *amended by protocol-v3 below: this test moved to the `quarantine → live` gate and no longer gates here*; (e) costs at 2× assumed slippage still net positive |
+| `gauntlet` | Full validation battery | ALL of, in this order (protocol-v4; see amendments below): (a) **train-window Sharpe floor** — annualized Sharpe on the pre-cutoff equity curve ≥ 0.4; (b) OOS walk-forward net positive; (c) **edge decay > −25%** (per-trade edge OOS vs IS); (d) Monte Carlo 2000 resamples, P05 equity > 0; (e) P(ruin @ risk budget) < 5%; (f) costs at 2× assumed slippage still net positive; (g) **CSCV/PBO** — probability of backtest overfitting across the sibling group < 0.20, with > 0.50 killing the whole group regardless of any individual member's other results; (h) **plateau/neighbourhood gate** — the candidate and every one of its one-step neighbours on every swept axis must sit on the sibling group's performance plateau (replaces point-winner sibling selection). *Historical: the pre-v3 table listed a fifth criterion, deflated Sharpe (Bailey & López de Prado) > 0 given sibling_group size, at this gate — amended by protocol-v3: that test moved to the `quarantine → live` gate and has not gated here since. protocol-v3 also ranked survivors by deflated Sharpe; protocol-v4 replaces that ranking with the neighbourhood-floor plateau selection in (h).* |
 | `quarantine` | Paper-traded; decisions posted daily to the forward-test log like any production system | ≥ 60 trading days AND realized edge within Monte Carlo P25–P75 cone of the gauntlet projection — *amended by protocol-v3 below: the cone criterion is not applied at this gate* |
 | `live` | Trading real capital | ongoing: rolling 90-day edge must stay above P05 cone, else auto-retire to graveyard with `reason: live_decay` |
 | `retired` | Deliberately shut down while healthy | terminal |
@@ -237,6 +237,26 @@ information, and says in its own output that the two are not comparable. The
 graduation comparison is pre-declared separately, in its own chained note,
 alongside the relocated deflated-Sharpe test at that same gate.
 
+**Amendment, protocol-v4 (`pipeline/gauntlet.py`).** Adds three gates to the
+gauntlet battery and changes nothing else in the state machine: a
+train-window Sharpe floor (`SR_FLOOR = 0.4`), a CSCV overfitting probability
+gate over the sibling group (`PBO_PASS = 0.20` fails a member, `PBO_KILL =
+0.50` kills the whole group), and a plateau/neighbourhood gate that replaces
+protocol-v3's point-winner (highest deflated Sharpe) sibling selection with
+neighbourhood-floor selection — a candidate only survives if it and every
+one-step neighbour on every swept axis clear the same plateau. protocol-v4
+is a strict superset of protocol-v3: every v3 gate is retained unchanged and
+three are added, so no strategy that failed under v3 can newly pass under
+v4. The plateau gate only ever fires on a family with a swept **dense**
+block type (`pipeline.composer.SWEEPABLE_TYPES`); see
+`diagnose_protocol_v4.py` for the standing audit of what protocol-v4 would
+have done to the chain to date, including the currently-open gap that no
+chained family sweeps a dense axis yet. Design record:
+`docs/2026-08-17-gate-standard-design.md` (current); the gen-3 note,
+`docs/2026-08-16-gen3-design.md`, is retained as the historical record of
+protocol-v3's own changes and is superseded by the v4 note for anything
+protocol-v4 amends.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -273,7 +293,7 @@ Common envelope:
 `verdict.metrics` minimums per stage:
 
 - `screened`: `{trades, net_pnl, win_rate, max_dd}`
-- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`
+- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}` — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
 - `quarantine` (graduation review): `{days, trades, realized_edge_per_trade, projection_percentile}`
 
 A `quarantine_decision` records what a paper-traded strategy's book DID on that

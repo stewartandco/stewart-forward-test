@@ -11,9 +11,14 @@ Usage:
         [--cutoff 2023-12-31] [--dry-run]
 
 Real runs HARD-REFUSE unless a note starting with PROTOCOL is chained.
-Current gates and amendments per docs/2026-08-16-gen3-design.md (rev 2);
-docs/2026-08-14-gauntlet-design.md is the HISTORICAL v1 spec and still
-describes the deflated-Sharpe gate that protocol-v3 retired.
+Current gates and amendments per docs/2026-08-17-gate-standard-design.md,
+the protocol-v4 spec. docs/2026-08-16-gen3-design.md (rev 2) is the
+HISTORICAL protocol-v3 record — it retired the deflated-Sharpe gate from
+this stage and moved it to quarantine -> live, and describes the
+point-winner sibling selection that protocol-v4 itself retires (see
+pipeline/plateau.py). docs/2026-08-14-gauntlet-design.md is the HISTORICAL
+v1 spec and still describes the deflated-Sharpe gate as gating here, which
+has not been true since protocol-v3.
 """
 from __future__ import annotations
 

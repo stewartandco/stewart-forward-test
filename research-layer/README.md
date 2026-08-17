@@ -160,9 +160,15 @@ Mechanics worth knowing:
 - **Gauntlet gates are pre-declared and falsifiable.** SCHEMA's two
   unfalsifiable literal gates were amended on-chain BEFORE any verdict
   (`gauntlet-protocol-v1` note): MC P05 terminal > 1.0 and DSR >= 0.95. One
-  quarantine slot per sibling group, selected by DSR — passers not selected
-  are graveyarded as `sibling_not_selected`, visibly distinct from gate
-  failure.
+  quarantine slot per sibling group. Under `gauntlet-protocol-v3` selection
+  was point-winner (highest deflated Sharpe); `gauntlet-protocol-v4` retires
+  point-winner selection for neighbourhood-floor plateau selection — a
+  candidate only survives if it and every one-step neighbour on every swept
+  axis sit on the family's performance plateau — and adds two more
+  pre-declared gates: a train-window Sharpe floor and a CSCV/PBO
+  overfitting check across the sibling group. Passers not selected are
+  graveyarded as `sibling_not_selected`, visibly distinct from gate failure,
+  under either selection rule.
 - **A buried composition cannot come back; a buried idea can.** `graveyard` is
   terminal and the composition-fingerprint guard blocks re-registration in any
   state, permanently. Under `gauntlet-protocol-v3` that guard is applied per
@@ -182,8 +188,9 @@ Mechanics worth knowing:
   unpassable. With only the best 30 registered the hurdle would have been 0.40.
   The threshold is unchanged at 0.95 and now gates `quarantine → live`, where
   genuinely fresh evidence exists to compute it on. Every gauntlet verdict
-  still records the deflated Sharpe, its variance and hurdle inputs, and
-  siblings are still ranked by it.
+  still records the deflated Sharpe, its variance and hurdle inputs — but as
+  of `gauntlet-protocol-v4` siblings are no longer ranked by it; sibling
+  selection is neighbourhood-floor plateau selection instead (see above).
 - **Quarantine is a real daily forward test.** Each quarantined strategy posts
   one `quarantine_decision` per asset per trading day, computed from bars up to
   that day only, preceded by a `quarantine_data_snapshot` recording the SHA-256
@@ -205,9 +212,12 @@ Offline tests (no API key needed): `python -m pytest pipeline/`
 ## Status
 
 - **Specification + Reader + Composer + Screen + Gauntlet + Quarantine**, with
-  `gauntlet-protocol-v3` superseding v2 for all future verdicts. v1 and v2
-  verdicts stand and the strategies they buried stay buried; the lifecycle
-  state machine is unchanged and `graveyard` remains terminal.
+  `gauntlet-protocol-v4` superseding v3 for all future verdicts (v4 adds a
+  train-window Sharpe floor, a CSCV/PBO overfitting gate, and neighbourhood-
+  floor plateau selection in place of point-winner selection; see
+  `SCHEMA.md` §3). v1, v2 and v3 verdicts stand and the strategies they
+  buried stay buried; the lifecycle state machine is unchanged and
+  `graveyard` remains terminal.
 - **Quarantine is built.** `python -m pipeline.quarantine --date YYYY-MM-DD`
   appends a day's decisions; `--review` audits completeness and backfill lag
   and writes nothing. Graduation is a separately human-gated decision, and the
