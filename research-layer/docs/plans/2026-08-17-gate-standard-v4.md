@@ -98,16 +98,31 @@ def test_coarse_types_are_untouched():
 
 
 def test_all_80_existing_fingerprints_unchanged():
-    """Adding block types must not perturb a single chained fingerprint."""
-    seen = 0
+    """Adding dense block types must not perturb a single chained fingerprint.
+
+    Proven by recomputing every chained fingerprint against a grammar with the
+    dense types REMOVED and requiring identical output. Comparing
+    composition_fingerprint(p) to itself would be a tautology that passes even
+    if every fingerprint had drifted — mutation-checked: retyping one coarse
+    grid literal (atr_stop.mult 2.0 -> 2) moves 46 of the 80.
+    """
+    payloads = []
     for line in REGISTRY.open(encoding="utf-8"):
         e = json.loads(line)
-        if e.get("entry_type") != "strategy_registered":
-            continue
-        p = e["payload"]
-        assert composition_fingerprint(p) == composition_fingerprint(p)
-        seen += 1
-    assert seen == 80
+        if e.get("entry_type") == "strategy_registered":
+            payloads.append(e["payload"])
+    assert len(payloads) == 80
+    with_dense = [composition_fingerprint(p) for p in payloads]
+    original = dict(BLOCK_TYPES)
+    try:
+        BLOCK_TYPES.clear()
+        BLOCK_TYPES.update({k: v for k, v in original.items() if k not in DENSE})
+        without_dense = [composition_fingerprint(p) for p in payloads]
+    finally:
+        BLOCK_TYPES.clear()
+        BLOCK_TYPES.update(original)
+    assert with_dense == without_dense
+    assert len(set(with_dense)) == 80, "fingerprint collision among chained specs"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -220,15 +235,28 @@ python -c "from pipeline.registry import Registry; from pipeline.composer import
 
 Expected: `[]`. A non-empty list means a chained schema was mutated — revert and find what moved.
 
-- [ ] **Step 8: Run the full scoped suite**
+- [ ] **Step 8: Bump the hardcoded grammar-size assertions**
+
+`BLOCK_TYPES` grows 15 → 19, and four existing tests assert the old count. All four must move to 19, each with a one-line comment saying why. There is repo precedent: one of them is still *named* `test_grammar_has_twelve_types_with_required_roles` while already asserting 15, from an earlier grammar growth.
+
+- `pipeline/test_composer.py::test_grammar_has_twelve_types_with_required_roles` — `assert len(BLOCK_TYPES) == 15`
+- `pipeline/test_composer.py::test_block_types_roundtrip` — `assert len(reg.block_types()) == 15`
+- `pipeline/test_composer.py::test_run_registers_blocks_then_specs` — `assert len(reg.block_types()) == 15`
+- `pipeline/test_gen2.py::test_grammar_has_fifteen_types` — `assert len(BLOCK_TYPES) == 15`
+
+Bump the counts only. Do not rename the tests — the stale names are a separate cleanup and renaming them here would bury a real change inside a cosmetic one.
+
+- [ ] **Step 9: Run the full scoped suite**
 
 Run the scoped command from the header.
 Expected: 371 baseline + 4 new = **375 passed**, zero failures.
 
-- [ ] **Step 9: Commit**
+**Known pre-existing flake, not caused by this task.** `pipeline/test_screen.py::test_serial_and_parallel_runs_produce_identical_verdicts` fails roughly 1 run in 5. `reader.build_card` (`pipeline/reader.py:157`) stamps `created_utc` from the wall clock at 1-second resolution; that timestamp is hashed into `card_id`, which flows into the content-addressed `strategy_id`; the test builds a separate registry per `workers` value and compares `strategy_id`s, so two iterations straddling a second boundary diverge. This is a defect in the test's assumption, not in production behaviour — two cards genuinely created a second apart *should* get different ids. This task makes the window marginally wider (19 block-type registrations per registry instead of 15, each doing a linear scan), but does not cause it. Do not fix it here: `test_screen.py` belongs to the concurrent session's fan-out work.
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add pipeline/blocks.py pipeline/engine.py pipeline/test_gen4.py && git commit -m "feat(grammar): dense twin block types for plateau selection"
+git add pipeline/blocks.py pipeline/engine.py pipeline/test_gen4.py pipeline/test_composer.py pipeline/test_gen2.py && git commit -m "feat(grammar): dense twin block types for plateau selection"
 git show HEAD --stat
 ```
 
