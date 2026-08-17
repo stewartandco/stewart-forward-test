@@ -646,13 +646,26 @@ def test_dominant_config_gives_low_pbo():
     assert out["pbo"] < 0.2, out
 
 
-def test_pure_noise_gives_pbo_near_one_half():
-    """With no real edge the in-sample winner is a coin flip out of sample."""
-    rng = random.Random(11)
-    series = {f"n{i}": [rng.gauss(0, 0.01) for _ in range(320)]
-              for i in range(8)}
-    out = cscv_pbo(series, s=8)
-    assert 0.25 < out["pbo"] < 0.75, out
+def test_pure_noise_averages_to_pbo_one_half():
+    """With no real edge the in-sample winner is a coin flip out of sample.
+
+    Asserted on the MEAN over 30 independent draws rather than a single one.
+    At 8 configs and s=8 a single PBO estimate has sd ~0.23 — measured: a
+    200-seed sweep gives mean 0.4946 with 65 of 200 outside (0.25, 0.75) — so
+    a single-seed assertion is either flaky or pinned to a hand-picked seed
+    and proves nothing about the estimator. The mean of 30 draws has sd ~0.042
+    and does test unbiasedness. Measured: seeds 0-29 give 0.5257 in 0.25s, and
+    an adversarial block-alternating matrix gives 0.7276, which this band
+    rejects — so it fails when it should.
+    """
+    vals = []
+    for seed in range(30):
+        rng = random.Random(seed)
+        series = {f"n{i}": [rng.gauss(0, 0.01) for _ in range(320)]
+                  for i in range(8)}
+        vals.append(cscv_pbo(series, s=8)["pbo"])
+    mean = sum(vals) / len(vals)
+    assert 0.40 < mean < 0.60, f"mean PBO {mean:.3f} over {len(vals)} draws"
 
 
 def test_is_deterministic():
