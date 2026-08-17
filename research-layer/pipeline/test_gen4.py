@@ -341,3 +341,55 @@ def test_saturated_normal_cdf_does_not_break_the_haircut():
     assert 0.0 <= out["haircut_pct"] <= 100.0
     assert out["sr_haircut"] >= 0.0
     assert not math.isnan(out["haircut_pct"])
+
+
+from pipeline.walkforward import purged_folds, walkforward_report
+
+
+def _trades(dates_and_returns):
+    return [{"entry_date": d, "return_net": r, "notional_frac": 1.0}
+            for d, r in dates_and_returns]
+
+
+def test_three_folds_cover_the_window_without_overlapping():
+    dates = [f"2020-{m:02d}-{d:02d}" for m in range(1, 13) for d in (1, 15)]
+    folds = purged_folds(dates, n_folds=3, purge_bars=2)
+    assert len(folds) == 3
+    spans = [set(f["test"]) for f in folds]
+    assert spans[0] & spans[1] == set()
+    assert spans[1] & spans[2] == set()
+
+
+def test_purge_gap_removes_train_bars_adjacent_to_the_test_slice():
+    dates = [f"d{i:03d}" for i in range(90)]
+    folds = purged_folds(dates, n_folds=3, purge_bars=5)
+    mid = folds[1]
+    assert set(mid["train"]) & set(mid["test"]) == set()
+    first_test = dates.index(mid["test"][0])
+    for d in dates[max(0, first_test - 5):first_test]:
+        assert d not in mid["train"]
+
+
+def test_majority_pass_needs_two_of_three_positive_folds():
+    dates = [f"d{i:03d}" for i in range(90)]
+    trades = _trades([(d, 0.01 if i < 60 else -0.01)
+                      for i, d in enumerate(dates)])
+    rep = walkforward_report(trades, dates, n_folds=3, purge_bars=5)
+    assert rep["folds_positive"] == 2
+    assert rep["majority_pass"] is True
+
+
+def test_a_fold_breaching_the_ruin_level_is_catastrophic():
+    dates = [f"d{i:03d}" for i in range(90)]
+    trades = _trades([(d, 0.001 if i < 60 else -0.30)
+                      for i, d in enumerate(dates)])
+    rep = walkforward_report(trades, dates, n_folds=3, purge_bars=5)
+    assert rep["catastrophic"] is True
+
+
+def test_report_records_every_fold_not_just_the_verdict():
+    dates = [f"d{i:03d}" for i in range(90)]
+    trades = _trades([(d, 0.01) for d in dates])
+    rep = walkforward_report(trades, dates, n_folds=3, purge_bars=5)
+    assert len(rep["folds"]) == 3
+    assert all("net" in f and "min_equity" in f for f in rep["folds"])
