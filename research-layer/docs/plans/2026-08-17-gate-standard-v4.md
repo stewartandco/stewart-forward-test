@@ -78,16 +78,16 @@ from pipeline.composer import composition_fingerprint
 
 REGISTRY = Path(__file__).resolve().parent.parent / "registry_log.jsonl"
 
-DENSE = [("entry", "channel_breakout_d"), ("entry", "ma_cross_d"),
-         ("entry", "trend_scan_d"), ("stop", "atr_stop_d")]
+DENSE = [("entry", "channel_breakout_dense"), ("entry", "ma_cross_dense"),
+         ("entry", "trend_scan_dense"), ("stop", "atr_stop_dense")]
 
 
 def test_dense_types_exist_with_expected_grids():
-    assert BLOCK_TYPES[("entry", "channel_breakout_d")]["lookback"]["grid"] == [20, 35, 55, 75, 100]
-    assert BLOCK_TYPES[("entry", "ma_cross_d")]["fast"]["grid"] == [5, 8, 13, 20, 34]
-    assert BLOCK_TYPES[("entry", "ma_cross_d")]["slow"]["grid"] == [50, 80, 130, 200]
-    assert BLOCK_TYPES[("entry", "trend_scan_d")]["max_lookback"]["grid"] == [60, 75, 90, 105, 120]
-    assert BLOCK_TYPES[("stop", "atr_stop_d")]["mult"]["grid"] == [1.5, 2.0, 2.5, 3.0, 3.5]
+    assert BLOCK_TYPES[("entry", "channel_breakout_dense")]["lookback"]["grid"] == [20, 35, 55, 75, 100]
+    assert BLOCK_TYPES[("entry", "ma_cross_dense")]["fast"]["grid"] == [5, 8, 13, 20, 34]
+    assert BLOCK_TYPES[("entry", "ma_cross_dense")]["slow"]["grid"] == [50, 80, 130, 200]
+    assert BLOCK_TYPES[("entry", "trend_scan_dense")]["max_lookback"]["grid"] == [60, 75, 90, 105, 120]
+    assert BLOCK_TYPES[("stop", "atr_stop_dense")]["mult"]["grid"] == [1.5, 2.0, 2.5, 3.0, 3.5]
 
 
 def test_coarse_types_are_untouched():
@@ -128,7 +128,7 @@ def test_all_80_existing_fingerprints_unchanged():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest pipeline/test_gen4.py -q`
-Expected: FAIL with `KeyError: ('entry', 'channel_breakout_d')`.
+Expected: FAIL with `KeyError: ('entry', 'channel_breakout_dense')`.
 
 If `test_all_80_existing_fingerprints_unchanged` fails on an import error for `composition_fingerprint`, run `grep -n "def composition_fingerprint" pipeline/composer.py` and correct the import to the real name before continuing. Do not weaken the test.
 
@@ -141,21 +141,21 @@ In `pipeline/blocks.py`, insert immediately before the closing `}` of `BLOCK_TYP
     # Chained schemas are immutable (composer.preflight_block_types), so
     # plateau selection gets density through NEW types rather than by widening
     # the coarse ones. Only these may be swept; see composer.validate_family.
-    ("entry", "channel_breakout_d"): {
+    ("entry", "channel_breakout_dense"): {
         "lookback": {"type": "int", "grid": [20, 35, 55, 75, 100]},
         "direction": {"type": "str", "grid": ["long", "both"]},
     },
-    ("entry", "ma_cross_d"): {
+    ("entry", "ma_cross_dense"): {
         "fast": {"type": "int", "grid": [5, 8, 13, 20, 34]},
         "slow": {"type": "int", "grid": [50, 80, 130, 200]},
         "direction": {"type": "str", "grid": ["long", "short", "both"]},
     },
-    ("entry", "trend_scan_d"): {
+    ("entry", "trend_scan_dense"): {
         "max_lookback": {"type": "int", "grid": [60, 75, 90, 105, 120]},
         "t_min": {"type": "float", "grid": [2.0, 2.5, 3.0]},
         "direction": {"type": "str", "grid": ["long", "short", "both"]},
     },
-    ("stop", "atr_stop_d"): {
+    ("stop", "atr_stop_dense"): {
         "atr_len": {"type": "int", "grid": [14]},
         "mult": {"type": "float", "grid": [1.5, 2.0, 2.5, 3.0, 3.5]},
     },
@@ -164,8 +164,8 @@ In `pipeline/blocks.py`, insert immediately before the closing `}` of `BLOCK_TYP
 Then add the `fast < slow` constraint for the dense cross. In `CONSTRAINTS`, add:
 
 ```python
-    ("entry", "ma_cross_d"):
-        lambda p: ["ma_cross_d: fast must be < slow"] if p["fast"] >= p["slow"] else [],
+    ("entry", "ma_cross_dense"):
+        lambda p: ["ma_cross_dense: fast must be < slow"] if p["fast"] >= p["slow"] else [],
 ```
 
 - [ ] **Step 4: Wire the dense types into the engine**
@@ -174,14 +174,14 @@ Each dense type is **behaviourally identical** to its coarse twin — only the g
 
 | Line | From | To |
 |---|---|---|
-| 114 | `elif block["type"] == "channel_breakout":` | `elif block["type"] in ("channel_breakout", "channel_breakout_d"):` |
-| 143 | `elif block["type"] == "trend_scan_ds":` | `elif block["type"] in ("trend_scan_ds", "trend_scan_d"):` |
-| 155 | `elif block["type"] == "ma_cross_ds":` | `elif block["type"] in ("ma_cross_ds", "ma_cross_d"):` |
-| 211 | `elif s["type"] == "atr_stop":` | `elif s["type"] in ("atr_stop", "atr_stop_d"):` |
-| 253 | `if s["type"] == "atr_stop":` | `if s["type"] in ("atr_stop", "atr_stop_d"):` |
-| 283 | `elif (entry["type"] in ("ma_cross", "ma_cross_ds")` | `elif (entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_d")` |
+| 114 | `elif block["type"] == "channel_breakout":` | `elif block["type"] in ("channel_breakout", "channel_breakout_dense"):` |
+| 143 | `elif block["type"] == "trend_scan_ds":` | `elif block["type"] in ("trend_scan_ds", "trend_scan_dense"):` |
+| 155 | `elif block["type"] == "ma_cross_ds":` | `elif block["type"] in ("ma_cross_ds", "ma_cross_dense"):` |
+| 211 | `elif s["type"] == "atr_stop":` | `elif s["type"] in ("atr_stop", "atr_stop_dense"):` |
+| 253 | `if s["type"] == "atr_stop":` | `if s["type"] in ("atr_stop", "atr_stop_dense"):` |
+| 283 | `elif (entry["type"] in ("ma_cross", "ma_cross_ds")` | `elif (entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_dense")` |
 
-The parameter names already match exactly: `channel_breakout_d` takes `lookback`/`direction` like its twin, `trend_scan_d` takes `max_lookback`/`t_min`/`direction`, `ma_cross_d` takes `fast`/`slow`/`direction`, `atr_stop_d` takes `atr_len`/`mult`. No handler body changes.
+The parameter names already match exactly: `channel_breakout_dense` takes `lookback`/`direction` like its twin, `trend_scan_dense` takes `max_lookback`/`t_min`/`direction`, `ma_cross_dense` takes `fast`/`slow`/`direction`, `atr_stop_dense` takes `atr_len`/`mult`. No handler body changes.
 
 - [ ] **Step 5: Prove the twins are behaviourally identical**
 
@@ -215,7 +215,7 @@ def test_dense_twin_reproduces_its_coarse_twin_exactly():
     root = Path(__file__).resolve().parent.parent
     bars = {"BTCUSD": load_bars(root / "data", "BTCUSD", "9999-12-31")}
     coarse = run_spec(_spec("channel_breakout", "atr_stop"), bars)
-    dense = run_spec(_spec("channel_breakout_d", "atr_stop_d"), bars)
+    dense = run_spec(_spec("channel_breakout_dense", "atr_stop_dense"), bars)
     assert coarse["trades"] == dense["trades"]
     assert coarse["equity"] == dense["equity"]
 ```
@@ -298,16 +298,16 @@ def test_sweeping_a_coarse_type_is_rejected():
 
 
 def test_sweeping_a_dense_type_is_accepted():
-    errs = validate_family(_fam("channel_breakout_d", "lookback", [35, 55, 75]),
+    errs = validate_family(_fam("channel_breakout_dense", "lookback", [35, 55, 75]),
                            accepted_ids=set(), sibling_cap=60)
     assert not [e for e in errs if "sweepable" in e], errs
 
 
 def test_sweepable_set_is_exactly_the_dense_types():
-    assert SWEEPABLE_TYPES == {("entry", "channel_breakout_d"),
-                               ("entry", "ma_cross_d"),
-                               ("entry", "trend_scan_d"),
-                               ("stop", "atr_stop_d")}
+    assert SWEEPABLE_TYPES == {("entry", "channel_breakout_dense"),
+                               ("entry", "ma_cross_dense"),
+                               ("entry", "trend_scan_dense"),
+                               ("stop", "atr_stop_dense")}
 
 
 def test_sibling_cap_is_sixty():
@@ -334,10 +334,10 @@ Add below it:
 # dense axis with a coarse one manufactures fake cliffs in plateau selection —
 # channel_breakout lookback 55 -> 100 is a different strategy, not a
 # perturbation. Coarse types stay usable at FIXED values.
-SWEEPABLE_TYPES = {("entry", "channel_breakout_d"),
-                   ("entry", "ma_cross_d"),
-                   ("entry", "trend_scan_d"),
-                   ("stop", "atr_stop_d")}
+SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
+                   ("entry", "ma_cross_dense"),
+                   ("entry", "trend_scan_dense"),
+                   ("stop", "atr_stop_dense")}
 ```
 
 In `validate_family`, inside the existing `for ax in fam.get("sweep", []):` loop, after the block-index and param-name checks already there (so `key` is bound), add:
