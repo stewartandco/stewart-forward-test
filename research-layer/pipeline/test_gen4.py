@@ -333,6 +333,85 @@ def test_two_value_message_fires_before_contiguity_message():
     assert three_value_idx < contiguity_idxs[0]
 
 
+# ---------------- task 2b: batch-gate drift --------------------------------
+
+from pipeline.composer import drift_record, drift_between, run as composer_run
+
+
+def _spec_stub(strategy_id, family):
+    return {"strategy_id": strategy_id, "family": family}
+
+
+def test_drift_record_captures_mode_count_ids_and_families():
+    specs = [_spec_stub("a" * 16, "fam_a"), _spec_stub("b" * 16, "fam_a"),
+             _spec_stub("c" * 16, "fam_b")]
+    rec = drift_record("run1", True, specs)
+    assert rec["run_id"] == "run1"
+    assert rec["mode"] == "dry"
+    assert rec["n_specs"] == 3
+    assert rec["strategy_ids"] == ["a" * 16, "b" * 16, "c" * 16]
+    assert rec["families"] == ["fam_a", "fam_b"]
+
+
+def test_drift_record_mode_is_real_when_not_a_dry_run():
+    rec = drift_record("run1", False, [])
+    assert rec["mode"] == "real"
+    assert rec["n_specs"] == 0
+    assert rec["strategy_ids"] == []
+    assert rec["families"] == []
+
+
+def test_drift_between_names_dropped_and_added_ids_and_families():
+    dry_specs = [_spec_stub("a" * 16, "fam_a"), _spec_stub("b" * 16, "fam_a"),
+                 _spec_stub("c" * 16, "fam_b")]
+    real_specs = [_spec_stub("a" * 16, "fam_a"), _spec_stub("d" * 16, "fam_c")]
+    dry = drift_record("run1", True, dry_specs)
+    real = drift_record("run1", False, real_specs)
+    d = drift_between(dry, real)
+    assert d["run_id"] == "run1"
+    assert d["n_dry"] == 3 and d["n_real"] == 2
+    assert d["dropped"] == sorted(["b" * 16, "c" * 16])
+    assert d["added"] == ["d" * 16]
+    assert d["dropped_families"] == ["fam_b"]
+    assert d["added_families"] == ["fam_c"]
+
+
+def test_drift_between_note_says_it_is_not_a_trial_count():
+    dry = drift_record("run1", True, [])
+    real = drift_record("run1", False, [])
+    d = drift_between(dry, real)
+    assert "not a trial count" in d["note"]
+
+
+def test_composer_run_persists_one_drift_record_per_invocation(tmp_path):
+    """End-to-end: the file lands next to --registry (never inside the real
+    repo's logs/ during a test), and registry_log.jsonl itself is untouched
+    by a dry run."""
+    from pipeline.registry import Registry
+    from pipeline.test_pipeline import make_card
+    from pipeline.test_composer import good_family
+
+    reg_path = tmp_path / "reg.jsonl"
+    reg = Registry(reg_path)
+    card = make_card()
+    reg.register_card(card)
+    reg.review_card(card["card_id"], "accepted", "tester")
+
+    rc = composer_run(
+        ["--registry", str(reg_path), "--run-id", "driftrun", "--dry-run"],
+        propose_fn=lambda cards: [good_family(card_ids=[card["card_id"]])])
+    assert rc == 0
+
+    drift_path = tmp_path / "logs" / "batch_drift.jsonl"
+    assert drift_path.exists()
+    lines = drift_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["run_id"] == "driftrun"
+    assert rec["mode"] == "dry"
+    assert rec["n_specs"] == 9
+
+
 from pipeline.stats import harvey_liu_haircut
 
 

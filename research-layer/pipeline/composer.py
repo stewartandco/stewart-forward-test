@@ -512,6 +512,43 @@ def normalize_proposal(families: list[dict]) -> list[dict]:
     return families
 
 
+def drift_record(run_id: str, dry_run: bool, specs: list[dict]) -> dict:
+    """What one Composer run emitted. Written for both the dry run and the real
+    run so the gap between the batch Coen approved and the batch that got
+    chained stops being invisible."""
+    return {"run_id": run_id,
+            "mode": "dry" if dry_run else "real",
+            "n_specs": len(specs),
+            "strategy_ids": [s["strategy_id"] for s in specs],
+            "families": sorted({s["family"] for s in specs})}
+
+
+def drift_between(dry: dict, real: dict) -> dict:
+    """The batch-gate drift. NOT a multiple-testing trial count: nothing in a
+    dry run was ever backtested, so none of it inflated any maximum Sharpe. It
+    is recorded because it is a real, auditable record of search that the chain
+    would otherwise lose."""
+    d, r = set(dry["strategy_ids"]), set(real["strategy_ids"])
+    return {"run_id": real["run_id"],
+            "n_dry": dry["n_specs"], "n_real": real["n_specs"],
+            "dropped": sorted(d - r), "added": sorted(r - d),
+            "dropped_families": sorted(set(dry["families"]) - set(real["families"])),
+            "added_families": sorted(set(real["families"]) - set(dry["families"])),
+            "note": "batch-gate drift; not a trial count — dry-run specs were "
+                    "never scored, so they inflated no maximum"}
+
+
+def _persist_drift_record(record: dict, registry_path: Path) -> None:
+    """Append one JSON line to logs/batch_drift.jsonl, next to wherever the
+    registry lives (repo root in production, tmp_path in tests -- so tests
+    never spam the live logs/ directory). A file write, NOT a chain write:
+    this never touches registry_log.jsonl."""
+    log_path = registry_path.resolve().parent / "logs" / "batch_drift.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+
+
 def run(argv: list[str] | None = None, propose_fn=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--max-families", type=int, default=8)
@@ -610,6 +647,15 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         kept.append((fam, kept_specs))
 
     total = sum(len(s) for _, s in kept)
+
+    # The batch-gate drift: what got approved at THIS invocation (dry or
+    # real) vs what a later real run actually chains. Written for both modes
+    # so the gap stops being invisible -- gen 3's approved dry run was 20
+    # specs, the real run chained 24 with a directional mirror dropped.
+    all_specs = [s for _, specs in kept for s in specs]
+    _persist_drift_record(
+        drift_record(args.run_id, args.dry_run, all_specs), args.registry)
+
     for fam, specs in kept:
         print(f"family {fam['family']}: {len(specs)} sibling(s), "
               f"cites {len(fam['card_ids'])} card(s) — {fam['rationale']}")
