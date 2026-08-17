@@ -393,3 +393,76 @@ def test_report_records_every_fold_not_just_the_verdict():
     rep = walkforward_report(trades, dates, n_folds=3, purge_bars=5)
     assert len(rep["folds"]) == 3
     assert all("net" in f and "min_equity" in f for f in rep["folds"])
+
+
+from pipeline.regime import regime_by_date, regime_split, CHOP_BAND
+
+
+def _bars(closes):
+    return [{"date": f"d{i:04d}", "close": c} for i, c in enumerate(closes)]
+
+
+def test_a_strong_uptrend_labels_trend_up():
+    bars = _bars([100.0] * 200 + [180.0] * 10)
+    labels = regime_by_date(bars, ma_len=200)
+    assert labels["d0205"] == "trend_up"
+
+
+def test_a_strong_downtrend_labels_trend_down():
+    bars = _bars([100.0] * 200 + [40.0] * 10)
+    labels = regime_by_date(bars, ma_len=200)
+    assert labels["d0205"] == "trend_down"
+
+
+def test_price_near_the_average_labels_chop():
+    bars = _bars([100.0] * 210)
+    labels = regime_by_date(bars, ma_len=200)
+    assert labels["d0205"] == "chop"
+
+
+def test_bars_before_the_average_exists_are_unlabelled():
+    bars = _bars([100.0] * 210)
+    labels = regime_by_date(bars, ma_len=200)
+    assert "d0100" not in labels
+
+
+def test_chop_band_is_five_percent():
+    assert CHOP_BAND == 0.05
+
+
+def test_split_buckets_trades_and_reports_counts_and_net():
+    labels = {"d0201": "trend_up", "d0202": "chop", "d0203": "trend_up"}
+    trades = [{"entry_date": "d0201", "return_net": 0.10, "notional_frac": 1.0},
+              {"entry_date": "d0202", "return_net": -0.04, "notional_frac": 1.0},
+              {"entry_date": "d0203", "return_net": 0.02, "notional_frac": 1.0}]
+    out = regime_split(trades, labels)
+    assert out["trend_up"]["n"] == 2
+    assert abs(out["trend_up"]["net"] - 0.12) < 1e-12
+    assert out["chop"]["n"] == 1
+    assert out["trend_down"]["n"] == 0
+
+
+def test_trades_outside_the_labelled_window_are_counted_as_unlabelled():
+    labels = {"d0201": "trend_up"}
+    trades = [{"entry_date": "d0001", "return_net": 0.1, "notional_frac": 1.0}]
+    out = regime_split(trades, labels)
+    assert out["unlabelled"]["n"] == 1
+
+
+def test_regime_ma_uses_exactly_ma_len_bars_not_off_by_one():
+    # Non-constant (linear ramp) prices so the moving-average window width
+    # actually matters -- constant-price fixtures can't distinguish a
+    # correctly ma_len-wide window from one that is ma_len-1 or ma_len+1
+    # wide, since the mean is the same regardless of width there.
+    #
+    # close[i] = 100 + 5*i, ma_len=5. At i=12 the correct 5-wide window is
+    # closes[8:13] = [140, 145, 150, 155, 160], mean=150.0, close=160,
+    # spread = (160-150)/150 = 6.67% -> trend_up.
+    #
+    # A window narrowed to 4 bars by an off-by-one (closes[9:13] =
+    # [145, 150, 155, 160]) would instead average 152.5, giving spread
+    # (160-152.5)/152.5 = 4.92%, which is inside the 5% chop band -- a
+    # different label. So this test would catch that specific bug.
+    bars = [{"date": f"d{i:04d}", "close": 100 + 5 * i} for i in range(45)]
+    labels = regime_by_date(bars, ma_len=5)
+    assert labels["d0012"] == "trend_up"
