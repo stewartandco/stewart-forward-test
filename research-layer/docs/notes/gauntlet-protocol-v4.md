@@ -1,231 +1,29 @@
-gauntlet-protocol-v4
+gauntlet-protocol-v4: Supersedes v3 for all FUTURE verdicts. v1, v2 and v3 verdicts stand. All 77 previously graveyarded strategies remain buried, which is terminal; the composition-fingerprint guard still blocks re-registration of any of them; the lifecycle state machine is UNCHANGED - no new transitions, nothing resurrected, no amendment to terminal states. Pre-declared before any strategy has been evaluated under it and before any generation-4 specification exists.
 
-Pre-declared 2026-08-18, before any strategy has been evaluated under it and
-before any generation-4 specification exists. Supersedes protocol-v3 for every
-candidate registered after this note is chained. It does not apply to anything
-already decided.
+WHY: the research layer and the trading-systems pipeline judged candidates by different standards, so a candidate's fate depended on which pipeline found it. This note makes one standard, so that a claim about several systems clearing one bar can be made honestly rather than requiring an explanation of which bar each one cleared. Direction of travel is one way: the research layer adopts the SOP's standard, and the SOP's gates do not move.
 
-## What this changes and why
+GATES RETAINED FROM v3, UNCHANGED: oos_negative, edge_decay, mc_p05, p_ruin, cost_stress. The deflated Sharpe is still computed and recorded. Under v3 it stopped gating this stage, moving to the quarantine-to-live gate where forward evidence exists to compute it on. Under v4 it also stops ranking siblings. It now influences no decision at this stage.
 
-The research layer and the `trading-systems` pipeline judged candidates by
-different standards. A candidate's fate depended on which pipeline found it.
-This note makes one standard, so that nine systems clearing one bar is a
-statement that can be made honestly rather than a statement requiring an
-explanation of which bar each one cleared.
+GATE ADDED - sharpe_floor: train-window annualized Sharpe below 0.4 is an auto-reject regardless of every other gate, taken from the SOP where a backtested Sharpe under 0.4 is presumptively false. This gate is knowingly non-binding today and that is stated here rather than discovered later: every one of the 43 strategies that has ever reached the gauntlet scored at least 0.577 on the train window, and all 24 specifications below 0.4 had already died at the screen. It is adopted because it makes the two pipelines textually identical and because it will bind if the screen is ever loosened.
 
-Direction of travel is one way: the research layer adopts the SOP's standard.
-The SOP is the stricter and better-sourced document and its gates do not move.
+GATE ADDED - pbo: probability of backtest overfitting by CSCV, S=16, all 12870 splits. Pass is below 0.20. Between 0.20 and 0.50 fails the configuration. Above 0.50 means the selection process is actively harmful and kills the entire sibling group on that universe rather than the single configuration, which is the SOP's rule adopted verbatim. Two properties of how it is computed here. It runs on the TRAIN WINDOW ONLY: the 2024-onward holdout has already been consumed three times and this protocol does not consume it a fourth. And EVERY sibling enters the matrix, including those that died at the screen, because computing PBO over survivors only would filter the matrix on performance and understate overfitting, which defeats the gate. When a family is killed, each member's recorded reason remains its own first failure in gate order and the family kill is recorded as a separate flag on every member; a strategy that independently failed oos_negative is not relabelled as a PBO casualty, because the chain would otherwise permanently hide that it was separately broken.
 
-## Gates retained from protocol-v3, unchanged
+GATE ADDED - plateau: neighbourhood selection replacing point-winner selection. This is the gate this protocol exists for. The SOP forbids selecting the best single configuration and requires selection by neighbourhood quality, on the reasoning that a lone peak surrounded by cliffs is the signature of overfitting rather than of edge. A candidate qualifies only if all of the following hold. (1) Its family has at least one swept dense axis; a family with none fails with no_swept_axis, because without a neighbourhood there is no robustness evidence and every other clause would pass vacuously. (2) Every swept axis has a registered sibling one step BELOW and one step ABOVE it; failing this is edge_of_grid, because a candidate at the boundary of a grid, or one whose neighbouring grid point was never registered as a sibling, has never been perturbed in that direction and cannot claim a plateau from there. (3) The candidate and every one of its one-step neighbours score at least 90 percent of the family's best score. (4) No neighbour died at the screen on trade_count, because turnover is a structural property of a configuration rather than a noisy metric and a 24-trade sibling can post a flattering per-trade Sharpe while being untradeable. Among qualifying candidates that passed every other gate, the winner is the one whose WORST score across itself and its neighbours is highest, ties breaking on the lexicographically smallest strategy id. The selection function reads no point metric of any kind. The single objective throughout is the train-window annualized Sharpe, computed identically for every sibling regardless of its screen or gauntlet outcome.
 
-`oos_negative`, `edge_decay`, `mc_p05`, `p_ruin`, `cost_stress`.
+CONSEQUENCES OF THE PLATEAU RULE, ACCEPTED DELIBERATELY: a two-value sweep can never produce a survivor because both points are grid edges, and on a three-value sweep only the middle point is eligible. The Composer's validator therefore enforces that every swept axis carries at least THREE values and that those values are CONTIGUOUS on the parameter's declared grid. Contiguity is not a convenience. Neighbours are defined against the declared grammar grid, so a family sweeping 20, 55 and 100 out of a grid of 20, 35, 55, 75, 100 would satisfy the three-value rule and still yield nothing, because the middle point's real neighbours at 35 and 75 were never registered. The alternative, defining neighbours against whichever values a family happened to sweep, was rejected: it would make a 20-to-55 jump count as a one-step perturbation, which is precisely the coarse-grid problem the dense block types were introduced to eliminate.
 
-The deflated Sharpe is still computed and still recorded. Under v3 it stopped
-gating this stage, moving to the quarantine-to-live gate where forward evidence
-exists to compute it on. Under v4 it also stops ranking siblings. It now
-influences no decision at this stage and is retained as a recorded number.
+RECORDED, NOT GATED, matching the SOP which reports rather than gates these; each records which window it was computed on so no reader has to infer it. Harvey-Liu multiple-testing haircut, nonlinear, on the train window, using Bonferroni, the most conservative of the three adjustments Harvey and Liu give; because the number is reported rather than gating, conservatism costs nothing. Purged walk-forward, three folds on the train window, purge gap 200 bars which is at least the grammar's longest lookback, reported as fold results plus the SOP's two summary flags. Regime-conditional split on the out-of-sample window under one ruler declared for the whole protocol: BTC close against its 200-day moving average with a 5 percent band around the average counted as chop rather than weak trend.
 
-## Gates added
+A DECLARED DIVERGENCE: the SOP's Phase 5 checklist treats purged walk-forward majority pass and catastrophic veto as binding on designation. Here they are recorded and do not gate. This is stated as a difference rather than presented as equivalence. Promoting them to gates is a one-line change and would be a tightening, permitted freely by the ratchet.
 
-**`sharpe_floor` — train-window annualized Sharpe below 0.4 is an auto-reject**,
-regardless of every other gate. Taken from the SOP, where a backtested Sharpe
-under 0.4 is treated as presumptively false.
+RATCHET POSITION: this protocol only tightens. Three gates are added, none is removed, no threshold is loosened, and every v3 gate is retained unchanged, so v4 is a strict superset and no buried strategy can newly pass under it. That is a structural fact rather than a statistical one, which means the ratchet cannot be tripped by this protocol. It therefore carries none of the evidence-and-argument burden that v3 had to discharge when it relocated the deflated Sharpe. The standing rule is unchanged: a future protocol may tighten freely, and any loosening requires the evidence and the argument on this chain before the results it would affect exist.
 
-This gate is knowingly non-binding today, and that is stated here rather than
-discovered later. Every one of the 43 strategies that has ever reached the
-gauntlet scored at least 0.577 on the train window; all 24 specifications below
-0.4 had already died at the screen. It is adopted because it makes the two
-pipelines textually identical and because it will bind if the screen is ever
-loosened.
+THE ADDED GATES BITE RATHER THAN DECORATE, measured by a write-free diagnostic run before this note was chained. Of the 12 sibling groups on the chain, CSCV would family-kill 3 at PBO 0.902, 0.824 and 0.629, and fail 3 more at 0.451, 0.449 and 0.342, leaving 6 passing. The PBO gate alone would therefore have eliminated half the families ever registered. Twenty-four of the 80 registered strategies would fail the Sharpe floor, all 24 of them already dead at the screen.
 
-**`pbo` — probability of backtest overfitting, by CSCV, S=16, all 12,870
-splits.** Pass is below 20%. Between 20% and 50% fails the configuration. Above
-50% means the selection process is actively harmful, and kills the entire
-sibling group on that universe rather than the single configuration — the SOP's
-rule, adopted verbatim.
+RETROACTIVITY: this standard does not apply to the three strategies already in quarantine, which keep their v3 verdicts. That was decided and chained separately, before this protocol existed, as the quarantine-standard-asymmetry note at registry entry 2308, commit 1b5da5e. It is cross-referenced here rather than restated, because it was deliberately pre-declared before the successor standard existed so that the exemption could not have been chosen after seeing whom it helps. What that exemption costs can now be measured: under this protocol's PBO gate, 9b6753a48c4d0ccd in family channel_breakout_both_fixedfrac would FAIL at 0.342, while ad654fd8097717bd at 0.184 and ef7712f41e2188e2 at 0.118 would pass. One of the three would not have reached quarantine under the standard now being declared. It keeps its place. This is recorded to make the cost of the exemption legible, not to reopen it; reopening it would be exactly the retroactive re-judging that the exemption, and the rule keeping 77 strategies buried, both exist to forbid. Quarantine's forward record remains the leveller, since after 60 trading days all three are assessed on identical forward evidence.
 
-Two properties of how it is computed here:
+WHAT IS KNOWINGLY NOT CORRECTED: the Composer's prior-knowledge leakage is real, unmeasured, and uncorrectable by the deflated Sharpe at any value of N. The model that proposes strategy families has read the literature on this asset class, so its priors already encode which strategies historically worked on this data. N counts configurations whose performance was actually observed, clustered to effective trials. Inflating it to account for the model's internal search would look like a correction while correcting nothing, because a configuration the model considered and discarded was never backtested and so never inflated any observed maximum. This is declared as a permanent limitation of the pipeline rather than priced into a number. Separately, the drift between the batch approved at the dry-run gate and the batch actually registered is now logged; it is mechanically observable and was previously lost. It is not a multiple-testing trial count, for the reason just given, and is recorded as provenance rather than as a denominator.
 
-- **The train window only.** The 2024-onward holdout has already been consumed
-  three times and this protocol does not consume it a fourth.
-- **Every sibling enters the matrix, including those that died at the screen.**
-  Computing PBO over survivors only would filter the matrix on performance and
-  understate overfitting, which defeats the gate.
+DIFFERENCES FROM THE SOP THAT SURVIVE, argued rather than smoothed over. First, the stage at which the deflated Sharpe is applied: both pipelines use 0.95, but trading-systems applies it at designation against a known search burden of N=1737 while the research layer applies it at the quarantine-to-live gate on the forward record, each where the evidence to compute it honestly exists. Second, deflation of N: trading-systems uses the raw trial count, the research layer clusters to effectively independent trials; this is defensible but it is a real difference in the denominator and is named here rather than hidden inside a shared threshold. Third, the sample-size floor: the SOP requires that under roughly 100 trades the shortfall is declared and every gate tightened, while the research layer's screen admits at 40 trades; this gap was previously undeclared.
 
-When a family is killed, each member's recorded reason remains its own first
-failure in gate order, and the family kill is recorded as a separate flag on
-every member. A strategy that independently failed `oos_negative` is not
-relabelled as a PBO casualty; the chain would otherwise permanently hide that it
-was separately broken.
-
-**`plateau` — neighbourhood selection, replacing point-winner selection.** This
-is the gate this protocol exists for. The SOP forbids selecting the best single
-configuration and requires selection by neighbourhood quality, on the reasoning
-that a lone peak surrounded by cliffs is the signature of overfitting rather
-than of edge.
-
-A candidate qualifies only if all of the following hold:
-
-1. Its family has at least one swept dense axis. A family with none fails with
-   `no_swept_axis`. Without a neighbourhood there is no robustness evidence, and
-   every other clause would pass vacuously.
-2. Every swept axis has a sibling one step below **and** one step above it.
-   Failing this is `edge_of_grid`. A candidate at the boundary of a grid, or one
-   whose neighbouring grid point was never registered as a sibling, has never
-   been perturbed in that direction and cannot claim a plateau from there.
-3. The candidate and every one of its one-step neighbours score at least 90% of
-   the family's best score.
-4. No neighbour died at the screen on `trade_count`. Turnover is a structural
-   property of a configuration rather than a noisy metric: a 24-trade sibling
-   can post a flattering per-trade Sharpe while being untradeable.
-
-Among qualifying candidates that passed every other gate, the winner is the one
-whose **worst score across itself and its neighbours** is highest. Ties break on
-the lexicographically smallest strategy id. The selection function reads no
-point metric of any kind.
-
-Two consequences follow and are accepted deliberately: a two-value sweep can
-never produce a survivor, because both points are grid edges; and on a
-three-value sweep only the middle point is eligible.
-
-The Composer's validator therefore enforces two things, so that a family cannot
-be registered in a shape that is structurally unpromotable: every swept axis
-carries **at least three values**, and those values are **contiguous on the
-parameter's declared grid**. Contiguity is not a convenience. Neighbours are
-defined against the declared grammar grid, so a family sweeping `{20, 55, 100}`
-out of a grid of `[20, 35, 55, 75, 100]` would satisfy the three-value rule and
-still yield nothing, because the middle point's real neighbours at 35 and 75
-were never registered. The alternative — defining neighbours against whichever
-values a family happened to sweep — was rejected: it would make a 20-to-55 jump
-count as a one-step perturbation, which is precisely the coarse-grid problem the
-dense block types were introduced to eliminate.
-
-The single objective used throughout is the **train-window annualized Sharpe**,
-computed identically for every sibling regardless of its screen or gauntlet
-outcome.
-
-## Recorded, not gated
-
-Matching the SOP, which reports rather than gates these. Each records which
-window it was computed on, so no reader has to infer it.
-
-- **Harvey-Liu multiple-testing haircut**, nonlinear, on the train window.
-  Harvey and Liu give three adjustments; this uses Bonferroni, the most
-  conservative. Because the number is reported rather than gating, conservatism
-  costs nothing.
-- **Purged walk-forward**, three folds on the train window, purge gap 200 bars —
-  at least the grammar's longest lookback. Reported as fold results plus the
-  SOP's two summary flags, majority pass and catastrophic veto.
-- **Regime-conditional split** on the out-of-sample window, under one ruler
-  declared for the whole protocol: BTC close against its 200-day moving average,
-  with a 5% band around the average counted as chop rather than weak trend.
-
-**A declared divergence.** The SOP's Phase 5 checklist treats purged walk-forward
-majority pass and catastrophic veto as binding on designation. Here they are
-recorded and do not gate. This is stated as a difference rather than presented
-as equivalence. Promoting them to gates is a one-line change and would be a
-tightening, permitted freely by the ratchet below.
-
-## Ratchet position
-
-**This protocol only tightens.** Three gates are added; none is removed; no
-threshold is loosened. Every protocol-v3 gate is retained unchanged, so v4 is a
-strict superset and no buried strategy can newly pass under it. That is a
-structural fact rather than a statistical one, and it means the ratchet cannot
-be tripped by this protocol. It therefore carries none of the
-evidence-and-argument burden that protocol-v3 had to discharge when it
-relocated the deflated Sharpe.
-
-The write-free diagnostic run before this note was chained confirms the added
-gates bite rather than decorate. Of the 12 sibling groups on the chain, CSCV
-would **family-kill 3** (PBO 0.902, 0.824, 0.629) and **fail 3 more** (0.451,
-0.449, 0.342), leaving 6 passing — so the PBO gate alone would have eliminated
-half the families ever registered. Twenty-four of the 80 registered strategies
-would fail the Sharpe floor, all 24 of them already dead at the screen.
-
-The standing rule is unchanged: a future protocol may tighten freely, and any
-loosening requires the evidence and the argument on the chain before the results
-it would affect exist.
-
-## Retroactivity
-
-This standard does not apply to the three strategies already in quarantine. They
-keep their protocol-v3 verdicts. That was decided and chained separately, before
-this protocol existed, as the `quarantine-standard-asymmetry` note — registry
-entry 2308, commit `1b5da5e`. It is cross-referenced here rather than restated,
-because it was deliberately pre-declared before the successor standard existed
-so that the exemption could not have been chosen after seeing whom it helps.
-
-**What that exemption actually costs, now that it can be measured.** The
-asymmetry note said the three were admitted on a weaker bar than anything after
-them. Under this protocol's PBO gate, that is no longer abstract:
-
-| Quarantined | Family | PBO | Under v4 |
-|---|---|---|---|
-| `9b6753a48c4d0ccd` | `channel_breakout_both_fixedfrac` | 0.342 | **would fail** |
-| `ad654fd8097717bd` | `channel_breakout_both_voltarget_control` | 0.184 | would pass |
-| `ef7712f41e2188e2` | `tstat_trend_both_asymmetric_payoff` | 0.118 | would pass |
-
-One of the three would not have reached quarantine under the standard now being
-declared. It keeps its place. This is recorded to make the cost of the
-exemption legible, not to reopen it — reopening it would be exactly the
-retroactive re-judging that the exemption, and the rule keeping 77 strategies
-buried, both exist to forbid. Quarantine's forward record remains the leveller:
-after 60 trading days all three are assessed on identical forward evidence.
-
-## What is knowingly not corrected
-
-**The Composer's prior-knowledge leakage is real, unmeasured, and uncorrectable
-by the deflated Sharpe at any value of N.** The model that proposes strategy
-families has read the literature on this asset class, so its priors already
-encode which strategies historically worked on this data. N counts
-configurations whose performance was actually observed, clustered to effective
-trials. Inflating it to account for the model's internal search would look like
-a correction while correcting nothing, because a configuration the model
-considered and discarded was never backtested and so never inflated any observed
-maximum. This is declared as a permanent limitation of the pipeline rather than
-priced into a number.
-
-Separately, the drift between the batch approved at the dry-run gate and the
-batch actually registered is now logged. It is mechanically observable and was
-previously lost. It is not a multiple-testing trial count, for the reason just
-given, and is recorded as provenance rather than as a denominator.
-
-## Differences from the SOP that survive, and why
-
-1. **Stage at which the deflated Sharpe is applied.** Both pipelines use a
-   threshold of 0.95. `trading-systems` applies it at designation against a
-   known search burden of N=1737. The research layer applies it at the
-   quarantine-to-live gate, on the forward record. Each applies it where the
-   evidence to compute it honestly exists.
-2. **Deflation of N.** `trading-systems` uses the raw trial count. The research
-   layer clusters to effectively independent trials. This is defensible but it is
-   a real difference in the denominator and is named here rather than hidden
-   inside a shared threshold.
-3. **Sample-size floor.** The SOP requires that under roughly 100 trades the
-   shortfall is declared and every gate tightened. The research layer's screen
-   admits at 40 trades. This gap was previously undeclared.
-
-## Stated before any result exists
-
-Adding gates raises the probability that generation 4 produces no survivors.
-Generation 3 was the first to produce any, and this standard is strictly harsher
-than the one that produced them. **A zero-survivor generation 4 is an acceptable
-outcome.**
-
-Three of these rules have never been exercised against real data. The plateau
-ratio of 0.9, the both-sides neighbour requirement, and the 20% PBO threshold are
-uncalibrated, and the write-free ratchet diagnostic cannot calibrate them: no
-strategy currently on the chain uses a dense block type, so no existing family
-has a swept axis for the plateau rule to act on. The diagnostic can exercise the
-Sharpe floor and PBO against history and nothing else. This is a real gap in the
-evidence behind this protocol and it is recorded here rather than discovered
-later.
-
-**Pre-committed consequence.** If generation 4 produces no survivors, a
-per-gate breakdown of what died where will be published on this chain **before
-any threshold is discussed or any successor protocol is drafted.** The purpose
-is to make a zero informative: it must be possible to tell whether the gates
-caught something real or whether a threshold was simply set too high, and that
-determination has to be made from the published breakdown rather than from
-whichever answer would be more convenient once the numbers are known.
+STATED BEFORE ANY RESULT EXISTS: adding gates raises the probability that generation 4 produces no survivors. Generation 3 was the first to produce any, and this standard is strictly harsher than the one that produced them. A ZERO-SURVIVOR GENERATION 4 IS AN ACCEPTABLE OUTCOME. Furthermore, three of these rules have never been exercised against real data: the plateau ratio of 0.9, the both-sides neighbour requirement, and the 0.20 PBO threshold are uncalibrated, and the write-free ratchet diagnostic cannot calibrate them, because no strategy currently on the chain uses a dense block type and so no existing family has a swept axis for the plateau rule to act on. The diagnostic can exercise the Sharpe floor and PBO against history and nothing else. That is a real gap in the evidence behind this protocol and it is recorded here rather than discovered later. PRE-COMMITTED CONSEQUENCE: if generation 4 produces no survivors, a per-gate breakdown of what died where will be published on this chain BEFORE any threshold is discussed or any successor protocol is drafted. The purpose is to make a zero informative, so that it is possible to tell whether the gates caught something real or whether a threshold was simply set too high, and so that the determination is made from the published breakdown rather than from whichever answer would be more convenient once the numbers are known.
