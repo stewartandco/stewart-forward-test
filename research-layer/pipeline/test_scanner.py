@@ -293,7 +293,7 @@ def test_budget_meter_accumulates_and_resumes(tmp_path):
     m = BudgetMeter(p, monthly_cap_usd=25.0)
     u = SimpleNamespace(input_tokens=1_000_000, output_tokens=0,
                         cache_read_input_tokens=0, cache_creation_input_tokens=0)
-    m.record_call("claude-sonnet-5", u, purpose="screen")
+    m.record_call("claude-sonnet-5", u, purpose="screen", agent="reader")
     assert m.month_spend() == pytest.approx(3.0)
     m2 = BudgetMeter(p, monthly_cap_usd=25.0)
     assert m2.month_spend() == pytest.approx(3.0)
@@ -304,11 +304,11 @@ def test_budget_warn_at_80_percent_and_cap_blocks(tmp_path):
     m = BudgetMeter(tmp_path / "ledger.jsonl", monthly_cap_usd=25.0)
     u80 = SimpleNamespace(input_tokens=0, output_tokens=1_400_000,  # $21.00
                           cache_read_input_tokens=0, cache_creation_input_tokens=0)
-    m.record_call("claude-sonnet-5", u80, purpose="extract")
+    m.record_call("claude-sonnet-5", u80, purpose="extract", agent="reader")
     assert m.state() == "WARN" and m.can_spend()
     u_more = SimpleNamespace(input_tokens=0, output_tokens=300_000,  # +$4.50 -> $25.50
                              cache_read_input_tokens=0, cache_creation_input_tokens=0)
-    m.record_call("claude-sonnet-5", u_more, purpose="extract")
+    m.record_call("claude-sonnet-5", u_more, purpose="extract", agent="reader")
     assert m.state() == "CAP" and not m.can_spend()
 
 
@@ -318,7 +318,8 @@ def test_budget_month_rollover_resets(tmp_path):
     last_month = (_now().replace(day=1) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
     u = SimpleNamespace(input_tokens=10_000_000, output_tokens=0,
                         cache_read_input_tokens=0, cache_creation_input_tokens=0)
-    m.record_call("claude-sonnet-5", u, purpose="extract", ts_utc=last_month)
+    m.record_call("claude-sonnet-5", u, purpose="extract", agent="reader",
+                  ts_utc=last_month)
     assert m.month_spend() == pytest.approx(0.0)
     assert m.can_spend()
 
@@ -873,7 +874,7 @@ def test_budget_record_call_extra_usd():
         u = SimpleNamespace(input_tokens=1_000_000, output_tokens=0,
                             cache_read_input_tokens=0,
                             cache_creation_input_tokens=0)
-        usd = m.record_call("claude-sonnet-5", u, purpose="scout",
+        usd = m.record_call("claude-sonnet-5", u, purpose="scout", agent="reader",
                             extra_usd=0.08)
         assert usd == pytest.approx(3.08)
         assert m.month_spend() == pytest.approx(3.08)

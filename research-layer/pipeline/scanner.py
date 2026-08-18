@@ -136,7 +136,8 @@ def _extract_item(client, model, item, source, page_text, html, *,
     registered = dropped = 0
     for label, chunk in chunk_text(page_text):
         claims, usage = extract_claims_usage(client, model, label, chunk)
-        meter.record_call(model, usage, purpose="extract")
+        meter.record_call(model, usage, purpose="extract",
+                          agent="reader")
         for raw in claims:
             if not quote_in_source(raw["quote"], page_text):
                 dropped += 1
@@ -335,7 +336,8 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
         registered = dropped = 0
         for label, chunk in chunk_text(text):
             claims, usage = extract_claims_usage(client, model, label, chunk)
-            meter.record_call(model, usage, purpose="inbox_extract")
+            meter.record_call(model, usage, purpose="inbox_extract",
+                              agent="reader")
             for raw in claims:
                 if not quote_in_source(raw["quote"], text):
                     dropped += 1

@@ -164,7 +164,8 @@ def screen_items(client, model: str, items: list[dict], meter,
                 raise ApiCreditExhausted(str(exc)) from exc
             print(f"  screen call failed: {exc}", file=sys.stderr)
             continue
-        meter.record_call(model, msg.usage, purpose="screen")
+        meter.record_call(model, msg.usage, purpose="screen",
+                          agent="reader")
         if msg.stop_reason == "refusal":
             decisions = {it["item_id"]: ("deferred_screen", "refusal") for it in batch}
         else:

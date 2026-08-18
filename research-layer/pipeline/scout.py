@@ -103,7 +103,7 @@ def run_scout(*, client, model: str, meter, watchlist_sources: list[dict],
             break
         messages = [{"role": "user", "content": user_prompt},
                     {"role": "assistant", "content": msg.content}]
-    meter.record_call(model, msg.usage, purpose="scout",
+    meter.record_call(model, msg.usage, purpose="scout", agent="reader",
                       extra_usd=searches * SEARCH_USD)
 
     queued, candidates = 0, []

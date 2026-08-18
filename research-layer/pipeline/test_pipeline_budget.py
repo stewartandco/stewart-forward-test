@@ -41,3 +41,94 @@ def test_state_names_which_limit_was_hit():
     assert pb.state(spent=5.0) == "OK"
     assert pb.state(spent=16.0) == "BATCH_STOP"
     assert pb.state(spent=20.0) == "CAP"
+
+
+# ---------------- 5c / D36: per-agent attribution on one ledger ----------------
+
+def _row(meter, purpose, usd, agent=None, ts="2026-08-01T00:00:00Z"):
+    """Append a raw ledger row, bypassing the API-usage shape."""
+    import json
+    r = {"ts_utc": ts, "model": "m", "purpose": purpose, "usd": usd,
+         "input_tokens": 0, "output_tokens": 0,
+         "cache_read_tokens": 0, "cache_write_tokens": 0}
+    if agent is not None:
+        r["agent"] = agent
+    with meter.ledger_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(r) + "\n")
+
+
+def test_month_spend_can_be_scoped_to_one_agent(tmp_path):
+    """D33 gave the Reader 35 and the pipeline 20, on ONE key and ONE ledger,
+    so the split could not be expressed, enforced or even measured. Attribution
+    is what makes those two numbers real."""
+    from .budget import BudgetMeter
+    m = BudgetMeter(tmp_path / "l.jsonl")
+    _row(m, "screen", 1.0, agent="reader")
+    _row(m, "triage", 2.0, agent="pipeline")
+    m2 = BudgetMeter(tmp_path / "l.jsonl")
+
+    assert m2.month_spend("2026-08") == pytest.approx(3.0)
+    assert m2.month_spend("2026-08", agent="reader") == pytest.approx(1.0)
+    assert m2.month_spend("2026-08", agent="pipeline") == pytest.approx(2.0)
+
+
+def test_historical_rows_are_attributed_from_purpose(tmp_path):
+    """Coen, 2026-08-18: DERIVE from purpose rather than splitting the ledger.
+    Every existing row predates the agent field, and the mapping is read out of
+    data already present rather than invented."""
+    from .budget import BudgetMeter
+    m = BudgetMeter(tmp_path / "l.jsonl")
+    for purpose, usd in (("screen", 8.96), ("extract", 11.79), ("scout", 2.34),
+                         ("triage", 1.50)):
+        _row(m, purpose, usd)
+    m2 = BudgetMeter(tmp_path / "l.jsonl")
+
+    assert m2.month_spend("2026-08", agent="reader") == pytest.approx(23.09)
+    assert m2.month_spend("2026-08", agent="pipeline") == pytest.approx(1.50)
+
+
+def test_unmappable_historical_spend_is_visible_not_hidden(tmp_path):
+    """The investigation rows (reextract_test, hg_diag) are neither agent's
+    work. They must not be silently dropped from the record, nor charged to an
+    agent that did not spend them: they surface as `unattributed`."""
+    from .budget import BudgetMeter
+    m = BudgetMeter(tmp_path / "l.jsonl")
+    _row(m, "screen", 1.0)
+    _row(m, "hg_diag", 0.19)
+    _row(m, "reextract_test", 1.25)
+    m2 = BudgetMeter(tmp_path / "l.jsonl")
+
+    assert m2.month_spend("2026-08", agent="reader") == pytest.approx(1.0)
+    assert m2.month_spend("2026-08", agent="unattributed") == pytest.approx(1.44)
+    # the total still reconciles: nothing invented, nothing lost
+    assert m2.month_spend("2026-08") == pytest.approx(2.44)
+
+
+def test_a_new_call_must_name_its_agent(tmp_path):
+    """Only HISTORY may be unattributed. A new row that omitted the agent would
+    escape every cap, so record_call refuses rather than defaulting."""
+    from .budget import BudgetMeter
+
+    class _U:
+        input_tokens = output_tokens = 0
+        cache_read_input_tokens = cache_creation_input_tokens = 0
+
+    m = BudgetMeter(tmp_path / "l.jsonl")
+    with pytest.raises(TypeError):
+        m.record_call("claude-sonnet-5", _U(), "screen")
+
+
+def test_state_is_judged_against_the_meters_own_agent(tmp_path):
+    """A Reader meter must not go to CAP because the pipeline spent. This is
+    the whole point of the split, and the failure it prevents is a scanner
+    stopping on someone else's bill."""
+    from .budget import BudgetMeter
+    m = BudgetMeter(tmp_path / "l.jsonl")
+    _row(m, "triage", 30.0, agent="pipeline")
+    _row(m, "screen", 1.0, agent="reader")
+
+    reader = BudgetMeter(tmp_path / "l.jsonl", monthly_cap_usd=35.0,
+                         agent="reader")
+    assert reader.state() == "OK"
+    unscoped = BudgetMeter(tmp_path / "l.jsonl", monthly_cap_usd=35.0)
+    assert unscoped.state() == "WARN"

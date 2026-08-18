@@ -133,7 +133,7 @@ def review_card(client, model: str, card: dict, meter,
             output_config={"format": {"type": "json_schema",
                                       "schema": VOTE_SCHEMA}},
         )
-        meter.record_call(model, msg.usage, "triage")
+        meter.record_call(model, msg.usage, "triage", agent="pipeline")
         try:
             # The first block is NOT necessarily the answer: when the model
             # thinks, content[0] is a ThinkingBlock with no .text at all. Take

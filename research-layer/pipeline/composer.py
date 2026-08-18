@@ -442,7 +442,7 @@ def expand_universe(spec: dict, cells: list[tuple[str, str]]) -> list[dict]:
     The 2-asset mean-combine path in engine.run_spec is untouched and still
     serves the legacy BTC+ETH 1d specs.
     """
-    from .cells import validate_cell
+    from .cells import cell_id, validate_cell
 
     out = []
     for asset, timeframe in cells:
@@ -450,6 +450,19 @@ def expand_universe(spec: dict, cells: list[tuple[str, str]]) -> list[dict]:
         s = json.loads(json.dumps(spec))          # deep copy, no shared state
         s["universe"] = dict(s.get("universe", {}),
                              assets=[asset], timeframe=timeframe)
+        # ONE SIBLING GROUP PER CELL (Coen, 2026-08-18). The deep copy carried
+        # provenance verbatim, so one parameter set across 30 cells landed in
+        # one group -- and selection, PBO and the plateau gate are all
+        # per-group, with select_survivors keeping exactly ONE winner. That
+        # would have discarded 29 of 30 cells, making a cell the unit of
+        # COMPETITION when this function exists to make it the unit of
+        # SURVIVAL. Scoping the id to the cell keeps the family and run
+        # readable in the id, so lineage survives on the chain.
+        prov = s.get("provenance") or {}
+        if prov.get("sibling_group_id"):
+            prov = dict(prov, sibling_group_id=(
+                f"{prov['sibling_group_id']}:{cell_id(asset, timeframe)}"))
+            s["provenance"] = prov
         out.append(s)
     return out
 

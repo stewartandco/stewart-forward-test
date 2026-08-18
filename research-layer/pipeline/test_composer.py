@@ -563,3 +563,52 @@ def test_undeclared_cells_are_refused():
     base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
     with pytest.raises(ValueError):
         composer.expand_universe(base, [("DOGEUSDT", "1h")])
+
+
+def test_each_cell_gets_its_own_sibling_group(tmp_path):
+    """Coen, 2026-08-18: one sibling group PER CELL.
+
+    expand_universe deep-copies the spec, so provenance rode along unchanged
+    and one parameter set across 30 cells would have landed in ONE group.
+    select_survivors keeps exactly one winner per group, so 29 of 30 cells
+    would have been discarded -- the precise outcome this function's own
+    docstring exists to prevent ("excluding a strategy that only works on 15m
+    ETH is exactly what this exists to prevent").
+
+    Selection, PBO and the plateau gate are all per-group, so scoping the group
+    to the cell is what makes a cell the unit of survival rather than the unit
+    of competition.
+    """
+    base = _family([{"role": "entry", "type": "ma_cross",
+                     "params": {"fast": 5, "slow": 50}}])
+    base["provenance"] = {"sibling_group_id": "trend-run7"}
+
+    out = composer.expand_universe(
+        base, [("ETHUSDT", "15m"), ("BTCUSDT", "4h"), ("SOLUSDT", "1d")])
+
+    groups = [s["provenance"]["sibling_group_id"] for s in out]
+    assert len(set(groups)) == 3, "each cell must be its own sibling group"
+    # and the id must still say which family and run it came from
+    assert all(g.startswith("trend-run7") for g in groups), groups
+    assert set(groups) == {"trend-run7:ETHUSDT_15m", "trend-run7:BTCUSDT_4h",
+                           "trend-run7:SOLUSDT_1d"}
+
+
+def test_cell_scoped_group_ids_are_deterministic():
+    """Same family, same cell, same id -- the ids end up on the chain."""
+    base = _family([{"role": "entry", "type": "ma_cross",
+                     "params": {"fast": 5, "slow": 50}}])
+    base["provenance"] = {"sibling_group_id": "trend-run7"}
+    a = composer.expand_universe(base, [("ETHUSDT", "15m")])[0]
+    b = composer.expand_universe(base, [("ETHUSDT", "15m")])[0]
+    assert a["provenance"]["sibling_group_id"] == b["provenance"]["sibling_group_id"]
+
+
+def test_expansion_without_provenance_is_left_alone():
+    """Not every caller carries provenance (sweep_measure builds bare specs).
+    Inventing a group id for one would be worse than leaving it absent."""
+    base = _family([{"role": "entry", "type": "ma_cross",
+                     "params": {"fast": 5, "slow": 50}}])
+    base.pop("provenance", None)
+    out = composer.expand_universe(base, [("ETHUSDT", "15m")])
+    assert "sibling_group_id" not in out[0].get("provenance", {})
