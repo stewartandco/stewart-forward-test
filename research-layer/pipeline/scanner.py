@@ -519,7 +519,8 @@ def run(argv: list[str] | None = None) -> int:
     logs_dir.mkdir(exist_ok=True)
     discovery_path = LAYER / "sources" / "discovery_queue.jsonl"
     seen = SeenStore(logs_dir / "seen_items.jsonl")
-    meter = BudgetMeter(logs_dir / "budget_ledger.jsonl", monthly_cap_usd=args.cap)
+    meter = BudgetMeter(logs_dir / "budget_ledger.jsonl",
+                        monthly_cap_usd=args.cap, agent="reader")
     registry = Registry(args.registry)
     actions = ActionLog(logs_dir / "reader_actions.jsonl")
 

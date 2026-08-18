@@ -143,7 +143,7 @@ def run(argv: list[str] | None = None) -> int:
     logs = LAYER / "logs"
     result = run_scout(
         client=client, model=args.model,
-        meter=BudgetMeter(logs / "budget_ledger.jsonl"),
+        meter=BudgetMeter(logs / "budget_ledger.jsonl", agent="reader"),
         watchlist_sources=load_watchlist(LAYER / "sources" / "verified_sources.json"),
         discovery_path=LAYER / "sources" / "discovery_queue.jsonl",
         actions=ActionLog(logs / "reader_actions.jsonl"),

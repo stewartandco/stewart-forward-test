@@ -132,3 +132,24 @@ def test_state_is_judged_against_the_meters_own_agent(tmp_path):
     assert reader.state() == "OK"
     unscoped = BudgetMeter(tmp_path / "l.jsonl", monthly_cap_usd=35.0)
     assert unscoped.state() == "WARN"
+
+
+def test_running_agents_scope_their_own_meters():
+    """5c is only real if the RUNNING agents use it. A meter built unscoped
+    totals every row, so the Reader would still stop on the pipeline's bill --
+    the failure D33's split exists to prevent, and the reason this assertion
+    reads the source rather than trusting the constructor's default.
+    """
+    import inspect
+    from . import scanner, scout, triage_batch
+    for mod, expected in ((scanner, '"reader"'), (scout, '"reader"'),
+                          (triage_batch, '"pipeline"')):
+        src = inspect.getsource(mod).replace("'", '"')
+        for line in src.splitlines():
+            if "BudgetMeter(" in line and "import" not in line:
+                break
+        else:                                   # pragma: no cover
+            raise AssertionError(f"{mod.__name__}: no BudgetMeter construction")
+        window = src[src.index("BudgetMeter("):]
+        assert f"agent={expected}" in window[:220], \
+            f"{mod.__name__} builds an unscoped meter; it must pass agent={expected}"

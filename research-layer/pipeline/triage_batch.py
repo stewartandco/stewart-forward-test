@@ -26,6 +26,9 @@ from .registry import Registry
 from .triage import apply_decisions
 
 REVIEWER = "auto-d31"
+# D33 gave the pipeline USD 20 of the D28 Intelligence band; D36 makes it
+# enforceable by scoping the meter to this agent's own attributed rows.
+PIPELINE_CAP_USD = 20.0
 PANEL_SIZE = 3
 
 _NOISE = re.compile(r"[^a-z0-9 ]+")
@@ -204,7 +207,9 @@ def _client_and_meter():
 
     _load_api_key(DEFAULT_READER_ENV)      # raises SystemExit with the path
     logs = Path(__file__).resolve().parent.parent / "logs"
-    return anthropic.Anthropic(), BudgetMeter(logs / "budget_ledger.jsonl")
+    return anthropic.Anthropic(), BudgetMeter(logs / "budget_ledger.jsonl",
+                                              monthly_cap_usd=PIPELINE_CAP_USD,
+                                              agent="pipeline")
 
 
 def run(argv: list[str] | None = None) -> int:
