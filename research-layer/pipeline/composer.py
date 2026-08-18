@@ -415,8 +415,15 @@ Rules:
   filters are mutually exclusive and the spec would never trade. Express
   "long in one regime, short in the other" as two separate families.
 - Choose sweep axes ONLY where the cited research motivates exploring the
-  parameter; sweep values must come from the declared grids. Small, motivated
-  sweeps beat exhaustive ones.
+  parameter, and sweep them on a DENSE block type (the *_dense variants).
+  Coarse types may be USED at fixed values but may NOT be swept.
+- Every swept axis must declare at least THREE values that are CONTIGUOUS on
+  that parameter's declared grid — e.g. [35, 55, 75], never [20, 55, 100].
+  Selection requires a registered sibling one step BELOW and one step ABOVE a
+  candidate on every swept axis, so a two-value sweep and a gapped sweep can
+  never produce a survivor and will be rejected.
+- Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
+  axes at three: five values leave three eligible candidates, three leave one.
 - Strategies must be implementable from daily OHLCV alone.
 - Propose fewer, better-grounded families over many weak ones. If the cards
   support only two good families, propose two."""
