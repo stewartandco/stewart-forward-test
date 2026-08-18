@@ -660,6 +660,72 @@ def test_load_cell_data_honours_the_cutoff_when_recording_the_end(tmp_path):
     assert ends == {"BTCUSDT_1d": "2023-12-31"}
 
 
+def test_manifest_records_when_each_cell_s_data_stopped(tmp_path):
+    """The manifest is the record of which bytes produced which verdict, and
+    the hash alone does not say WHEN the data stopped. Without this field a
+    reader cannot tell a cell that was tested to the same date as its peers
+    from one that was truncated, which is the whole of the alignment problem.
+
+    Required, not optional: a caller that forgets would silently record an
+    empty provenance, which is the failure mode this field exists to prevent.
+    """
+    from .screen import write_artifacts
+    spec = {"strategy_id": "abc123", "universe": {"assets": ["BTCUSD"]}}
+    result = {"trades": [], "equity": [("2024-01-01", 1.0)]}
+
+    bundle = write_artifacts(tmp_path, spec, result, "2023-12-31",
+                             {"BTCUSD_1d": "deadbeef"},
+                             {"BTCUSD_1d": "2026-08-18"})
+
+    cfg = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
+    assert cfg["data_end"] == {"BTCUSD_1d": "2026-08-18"}
+    assert cfg["data_sha256"] == {"BTCUSD_1d": "deadbeef"}
+
+
+def test_cells_ending_the_same_day_at_different_hours_are_comparable():
+    """The gate compares DATES, not timestamps, and this is the whole reason.
+
+    A 4h bar cannot close at 23:00. BTCUSDT_1h really does end 2026-08-15
+    23:00 while BTCUSDT_4h ends 2026-08-15 20:00, and both cover through the
+    15th. Strict timestamp equality would refuse every multi-timeframe
+    comparison forever. load_bars already compares date[:10] at its fence for
+    exactly this reason.
+    """
+    from .screen import assert_cells_comparable
+    assert_cells_comparable({"BTCUSDT_1h": "2026-08-15 23:00:00",
+                             "BTCUSDT_4h": "2026-08-15 20:00:00"})
+
+
+def test_cells_stopping_on_different_days_refuse_to_be_compared():
+    """A cell is the unit of survival, so a strategy that "died on SOL 1d"
+    when that cell's data stopped two weeks early has not been tested, it has
+    been truncated. Refuse loudly rather than quietly dropping the pair: the
+    pipeline contract's success metrics forbid quiet subsetting of the
+    reported search space.
+    """
+    from .screen import assert_cells_comparable
+    with pytest.raises(ValueError) as exc:
+        assert_cells_comparable({"BTCUSDT_1h": "2026-08-15 23:00:00",
+                                 "SOLUSDT_1d": "2026-08-01 00:00:00"})
+    msg = str(exc.value)
+    assert "SOLUSDT_1d" in msg and "2026-08-01" in msg
+    assert "BTCUSDT_1h" in msg and "2026-08-15" in msg
+
+
+def test_a_single_cell_is_always_comparable_with_itself():
+    from .screen import assert_cells_comparable
+    assert_cells_comparable({"BTCUSD_1d": "2026-08-18"})
+    assert_cells_comparable({})
+
+
+def test_an_empty_cell_is_refused_rather_than_treated_as_aligned():
+    """load_cell_data records "" for a cell with no bars. Letting that compare
+    equal to everything would make an EMPTY cell the most comparable one."""
+    from .screen import assert_cells_comparable
+    with pytest.raises(ValueError, match="no bars"):
+        assert_cells_comparable({"BTCUSD_1d": "2026-08-18", "XRPUSDT_15m": ""})
+
+
 def test_load_bars_reads_the_requested_timeframe(tmp_path):
     _write_csv(tmp_path / "BTCUSDT_4h.csv", ["2023-12-30 00:00:00",
                                              "2023-12-30 04:00:00"])

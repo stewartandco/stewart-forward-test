@@ -50,7 +50,8 @@ def test_screen_artifacts_still_write(tmp_path):
     from .test_screen import make_screen_spec
     result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
     bundle = write_artifacts(tmp_path, make_screen_spec(), result,
-                             "2023-12-31", {"BTCUSD": "x"})
+                             "2023-12-31", {"BTCUSD_1d": "x"},
+                             {"BTCUSD_1d": "2024-01-05"})
     assert (bundle / "trades.csv").exists()
 
 
@@ -148,7 +149,8 @@ def test_screen_trades_csv_bytes_are_format_stable(tmp_path):
     from .test_screen import make_screen_spec
     result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
     bundle = write_artifacts(tmp_path, make_screen_spec(), result,
-                             "2023-12-31", {"BTCUSD": "x"})
+                             "2023-12-31", {"BTCUSD_1d": "x"},
+                             {"BTCUSD_1d": "2024-01-05"})
     raw = (bundle / "trades.csv").read_bytes()
     assert b"notional_frac" not in raw
     assert raw.startswith(b"asset,side,entry_date,entry_px,exit_date,"

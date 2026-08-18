@@ -81,6 +81,42 @@ def load_cell_data(data_dir: Path, cells, cutoff: str) -> tuple[dict, dict, dict
     return bars_by_cell, data_hashes, data_end
 
 
+def assert_cells_comparable(data_end: dict[str, str]) -> None:
+    """Refuse to compare cells whose data stops on different DAYS.
+
+    A cell is the unit of survival, so a strategy that "died on SOL 1d" when
+    that cell's bars stopped two weeks early was not tested, it was truncated.
+    The cache is not time-aligned by default: on 2026-08-18 the imported grid
+    had BTCUSDT_1h through 08-15 and SOLUSDT_1d through 08-01.
+
+    DAYS, not timestamps, because a 4h bar cannot close at 23:00 -- BTCUSDT_1h
+    ends 15:23:00 and BTCUSDT_4h ends 15:20:00 while both cover through the
+    15th. Comparing whole timestamps would refuse every multi-timeframe run
+    forever. load_bars already compares date[:10] at its fence for this reason.
+
+    This raises rather than dropping the offending cells, because the pipeline
+    contract's success metrics require every cell tested to be present in the
+    trial denominator: no quiet subsetting of the reported search space. The
+    fix is a re-fetch to a common end date, not a smaller comparison.
+    """
+    empty = sorted(cid for cid, end in data_end.items() if not end)
+    if empty:
+        raise ValueError(
+            f"cell(s) loaded with no bars, so their data end is unknown: "
+            f"{', '.join(empty)}. An empty cell must not compare equal to "
+            f"every other cell.")
+    by_day: dict[str, list[str]] = {}
+    for cid, end in sorted(data_end.items()):
+        by_day.setdefault(end[:10], []).append(cid)
+    if len(by_day) > 1:
+        detail = "; ".join(f"{day}: {', '.join(cids)}"
+                           for day, cids in sorted(by_day.items()))
+        raise ValueError(
+            f"cells stop on different days, so they cannot be compared: "
+            f"{detail}. Re-fetch to a common end date; excluding the short "
+            f"cells would quietly shrink the reported search space.")
+
+
 class SpecJob:
     """One spec's evaluation, picklable so it can cross a process boundary.
 
@@ -111,7 +147,11 @@ def protocol_note_chained(registry: Registry) -> bool:
 
 
 def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
-                    data_hashes: dict[str, str]) -> Path:
+                    data_hashes: dict[str, str],
+                    data_end: dict[str, str]) -> Path:
+    """`data_end` is required on purpose: the hash says WHICH bytes produced a
+    verdict, not when they stopped, and a caller that forgot would record an
+    empty provenance for the very field that exists to catch truncation."""
     bundle = art_dir / spec["strategy_id"]
     bundle.mkdir(parents=True, exist_ok=True)
     with (bundle / "trades.csv").open("w", newline="", encoding="utf-8") as f:
@@ -127,7 +167,8 @@ def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
         w.writerows(result["equity"])
     (bundle / "config.json").write_text(json.dumps(
         {"protocol": PROTOCOL, "cutoff": cutoff, "spec": spec,
-         "data_sha256": data_hashes}, indent=1, sort_keys=True), encoding="utf-8")
+         "data_sha256": data_hashes, "data_end": data_end},
+        indent=1, sort_keys=True), encoding="utf-8")
     return bundle
 
 
@@ -222,7 +263,7 @@ def run(argv: list[str] | None = None) -> int:
         for spec, result, passed, reason in results:
             sid = spec["strategy_id"]
             bundle = write_artifacts(args.artifacts_dir, spec, result,
-                                     args.cutoff, data_hashes)
+                                     args.cutoff, data_hashes, data_end)
             registry.record_state_change(sid, "screened",
                                          f"screen run, cutoff {args.cutoff}")
             registry.record_verdict(sid, "screened",

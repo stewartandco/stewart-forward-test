@@ -277,7 +277,8 @@ def stressed(spec: dict) -> dict:
 
 def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
                              mc_summary: dict, metrics: dict, cutoff: str,
-                             data_hashes: dict, group_context: dict) -> Path:
+                             data_hashes: dict, data_end: dict,
+                             group_context: dict) -> Path:
     import csv
     bundle = art_dir / spec["strategy_id"] / "gauntlet"
     bundle.mkdir(parents=True, exist_ok=True)
@@ -294,14 +295,15 @@ def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
         json.dumps(mc_summary, indent=1, sort_keys=True), encoding="utf-8")
     (bundle / "config.json").write_text(json.dumps(
         {"protocol": PROTOCOL, "cutoff": cutoff, "metrics": metrics,
-         "data_sha256": data_hashes, "group_context": group_context,
+         "data_sha256": data_hashes, "data_end": data_end,
+         "group_context": group_context,
          "spec": spec}, indent=1, sort_keys=True), encoding="utf-8")
     return bundle
 
 
 def run(argv: list[str] | None = None) -> int:
     import hashlib
-    from .screen import bundle_hash, load_cell_data
+    from .screen import assert_cells_comparable, bundle_hash, load_cell_data
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path,
@@ -356,6 +358,13 @@ def run(argv: list[str] | None = None) -> int:
                            for s in all_specs for a in s["universe"]["assets"]})
     bars_by_cell, data_hashes, data_end = load_cell_data(
         args.data_dir, cells_needed, "9999-12-31")          # full history
+
+    # This stage COMPARES: clustering pools trials registry-wide, CSCV runs
+    # over a sibling family, and plateau selection ranks neighbours. Comparing
+    # cells whose bars stop on different days scores truncation as strategy
+    # failure, so refuse before any of that runs. The screen needs no such gate
+    # -- it judges each spec against a fixed threshold and compares nothing.
+    assert_cells_comparable(data_end)
 
     # clustering needs every sibling's full-run curve (incl. graveyarded)
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
@@ -546,7 +555,7 @@ def run(argv: list[str] | None = None) -> int:
                 "cluster_labels": cluster_labels}
             bundle = write_gauntlet_artifacts(
                 args.artifacts_dir, s, oos_t, mc_summary, metrics,
-                args.cutoff, data_hashes, group_context)
+                args.cutoff, data_hashes, data_end, group_context)
             registry.record_verdict(
                 sid, "gauntlet", "pass" if passed else "fail", metrics,
                 bundle_hash(bundle, names=("oos_trades.csv",
