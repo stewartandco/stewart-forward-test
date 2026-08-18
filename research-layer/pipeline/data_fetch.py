@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import sys
+import time
 import json
 import hashlib
 import argparse
@@ -35,6 +36,22 @@ def klines_to_rows(klines: list[list]) -> list[dict]:
 
 
 def fetch_symbol(exchange_symbol: str) -> list[dict]:
+    """Every COMPLETE daily kline for a symbol.
+
+    Binance returns the currently-open kline as the last element of the last
+    batch. Its close_time (index 6) is in the future, so it is a partial bar
+    whose OHLCV describes however much of today has elapsed - on a 00:20 UTC
+    fetch, about 1% of a day's volume. Writing it into the committed CSVs put a
+    fabricated bar into every consumer that reads full history, which is the
+    gauntlet's out-of-sample window. Completeness is taken from the exchange's
+    own close_time rather than from a local date comparison, so it stays
+    correct if this fetcher ever gains a non-daily interval.
+
+    Pagination advances from the RAW batch, not the filtered one: a final batch
+    consisting only of the open kline must still advance `start`, or the loop
+    would re-request it forever.
+    """
+    now_ms = int(time.time() * 1000)
     rows, start = [], 0
     while True:
         url = (f"{API}?symbol={exchange_symbol}&interval=1d"
@@ -43,7 +60,7 @@ def fetch_symbol(exchange_symbol: str) -> list[dict]:
             batch = json.loads(resp.read())
         if not batch:
             return rows
-        rows.extend(klines_to_rows(batch))
+        rows.extend(klines_to_rows([k for k in batch if k[6] <= now_ms]))
         start = batch[-1][0] + 1
         if len(batch) < 1000:
             return rows

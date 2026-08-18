@@ -620,3 +620,51 @@ def test_the_diagnostic_writes_nothing():
     assert r.returncode == 0, r.stderr[-2000:]
     assert before == after, "diagnostic mutated registry_log.jsonl"
     assert "WOULD" in r.stdout
+
+
+# --- data_fetch: the currently-open kline must never reach the CSVs ---------
+# These live here rather than beside the other data_fetch tests in
+# test_screen.py because that file belongs to a concurrent session's work.
+
+def test_fetch_symbol_drops_the_currently_open_kline(monkeypatch):
+    """Binance returns the in-progress candle as the last element. Writing it
+    into the committed CSVs put a fabricated bar into the gauntlet's
+    out-of-sample window."""
+    import json as _json
+    import time as _time
+    from contextlib import contextmanager
+    from pipeline import data_fetch
+
+    now_ms = int(_time.time() * 1000)
+    day = 86_400_000
+    # two closed days, then the open one whose close_time is in the future
+    batch = [
+        [now_ms - 3 * day, "1", "2", "0.5", "1.5", "10", now_ms - 2 * day],
+        [now_ms - 2 * day, "1.5", "2.5", "1", "2", "11", now_ms - day],
+        [now_ms - day, "2", "2.1", "1.9", "2.05", "0.2", now_ms + day],
+    ]
+    calls = {"n": 0}
+
+    @contextmanager
+    def fake_urlopen(url, timeout=30):
+        calls["n"] += 1
+
+        class R:
+            def read(self):
+                return _json.dumps(batch if calls["n"] == 1 else []).encode()
+        yield R()
+
+    monkeypatch.setattr(data_fetch.urllib.request, "urlopen", fake_urlopen)
+    rows = data_fetch.fetch_symbol("BTCUSDT")
+    assert len(rows) == 2, rows
+    assert all(r["volume"] != 0.2 for r in rows), "open kline leaked through"
+
+
+def test_committed_csvs_contain_no_bar_dated_today_utc():
+    """Regression on the artifact itself, not just the fetcher."""
+    from datetime import datetime, timezone
+    root = Path(__file__).resolve().parent.parent
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for name in ("BTCUSD_1d.csv", "ETHUSD_1d.csv"):
+        last = (root / "data" / name).read_text(encoding="utf-8").strip().splitlines()[-1]
+        assert last.split(",")[0] < today, f"{name} ends on an incomplete bar: {last}"
