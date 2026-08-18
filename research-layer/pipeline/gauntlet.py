@@ -237,6 +237,15 @@ def select_survivors(rows: list[dict], grids_by_group: dict,
     return quarantine, not_selected
 
 
+def _spec_bars(bars_by_cell: dict, spec: dict) -> dict:
+    """The bars of the spec's OWN cell, keyed by asset for run_spec.
+
+    A spec with no declared timeframe is a legacy daily, matching the screen.
+    """
+    tf = spec["universe"].get("timeframe", "1d")
+    return {a: bars_by_cell[(a, tf)] for a in spec["universe"]["assets"]}
+
+
 def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:
     return [equity[i][1] / equity[i - 1][1] - 1
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
@@ -292,7 +301,7 @@ def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
 
 def run(argv: list[str] | None = None) -> int:
     import hashlib
-    from .screen import load_bars, bundle_hash
+    from .screen import bundle_hash, load_cell_data
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path,
@@ -338,12 +347,15 @@ def run(argv: list[str] | None = None) -> int:
         print("No strategies in 'gauntlet' state.")
         return 0
 
-    assets = sorted({a for s in all_specs for a in s["universe"]["assets"]})
-    bars_by_asset, data_hashes = {}, {}
-    for a in assets:
-        bars_by_asset[a] = load_bars(args.data_dir, a, "9999-12-31")  # full history
-        data_hashes[a] = hashlib.sha256(
-            (args.data_dir / f"{a}_1d.csv").read_bytes()).hexdigest()
+    # A CELL is (asset, timeframe), same as the screen. This used to load
+    # `_1d` for every spec and hash by bare asset, so a 15m spec would have
+    # been gauntleted on daily bars while the manifest named the cell, and two
+    # cells of one asset would have overwritten each other's hash. Latent while
+    # all 80 registered specs were 1d; live the moment gen-4 uses the grid.
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in all_specs for a in s["universe"]["assets"]})
+    bars_by_cell, data_hashes, data_end = load_cell_data(
+        args.data_dir, cells_needed, "9999-12-31")          # full history
 
     # clustering needs every sibling's full-run curve (incl. graveyarded)
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
@@ -352,8 +364,7 @@ def run(argv: list[str] | None = None) -> int:
     returns_by_id: dict[str, list[float]] = {}
     for s in all_specs:
         sid = s["strategy_id"]
-        res = run_spec(s, {a: bars_by_asset[a]
-                           for a in s["universe"]["assets"]})
+        res = run_spec(s, _spec_bars(bars_by_cell, s))
         full_results[sid] = res
         returns_by_id[sid] = daily_returns_from_curve(res["equity"])
     group_n: dict[str, int] = {}
@@ -443,16 +454,15 @@ def run(argv: list[str] | None = None) -> int:
     for s in candidates:
         sid = s["strategy_id"]
         res = full_results[sid]
-        stress_res = run_spec(stressed(s),
-                              {a: bars_by_asset[a]
-                               for a in s["universe"]["assets"]})
+        spec_bars = _spec_bars(bars_by_cell, s)
+        stress_res = run_spec(stressed(s), spec_bars)
         is_t, oos_t = split_trades(res["trades"], args.cutoff)
         _, stress_oos = split_trades(stress_res["trades"], args.cutoff)
         rets = returns_by_id[sid]
         g = group_of[sid]
         assets = s["universe"]["assets"]
-        is_vol = window_vol(bars_by_asset, assets, "", args.cutoff)
-        oos_vol = window_vol(bars_by_asset, assets, args.cutoff, "9999-12-31")
+        is_vol = window_vol(spec_bars, assets, "", args.cutoff)
+        oos_vol = window_vol(spec_bars, assets, args.cutoff, "9999-12-31")
         ok_plateau, _reason = qualifies(
             next(x for x in family_by_group[g] if x["sid"] == sid),
             family_by_group[g], grids_by_group.get(g, {}))
@@ -488,7 +498,7 @@ def run(argv: list[str] | None = None) -> int:
                 [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
                 train_dates, n_folds=3, purge_bars=PURGE_BARS),
             window="train")
-        btc = bars_by_asset.get("BTCUSD") or bars_by_asset[sorted(bars_by_asset)[0]]
+        btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
         # `buckets` is nested rather than flattened alongside `window`:
         # regime.BUCKETS is a closed vocabulary and the map's values are all
         # per-bucket stat dicts, so a bare string sibling would break anyone

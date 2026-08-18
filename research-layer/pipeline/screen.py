@@ -51,6 +51,36 @@ def load_bars(data_dir: Path, asset: str, cutoff: str,
     return bars
 
 
+def load_cell_data(data_dir: Path, cells, cutoff: str) -> tuple[dict, dict, dict]:
+    """Load a set of cells once, and return everything keyed by CELL.
+
+    Returns (bars_by_cell, data_sha256_by_cell_id, data_end_by_cell_id).
+
+    This exists because screen.py and gauntlet.py each hand-rolled the same
+    three lines and drifted apart: the screen became timeframe-aware while the
+    gauntlet kept loading `_1d` for every spec and hashing by bare asset. Two
+    stages evaluating one spec on different bars makes the chained verdict
+    meaningless, so cell identity lives here and both stages call it.
+
+    `data_end` is the last bar actually LOADED, not the last on disk, so a
+    fenced run never claims data it deliberately refused to read. It is the
+    field that makes cross-cell comparison checkable: the cache is not
+    time-aligned, so two cells can stop on different dates for reasons that
+    have nothing to do with the strategies being compared.
+    """
+    bars_by_cell: dict[tuple[str, str], list[dict]] = {}
+    data_hashes: dict[str, str] = {}
+    data_end: dict[str, str] = {}
+    for asset, tf in sorted(set(cells)):
+        bars = load_bars(data_dir, asset, cutoff, timeframe=tf)
+        bars_by_cell[(asset, tf)] = bars
+        cid = cell_id(asset, tf)
+        data_hashes[cid] = hashlib.sha256(
+            (data_dir / f"{asset}_{tf}.csv").read_bytes()).hexdigest()
+        data_end[cid] = bars[-1]["date"] if bars else ""
+    return bars_by_cell, data_hashes, data_end
+
+
 class SpecJob:
     """One spec's evaluation, picklable so it can cross a process boundary.
 
@@ -156,13 +186,8 @@ def run(argv: list[str] | None = None) -> int:
     # verdict. Specs with no timeframe are the legacy dailies.
     cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
                            for s in specs for a in s["universe"]["assets"]})
-    bars_by_cell, data_hashes = {}, {}
-    for asset, tf in cells_needed:
-        bars_by_cell[(asset, tf)] = load_bars(args.data_dir, asset,
-                                              args.cutoff, timeframe=tf)
-        path = args.data_dir / f"{asset}_{tf}.csv"
-        data_hashes[cell_id(asset, tf)] = hashlib.sha256(
-            path.read_bytes()).hexdigest()
+    bars_by_cell, data_hashes, data_end = load_cell_data(
+        args.data_dir, cells_needed, args.cutoff)
 
     jobs = []
     for spec in specs:

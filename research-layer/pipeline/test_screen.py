@@ -594,6 +594,72 @@ def _write_csv(path, rows):
                     encoding="utf-8")
 
 
+def _write_cell_csv(data_dir, asset, tf, dates):
+    p = data_dir / f"{asset}_{tf}.csv"
+    rows = ["date,open,high,low,close,volume"]
+    rows += [f"{d},1,1,1,1,1" for d in dates]
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return p
+
+
+def test_load_cell_data_keys_everything_by_cell_not_by_asset(tmp_path):
+    """One loader for both stages.
+
+    screen.py and gauntlet.py each hand-rolled this, and they drifted: the
+    screen became cell-aware in Task 6b while the gauntlet kept loading `_1d`
+    for every spec and hashing by bare asset. Two stages evaluating one spec on
+    different bars is the failure that makes a chained verdict meaningless, so
+    the cell identity logic belongs in ONE place that both call.
+    """
+    from .screen import load_cell_data
+    _write_cell_csv(tmp_path, "ETHUSDT", "1h", ["2024-01-01 00:00:00",
+                                                "2024-01-01 01:00:00"])
+    _write_cell_csv(tmp_path, "ETHUSDT", "4h", ["2024-01-01 00:00:00"])
+
+    bars, hashes, ends = load_cell_data(
+        tmp_path, [("ETHUSDT", "1h"), ("ETHUSDT", "4h")], "9999-12-31")
+
+    # the two cells of one asset must not collide
+    assert set(hashes) == {"ETHUSDT_1h", "ETHUSDT_4h"}
+    assert hashes["ETHUSDT_1h"] != hashes["ETHUSDT_4h"]
+    # and the bars must be the cell's own, not always the daily file
+    assert len(bars[("ETHUSDT", "1h")]) == 2
+    assert len(bars[("ETHUSDT", "4h")]) == 1
+
+
+def test_load_cell_data_records_each_cell_s_last_bar(tmp_path):
+    """The manifest must say WHEN each cell's data stops.
+
+    The cache is not time-aligned: on 2026-08-16 every 15m file ended 08-02
+    while BTC 1h ran to 08-16. A cell is the unit of survival, so without this
+    field "survived on 15m, died on 1h" can be an artefact of where the data
+    stops rather than anything about the strategy.
+    """
+    from .screen import load_cell_data
+    _write_cell_csv(tmp_path, "BTCUSDT", "1h", ["2024-01-01 00:00:00",
+                                                "2024-03-05 12:00:00"])
+    _write_cell_csv(tmp_path, "BTCUSDT", "4h", ["2024-01-01 00:00:00"])
+
+    _bars, _hashes, ends = load_cell_data(
+        tmp_path, [("BTCUSDT", "1h"), ("BTCUSDT", "4h")], "9999-12-31")
+
+    assert ends == {"BTCUSDT_1h": "2024-03-05 12:00:00",
+                    "BTCUSDT_4h": "2024-01-01 00:00:00"}
+
+
+def test_load_cell_data_honours_the_cutoff_when_recording_the_end(tmp_path):
+    """The end date is the end of what was LOADED, not what is on disk. A
+    fenced run must not claim data it deliberately refused to read."""
+    from .screen import load_cell_data
+    _write_cell_csv(tmp_path, "BTCUSDT", "1d", ["2023-12-30", "2023-12-31",
+                                                "2024-06-01"])
+
+    _bars, _hashes, ends = load_cell_data(
+        tmp_path, [("BTCUSDT", "1d")], "2023-12-31")
+
+    assert ends == {"BTCUSDT_1d": "2023-12-31"}
+
+
 def test_load_bars_reads_the_requested_timeframe(tmp_path):
     _write_csv(tmp_path / "BTCUSDT_4h.csv", ["2023-12-30 00:00:00",
                                              "2023-12-30 04:00:00"])

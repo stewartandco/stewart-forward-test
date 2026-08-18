@@ -16,6 +16,26 @@ from .test_screen import breakout_spec_blocks, target_hit_bars, COST
 
 # ---------------- engine notional_frac ----------------
 
+def test_spec_bars_selects_the_spec_s_own_cell():
+    """Every run_spec call in the gauntlet must be handed the bars of the
+    spec's declared cell. The old code passed `_1d` bars to every spec, so a
+    15m strategy would have been judged on daily data while its manifest named
+    the 15m cell, and the screen -- cell-aware since Task 6b -- would have
+    judged the same spec on different bars. Latent while all 80 registered
+    specs were 1d; live the moment gen-4 uses the declared grid.
+    """
+    from .gauntlet import _spec_bars
+    bars_by_cell = {("ETHUSDT", "1d"): [{"date": "daily"}],
+                    ("ETHUSDT", "15m"): [{"date": "intraday"}]}
+
+    spec = {"universe": {"assets": ["ETHUSDT"], "timeframe": "15m"}}
+    assert _spec_bars(bars_by_cell, spec) == {"ETHUSDT": [{"date": "intraday"}]}
+
+    # a spec with no timeframe is a legacy daily, same rule as the screen's
+    legacy = {"universe": {"assets": ["ETHUSDT"]}}
+    assert _spec_bars(bars_by_cell, legacy) == {"ETHUSDT": [{"date": "daily"}]}
+
+
 def test_trades_record_notional_frac():
     book = simulate_asset(breakout_spec_blocks(), target_hit_bars(), COST)
     t = book["trades"][0]
