@@ -17,34 +17,60 @@ REM `python -m pipeline.quarantine --review` to find gaps, then re-run with an
 REM explicit --date. --review also reports how long after its bar each row was
 REM chained, so a backfilled record and a faithfully-kept one stay
 REM distinguishable.
+REM
+REM EXIT CODE IS LOAD-BEARING: Ops Sentinel alarms on a nonzero last result, so
+REM this script exits 0 only when both Python steps succeeded. Every path uses
+REM the ABSOLUTE log path -- the git block changes directory, and a relative
+REM redirect after that resolves against the repo root, where logs\ does not
+REM exist. That failing redirect is what made the first run report exit 1 while
+REM having actually done its work correctly.
 
-cd /d "E:\Users\Coen\Claude\stewart-forward-test\research-layer"
-if not exist logs mkdir logs
-echo ==== %DATE% %TIME% ==== >> logs\quarantine-run.log
+setlocal
+set LAYER=E:\Users\Coen\Claude\stewart-forward-test\research-layer
+set REPO=E:\Users\Coen\Claude\stewart-forward-test
+set LOG=%LAYER%\logs\quarantine-run.log
+
+cd /d "%LAYER%"
+if not exist "%LAYER%\logs" mkdir "%LAYER%\logs"
+echo ==== %DATE% %TIME% ==== >> "%LOG%"
 
 REM 1. Refresh the committed price CSVs. quarantine REFUSES a date with no bar,
-REM    so a stale data dir silently stalls the forward record. The re-fetch is
-REM    anticipated by design: each date's snapshot records bars_sha256 of the
-REM    bars up to that date precisely so a later re-fetch cannot silently change
-REM    what a reproduction yields.
-python -m pipeline.data_fetch >> logs\quarantine-run.log 2>&1
+REM    so a stale data dir silently stalls the forward record. The fetcher drops
+REM    the exchange's currently-open kline, so this never writes a partial bar.
+python -m pipeline.data_fetch >> "%LOG%" 2>&1
+if errorlevel 1 goto :fail
 
 REM 2. Resolve yesterday in UTC.
-python -c "import datetime as d, pathlib; pathlib.Path('logs/qdate.txt').write_text((d.datetime.now(d.timezone.utc) - d.timedelta(days=1)).strftime('%%Y-%%m-%%d'))"
-set /p QDATE=<logs\qdate.txt
-echo recording %QDATE% >> logs\quarantine-run.log
+python -c "import datetime as d, pathlib; pathlib.Path(r'%LAYER%\logs\qdate.txt').write_text((d.datetime.now(d.timezone.utc) - d.timedelta(days=1)).strftime('%%Y-%%m-%%d'))"
+if errorlevel 1 goto :fail
+set /p QDATE=<"%LAYER%\logs\qdate.txt"
+echo recording %QDATE% >> "%LOG%"
 
 REM 3. Record it.
-python -m pipeline.quarantine --date %QDATE% >> logs\quarantine-run.log 2>&1
+python -m pipeline.quarantine --date %QDATE% >> "%LOG%" 2>&1
+if errorlevel 1 goto :fail
 
 REM 4. Persist the witnessed record. Scoped pathspec ONLY -- a concurrent session
 REM    shares this branch and working tree, and an unscoped add would sweep its
 REM    work into this commit. Guarded so a no-change day makes no commit and
 REM    leaves a clean tree. Never pushed; pushing stays a human action.
-cd /d "E:\Users\Coen\Claude\stewart-forward-test"
+REM    `git diff --quiet` exits 1 when there ARE changes, which is the signal to
+REM    commit, NOT an error -- hence the explicit exit 0 below rather than
+REM    letting that errorlevel leak out as the task's result.
+cd /d "%REPO%"
 git diff --quiet -- research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
 if errorlevel 1 (
   git add research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
-  git commit -q -m "quarantine: forward record for %QDATE%"
+  git commit -q -m "quarantine: forward record for %QDATE%" >> "%LOG%" 2>&1
 )
-echo. >> logs\quarantine-run.log
+
+echo done, exit 0 >> "%LOG%"
+echo. >> "%LOG%"
+endlocal
+exit /b 0
+
+:fail
+echo FAILED - see errors above; task exits 1 so Ops Sentinel alarms >> "%LOG%"
+echo. >> "%LOG%"
+endlocal
+exit /b 1
