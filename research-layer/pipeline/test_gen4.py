@@ -112,13 +112,23 @@ def test_all_80_existing_fingerprints_unchanged():
     dense types REMOVED and requiring identical output. Comparing
     composition_fingerprint(p) to itself would be a tautology that passes even
     if every fingerprint had drifted.
+
+    The registry size is read from the chain rather than pinned. This test
+    guards an INVARIANT -- no chained fingerprint moves when the dense types
+    are present, and no two collide -- not the size of the registry, and a
+    hard-coded count fails on every new generation for a reason that has
+    nothing to do with that invariant. It failed exactly that way when
+    generation 4 took the chain from 80 specs to 110. The floor below keeps
+    the fixture from silently emptying, which is the failure a bare count was
+    really guarding against, and the invariant now runs over MORE specs than
+    when it was written, including the first ones to use a dense type.
     """
     payloads = []
     for line in REGISTRY.open(encoding="utf-8"):
         e = json.loads(line)
         if e.get("entry_type") == "strategy_registered":
             payloads.append(e["payload"])
-    assert len(payloads) == 80
+    assert len(payloads) >= 80, f"fixture shrank: {len(payloads)} chained specs"
     with_dense = [composition_fingerprint(p) for p in payloads]
     original = dict(BLOCK_TYPES)
     try:
@@ -129,7 +139,8 @@ def test_all_80_existing_fingerprints_unchanged():
         BLOCK_TYPES.clear()
         BLOCK_TYPES.update(original)
     assert with_dense == without_dense
-    assert len(set(with_dense)) == 80, "fingerprint collision among chained specs"
+    assert len(set(with_dense)) == len(with_dense), (
+        "fingerprint collision among chained specs")
 
 
 from pipeline.engine import run_spec
@@ -620,6 +631,35 @@ def test_the_diagnostic_writes_nothing():
     assert r.returncode == 0, r.stderr[-2000:]
     assert before == after, "diagnostic mutated registry_log.jsonl"
     assert "WOULD" in r.stdout
+
+
+def test_the_pbo_validity_diagnostic_writes_nothing():
+    """Same guard for diagnose_pbo_validity.py, which reads the same chain.
+
+    Run at --draws 4 purely for speed: this test is about the write path, not
+    about the null estimates, and the draw count does not change which files
+    the script opens. It also pins the analytic result the chained note at
+    registry entry 2511 rests on, so a change to pbo.py's omega convention
+    that silently moved the n=5 null would fail here rather than in a future
+    generation's verdicts.
+
+    KNOWN FLAKE SOURCE: identical to the test above -- a concurrent scanner
+    appends to registry_log.jsonl and can land mid-run. If it fails, re-run
+    once and inspect the diff; `card_registered` / `card_reviewed` lines are
+    the scanner, not this script.
+    """
+    import subprocess, sys, hashlib
+    root = Path(__file__).resolve().parent.parent
+    before = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
+    r = subprocess.run([sys.executable, "diagnose_pbo_validity.py", "--draws", "4"],
+                       cwd=root, capture_output=True, text=True, timeout=1800)
+    after = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert before == after, "diagnostic mutated registry_log.jsonl"
+    assert "nothing was written" in r.stdout
+    # The parity result the chained evidence note is built on.
+    assert "n_configs=  5  uniform-rank null=0.600" in r.stdout
+    assert "n_configs=  4  uniform-rank null=0.500" in r.stdout
 
 
 # --- data_fetch: the currently-open kline must never reach the CSVs ---------
