@@ -45,13 +45,14 @@ def test_protocol_is_current():
     # string; protocol-v4 kept every one of those behaviours and added three
     # gates on top and v5 amended only the PBO gate, so the anchor tracks
     # whatever protocol is current.
-    assert PROTOCOL == "gauntlet-protocol-v5"
+    assert PROTOCOL == "gauntlet-protocol-v6"
 
 
 def test_fail_order_excludes_dsr():
+    # protocol-v6 removed pbo, pbo_underpowered and plateau from the battery;
+    # this suite pins v3's BEHAVIOUR (the retired DSR gate), which is unchanged.
     assert FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
-                          "mc_p05", "p_ruin", "cost_stress",
-                          "pbo_underpowered", "pbo", "plateau")
+                          "mc_p05", "p_ruin", "cost_stress")
     assert "dsr" not in FAIL_ORDER
 
 
@@ -97,7 +98,7 @@ def test_metrics_carry_the_protocol_discriminator():
     """trials_n means 'registered strategies' under v2 and 'clusters' under
     v3, under the same key, so the entry must say which produced it."""
     _, _, metrics, _ = geval()
-    assert metrics["protocol"] == PROTOCOL == "gauntlet-protocol-v5"
+    assert metrics["protocol"] == PROTOCOL == "gauntlet-protocol-v6"
 
 
 def test_mc_summary_carries_the_full_cone():

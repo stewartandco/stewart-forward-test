@@ -353,7 +353,7 @@ def test_protocol_is_current():
     # migrated with the gauntlet: v3 retired the DSR gate and v4 added the
     # Sharpe floor, PBO and plateau gates, so the gen-2 suite's anchor tracks
     # the current protocol string rather than the one it was written against.
-    assert G_PROTOCOL == "gauntlet-protocol-v5"
+    assert G_PROTOCOL == "gauntlet-protocol-v6"
 
 
 # ---------------- window_vol ----------------
@@ -405,7 +405,10 @@ def test_metrics_carry_raw_and_normalized():
         # it was judged against, so the verdict carries the null with it and a
         # reader of the chain never has to recompute one to interpret a kill.
         "pbo_n_distinct", "pbo_percentile", "pbo_null_p05", "pbo_null_p95",
-        "pbo_null_draws"}
+        "pbo_null_draws",
+        # protocol-v6: the plateau outcome is recorded too, now that it no
+        # longer gates and no longer selects.
+        "plateau_ok"}
     assert metrics["is_edge_per_trade"] == pytest.approx(
         metrics["is_edge_raw"] / metrics["is_vol"])
 

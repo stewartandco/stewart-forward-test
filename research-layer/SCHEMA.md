@@ -285,6 +285,34 @@ both before any generation-5 specification exists. Applied to generation 4 it
 also returns zero survivors. `diagnose_protocol_v4.py` keeps v4's withdrawn
 thresholds locally, so it still reports what **v4** would have done.
 
+**Amendment, protocol-v6 (`pipeline/gauntlet.py`).** Encodes one principle,
+Coen 2026-08-21: each individual edge is tested and judged on its own evidence,
+regardless of how similar it is to another, and **every edge is standalone when
+running through the gauntlet**. Three mechanisms decided a strategy's fate on
+something other than its own performance; all three are removed from the
+battery and kept as **recorded numbers**. (1) **Selection is retired** — every
+gate passer proceeds to quarantine, `select_survivors` selects nothing, and the
+`sibling_not_selected` transition is retired; 7 strategies, all in generation 3,
+had passed every gate on their own evidence and were graveyarded under it.
+(2) The **PBO gate and its family kill** stop gating, withdrawing criterion (g)
+above entirely. (3) The **plateau gate** stops gating and stops selecting,
+withdrawing criterion (h) above entirely. `FAIL_ORDER` is now six gates —
+`sharpe_floor`, `oos_negative`, `edge_decay`, `mc_p05`, `p_ruin`, `cost_stress`
+— and **every input to every one of them is a property of the strategy alone**.
+`sibling_group_n` survives in the recorded metrics and was never read by a gate
+even under v4/v5. Promoting every passer costs nothing statistically: the trials
+denominator counts **registrations, not promotions** (gen-4 recorded
+`trials_n=2` clusters over `registered_n=110`), so the deflated Sharpe is
+unchanged, and the one-winner rule was a capacity decision presented as a
+statistical one. Declared a **loosening** without qualification, evidence
+chained first at entries **2503**, **2511** and **2513**, protocol at **2514**.
+Two costs named on-chain: it partially undoes v4's reconciliation with the
+`trading-systems` SOP, so the claim that both pipelines clear one named bar must
+stop being made until repaired; and it loosens the gauntlet while the DSR gate
+at `quarantine → live`, now the **only** place multiplicity is priced, remains
+uncalibrated. Pre-committed on-chain: more survivors under v6 is evidence of a
+looser gate, **not** of edge, and must not be reported as a breakthrough.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -321,7 +349,7 @@ Common envelope:
 `verdict.metrics` minimums per stage:
 
 - `screened`: `{trades, net_pnl, win_rate, max_dd}`
-- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}`, plus protocol-v5: `{pbo_n_distinct, pbo_percentile, pbo_null_p05, pbo_null_p95, pbo_null_draws}` — an observed PBO cannot be read without the null it was judged against, so the verdict carries the null with it rather than forcing a later reader to recompute one — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
+- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}`, plus protocol-v5: `{pbo_n_distinct, pbo_percentile, pbo_null_p05, pbo_null_p95, pbo_null_draws}`, plus protocol-v6: `{plateau_ok}` — an observed PBO cannot be read without the null it was judged against, so the verdict carries the null with it rather than forcing a later reader to recompute one — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
 - `quarantine` (graduation review): `{days, trades, realized_edge_per_trade, projection_percentile}`
 
 A `quarantine_decision` records what a paper-traded strategy's book DID on that

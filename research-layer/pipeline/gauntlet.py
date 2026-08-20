@@ -1,5 +1,16 @@
-"""Gauntlet battery: eight-gate robustness validation of gauntlet-state
-strategies on the 2024+ holdout, with pre-declared sibling selection.
+"""Gauntlet battery: six-gate robustness validation of gauntlet-state
+strategies on the 2024+ holdout. Every gate is STANDALONE.
+
+protocol-v6 (chained at registry entry 2514) encodes one principle: each
+individual edge is tested and judged on its own evidence, regardless of how
+similar it is to another. It removed the three mechanisms that decided a
+strategy's fate on something else -- one-winner-per-group selection, the PBO
+gate and its family kill, and the plateau gate -- and kept all three as
+RECORDED numbers. Every gate passer now proceeds to quarantine, and the
+sibling_not_selected transition is retired. No gate reads a sibling, a group, a
+neighbour, a grid position or a family statistic; reintroducing any of those
+contradicts v6 and needs its own pre-declared chained note. The evidence behind
+the removals is chained at entries 2503, 2511 and 2513.
 
 protocol-v4 adds a train-window Sharpe floor, a CSCV overfitting gate and a
 plateau gate, and replaces point-winner sibling selection (highest deflated
@@ -47,11 +58,13 @@ from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
 from .cluster import effective_trials
 from .pbo import (cscv_pbo, distinct_configs, permutation_null,
                    percentile_of)
-from .plateau import annualized_sharpe, select_survivor, qualifies
+# select_survivor is deliberately NOT imported: protocol-v6 retired
+# selection, and `qualifies` is kept only to RECORD the outcome.
+from .plateau import annualized_sharpe, qualifies
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
 
-PROTOCOL = "gauntlet-protocol-v5"
+PROTOCOL = "gauntlet-protocol-v6"
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
@@ -91,8 +104,17 @@ PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 # Sharpe, but it does not gate entry to paper trading and — new in v4 — it no
 # longer ranks siblings either; neighbourhood floor does. Adding it back here
 # is a protocol change and needs its own pre-declared chained note.
+# protocol-v6: SIX gates, and every input to every one of them is a property
+# of the STRATEGY ALONE -- its own trades, its own returns, its own train
+# Sharpe, its own trades re-run at doubled slippage. No gate reads a sibling, a
+# group, a neighbour, a grid position or a family statistic. 'pbo',
+# 'pbo_underpowered' and 'plateau' were removed because each decided a
+# strategy's fate on something other than its own performance; all three are
+# still COMPUTED and RECORDED. 'dsr' remains deliberately absent, as it has
+# been since v3. Reintroducing any group-level input here contradicts v6's
+# founding principle and needs its own pre-declared chained note saying so.
 FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
-              "p_ruin", "cost_stress", "pbo_underpowered", "pbo", "plateau")
+              "p_ruin", "cost_stress")
 
 
 def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
@@ -214,6 +236,12 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "pbo_null_p05": (pbo_status or {}).get("null_p05"),
         "pbo_null_p95": (pbo_status or {}).get("null_p95"),
         "pbo_null_draws": (pbo_status or {}).get("null_draws"),
+        # protocol-v6: neighbourhood qualification is still computed and still
+        # recorded; it stopped gating and stopped selecting. Kept because the
+        # next protocol argument will need the evidence, and a verdict that
+        # quietly dropped it would destroy that evidence generation by
+        # generation.
+        "plateau_ok": plateau_ok,
     }
     mc_summary = {"seed": seed, "paths": MC_PATHS,
                   "p05": mc_p05,
@@ -235,19 +263,7 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
               "mc_p05": mc_p05 > MC_P05_MIN,
               "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
               "cost_stress": stress_net > 0,
-              # protocol-v5. Underpowered runs FIRST and fails closed: a
-              # family with too few distinct configurations is one the gate
-              # cannot see into, and v4's own plateau rule already settled
-              # that a gate passing on the absence of evidence is not a gate.
-              # The pass test then runs the other way round from v4's: a
-              # family must LAND at or below the 5th percentile of its own
-              # null to pass, rather than pass by not being convicted. Under
-              # v4 a gate with no power passed everything; under v5 it passes
-              # nothing.
-              "pbo_underpowered": (pbo_status is None
-                                   or pbo_status.get("verdict") != "underpowered"),
-              "pbo": pbo_status is None or pbo_status.get("member_pass", False),
-              "plateau": plateau_ok is not False}
+              }
     assert checks.keys() == set(FAIL_ORDER), (
         f"gate battery and FAIL_ORDER disagree: "
         f"computed-not-declared={sorted(checks.keys() - set(FAIL_ORDER))}, "
@@ -260,22 +276,24 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
 
 def select_survivors(rows: list[dict], grids_by_group: dict,
                      family_by_group: dict) -> tuple[set[str], set[str]]:
-    """protocol-v4 selection: per sibling group, the candidate with the
-    strongest NEIGHBOURHOOD FLOOR among plateau-qualifying gauntlet passers.
+    """protocol-v6: there is no selection. Every strategy that passed the gate
+    battery proceeds to quarantine.
 
-    This function no longer reads any point metric. Under protocol-v3 it sorted
-    on -dsr and took the winner, which is precisely the point-winner selection
-    the SOP forbids.
+    Under v3 this took the highest deflated Sharpe in each sibling group; under
+    v4 and v5 it took the strongest neighbourhood floor. Both discarded
+    strategies that had passed every gate on their own evidence because a
+    SIMILAR SIBLING scored higher -- 7 of them, all in generation 3, recorded on
+    the chain as sibling_not_selected. v6's principle is that each individual
+    edge is tested and judged standalone, and a sibling's score is not evidence
+    about this strategy, so the second element of the returned pair is now
+    always empty and the sibling_not_selected transition is retired.
+
+    grids_by_group and family_by_group are still accepted so callers and their
+    tests are unchanged, and they are deliberately UNUSED: a future reader
+    should see that the group state is available here and consulted by nothing.
     """
-    quarantine, not_selected = set(), set()
-    for group, family in sorted(family_by_group.items()):
-        grids = grids_by_group.get(group, {})
-        winner, _detail = select_survivor(family, grids)
-        passers = {s["sid"] for s in family if s["gauntlet_passed"]}
-        if winner is not None:
-            quarantine.add(winner)
-        not_selected.update(passers - {winner})
-    return quarantine, not_selected
+    del grids_by_group, family_by_group        # v6: group state cannot decide
+    return {r["sid"] for r in rows if r["passed"]}, set()
 
 
 def _spec_bars(bars_by_cell: dict, spec: dict) -> dict:
@@ -631,7 +649,6 @@ def run(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(f"\nDRY RUN — {len(rows)} evaluated, {n_pass} pass; "
               f"{len(quarantine)} would quarantine, "
-              f"{len(not_selected)} sibling_not_selected, "
               f"{len(rows) - n_pass} gate-fail; nothing written.")
         return 0
 
@@ -662,11 +679,19 @@ def run(argv: list[str] | None = None) -> int:
             if not passed:
                 registry.record_state_change(sid, "graveyard", reason)
             elif sid in quarantine:
-                registry.record_state_change(sid, "quarantine",
-                                             "gauntlet pass, group-selected")
+                # protocol-v6: nothing is group-selected any more. Every gate
+                # passer is here, on its own evidence.
+                registry.record_state_change(sid, "quarantine", "gauntlet pass")
             else:
-                registry.record_state_change(sid, "graveyard",
-                                             "sibling_not_selected")
+                # Unreachable under v6: select_survivors returns every passer,
+                # and a non-passer always carries a reason, so this branch has
+                # no members. It raises rather than falling back to the retired
+                # sibling_not_selected transition, because a silent fallback
+                # here would bury a strategy for a reason this protocol
+                # abolished -- in an append-only chain, permanently.
+                raise AssertionError(
+                    f"{sid} passed the battery but was not promoted: v6 "
+                    f"retired selection, so this cannot happen")
             n_written += 1
     except BaseException:
         print(f"\nPARTIAL WRITE: {n_written}/{2 * len(payloads)} entries "
@@ -675,7 +700,6 @@ def run(argv: list[str] | None = None) -> int:
         raise
 
     print(f"\n{len(rows)} evaluated: {len(quarantine)} -> quarantine, "
-          f"{len(not_selected)} sibling_not_selected, "
           f"{len(rows) - n_pass} gate-fail -> graveyard.")
     return 0
 

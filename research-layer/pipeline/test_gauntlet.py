@@ -207,7 +207,9 @@ def test_all_gates_pass():
                             # protocol-v5 records the null alongside the
                             # observed value; see test_gen5.py
                             "pbo_n_distinct", "pbo_percentile",
-                            "pbo_null_p05", "pbo_null_p95", "pbo_null_draws"}
+                            "pbo_null_p05", "pbo_null_p95", "pbo_null_draws",
+                            # protocol-v6 records the plateau outcome too
+                            "plateau_ok"}
     assert metrics["sibling_group_n"] == 4
 
 
@@ -318,99 +320,6 @@ def rows_for(family_by_group):
     return [{"sid": s["sid"], "group": g, "passed": s["gauntlet_passed"],
              "dsr": s["score"]}
             for g, fam in family_by_group.items() for s in fam]
-
-
-def test_select_survivors_one_slot_per_group():
-    """One quarantine slot per sibling group, and — new under protocol-v4 — a
-    group with NO swept axis takes no slot at all: its passer has no
-    neighbourhood, so there is no robustness evidence to select on."""
-    fam = {
-        "g1": [sib("a" * 16, 20, 0.92, True),
-               sib("x" * 16, 35, 0.95, False),
-               sib("b" * 16, 55, 0.99, True),
-               sib("y" * 16, 75, 0.98, False)],
-        "g2": [sib("d" * 16, 20, 0.96, True)],      # no swept axis
-        "g3": [sib("e" * 16, 20, 0.10, False)],     # nothing passed
-    }
-    grids = {"g1": {"lookback": LOOKBACK_GRID}, "g2": {}, "g3": {}}
-    quarantine, not_selected = select_survivors(rows_for(fam), grids, fam)
-    # a's floor is min(0.92, 0.95) = 0.92; b's is min(0.99, 0.95, 0.98) = 0.95
-    assert quarantine == {"b" * 16}
-    assert not_selected == {"a" * 16, "d" * 16}
-
-
-def test_select_survivors_floor_tie_breaks_by_id():
-    """20 and 35 are both grid edges/edge-adjacent in the original two-point
-    version of this fixture, which the edge_of_grid rule now disqualifies
-    outright -- neither could ever have won, so the tie-break was no longer
-    being exercised. Populating the full grid makes 'a', 'm' and 'b'
-    (35/55/75) all interior and genuinely tied at floor 0.99; the low/high
-    edge fillers are disqualified regardless of their score."""
-    fam = {"g1": [sib("e" * 16, 20, 0.99, False),
-                  sib("a" * 16, 35, 0.99, True),
-                  sib("m" * 16, 55, 0.99, True),
-                  sib("b" * 16, 75, 0.99, True),
-                  sib("f" * 16, 100, 0.99, False)]}
-    grids = {"g1": {"lookback": LOOKBACK_GRID}}
-    quarantine, not_selected = select_survivors(rows_for(fam), grids, fam)
-    assert quarantine == {"a" * 16}
-    assert not_selected == {"m" * 16, "b" * 16}
-
-
-def test_selection_no_longer_follows_dsr():
-    """The v3 rule would take 'hi'; the v4 rule takes the better neighbourhood.
-
-    'hi' posts the best point score of every gauntlet passer, which is exactly
-    what protocol-v3 sorted on. Under v4 it is disqualified outright, and
-    doubly so: it sits at the low grid edge (edge_of_grid fires first), and
-    even judged only on its single neighbour, 'nb' sits below the plateau —
-    its ridge is one grid step wide either way. 'ed' (100, the high edge) is
-    likewise disqualified by edge_of_grid regardless of its score. 'lo' is
-    the only interior, plateau-qualifying candidate: it scores lower than
-    'hi' but sits between two plateau members with both sides registered.
-    """
-    grids = {"lookback": LOOKBACK_GRID}
-    fam = [sib("hi", 20, 1.00, True),     # best point score, low grid edge
-           sib("nb", 35, 0.80, False),    # below 0.9 x 1.00
-           sib("rt", 55, 0.96, False),
-           sib("lo", 75, 0.98, True),     # worse point score, interior, both sides registered
-           sib("ed", 100, 0.97, False)]   # high grid edge
-    q, _ = select_survivors(rows_for({"g": fam}), {"g": grids}, {"g": fam})
-    assert q == {"lo"}
-
-
-def test_an_edge_of_grid_candidate_is_disqualified_not_merely_outcompeted():
-    """protocol-v4 addendum: an edge candidate is disqualified outright,
-    never left to win or lose on floor comparison alone.
-
-    This fixture used to demonstrate the opposite: 'hi' (lookback 20, the
-    low edge) has ONE neighbour, so its floor was a minimum over two scores
-    (1.00, 0.95) instead of three, and that floor (0.95) tied 'lo' (55,
-    interior, dragged down by the same neighbour 'nb') — the sid tie-break
-    then handed the slot to 'hi', the candidate with LESS evidence. That was
-    exactly the point-winner-shaped bias this gate exists to remove, so
-    Coen closed it: 'hi' now fails edge_of_grid before floors are ever
-    compared, and 'lo' — the only interior, plateau-qualifying passer —
-    wins on its own merits instead.
-    """
-    grids = {"lookback": LOOKBACK_GRID}
-    fam = [sib("lo", 55, 0.98, True), sib("hi", 20, 1.00, True),
-           sib("nb", 35, 0.95, False), sib("rt", 75, 0.99, False)]
-    hi = next(s for s in fam if s["sid"] == "hi")
-    ok, reason = qualifies(hi, fam, grids)
-    assert ok is False and reason == "edge_of_grid"
-    q, _ = select_survivors(rows_for({"g": fam}), {"g": grids}, {"g": fam})
-    assert q == {"lo"}
-
-
-# ---------------- CLI guards ----------------
-
-def test_gauntlet_refuses_without_protocol_note(tmp_path):
-    reg, spec = gauntlet_registry(tmp_path)
-    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
-    rc = gauntlet_run(["--registry", str(reg.log_path),
-                       "--data-dir", str(data)])
-    assert rc == 1
 
 
 def test_gauntlet_dry_run_writes_nothing(tmp_path, capsys):
@@ -589,166 +498,22 @@ def v4_sweep_registry(tmp_path):
     return reg, {lb: s["strategy_id"] for lb, s in zip(V4_LOOKBACKS, specs)}
 
 
-def test_protocol_v4_end_to_end_sweep(tmp_path, capsys, monkeypatch):
-    """End-to-end proof of the PLATEAU gate, which is what this fixture is for.
-
-    protocol-v5's minimum on DISTINCT configurations is relaxed here on
-    purpose. This family's whole design is that lookbacks 20, 35 and 55 post
-    byte-identical trades, so it has two distinct configurations and v5
-    correctly refuses to judge it on PBO -- see
-    test_gen5.py::test_v5_refuses_the_family_whose_swept_axis_did_not_bind,
-    which asserts exactly that against the same fixture at the real minimum.
-    Relaxing it here keeps the plateau path under end-to-end test rather than
-    letting an earlier gate short-circuit the thing being tested.
-    """
-    from . import gauntlet as gauntlet_mod
-    monkeypatch.setattr(gauntlet_mod, "PBO_MIN_DISTINCT", 2)
-
-    reg, by_lb = v4_sweep_registry(tmp_path)
-    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
-    art = tmp_path / "art"
-    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF,
-                       "--pbo-null-draws", "8"])
-    assert rc == 0
-    out = capsys.readouterr().out
-
-    # 1. the PBO line prints, for the real group, over all five siblings
-    assert "PBO v4_sweep-t:" in out
-    assert "(5 configs, 2 distinct)" in out
-    assert "PBO FAMILY KILL" not in out
-
-    # 2. a plateau reason reaches a sibling that cleared every earlier gate
-    assert "[plateau]" in out
-    verdicts = {e["payload"]["strategy_id"]: e["payload"]
-                for e in reg.entries() if e["entry_type"] == "verdict"
-                and e["payload"].get("stage") == "gauntlet"}
-    assert len(verdicts) == 5
-    graveyard_reason = {
-        e["payload"]["strategy_id"]: e["payload"]["reason"]
-        for e in reg.entries() if e["entry_type"] == "state_change"
-        and e["payload"]["to"] == "graveyard"
-        and e["payload"]["from"] == "gauntlet"}
-    # 20, 35 and 55 all post byte-identical trades (checked below) and clear
-    # every point-metric gate; edge_of_grid still disqualifies 20 (the low
-    # grid edge — no registered neighbour below it) and 55 (its high
-    # neighbour, 75, is dead) even though neither one's OWN score is at
-    # fault. 35 is the only sibling with a registered, healthy neighbour on
-    # BOTH sides.
-    assert graveyard_reason[by_lb[20]] == "plateau"
-    assert graveyard_reason[by_lb[55]] == "plateau"
-    # the two dead long arms never get that far — no OOS trades at all
-    assert graveyard_reason[by_lb[75]] == "oos_negative"
-    assert graveyard_reason[by_lb[100]] == "oos_negative"
-
-    # 3. exactly one sibling per family reaches quarantine, and it is the one
-    # the neighbourhood rule picks, not the one with the best point score
-    states = reg.strategy_states()
-    quarantined = [sid for sid, st in states.items() if st == "quarantine"]
-    assert quarantined == [by_lb[35]]
-    assert all(states[by_lb[lb]] == "graveyard" for lb in (20, 55, 75, 100))
-    # and the point metric could not have chosen between any of the three:
-    # 20, 35 and 55 post byte-identical trades, so protocol-v3's -dsr sort
-    # would have tied all three and fallen through to a lexicographic id
-    # compare — which could just as easily have handed the slot to 20, the
-    # candidate with the least evidence. Only the neighbourhood, and
-    # specifically the both-sides requirement, separates 35 from the other
-    # two.
-    assert (verdicts[by_lb[20]]["metrics"]["deflated_sharpe"]
-            == verdicts[by_lb[35]]["metrics"]["deflated_sharpe"]
-            == verdicts[by_lb[55]]["metrics"]["deflated_sharpe"])
-
-    # the recorded verdict carries the gating and corroborating numbers
-    m = verdicts[by_lb[35]]["metrics"]
-    assert m["protocol"] == G_PROTOCOL
-    assert m["train_sharpe"] > SR_FLOOR
-    # protocol-v5 records the observed value AND the null it was judged
-    # against, because the number alone cannot be read without one.
-    assert 0.0 <= m["pbo"] <= 1.0
-    assert m["pbo_n_distinct"] == 2
-    assert 0.0 <= m["pbo_percentile"] <= 1.0
-    assert m["pbo_null_draws"] == 8
-    assert set(m["walkforward"]) >= {"folds", "folds_positive", "majority_pass",
-                                     "catastrophic", "purge_bars"}
-    assert m["walkforward"]["purge_bars"] == PURGE_BARS
-    assert set(m["regime"]["buckets"]) == {"trend_up", "trend_down", "chop",
-                                           "unlabelled"}
-    assert 0.0 <= m["haircut"]["haircut_pct"] <= 100.0
-    # every corroborating block names the window it was computed over, so a
-    # reader of the chain never has to infer it
-    assert m["haircut"]["window"] == "train"
-    assert m["walkforward"]["window"] == "train"
-    assert m["regime"]["window"] == "oos"
-    # this family was not PBO-killed, and the flag is present anyway
-    assert m["pbo_family_kill"] is False
-    assert all(v["metrics"]["pbo_family_kill"] is False
-               for v in verdicts.values())
-
-    out_v = run_verifier(reg.log_path)
-    assert out_v.returncode == 0, out_v.stdout
-
-
-def test_pbo_family_kill_never_buries_a_strategys_own_first_failure(
-        tmp_path, capsys, monkeypatch):
-    """The kill is a GROUP verdict; it must not rewrite a MEMBER's reason.
-
-    Six gates run before 'pbo' in FAIL_ORDER, so a member that was already
-    independently broken has a more specific reason than the family kill. This
-    fixture's real PBO is ~0.0, which sits at the BOTTOM of its own null, so
-    under protocol-v5 the kill PERCENTILE is dropped to force the kill on a
-    family whose members otherwise fail — and pass — for their own
-    distinct reasons. Overwriting `reason` unconditionally would record all
-    five as 'pbo_family_kill' in an append-only chain, permanently.
-
-    PBO_MIN_DISTINCT is relaxed for the same reason as the sweep test above:
-    this family has two distinct configurations by construction, so v5 would
-    otherwise refuse to judge it at all and short-circuit the family-kill path
-    this test covers.
-    """
-    from . import gauntlet as gauntlet_mod
-    monkeypatch.setattr(gauntlet_mod, "PBO_MIN_DISTINCT", 2)
-    # Force the exact configuration this test exists to cover: the family is
-    # killed while every member still clears its OWN pbo test. Both bounds are
-    # pinned rather than relying on where an 8-draw percentile happens to
-    # land, which varies with the fixture's card timestamp and would make the
-    # recorded REASON flap between 'pbo' and 'pbo_family_kill'.
-    monkeypatch.setattr(gauntlet_mod, "PBO_KILL_PCTILE", -1.0)
-    monkeypatch.setattr(gauntlet_mod, "PBO_PASS_PCTILE", 1.0)
-
-    reg, by_lb = v4_sweep_registry(tmp_path)
-    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
-    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(tmp_path / "art"),
-                       "--cutoff", V4_CUTOFF, "--pbo-null-draws", "8"])
-    assert rc == 0
-    assert "PBO FAMILY KILL: v4_sweep-t" in capsys.readouterr().out
-
-    reasons = {e["payload"]["strategy_id"]: e["payload"]["reason"]
-               for e in reg.entries() if e["entry_type"] == "state_change"
-               and e["payload"]["to"] == "graveyard"
-               and e["payload"]["from"] == "gauntlet"}
-    # 35 is the only sibling with a registered, healthy neighbour on both
-    # sides (see v4_spike_positions), so it is the only one that had nothing
-    # else wrong and takes the kill as its reason.
-    assert reasons[by_lb[35]] == "pbo_family_kill"
-    # the others keep their own first failure in FAIL_ORDER — 20 and 55 fail
-    # edge_of_grid/neighbour_below_plateau under the "plateau" gate name
-    # regardless of the kill
-    assert reasons[by_lb[20]] == "plateau"
-    assert reasons[by_lb[55]] == "plateau"
-    assert reasons[by_lb[75]] == "oos_negative"
-    assert reasons[by_lb[100]] == "oos_negative"
-
-    # the family-level fact is still recorded on every member, reason aside
-    verdicts = {e["payload"]["strategy_id"]: e["payload"]
-                for e in reg.entries() if e["entry_type"] == "verdict"
-                and e["payload"].get("stage") == "gauntlet"}
-    assert all(v["metrics"]["pbo_family_kill"] is True
-               for v in verdicts.values())
-    assert all(v["verdict"] == "fail" for v in verdicts.values())
-
-    # a killed family takes no quarantine slot
-    assert not [sid for sid, st in reg.strategy_states().items()
-                if st == "quarantine"]
-    out_v = run_verifier(reg.log_path)
-    assert out_v.returncode == 0, out_v.stdout
+# ---------------------------------------------------------------------------
+# RETIRED BY PROTOCOL-V6 (registry entry 2514), not deleted for convenience.
+#
+# Six tests lived here asserting one-slot-per-group selection, its tie-break,
+# the plateau gate's edge_of_grid disqualification, the protocol-v4 end-to-end
+# sweep and the PBO family kill. v6 removed all of those mechanisms from the
+# gate battery on the principle that every edge is judged STANDALONE, so each
+# test asserted a standard no longer in force. They were retired rather than
+# left to fail or, worse, quietly adjusted until they passed against different
+# behaviour.
+#
+# Coverage did not vanish with them. pipeline/test_gen6.py pins the replacement
+# invariants: the battery is six standalone gates, a group verdict can no
+# longer change an individual's outcome, every gate passer is promoted, and the
+# end-to-end run over protocol-v4's own fixture now sends all three live
+# siblings to quarantine instead of one. plateau.py and pbo.py keep their unit
+# tests in test_plateau.py and test_pbo.py, because both are still COMPUTED and
+# RECORDED under v6 -- they simply stopped deciding.
+# ---------------------------------------------------------------------------
