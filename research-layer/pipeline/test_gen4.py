@@ -587,26 +587,23 @@ def test_regime_ma_uses_exactly_ma_len_bars_not_off_by_one():
     assert labels["d0012"] == "trend_up"
 
 
-from pipeline.gauntlet import FAIL_ORDER, PROTOCOL, SR_FLOOR, PBO_PASS, PBO_KILL
+from pipeline.gauntlet import FAIL_ORDER, SR_FLOOR
 
-
-def test_protocol_is_v4():
-    assert PROTOCOL == "gauntlet-protocol-v4"
-
-
-def test_fail_order_puts_the_cheap_reject_first_and_family_gates_last():
-    assert FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
-                          "mc_p05", "p_ruin", "cost_stress", "pbo", "plateau")
+# The live PROTOCOL, FAIL_ORDER and PBO threshold pins moved to test_gen5.py
+# when protocol-v5 superseded v4: they track whatever protocol is CURRENT, and
+# duplicating them here would mean two files to update and one of them
+# silently asserting a superseded standard. What v4 contributed and v5 kept is
+# still pinned below. v4's own text is on the chain at registry entry 2324.
 
 
 def test_dsr_is_still_absent_from_the_gate_order():
     assert "dsr" not in FAIL_ORDER
 
 
-def test_thresholds_match_the_sop():
+def test_the_sharpe_floor_still_matches_the_sop():
+    """v4's other two thresholds, PBO_PASS 0.20 and PBO_KILL 0.50, were
+    WITHDRAWN by protocol-v5 and no longer exist; see test_gen5.py."""
     assert SR_FLOOR == 0.4
-    assert PBO_PASS == 0.20
-    assert PBO_KILL == 0.50
 
 
 def test_the_diagnostic_writes_nothing():

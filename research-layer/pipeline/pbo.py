@@ -12,10 +12,17 @@ Performance note: subset Sharpes are reconstructed from per-block
 (count, sum, sum of squares) so a combination costs S/2 additions per config
 instead of a full pass over the observations. Without this, C(16,8) = 12,870
 combinations is unusably slow in pure Python.
+
+protocol-v5 amends two things here. The boundary tie counts as a HALF event
+(see overfit_weight), and the fixed thresholds that used to be applied to the
+returned number are withdrawn in favour of a per-family permutation null (see
+permutation_null). The evidence for both is chained at registry entry 2511 and
+the argument at 2512.
 """
 from __future__ import annotations
 
 import math
+import random
 from itertools import combinations
 
 
@@ -41,6 +48,97 @@ def _sharpe_from(n: int, total: float, total_sq: float) -> float:
     if var <= 0:
         return -math.inf
     return mean / math.sqrt(var)
+
+
+def overfit_weight(rank: int, n_configs: int) -> float:
+    """How much one split contributes to the overfit count (protocol-v5).
+
+    omega = rank/(n_configs + 1) and BBLdP score lambda = logit(omega) <= 0 as
+    overfit. At the family sizes their work assumes, omega == 0.5 exactly has
+    vanishing measure. At small ODD n_configs it does not: the median rank
+    lands precisely on the boundary, and counting it as a WHOLE overfit event
+    made the uniform-rank null (n_configs + 1) / (2 * n_configs) -- 0.600 at
+    five configs, ABOVE protocol-v4's own 0.50 family-kill line, so a family
+    with no persistent skill differences at all was killed by construction.
+    Generation 4 registered every one of its six families at exactly five.
+
+    Counting the exact tie as a HALF event makes the null exactly 0.5 at every
+    family size. The comparison is done in integers because the tie must be
+    decided exactly and never by float equality.
+    """
+    doubled = 2 * rank
+    if doubled < n_configs + 1:
+        return 1.0
+    if doubled == n_configs + 1:
+        return 0.5
+    return 0.0
+
+
+def distinct_configs(perf_by_id: dict[str, list[float]]) -> int:
+    """How many genuinely different configurations a family contains.
+
+    Siblings with identical series are the same configuration observed more
+    than once: the swept axis did not bind between them, so there is nothing
+    for CSCV to select among and a low PBO records only that a tiny difference
+    was persistent. protocol-v5 fails a family closed below four of these.
+    """
+    return len({tuple(v) for v in perf_by_id.values()})
+
+
+def permute_labels(series: dict[str, list[float]],
+                   rng: random.Random) -> dict[str, list[float]]:
+    """Randomly reassign which sibling owns which return, day by day.
+
+    Each day's cross-section is preserved EXACTLY, so the family's real return
+    distribution, its real sibling correlation and the real common market
+    factor all survive; only PERSISTENT per-sibling skill is destroyed. That
+    is precisely the null the PBO thresholds assumed and never verified.
+    """
+    ids = sorted(series)
+    n_obs = min(len(series[i]) for i in ids)
+    out: dict[str, list[float]] = {i: [] for i in ids}
+    for t in range(n_obs):
+        order = ids[:]
+        rng.shuffle(order)
+        for src, dst in zip(ids, order):
+            out[dst].append(series[src][t])
+    return out
+
+
+def permutation_null(perf_by_id: dict[str, list[float]], s: int = 16,
+                     draws: int = 200, seed: int = 0) -> list[float]:
+    """The distribution of PBO for THIS family under no persistent skill.
+
+    Refuses a family whose siblings are all identical: permuting labels there
+    cannot change anything, so the result would be one point pretending to be
+    a distribution. Callers get an error rather than a false null.
+    """
+    if distinct_configs(perf_by_id) < 2:
+        raise ValueError(
+            "cannot build a permutation null from a family with fewer than 2 "
+            "distinct series: permuting labels would change nothing")
+    rng = random.Random(seed)
+    out = []
+    for _ in range(draws):
+        v = cscv_pbo(permute_labels(perf_by_id, rng), s=s)["pbo"]
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def percentile_of(values: list[float], observed: float) -> float | None:
+    """Where `observed` sits in `values`, counting ties as half.
+
+    Ties are split rather than counted wholly on either side for the same
+    reason overfit_weight splits its boundary: PBO is discrete at small family
+    sizes, so exact ties are common and assigning them entirely to one side
+    biases the answer in that direction.
+    """
+    if not values:
+        return None
+    below = sum(1 for v in values if v < observed)
+    equal = sum(1 for v in values if v == observed)
+    return (below + 0.5 * equal) / len(values)
 
 
 def cscv_pbo(perf_by_id: dict[str, list[float]], s: int = 16) -> dict:
@@ -87,11 +185,9 @@ def cscv_pbo(perf_by_id: dict[str, list[float]], s: int = 16) -> dict:
         # ascending rank out of sample: 1 = worst, n_configs = best
         ranked = sorted(ids, key=lambda i: (oos_sr[i], i))
         rank = ranked.index(winner) + 1
-        omega = rank / (n_configs + 1)
-        # lambda = logit(omega); lambda <= 0 iff omega <= 0.5 (BBLdP's own
-        # convention -- the median OOS rank counts as overfit, not as a pass)
-        if omega <= 0.5:
-            below += 1
+        # protocol-v5: the exact median rank contributes a HALF event rather
+        # than a whole one. See overfit_weight for why that is not a detail.
+        below += overfit_weight(rank, n_configs)
         total += 1
     shape["n_combinations"] = total
     return {"pbo": below / total, "reason": None, **shape}

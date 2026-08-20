@@ -5,10 +5,21 @@ protocol-v4 adds a train-window Sharpe floor, a CSCV overfitting gate and a
 plateau gate, and replaces point-winner sibling selection (highest deflated
 Sharpe) with neighbourhood-floor selection. See pipeline/plateau.py.
 
+protocol-v5 amends ONE of those, the PBO gate, and leaves every other gate at
+v4's threshold and FAIL_ORDER position. v4's fixed 0.20 / 0.50 lines assumed a
+no-skill null of about 0.5; that is false in this implementation at small ODD
+family sizes, where the median rank lands exactly on the omega <= 0.5 boundary
+and pushes the null to 0.600 at five configs -- above v4's own kill line, on
+which every one of generation 4's six families sat. v5 counts that boundary
+tie as a half event, counts DISTINCT configurations rather than registered
+siblings and fails closed below four of them, and replaces the fixed lines
+with a test against each family's own permutation null. Evidence is chained at
+registry entry 2511, the protocol at 2512.
+
 Usage:
     python -m pipeline.gauntlet [--registry registry_log.jsonl]
         [--data-dir data] [--artifacts-dir artifacts]
-        [--cutoff 2023-12-31] [--dry-run]
+        [--cutoff 2023-12-31] [--pbo-null-draws 200] [--dry-run]
 
 Real runs HARD-REFUSE unless a note starting with PROTOCOL is chained.
 Current gates and amendments per docs/2026-08-17-gate-standard-design.md,
@@ -25,6 +36,7 @@ from __future__ import annotations
 import sys
 import math
 import json
+import hashlib
 import argparse
 from pathlib import Path
 
@@ -33,12 +45,13 @@ from .engine import run_spec
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
                     bootstrap_paths, harvey_liu_haircut)
 from .cluster import effective_trials
-from .pbo import cscv_pbo
+from .pbo import (cscv_pbo, distinct_configs, permutation_null,
+                   percentile_of)
 from .plateau import annualized_sharpe, select_survivor, qualifies
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
 
-PROTOCOL = "gauntlet-protocol-v4"
+PROTOCOL = "gauntlet-protocol-v5"
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
@@ -59,8 +72,17 @@ DEFAULT_CUTOFF = "2023-12-31"
 # so the two pipelines read identically, and it will bite if the screen is ever
 # loosened.
 SR_FLOOR = 0.4
-PBO_PASS = 0.20      # < this passes
-PBO_KILL = 0.50      # > this kills the whole sibling group
+# protocol-v5 withdraws v4's fixed 0.20 / 0.50 lines. They presupposed that a
+# family with no persistent skill differences scores about 0.5, which is false
+# in this implementation at small odd family sizes and only approximate
+# anywhere. The observed PBO is now tested against a null computed for THAT
+# family by permutation, so the reference is calibrated to its size, parity,
+# sibling correlation and series length instead of assumed. Evidence: registry
+# entry 2511. Argument: entry 2512.
+PBO_MIN_DISTINCT = 4     # below this the gate cannot see; it FAILS, never passes
+PBO_PASS_PCTILE = 0.05   # <= this percentile of its own null passes
+PBO_KILL_PCTILE = 0.95   # >= this kills the whole sibling group
+PBO_NULL_DRAWS = 200
 CSCV_SPLITS = 16
 PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 
@@ -70,7 +92,7 @@ PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 # longer ranks siblings either; neighbourhood floor does. Adding it back here
 # is a protocol change and needs its own pre-declared chained note.
 FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
-              "p_ruin", "cost_stress", "pbo", "plateau")
+              "p_ruin", "cost_stress", "pbo_underpowered", "pbo", "plateau")
 
 
 def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
@@ -113,7 +135,7 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
                   trials_n: int, trials_sr_var: float, seed: int,
                   group_n: int | None = None, registered_n: int | None = None,
                   train_sharpe: float | None = None,
-                  pbo_value: float | None = None,
+                  pbo_status: dict | None = None,
                   plateau_ok: bool | None = None):
     """Run the robustness gates in FAIL_ORDER. Returns
     (passed, fail_reason|None, metrics, mc_summary).
@@ -179,11 +201,19 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         "oos_edge_raw": oos_raw,
         "is_vol": is_vol,
         "oos_vol": oos_vol,
-        # protocol-v4: the train-window annualized Sharpe the floor gate read,
-        # and the sibling group's CSCV overfitting probability. Both are None
-        # when the caller did not supply them.
+        # protocol-v4: the train-window annualized Sharpe the floor gate read.
+        # protocol-v5: the sibling group's CSCV result is now a STATUS, not a
+        # bare number -- the observed value alone cannot be read without the
+        # null it was judged against, and a chained verdict must not require a
+        # reader to recompute one. Both are None when the caller did not
+        # supply them.
         "train_sharpe": train_sharpe,
-        "pbo": pbo_value,
+        "pbo": (pbo_status or {}).get("pbo"),
+        "pbo_n_distinct": (pbo_status or {}).get("n_distinct"),
+        "pbo_percentile": (pbo_status or {}).get("percentile"),
+        "pbo_null_p05": (pbo_status or {}).get("null_p05"),
+        "pbo_null_p95": (pbo_status or {}).get("null_p95"),
+        "pbo_null_draws": (pbo_status or {}).get("null_draws"),
     }
     mc_summary = {"seed": seed, "paths": MC_PATHS,
                   "p05": mc_p05,
@@ -205,7 +235,18 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
               "mc_p05": mc_p05 > MC_P05_MIN,
               "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
               "cost_stress": stress_net > 0,
-              "pbo": pbo_value is None or pbo_value < PBO_PASS,
+              # protocol-v5. Underpowered runs FIRST and fails closed: a
+              # family with too few distinct configurations is one the gate
+              # cannot see into, and v4's own plateau rule already settled
+              # that a gate passing on the absence of evidence is not a gate.
+              # The pass test then runs the other way round from v4's: a
+              # family must LAND at or below the 5th percentile of its own
+              # null to pass, rather than pass by not being convicted. Under
+              # v4 a gate with no power passed everything; under v5 it passes
+              # nothing.
+              "pbo_underpowered": (pbo_status is None
+                                   or pbo_status.get("verdict") != "underpowered"),
+              "pbo": pbo_status is None or pbo_status.get("member_pass", False),
               "plateau": plateau_ok is not False}
     assert checks.keys() == set(FAIL_ORDER), (
         f"gate battery and FAIL_ORDER disagree: "
@@ -313,6 +354,9 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--artifacts-dir", type=Path,
                     default=Path(__file__).resolve().parent.parent / "artifacts")
     ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
+    # protocol-v5's per-family null. Exposed so tests can run a cheap one;
+    # a real run uses the declared 200 and the verdict records what it used.
+    ap.add_argument("--pbo-null-draws", type=int, default=PBO_NULL_DRAWS)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -442,22 +486,72 @@ def run(argv: list[str] | None = None) -> int:
             s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
 
     # PBO over the TRAIN window only — the 2024+ holdout has been consumed
-    # three times already and protocol-v4 does not consume it a fourth. The
+    # three times already and protocol-v5 does not consume it a fourth. The
     # matrix includes EVERY sibling, screen deaths included; computing it over
     # passers only would filter on performance and understate overfitting.
+    #
+    # protocol-v5 judges the observed value against a null built for THAT
+    # family rather than against a fixed line, and refuses to judge a family
+    # with too few DISTINCT configurations at all.
     pbo_by_group = {}
     for g, fam in family_by_group.items():
         series = {s["sid"]: daily_returns_from_curve(train_curve(s["sid"]))
                   for s in fam}
-        pbo_by_group[g] = cscv_pbo(series, s=CSCV_SPLITS)
-        v = pbo_by_group[g]["pbo"]
+        res = cscv_pbo(series, s=CSCV_SPLITS)
+        n_distinct = distinct_configs(series)
+        res["n_distinct"] = n_distinct
+        res["null_draws"] = 0
+        res["percentile"] = res["null_p05"] = res["null_p95"] = None
+        res["member_pass"] = False        # fail closed until measured
+        if res["pbo"] is None:
+            res["verdict"] = "underpowered"
+        elif n_distinct < PBO_MIN_DISTINCT:
+            # Not a lenient default: the swept axis did not bind, so there is
+            # nothing to select among and no null worth building.
+            res["verdict"] = "underpowered"
+        else:
+            # Seeded off the group id so a rerun of the same chain reproduces
+            # the same null exactly, the way every other stochastic step here
+            # is seeded off content rather than off the clock.
+            null = permutation_null(
+                series, s=CSCV_SPLITS, draws=args.pbo_null_draws,
+                seed=int(hashlib.sha256(g.encode()).hexdigest()[:8], 16))
+            res["null_draws"] = len(null)
+            if not null:                      # every draw was uncomputable
+                res["verdict"] = "underpowered"
+                pbo_by_group[g] = res
+                print(f"  PBO {g}: null was uncomputable -> underpowered")
+                continue
+            res["percentile"] = percentile_of(null, res["pbo"])
+            res["null_p05"] = percentile(sorted(null), PBO_PASS_PCTILE)
+            res["null_p95"] = percentile(sorted(null), PBO_KILL_PCTILE)
+            # The MEMBER-level test and the GROUP kill are kept separate,
+            # exactly as they were under v4's two thresholds. Collapsing them
+            # would make 'pbo_family_kill' unreachable as a reason and bury the
+            # distinction between a member that failed on its own standing and
+            # one that had nothing wrong and died with its family -- in an
+            # append-only chain, permanently.
+            res["member_pass"] = res["percentile"] <= PBO_PASS_PCTILE
+            if res["percentile"] >= PBO_KILL_PCTILE:
+                res["verdict"] = "kill"
+            elif res["member_pass"]:
+                res["verdict"] = "pass"
+            else:
+                res["verdict"] = "fail"
+        pbo_by_group[g] = res
+        v, pct = res["pbo"], res["percentile"]
         print(f"  PBO {g}: "
-              f"{'n/a — ' + pbo_by_group[g]['reason'] if v is None else f'{v:.3f}'}"
-              f"  ({pbo_by_group[g]['n_configs']} configs)")
+              f"{'n/a - ' + str(res['reason']) if v is None else f'{v:.3f}'}"
+              f"  ({res['n_configs']} configs, {n_distinct} distinct)"
+              + ("" if pct is None else
+                 f"  pctile={pct:.0%} of {res['null_draws']} draws")
+              + f"  -> {res['verdict']}")
     killed_groups = {g for g, r in pbo_by_group.items()
-                     if r["pbo"] is not None and r["pbo"] > PBO_KILL}
+                     if r["verdict"] == "kill"}
     for g in sorted(killed_groups):
-        print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f} > {PBO_KILL}")
+        print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f}, "
+              f"the {pbo_by_group[g]['percentile']:.0%} percentile of its own "
+              f"no-skill null (kill at {PBO_KILL_PCTILE:.0%})")
 
     rows, payloads = [], []
     for s in candidates:
@@ -480,7 +574,7 @@ def run(argv: list[str] | None = None) -> int:
             trials_n, trials_var, seed=int(sid, 16) % (2 ** 31),
             group_n=group_n[g], registered_n=registered_n,
             train_sharpe=train_sharpe[sid],
-            pbo_value=pbo_by_group[g]["pbo"],
+            pbo_status=pbo_by_group[g],
             plateau_ok=ok_plateau)
         # A PBO family kill is recorded on EVERY member of the group, but it
         # only becomes the fail REASON for a strategy that had nothing else

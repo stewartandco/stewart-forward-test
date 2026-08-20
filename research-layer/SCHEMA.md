@@ -191,7 +191,7 @@ Design notes:
 |---|---|---|
 | `proposed` | Spec registered; no results | automatic → screened when compute is scheduled |
 | `screened` | Fast single pass over training data | net P&L > 0 after costs; ≥ 100 trades; else graveyard. Cheap-first: nothing else runs until this passes |
-| `gauntlet` | Full validation battery | ALL of, in this order (protocol-v4; see amendments below): (a) **train-window Sharpe floor** — annualized Sharpe on the pre-cutoff equity curve ≥ 0.4; (b) OOS walk-forward net positive; (c) **edge decay > −25%** (per-trade edge OOS vs IS); (d) Monte Carlo 2000 resamples, P05 equity > 0; (e) P(ruin @ risk budget) < 5%; (f) costs at 2× assumed slippage still net positive; (g) **CSCV/PBO** — probability of backtest overfitting across the sibling group < 0.20, with > 0.50 killing the whole group regardless of any individual member's other results; (h) **plateau/neighbourhood gate** — the candidate and every one of its one-step neighbours on every swept axis must sit on the sibling group's performance plateau (replaces point-winner sibling selection). *Historical: the pre-v3 table listed a fifth criterion, deflated Sharpe (Bailey & López de Prado) > 0 given sibling_group size, at this gate — amended by protocol-v3: that test moved to the `quarantine → live` gate and has not gated here since. protocol-v3 also ranked survivors by deflated Sharpe; protocol-v4 replaces that ranking with the neighbourhood-floor plateau selection in (h).* |
+| `gauntlet` | Full validation battery | ALL of, in this order (protocol-v4; see amendments below): (a) **train-window Sharpe floor** — annualized Sharpe on the pre-cutoff equity curve ≥ 0.4; (b) OOS walk-forward net positive; (c) **edge decay > −25%** (per-trade edge OOS vs IS); (d) Monte Carlo 2000 resamples, P05 equity > 0; (e) P(ruin @ risk budget) < 5%; (f) costs at 2× assumed slippage still net positive; (g) **CSCV/PBO** — probability of backtest overfitting across the sibling group < 0.20, with > 0.50 killing the whole group regardless of any individual member's other results *(both fixed lines WITHDRAWN by protocol-v5, which tests the observed value against the family's own permutation null and fails closed below four distinct configurations — see the v5 amendment below)*; (h) **plateau/neighbourhood gate** — the candidate and every one of its one-step neighbours on every swept axis must sit on the sibling group's performance plateau (replaces point-winner sibling selection). *Historical: the pre-v3 table listed a fifth criterion, deflated Sharpe (Bailey & López de Prado) > 0 given sibling_group size, at this gate — amended by protocol-v3: that test moved to the `quarantine → live` gate and has not gated here since. protocol-v3 also ranked survivors by deflated Sharpe; protocol-v4 replaces that ranking with the neighbourhood-floor plateau selection in (h).* |
 | `quarantine` | Paper-traded; decisions posted daily to the forward-test log like any production system | ≥ 60 trading days AND realized edge within Monte Carlo P25–P75 cone of the gauntlet projection — *amended by protocol-v3 below: the cone criterion is not applied at this gate* |
 | `live` | Trading real capital | ongoing: rolling 90-day edge must stay above P05 cone, else auto-retire to graveyard with `reason: live_decay` |
 | `retired` | Deliberately shut down while healthy | terminal |
@@ -257,6 +257,34 @@ chained family sweeps a dense axis yet. Design record:
 protocol-v3's own changes and is superseded by the v4 note for anything
 protocol-v4 amends.
 
+**Amendment, protocol-v5 (`pipeline/gauntlet.py`, `pipeline/pbo.py`).** Amends
+**one** gate, (g), and leaves every other gate at v4's threshold and
+`FAIL_ORDER` position. v4's fixed lines assumed a no-skill null of about 0.5.
+That is false in this implementation at small **odd** family sizes: `pbo.py`
+scores a split overfit when `omega <= 0.5` (BBLdP's own convention) and at odd
+`n_configs` the median rank lands exactly on that boundary, making the
+uniform-rank null `(n+1)/2n` — **0.600 at five configs, above v4's own 0.50
+kill line**. Every one of the twelve sibling groups registered before
+generation 4 was even; every one of generation 4's six was exactly five. Three
+changes: (1) the boundary tie counts as a **half event** (`pbo.overfit_weight`),
+making the null exactly 0.5 at every size; (2) the gate counts **distinct**
+train-window curves rather than registered siblings and **fails closed** below
+four (`PBO_MIN_DISTINCT`, reason `pbo_underpowered`), because siblings with
+identical curves are one configuration seen twice and a low PBO there records
+only that a tiny difference was persistent; (3) `PBO_PASS`/`PBO_KILL` are
+**withdrawn** for a test against the family's own 200-draw permutation null —
+pass at or below the 5th percentile (`PBO_PASS_PCTILE`), family kill at or
+above the 95th (`PBO_KILL_PCTILE`). The burden is **reversed**: a family must
+demonstrate its selection generalises rather than pass by not being convicted,
+so a gate with no power now passes nothing instead of everything. The
+member-level test and the group kill stay separate, exactly as v4's two
+thresholds were, so `pbo_family_kill` never overwrites a member's own first
+failure. Unlike v4, v5 contains a **loosening** and carries the full ratchet
+burden: evidence chained at registry entry **2511**, argument at **2512**,
+both before any generation-5 specification exists. Applied to generation 4 it
+also returns zero survivors. `diagnose_protocol_v4.py` keeps v4's withdrawn
+thresholds locally, so it still reports what **v4** would have done.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -293,7 +321,7 @@ Common envelope:
 `verdict.metrics` minimums per stage:
 
 - `screened`: `{trades, net_pnl, win_rate, max_dd}`
-- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}` — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
+- `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}`, plus protocol-v5: `{pbo_n_distinct, pbo_percentile, pbo_null_p05, pbo_null_p95, pbo_null_draws}` — an observed PBO cannot be read without the null it was judged against, so the verdict carries the null with it rather than forcing a later reader to recompute one — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
 - `quarantine` (graduation review): `{days, trades, realized_edge_per_trade, projection_percentile}`
 
 A `quarantine_decision` records what a paper-traded strategy's book DID on that

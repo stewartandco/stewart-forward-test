@@ -52,7 +52,16 @@ from pipeline.pbo import cscv_pbo
 from pipeline.plateau import annualized_sharpe, qualifies
 from pipeline.composer import SWEEPABLE_TYPES
 from pipeline.blocks import BLOCK_TYPES
-from pipeline.gauntlet import SR_FLOOR, PBO_PASS, PBO_KILL, CSCV_SPLITS
+from pipeline.gauntlet import SR_FLOOR, CSCV_SPLITS
+
+# protocol-v4's PBO thresholds, held LOCALLY. They were withdrawn from
+# pipeline.gauntlet by protocol-v5, which replaced the fixed lines with a test
+# against each family's own permutation null (evidence at registry entry 2511,
+# argument at 2512). This script reports what V4 would have done and must keep
+# reporting exactly that, so it carries v4's numbers rather than following the
+# live module wherever the protocol goes next.
+PBO_PASS = 0.20
+PBO_KILL = 0.50
 
 PROTOCOL = "gauntlet-protocol-v4"
 

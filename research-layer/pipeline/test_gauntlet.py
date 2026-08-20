@@ -159,7 +159,7 @@ def test_screen_trades_csv_bytes_are_format_stable(tmp_path):
 
 from .gauntlet import (split_trades, contributions, compound, evaluate_spec,
                        DSR_MIN, DECAY_MIN_PCT, MC_P05_MIN, P_RUIN_MAX,
-                       SR_FLOOR, PBO_PASS, PBO_KILL, PURGE_BARS)
+                       SR_FLOOR, PURGE_BARS)
 
 
 def trade(entry_date, ret, frac=0.2):
@@ -203,7 +203,11 @@ def test_all_gates_pass():
                             "cost_stress_net_pnl", "trials_n", "registered_n",
                             "trials_sr_var", "expected_max_sharpe", "protocol",
                             "is_edge_raw", "oos_edge_raw", "is_vol", "oos_vol",
-                            "train_sharpe", "pbo"}
+                            "train_sharpe", "pbo",
+                            # protocol-v5 records the null alongside the
+                            # observed value; see test_gen5.py
+                            "pbo_n_distinct", "pbo_percentile",
+                            "pbo_null_p05", "pbo_null_p95", "pbo_null_draws"}
     assert metrics["sibling_group_n"] == 4
 
 
@@ -265,7 +269,8 @@ import subprocess
 import sys
 
 from .registry import Registry
-from .gauntlet import run as gauntlet_run, select_survivors
+from .gauntlet import (run as gauntlet_run, select_survivors,
+                       PROTOCOL as G_PROTOCOL)
 from .plateau import qualifies
 from .test_screen import (screening_registry, chain_protocol_note,
                           write_data_dir, dated_target_hit_bars)
@@ -293,7 +298,7 @@ def gauntlet_registry(tmp_path):
 
 
 def chain_gauntlet_note(reg):
-    reg.append("note", {"text": "gauntlet-protocol-v4: test anchor"})
+    reg.append("note", {"text": f"{G_PROTOCOL}: test anchor"})
 
 
 # ---------------- selection ----------------
@@ -584,18 +589,33 @@ def v4_sweep_registry(tmp_path):
     return reg, {lb: s["strategy_id"] for lb, s in zip(V4_LOOKBACKS, specs)}
 
 
-def test_protocol_v4_end_to_end_sweep(tmp_path, capsys):
+def test_protocol_v4_end_to_end_sweep(tmp_path, capsys, monkeypatch):
+    """End-to-end proof of the PLATEAU gate, which is what this fixture is for.
+
+    protocol-v5's minimum on DISTINCT configurations is relaxed here on
+    purpose. This family's whole design is that lookbacks 20, 35 and 55 post
+    byte-identical trades, so it has two distinct configurations and v5
+    correctly refuses to judge it on PBO -- see
+    test_gen5.py::test_v5_refuses_the_family_whose_swept_axis_did_not_bind,
+    which asserts exactly that against the same fixture at the real minimum.
+    Relaxing it here keeps the plateau path under end-to-end test rather than
+    letting an earlier gate short-circuit the thing being tested.
+    """
+    from . import gauntlet as gauntlet_mod
+    monkeypatch.setattr(gauntlet_mod, "PBO_MIN_DISTINCT", 2)
+
     reg, by_lb = v4_sweep_registry(tmp_path)
     data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
     art = tmp_path / "art"
     rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF])
+                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF,
+                       "--pbo-null-draws", "8"])
     assert rc == 0
     out = capsys.readouterr().out
 
     # 1. the PBO line prints, for the real group, over all five siblings
     assert "PBO v4_sweep-t:" in out
-    assert "(5 configs)" in out
+    assert "(5 configs, 2 distinct)" in out
     assert "PBO FAMILY KILL" not in out
 
     # 2. a plateau reason reaches a sibling that cleared every earlier gate
@@ -638,11 +658,16 @@ def test_protocol_v4_end_to_end_sweep(tmp_path, capsys):
             == verdicts[by_lb[35]]["metrics"]["deflated_sharpe"]
             == verdicts[by_lb[55]]["metrics"]["deflated_sharpe"])
 
-    # the recorded verdict carries the v4 numbers, gating and corroborating
+    # the recorded verdict carries the gating and corroborating numbers
     m = verdicts[by_lb[35]]["metrics"]
-    assert m["protocol"] == "gauntlet-protocol-v4"
+    assert m["protocol"] == G_PROTOCOL
     assert m["train_sharpe"] > SR_FLOOR
-    assert 0.0 <= m["pbo"] < PBO_PASS
+    # protocol-v5 records the observed value AND the null it was judged
+    # against, because the number alone cannot be read without one.
+    assert 0.0 <= m["pbo"] <= 1.0
+    assert m["pbo_n_distinct"] == 2
+    assert 0.0 <= m["pbo_percentile"] <= 1.0
+    assert m["pbo_null_draws"] == 8
     assert set(m["walkforward"]) >= {"folds", "folds_positive", "majority_pass",
                                      "catastrophic", "purge_bars"}
     assert m["walkforward"]["purge_bars"] == PURGE_BARS
@@ -669,19 +694,32 @@ def test_pbo_family_kill_never_buries_a_strategys_own_first_failure(
 
     Six gates run before 'pbo' in FAIL_ORDER, so a member that was already
     independently broken has a more specific reason than the family kill. This
-    fixture's real PBO is ~0.0, so the threshold is dropped to force the kill
-    on a family whose members otherwise fail — and pass — for their own
+    fixture's real PBO is ~0.0, which sits at the BOTTOM of its own null, so
+    under protocol-v5 the kill PERCENTILE is dropped to force the kill on a
+    family whose members otherwise fail — and pass — for their own
     distinct reasons. Overwriting `reason` unconditionally would record all
     five as 'pbo_family_kill' in an append-only chain, permanently.
+
+    PBO_MIN_DISTINCT is relaxed for the same reason as the sweep test above:
+    this family has two distinct configurations by construction, so v5 would
+    otherwise refuse to judge it at all and short-circuit the family-kill path
+    this test covers.
     """
     from . import gauntlet as gauntlet_mod
-    monkeypatch.setattr(gauntlet_mod, "PBO_KILL", -1.0)
+    monkeypatch.setattr(gauntlet_mod, "PBO_MIN_DISTINCT", 2)
+    # Force the exact configuration this test exists to cover: the family is
+    # killed while every member still clears its OWN pbo test. Both bounds are
+    # pinned rather than relying on where an 8-draw percentile happens to
+    # land, which varies with the fixture's card timestamp and would make the
+    # recorded REASON flap between 'pbo' and 'pbo_family_kill'.
+    monkeypatch.setattr(gauntlet_mod, "PBO_KILL_PCTILE", -1.0)
+    monkeypatch.setattr(gauntlet_mod, "PBO_PASS_PCTILE", 1.0)
 
     reg, by_lb = v4_sweep_registry(tmp_path)
     data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
     rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
                        "--artifacts-dir", str(tmp_path / "art"),
-                       "--cutoff", V4_CUTOFF])
+                       "--cutoff", V4_CUTOFF, "--pbo-null-draws", "8"])
     assert rc == 0
     assert "PBO FAMILY KILL: v4_sweep-t" in capsys.readouterr().out
 
