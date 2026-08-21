@@ -206,3 +206,145 @@ def _is_hex(s: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# The runner. Everything above is pure; everything below touches the chain, and
+# only ever behind the same refusal guard and --dry-run discipline the screen
+# and the gauntlet use.
+# ---------------------------------------------------------------------------
+
+PROTOCOL = "quarantine-live-protocol-v1"
+
+
+def quarantined_specs(registry) -> dict[str, dict]:
+    """{sid: spec} for every strategy currently in the quarantine state."""
+    specs, state = {}, {}
+    for e in registry.entries():
+        p = e.get("payload", {})
+        if not isinstance(p, dict):
+            continue
+        if e["entry_type"] == "strategy_registered":
+            specs[p["strategy_id"]] = p
+        elif e["entry_type"] == "state_change" and p.get("strategy_id"):
+            state[p["strategy_id"]] = p.get("to")
+    return {s: specs[s] for s, st in state.items()
+            if st == "quarantine" and s in specs}
+
+
+def quarantine_rows(registry) -> dict[str, list[dict]]:
+    rows: dict[str, list[dict]] = defaultdict(list)
+    for e in registry.entries():
+        if e["entry_type"] == "quarantine_decision":
+            rows[e["payload"]["strategy_id"]].append(e["payload"])
+    return rows
+
+
+def train_contributions(spec: dict, data_dir, cutoff: str) -> list[float]:
+    """Per-trade portfolio contributions over the TRAIN window.
+
+    Recomputed by re-running the spec rather than read from the screen's
+    trades.csv, which deliberately omits notional_frac -- its byte format is
+    pinned by a regression test -- so the contributions the cone needs are not
+    recoverable from the artifact. The spec is content-addressed and the bars
+    are hashed on the chain, so the re-run is reproducible.
+    """
+    from .screen import load_bars
+    from .engine import run_spec
+    from .gauntlet import contributions
+    universe = spec["universe"]
+    tf = universe.get("timeframe", "1d")
+    bars = {a: load_bars(data_dir, a, cutoff, timeframe=tf)
+            for a in universe["assets"]}
+    res = run_spec(spec, bars)
+    return contributions([t for t in res["trades"] if t["entry_date"] <= cutoff])
+
+
+def run(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+    from pathlib import Path
+    from .registry import Registry
+    from .quarantine import MIN_TRADING_DAYS
+
+    here = Path(__file__).resolve().parent.parent
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--registry", type=Path, default=here / "registry_log.jsonl")
+    ap.add_argument("--data-dir", type=Path, default=here / "data")
+    ap.add_argument("--cutoff", default="2023-12-31")
+    ap.add_argument("--min-days", type=int, default=MIN_TRADING_DAYS)
+    ap.add_argument("--q", type=float, default=BH_Q)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+
+    registry = Registry(args.registry)
+    if not args.dry_run and not any(
+            e["entry_type"] == "note"
+            and str(e["payload"].get("text", "")).startswith(PROTOCOL)
+            for e in registry.entries()):
+        print(f"REFUSED: no '{PROTOCOL}' note on the chain. Chain the gate "
+              f"before it may move a single strategy.")
+        return 1
+
+    specs = quarantined_specs(registry)
+    rows = quarantine_rows(registry)
+    if not specs:
+        print("no strategies in quarantine; nothing to assess")
+        return 0
+
+    cases = [{"sid": sid,
+              "rows": rows.get(sid, []),
+              "train_contributions": train_contributions(spec, args.data_dir,
+                                                         args.cutoff)}
+             for sid, spec in sorted(specs.items())]
+    report = assess(cases, min_days=args.min_days, q=args.q)
+
+    for sid in sorted(report):
+        r = report[sid]
+        cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
+        print(f"{sid}  days={r['forward_days']:>4} trades={r['forward_trades']:>3} "
+              f"terminal={r['terminal']:.4f} cone_p01={cone:>7} "
+              f"psr={r['psr']:.4f}  -> {r['verdict'].upper()}"
+              + ("" if r["eligible"] else "  (not yet eligible)"))
+
+    n_live = sum(1 for r in report.values() if r["verdict"] == "live")
+    n_dead = sum(1 for r in report.values() if r["verdict"] == "graveyard")
+    if args.dry_run:
+        print(f"\nDRY RUN - {len(report)} assessed, {n_live} would go live, "
+              f"{n_dead} would be buried; nothing written.")
+        return 0
+
+    written = 0
+    try:
+        for sid in sorted(report):
+            r = report[sid]
+            if r["verdict"] == "hold":
+                continue
+            registry.record_verdict(
+                sid, "live_gate", "pass" if r["verdict"] == "live" else "fail",
+                {k: r[k] for k in ("forward_days", "forward_trades", "terminal",
+                                   "cone_p01", "psr", "eligible")}
+                | {"protocol": PROTOCOL, "cohort_size": r.get("cohort_size")},
+                "0" * 64)
+            written += 1
+        for sid in sorted(report):
+            r = report[sid]
+            if r["verdict"] == "live":
+                registry.record_state_change(sid, "live", f"{PROTOCOL} pass")
+                written += 1
+            elif r["verdict"] == "graveyard":
+                registry.record_state_change(
+                    sid, "graveyard", "forward record below the rebuilt cone")
+                written += 1
+    except BaseException:
+        print(f"\nPARTIAL WRITE: {written} entries chained before failure.",
+              file=sys.stderr)
+        raise
+
+    print(f"\n{len(report)} assessed: {n_live} -> live, {n_dead} -> graveyard.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(run())

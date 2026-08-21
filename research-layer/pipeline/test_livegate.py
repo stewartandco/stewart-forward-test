@@ -271,3 +271,61 @@ def test_a_buried_strategy_is_excluded_from_the_cohort_that_sets_the_bar():
     assert out["d"]["verdict"] == "graveyard"
     assert out["g"]["cohort_size"] == 1
     assert out["g"]["verdict"] == "live"
+
+
+# ---------------- the runner ----------------
+
+from pathlib import Path
+from .livegate import run as livegate_run, PROTOCOL, quarantined_specs, quarantine_rows
+from .registry import Registry
+
+
+def test_the_runner_refuses_a_real_run_without_the_chained_note(tmp_path, capsys):
+    """Same guard the screen and gauntlet use. A gate that can bury or promote
+    must not run before the standard it applies is on the chain."""
+    reg = Registry(tmp_path / "reg.jsonl")
+    rc = livegate_run(["--registry", str(reg.log_path), "--data-dir", str(tmp_path)])
+    assert rc == 1
+    assert f"REFUSED: no '{PROTOCOL}'" in capsys.readouterr().out
+
+
+def test_a_dry_run_needs_no_note_and_writes_nothing(tmp_path, capsys):
+    reg = Registry(tmp_path / "reg.jsonl")
+    before = Path(reg.log_path).read_bytes() if Path(reg.log_path).exists() else b""
+    rc = livegate_run(["--registry", str(reg.log_path), "--data-dir", str(tmp_path),
+                       "--dry-run"])
+    after = Path(reg.log_path).read_bytes() if Path(reg.log_path).exists() else b""
+    assert rc == 0
+    assert before == after
+    assert "nothing to assess" in capsys.readouterr().out
+
+
+def test_quarantined_specs_and_rows_read_the_live_chain():
+    """Reads the REAL chain: the three in quarantine must be found with their
+    daily rows, or the runner would silently assess an empty cohort."""
+    reg = Registry(Path(__file__).resolve().parent.parent / "registry_log.jsonl")
+    specs = quarantined_specs(reg)
+    rows = quarantine_rows(reg)
+    assert len(specs) == 3
+    for sid in specs:
+        assert rows[sid], f"{sid} has no quarantine_decision rows"
+        assert specs[sid]["universe"]["assets"] == ["BTCUSD", "ETHUSD"]
+
+
+def test_the_live_chain_dry_run_holds_everything_and_writes_nothing(tmp_path, capsys):
+    """End to end against the real chain and real data. Nothing is eligible
+    yet -- the three entered on 2026-08-17 and 60 days accrue on 2026-10-17 --
+    so every verdict must be hold, and the chain must be byte-identical after.
+    """
+    import hashlib
+    root = Path(__file__).resolve().parent.parent
+    log = root / "registry_log.jsonl"
+    before = hashlib.sha256(log.read_bytes()).hexdigest()
+    rc = livegate_run(["--registry", str(log), "--data-dir", str(root / "data"),
+                       "--dry-run"])
+    after = hashlib.sha256(log.read_bytes()).hexdigest()
+    assert rc == 0
+    assert before == after, "the live gate mutated registry_log.jsonl"
+    out = capsys.readouterr().out
+    assert "0 would go live, 0 would be buried" in out
+    assert "not yet eligible" in out
