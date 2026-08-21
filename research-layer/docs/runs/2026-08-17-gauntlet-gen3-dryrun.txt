@@ -1,0 +1,15 @@
+effective trials: 4 clusters over 80 registered strategies
+9b6753a48c4d0ccd  PASS oos_edge=+0.03931  decay=+34.1%  p05=4.351  ruin=0.000  [info dsr=0.940]  stress=+0.7340
+876dc462f1d6e442  PASS oos_edge=+0.02263  decay=+12.8%  p05=2.481  ruin=0.000  [info dsr=0.901]  stress=+0.3757
+7a146aebe202bd0c  PASS oos_edge=+0.02707  decay=-5.5%  p05=2.144  ruin=0.000  [info dsr=0.708]  stress=+0.3500
+9593dc8a09a625b3  PASS oos_edge=+0.01882  decay=-8.9%  p05=1.703  ruin=0.000  [info dsr=0.708]  stress=+0.2238
+75773b65e7ce1834  PASS oos_edge=+0.06110  decay=+43.4%  p05=7.623  ruin=0.000  [info dsr=0.933]  stress=+1.2890
+ad654fd8097717bd  PASS oos_edge=+0.12207  decay=+48.8%  p05=28.578  ruin=0.004  [info dsr=0.946]  stress=+3.6751
+08b2b899076c2b7d  PASS oos_edge=+0.04357  decay=+6.3%  p05=2.724  ruin=0.000  [info dsr=0.665]  stress=+0.5971
+ecd8c854495dc869  PASS oos_edge=+0.08707  decay=+8.7%  p05=4.577  ruin=0.009  [info dsr=0.667]  stress=+1.3524
+ef7712f41e2188e2  PASS oos_edge=+0.01020  decay=+6.3%  p05=2.115  ruin=0.000  [info dsr=0.692]  stress=+0.4349
+0a872bb0b01ac435  fail oos_edge=+0.00565  decay=-66.9%  p05=1.969  ruin=0.000  [info dsr=0.679]  stress=+0.1234  [edge_decay]
+76043263fde44531  PASS oos_edge=+0.00757  decay=+9.0%  p05=1.459  ruin=0.000  [info dsr=0.400]  stress=+0.2779
+9cc49ddd9b6a569f  fail oos_edge=+0.00745  decay=-34.5%  p05=1.426  ruin=0.000  [info dsr=0.427]  stress=+0.1747  [edge_decay]
+
+DRY RUN — 12 evaluated, 10 pass; 3 would quarantine, 7 sibling_not_selected, 2 gate-fail; nothing written.
