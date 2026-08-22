@@ -301,15 +301,49 @@ def test_a_dry_run_needs_no_note_and_writes_nothing(tmp_path, capsys):
 
 
 def test_quarantined_specs_and_rows_read_the_live_chain():
-    """Reads the REAL chain: the three in quarantine must be found with their
-    daily rows, or the runner would silently assess an empty cohort."""
-    reg = Registry(Path(__file__).resolve().parent.parent / "registry_log.jsonl")
+    """Reads the REAL chain: the runner must find every quarantined strategy
+    with a well-formed spec, or it would silently assess a partial cohort.
+
+    The count is DERIVED from the chain rather than pinned. An earlier version
+    asserted exactly three and broke the moment generation 5 promoted
+    seventeen more -- the same defect as the hard-coded 80 in
+    test_gen4.py::test_all_80_existing_fingerprints_unchanged, which broke when
+    generation 4 took the registry to 110. A test that pins a live-chain
+    quantity fails on every future generation for a reason that has nothing to
+    do with what it was written to guard.
+
+    Daily rows are NOT required of every member: a strategy promoted since the
+    last daily run has none yet, which is a fact about the calendar rather than
+    about the loader.
+    """
+    import json as _json
+    log = Path(__file__).resolve().parent.parent / "registry_log.jsonl"
+    reg = Registry(log)
+
+    expected, seen_rows = {}, set()
+    for line in log.open(encoding="utf-8"):
+        e = _json.loads(line)
+        p = e.get("payload", {})
+        if not isinstance(p, dict):
+            continue
+        if e["entry_type"] == "state_change" and p.get("strategy_id"):
+            expected[p["strategy_id"]] = p.get("to")
+        elif e["entry_type"] == "quarantine_decision":
+            seen_rows.add(p["strategy_id"])
+    want = {s for s, st in expected.items() if st == "quarantine"}
+
     specs = quarantined_specs(reg)
     rows = quarantine_rows(reg)
-    assert len(specs) == 3
-    for sid in specs:
-        assert rows[sid], f"{sid} has no quarantine_decision rows"
-        assert specs[sid]["universe"]["assets"] == ["BTCUSD", "ETHUSD"]
+    assert set(specs) == want, "the runner's cohort disagrees with the chain"
+    assert want, "no strategy is in quarantine; this test would prove nothing"
+    for sid, spec in specs.items():
+        assert spec["universe"]["assets"], f"{sid} has no universe"
+        assert spec["strategy_id"] == sid
+    # the row loader works for at least the members that have been observed
+    observed = want & seen_rows
+    assert observed, "no quarantined strategy has any daily row"
+    for sid in observed:
+        assert rows[sid] and all(r["strategy_id"] == sid for r in rows[sid])
 
 
 def test_the_live_chain_dry_run_holds_everything_and_writes_nothing(tmp_path, capsys):
