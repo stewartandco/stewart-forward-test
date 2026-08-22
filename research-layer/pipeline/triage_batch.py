@@ -26,9 +26,8 @@ from .registry import Registry
 from .triage import apply_decisions
 
 REVIEWER = "auto-d31"
-# D33 gave the pipeline USD 20 of the D28 Intelligence band; D36 makes it
-# enforceable by scoping the meter to this agent's own attributed rows.
-PIPELINE_CAP_USD = 20.0
+# D33's pipeline cap, shared with the Composer -- see pipeline/budget.py.
+from .budget import PIPELINE_CAP_USD
 PANEL_SIZE = 3
 
 _NOISE = re.compile(r"[^a-z0-9 ]+")

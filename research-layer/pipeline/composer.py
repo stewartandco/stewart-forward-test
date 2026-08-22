@@ -496,10 +496,35 @@ def preflight_block_types(registry: Registry) -> list[str]:
     ]
 
 
-def propose_families(model: str, accepted: dict[str, dict],
-                     max_families: int) -> list[dict]:
+def _client_and_meter():
+    """Real client and budget meter. Split out so tests can stub it, and so
+    both the dry run and the real run go through the SAME metered path."""
     import anthropic
-    client = anthropic.Anthropic()
+    from pathlib import Path as _Path
+    from .budget import BudgetMeter, PIPELINE_CAP_USD
+    logs = _Path(__file__).resolve().parent.parent / "logs"
+    return anthropic.Anthropic(), BudgetMeter(
+        logs / "budget_ledger.jsonl", monthly_cap_usd=PIPELINE_CAP_USD,
+        agent="pipeline")
+
+
+def propose_families(model: str, accepted: dict[str, dict],
+                     max_families: int, client=None, meter=None) -> list[dict]:
+    """Propose idea families, recording the spend against the pipeline's cap.
+
+    Until 2026-08-22 this called anthropic directly with no record_call, so the
+    Composer was the one metered agent's unmetered mouth: D33's USD 20 cap
+    could not see it and could not bind it, and neither of generation 4's two
+    live calls left a ledger row. The cap is checked BEFORE the call, because a
+    cap that only notices after the money is gone is a report, not a cap.
+    """
+    if client is None or meter is None:
+        client, meter = _client_and_meter()
+    if not meter.can_spend():
+        raise SystemExit(
+            f"REFUSED: pipeline budget at cap "
+            f"({meter.month_spend():.2f} of {meter.monthly_cap_usd:.2f} USD "
+            f"this month). The Composer will not spend past D33's limit.")
     with client.messages.stream(
         model=model,
         max_tokens=32_000,
@@ -515,6 +540,10 @@ def propose_families(model: str, accepted: dict[str, dict],
         }],
     ) as stream:
         message = stream.get_final_message()
+    # Recorded whatever the outcome: a refusal still consumed tokens, and a
+    # row missing because the answer was unusable is exactly how the meter
+    # drifts from the bill.
+    meter.record_call(model, message.usage, "composer", agent="pipeline")
     if message.stop_reason == "refusal":
         print("  model refusal", file=sys.stderr)
         return []
@@ -598,6 +627,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
 
     if propose_fn is None:
         proposals = propose_families(args.model, accepted, args.max_families)
+        # NB the dry run reaches here too: it makes the same call and costs the
+        # same, so it is metered the same.
     else:
         proposals = propose_fn(accepted)
     if len(proposals) > args.max_families:

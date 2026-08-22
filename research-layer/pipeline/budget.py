@@ -52,6 +52,12 @@ PURPOSE_AGENT = {
 }
 UNATTRIBUTED = "unattributed"
 
+# D33 gave the pipeline agent USD 20 of the D28 Intelligence band, and D36 made
+# it enforceable by scoping a meter to that agent's own attributed rows. It
+# lives HERE rather than in one of the two agents that spend against it,
+# because two copies of a number that must agree will eventually disagree.
+PIPELINE_CAP_USD = 20.0
+
 
 def agent_of(row: dict) -> str:
     """The agent a row belongs to: its own field, else derived from purpose."""
