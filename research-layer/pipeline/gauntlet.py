@@ -30,7 +30,8 @@ registry entry 2511, the protocol at 2512.
 Usage:
     python -m pipeline.gauntlet [--registry registry_log.jsonl]
         [--data-dir data] [--artifacts-dir artifacts]
-        [--cutoff 2023-12-31] [--pbo-null-draws 200] [--dry-run]
+        [--cutoff 2023-12-31] [--pbo-null-draws 200] [--no-perturb]
+        [--dry-run]
 
 Real runs HARD-REFUSE unless a note starting with PROTOCOL is chained.
 Current gates and amendments per docs/2026-08-17-gate-standard-design.md,
@@ -61,6 +62,7 @@ from .pbo import (cscv_pbo, distinct_configs, permutation_null,
 # select_survivor is deliberately NOT imported: protocol-v6 retired
 # selection, and `qualifies` is kept only to RECORD the outcome.
 from .plateau import annualized_sharpe, qualifies
+from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
 
@@ -375,6 +377,10 @@ def run(argv: list[str] | None = None) -> int:
     # protocol-v5's per-family null. Exposed so tests can run a cheap one;
     # a real run uses the declared 200 and the verdict records what it used.
     ap.add_argument("--pbo-null-draws", type=int, default=PBO_NULL_DRAWS)
+    # Self-perturbation costs two extra backtests per dense axis per strategy.
+    # On by default because a metric nobody computes is a metric nobody has;
+    # off in the fixtures that do not exercise it.
+    ap.add_argument("--no-perturb", dest="perturb", action="store_false")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -619,6 +625,23 @@ def run(argv: list[str] | None = None) -> int:
                 [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
                 train_dates, n_folds=3, purge_bars=PURGE_BARS),
             window="train")
+        # protocol-v6 retired the plateau gate; this replaces the CONCERN it
+        # was built on -- a lone peak surrounded by cliffs -- in a form that is
+        # standalone. It nudges the strategy's OWN parameters one step along
+        # their own grids and re-runs IT, consulting no sibling and requiring
+        # no neighbouring grid point to have been registered. RECORDED, NOT
+        # GATED: nothing is known yet about what real strategies show here, and
+        # gating an unmeasured threshold is the mistake v4 and v5 both made.
+        if args.perturb:
+            def _perturbed_score(pspec):
+                r = run_spec(pspec, spec_bars)
+                return annualized_sharpe([(d, v) for d, v in r["equity"]
+                                          if d <= args.cutoff])
+            metrics["perturbation"] = sensitivity(
+                s, train_sharpe[sid], _perturbed_score, dense_only=True)
+        else:
+            metrics["perturbation"] = None
+
         btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
         # `buckets` is nested rather than flattened alongside `window`:
         # regime.BUCKETS is a closed vocabulary and the map's values are all

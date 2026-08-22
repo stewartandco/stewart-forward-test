@@ -135,3 +135,65 @@ def test_v6_end_to_end_promotes_the_whole_plateau(tmp_path, capsys):
     # buried for their OWN failure, never for a family's
     assert reasons[by_lb[75]] == "oos_negative"
     assert reasons[by_lb[100]] == "oos_negative"
+
+
+# ---------------- self-perturbation, recorded not gating ----------------
+
+def test_the_verdict_records_self_perturbation_sensitivity(tmp_path, capsys):
+    """Coen's decision of 2026-08-21, replacing the CONCERN the plateau gate
+    was built on with a standalone measurement: nudge the strategy's own
+    parameters and re-run IT. Recorded on every verdict, gating nothing."""
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    assert gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                         "--artifacts-dir", str(tmp_path / "art"),
+                         "--cutoff", V4_CUTOFF]) == 0
+    capsys.readouterr()
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+                for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+    pert = verdicts[by_lb[35]]["metrics"]["perturbation"]
+    assert pert["dense_only"] is True
+    assert pert["n_perturbations"] >= 1
+    for r in pert["results"]:
+        assert "_dense." in r["axis"]
+        assert r["direction"] in {"up", "down"}
+        assert r["from"] != r["to"]
+
+
+def test_perturbation_can_be_switched_off_and_says_so(tmp_path, capsys):
+    """It costs two extra backtests per dense axis; a fixture that does not
+    exercise it should be able to skip it without the verdict pretending the
+    measurement was taken and came back empty."""
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    assert gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                         "--artifacts-dir", str(tmp_path / "art"),
+                         "--cutoff", V4_CUTOFF, "--no-perturb"]) == 0
+    capsys.readouterr()
+    v = next(e["payload"] for e in reg.entries() if e["entry_type"] == "verdict"
+             and e["payload"].get("stage") == "gauntlet")
+    assert v["metrics"]["perturbation"] is None
+
+
+def test_perturbation_does_not_change_any_verdict(tmp_path, capsys):
+    """RECORDED, NOT GATED. The same chain judged with and without the
+    measurement must reach identical outcomes."""
+    import shutil
+    from .registry import Registry
+    source, by_lb = v4_sweep_registry(tmp_path)
+    outcomes = []
+    for i, extra in enumerate(([], ["--no-perturb"])):
+        d = tmp_path / f"run{i}"
+        d.mkdir()
+        log = d / "reg.jsonl"
+        shutil.copyfile(source.log_path, log)
+        data = write_data_dir(d, {"BTCUSD": v4_bars()})
+        assert gauntlet_run(["--registry", str(log), "--data-dir", str(data),
+                             "--artifacts-dir", str(d / "art"),
+                             "--cutoff", V4_CUTOFF] + extra) == 0
+        capsys.readouterr()
+        outcomes.append({e["payload"]["strategy_id"]: e["payload"]["to"]
+                         for e in Registry(log).entries()
+                         if e["entry_type"] == "state_change"})
+    assert outcomes[0] == outcomes[1]
