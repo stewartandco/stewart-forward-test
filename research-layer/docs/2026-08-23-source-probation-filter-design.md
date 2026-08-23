@@ -3,7 +3,7 @@
 **Status: design APPROVED by Coen 2026-08-23 in session (§1–§5 each approved). Governance: amends
 D27 in `stewartandco-agents/DECISIONS.md` (case 3) and retires the D26 approval write path; to be
 ratified there when this ships. Not built. BUILT 2026-08-24 on branch feat/source-probation
-(Tasks 1-12); first live pass pending merge.**
+(Tasks 1-12). MERGED + LIVE 2026-08-23 16:0x AWST (branch HEAD 69def3f fast-forwarded; scanner restarted, contract 1.8; Morpheus master c1dfbe9, hub restarted, sw mh-v12). FIRST PASS (cycle 1, 20 of 114): 1 admitted on probation (edgealchemy.robotwealth.com), 8 prefilter blocks, 11 source-screen blocks, 14 Sonnet calls USD 0.083; 97 proposals remain for the following cycles.**
 
 ## 0. Decision and scope
 
