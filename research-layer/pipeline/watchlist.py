@@ -12,6 +12,7 @@ Coen's own verification pass, tracked via the `tier` field.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
@@ -20,10 +21,31 @@ VALID_CLASSES = {"arxiv", "aggregator", "blog", "ssrn", "central_bank", "github"
 REQUIRED_FIELDS = ("id", "class", "name", "url", "feed", "poll_minutes",
                    "added_by", "verified_date", "notes")
 TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
+AUTO_ADMIT_MIN_CITERS = 2
+DEFAULT_POLL_MINUTES_AUTO = 360
 
 
 class WatchlistError(ValueError):
     pass
+
+
+def _atomic_write_text(path: str | Path, text: str) -> None:
+    """Write-then-rename so a crash mid-write never leaves a truncated file.
+    `.with_name` (not `.with_suffix`) so a `.jsonl` path keeps its real
+    suffix and only grows a `.tmp` tail."""
+    p = Path(path)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def write_watchlist_doc(path: str | Path, doc: dict) -> None:
+    _atomic_write_text(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+
+
+def write_discovery(path: str | Path, entries: list[dict]) -> None:
+    _atomic_write_text(
+        path, "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries))
 
 
 def load_watchlist(path: str | Path) -> list[dict]:
@@ -82,8 +104,7 @@ def remove_source(path: str | Path, source_id: str) -> dict | None:
             keep.append(s)
     if removed is not None:
         doc["sources"] = keep
-        p.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-                     encoding="utf-8")
+        write_watchlist_doc(p, doc)
     return removed
 
 
@@ -118,6 +139,32 @@ def entry_domain(e: dict) -> str:
     return e.get("domain") or discovery_domain(e["url"])
 
 
+def proposal_citers(e: dict) -> set[str]:
+    """Distinct citing sources for a discovery-queue proposal: `cited_by`
+    when stamped, else the first path segment of `found_in` (legacy
+    entries); 'scout' is never a citer for endorsement-counting purposes."""
+    citers = set(e.get("cited_by") or [e.get("found_in", "").split("/", 1)[0]])
+    return citers - {"scout"}
+
+
+def is_mechanically_admissible(e: dict) -> bool:
+    """D27 case 1/2 mechanical bar: scout-researched, or cited by
+    >= AUTO_ADMIT_MIN_CITERS distinct non-scout sources."""
+    found_in = e.get("found_in", "")
+    raw_citers = set(e.get("cited_by") or [found_in.split("/", 1)[0]])
+    is_scout = found_in.startswith("scout/") or "scout" in raw_citers
+    return is_scout or len(proposal_citers(e)) >= AUTO_ADMIT_MIN_CITERS
+
+
+def watchlist_domains(doc: dict) -> set[str]:
+    """Every domain already represented on the watchlist: source ids plus
+    the domain of each source's url and feed."""
+    domains = {s["id"] for s in doc["sources"]}
+    domains |= {discovery_domain(u) for s in doc["sources"]
+               for u in (s["url"], s.get("feed")) if u}
+    return domains
+
+
 def load_discovery(path: str | Path) -> list[dict]:
     p = Path(path)
     if not p.exists():
@@ -147,10 +194,7 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
                 "cited_by", [existing.get("found_in", "").split("/", 1)[0]])
             if citer and citer not in cited_by:
                 cited_by.append(citer)
-                Path(path).write_text(
-                    "".join(json.dumps(e, ensure_ascii=False) + "\n"
-                            for e in entries),
-                    encoding="utf-8")
+                write_discovery(path, entries)
         return False
     entry = {
         "url": url,
@@ -170,17 +214,12 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
     return True
 
 
-def set_discovery_status(path: str | Path, domain: str, status: str, *,
-                         reason: str, only_from: str | None = None) -> bool:
-    """Flip EVERY discovery-queue entry for this domain to `status` and
-    record why. `only_from`, when given, restricts the flip to entries whose
+def flip_entries(entries: list[dict], domain: str, status: str, *,
+                 reason: str, only_from: str | None = None) -> bool:
+    """In-memory: flip EVERY entry for this domain to `status` and record
+    why. `only_from`, when given, restricts the flip to entries whose
     current status equals it (others for the same domain are left alone).
-    Returns False when nothing matched.
-
-    Not safe to call while another function holds an in-memory copy of the
-    queue and will write it back (load once, write once in any pass that
-    also calls this)."""
-    entries = load_discovery(path)
+    Returns False when nothing matched. Caller owns writing `entries` back."""
     hit = False
     for e in entries:
         if entry_domain(e) != domain:
@@ -191,8 +230,17 @@ def set_discovery_status(path: str | Path, domain: str, status: str, *,
         e["status_reason"] = reason
         e["status_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         hit = True
+    return hit
+
+
+def set_discovery_status(path: str | Path, domain: str, status: str, *,
+                         reason: str, only_from: str | None = None) -> bool:
+    """Flip EVERY discovery-queue entry for this domain to `status` and
+    record why. `only_from`, when given, restricts the flip to entries whose
+    current status equals it (others for the same domain are left alone).
+    Returns False when nothing matched."""
+    entries = load_discovery(path)
+    hit = flip_entries(entries, domain, status, reason=reason, only_from=only_from)
     if hit:
-        Path(path).write_text(
-            "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
-            encoding="utf-8")
+        write_discovery(path, entries)
     return hit

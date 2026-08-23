@@ -334,6 +334,9 @@ def test_admissions_malformed_screen_retries_then_blocks(tmp_path):
     out = process_admissions(today="2026-08-26", **kw)
     assert out["blocked"] == ["flaky.example"]
     assert load_discovery(q)[0]["status_reason"] == "source-screen malformed x3"
+    malformed_events = [e for e in _events(tmp_path / "act.jsonl")
+                        if e["entry_type"] == "source_screen_malformed"]
+    assert [e["payload"]["run"] for e in malformed_events] == [1, 2]
 
 
 def test_admissions_skip_scout_and_multi_citer_proposals(tmp_path):
@@ -376,7 +379,9 @@ def test_reviews_promote_revoke_timeout(tmp_path):
     actions = ActionLog(tmp_path / "act.jsonl")
     out = process_reviews(watchlist_path=wl, discovery_path=q, seen=seen,
                           actions=actions, today="2026-08-20")
-    assert out == {"promoted": ["win.example"], "revoked": ["lose.example", "quiet.example"], "waiting": ["wait.example"]}
+    assert out == {"promoted": ["win.example"], "revoked": ["lose.example"],
+                   "timed_out": ["quiet.example"],
+                   "waiting": {"wait.example": "0 keeps in 10/40"}}
     src = {s["id"]: s for s in load_watchlist(wl)}
     assert src["win.example"]["added_by"] == PROVENANCE_PROMOTED and src["win.example"]["tier"] == "verified"
     assert src["win.example"]["verified_date"] == "2026-08-20" and "probation_since" not in src["win.example"]
@@ -387,8 +392,12 @@ def test_reviews_promote_revoke_timeout(tmp_path):
     assert st["quiet.example"]["status"] == "proposed" and st["quiet.example"]["status_reason"] == "probation-timeout"
     types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
     assert types.count("source_promoted") == 1 and types.count("source_auto_revoked") == 2
+    revoke_events = [e for e in _events(tmp_path / "act.jsonl") if e["entry_type"] == "source_auto_revoked"]
+    assert sorted(e["payload"]["action"] for e in revoke_events) == ["revoke", "timeout"]
     assert process_reviews(watchlist_path=wl, discovery_path=q, seen=seen,
-                           actions=actions, today="2026-08-20") == {"promoted": [], "revoked": [], "waiting": ["wait.example"]}
+                           actions=actions, today="2026-08-20") == {
+        "promoted": [], "revoked": [], "timed_out": [],
+        "waiting": {"wait.example": "0 keeps in 10/40"}}
 
 
 def test_reviews_second_citer_promotes_immediately(tmp_path):
@@ -411,4 +420,40 @@ def test_reviews_ignore_non_probation_entries(tmp_path):
     out = process_reviews(watchlist_path=wl, discovery_path=tmp_path / "q.jsonl",
                           seen=SeenStore(tmp_path / "seen.jsonl"),
                           actions=ActionLog(tmp_path / "act.jsonl"), today="2026-08-02")
-    assert out == {"promoted": [], "revoked": [], "waiting": []}
+    assert out == {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
+
+
+def test_admissions_malformed_then_admit_pops_run_counter(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://flaky.example/", found_in="blog1/i1", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    fetch = _fetch_factory(_good_pages("flaky.example"))
+    verdicts = iter([None, {"research_source": True, "reason": "quant", "asset_classes": ["fx"]}])
+    screen = lambda d, t, a: next(verdicts)
+    out1 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                              fetch=fetch, screen=screen, today="2026-08-24")
+    assert out1["deferred"] == ["flaky.example"]
+    assert load_discovery(q)[0]["malformed_runs"] == 1
+    out2 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                              fetch=fetch, screen=screen, today="2026-08-25")
+    assert out2["admitted"] == ["flaky.example"]
+    assert "malformed_runs" not in load_discovery(q)[0]
+    types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
+    assert types.count("source_screen_malformed") == 1
+    run = next(e["payload"]["run"] for e in _events(tmp_path / "act.jsonl")
+              if e["entry_type"] == "source_screen_malformed")
+    assert run == 1
+
+
+def test_admissions_known_via_watchlist_domain_not_id(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://legacy.example/", found_in="blog1/i1", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source(id="legacy-id", url="https://legacy.example/")])
+    out = process_admissions(discovery_path=q, watchlist_path=wl,
+                             actions=ActionLog(tmp_path / "act.jsonl"),
+                             fetch=_fetch_factory({}), screen=lambda d, t, a: None,
+                             today="2026-08-24")
+    assert out == {"admitted": [], "blocked": [], "deferred": []}
+    e = load_discovery(q)[0]
+    assert e["status"] == "auto_admitted" and e["status_reason"] == "already on watchlist"

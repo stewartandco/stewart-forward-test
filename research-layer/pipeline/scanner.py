@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 from .watchlist import (load_watchlist, pollable, queue_discovery,
-                        load_discovery)
+                        load_discovery, DEFAULT_POLL_MINUTES_AUTO)
 from .feeds import (parse_feed, extract_links, article_links, discover_feed,
                     item_id, html_to_text, looks_paywalled, fetch_url)
 from .seen import SeenStore
@@ -376,27 +376,25 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
     auto-d27), chain-logged, idempotent (admitted proposals flip status).
     Everything else stays queued for Coen."""
     import json as _json
-    from .watchlist import load_discovery, discovery_domain, entry_domain
+    from .watchlist import (load_discovery, entry_domain, proposal_citers,
+                            is_mechanically_admissible, watchlist_domains)
     entries = load_discovery(discovery_path)
     doc = _json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
-    known_ids = {s["id"] for s in doc["sources"]}
-    known_domains = {discovery_domain(u) for s in doc["sources"]
-                     for u in (s["url"], s["feed"]) if u}
+    known = watchlist_domains(doc)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     admitted, queue_dirty = [], False
     for e in entries:
-        if e.get("status") != "proposed":
+        if e.get("status") != "proposed" or not is_mechanically_admissible(e):
             continue
         domain = entry_domain(e)
-        citers = set(e.get("cited_by") or [e.get("found_in", "").split("/", 1)[0]])
-        is_scout = "scout" in citers or e.get("found_in", "").startswith("scout/")
-        endorsed = len(citers - {"scout"}) >= AUTO_ADMIT_MIN_CITERS
-        if not (is_scout or endorsed):
-            continue
-        if domain in known_ids or domain in known_domains:
+        if domain in known:
             e["status"] = "auto_admitted"  # already present; just close it out
             queue_dirty = True
             continue
+        found_in = e.get("found_in", "")
+        raw_citers = set(e.get("cited_by") or [found_in.split("/", 1)[0]])
+        is_scout = found_in.startswith("scout/") or "scout" in raw_citers
+        citers = proposal_citers(e)
         rule = "scout-researched" if is_scout else \
                f"cited by {len(citers)} distinct verified sources"
         entry = {
@@ -407,7 +405,7 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
                       "feed unset (HTML diff on url)."),
         }
         doc["sources"].append(entry)
-        known_ids.add(domain)
+        known.add(domain)
         e["status"] = "auto_admitted"
         queue_dirty = True
         admitted.append(entry)
@@ -422,9 +420,6 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
             "".join(_json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
             encoding="utf-8")
     return admitted
-
-
-DEFAULT_POLL_MINUTES_AUTO = 360
 
 
 def pending_tier3_count(registry: Registry, discovery_path) -> int:

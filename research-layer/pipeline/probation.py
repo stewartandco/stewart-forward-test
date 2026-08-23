@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .feeds import (fetch_url, discover_feed, parse_feed, article_links,
                     html_to_text)
-from .watchlist import JUNK_DOMAINS, discovery_domain
+from .watchlist import JUNK_DOMAINS, discovery_domain, DEFAULT_POLL_MINUTES_AUTO
 
 WINDOW_1 = 40
 WINDOW_2 = 80
@@ -107,40 +107,36 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
 
 # ---------------- admissions (proposal -> blocked | probation) ----------------
 
-DEFAULT_POLL_MINUTES_PROBATION = 360
-
-
-def _is_case_1_or_2(entry: dict) -> bool:
-    citers = set(entry.get("cited_by") or [entry.get("found_in", "").split("/", 1)[0]])
-    is_scout = "scout" in citers or entry.get("found_in", "").startswith("scout/")
-    return is_scout or len(citers - {"scout"}) >= 2
-
-
 def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
                        screen, today: str | None = None) -> dict:
     """Case-3 admission pass. `screen(domain, titles, about) -> verdict|None`
     is injected (production binds relevance.screen_source). Returns the
-    domains admitted / blocked / deferred this pass. Idempotent. The queue is
-    loaded once and never written back here; all flips go through
-    set_discovery_status."""
-    from .watchlist import load_discovery, set_discovery_status, entry_domain
+    domains admitted / blocked / deferred this pass. Idempotent. The queue
+    is loaded once and written once at the end (if anything changed); same
+    for the watchlist (only when something was admitted)."""
+    from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
+                            flip_entries, entry_domain, is_mechanically_admissible,
+                            watchlist_domains)
     today = today or _today()
     entries = load_discovery(discovery_path)
     doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
-    known = {s["id"] for s in doc["sources"]}
+    known = watchlist_domains(doc)
     out = {"admitted": [], "blocked": [], "deferred": []}
+    queue_dirty = False
     for e in entries:
-        if e.get("status") != "proposed" or _is_case_1_or_2(e):
+        if e.get("status") != "proposed" or is_mechanically_admissible(e):
             continue
         domain = entry_domain(e)
         if domain in known:
-            set_discovery_status(discovery_path, domain, "auto_admitted",
-                                 reason="already on watchlist")
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "auto_admitted", reason="already on watchlist")
+            queue_dirty = True
             continue
         pf = prefilter(e["url"], fetch)
         if not pf["ok"]:
-            set_discovery_status(discovery_path, domain, "blocked",
-                                 reason=f"prefilter: {pf['reason']}")
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "blocked", reason=f"prefilter: {pf['reason']}")
+            queue_dirty = True
             actions.event("source_auto_blocked", {"domain": domain, "rule": "prefilter",
                                                   "reason": pf["reason"], "url": e["url"]})
             out["blocked"].append(domain)
@@ -149,25 +145,29 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         if verdict is None:
             n = int(e.get("malformed_runs", 0)) + 1
             if n >= MAX_MALFORMED_RUNS:
-                set_discovery_status(discovery_path, domain, "blocked",
-                                     reason=f"source-screen malformed x{n}")
+                e.pop("malformed_runs", None)
+                flip_entries(entries, domain, "blocked", reason=f"source-screen malformed x{n}")
                 actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
                                                       "reason": f"malformed x{n}", "url": e["url"]})
                 out["blocked"].append(domain)
             else:
-                _bump_malformed(discovery_path, domain, n)
+                e["malformed_runs"] = n
+                actions.event("source_screen_malformed",
+                              {"domain": domain, "run": n, "url": e["url"]})
                 out["deferred"].append(domain)
+            queue_dirty = True
             continue
         if not verdict["research_source"]:
-            set_discovery_status(discovery_path, domain, "blocked",
-                                 reason=f"source-screen: {verdict['reason']}")
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "blocked", reason=f"source-screen: {verdict['reason']}")
+            queue_dirty = True
             actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
                                                   "reason": verdict["reason"], "url": e["url"]})
             out["blocked"].append(domain)
             continue
         entry = {
             "id": domain, "class": "blog", "name": domain, "url": e["url"],
-            "feed": pf["feed"], "poll_minutes": DEFAULT_POLL_MINUTES_PROBATION,
+            "feed": pf["feed"], "poll_minutes": DEFAULT_POLL_MINUTES_AUTO,
             "added_by": PROVENANCE_PROBATION, "verified_date": today,
             "tier": "probation", "probation_since": today,
             "notes": (f"probation from {today} per D27 case 3 (single citation; "
@@ -176,85 +176,83 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         }
         doc["sources"].append(entry)
         known.add(domain)
-        set_discovery_status(discovery_path, domain, "probation",
-                             reason=f"admitted on probation: {verdict['reason']}")
+        e.pop("malformed_runs", None)
+        flip_entries(entries, domain, "probation",
+                    reason=f"admitted on probation: {verdict['reason']}")
+        queue_dirty = True
         actions.event("source_auto_admitted", {"domain": domain, "rule": "probation",
                                                "reason": verdict["reason"],
                                                "asset_classes": verdict["asset_classes"],
                                                "url": e["url"], "feed": pf["feed"]})
         out["admitted"].append(domain)
+    if queue_dirty:
+        write_discovery(discovery_path, entries)
     if out["admitted"]:
-        Path(watchlist_path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-                                        encoding="utf-8")
+        write_watchlist_doc(watchlist_path, doc)
     return out
 
 
-def _bump_malformed(discovery_path, domain: str, n: int) -> None:
-    from .watchlist import load_discovery, entry_domain
-    entries = load_discovery(discovery_path)
-    for e in entries:
-        if entry_domain(e) == domain:
-            e["malformed_runs"] = n
-    Path(discovery_path).write_text(
-        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8")
-
-
-# ---------------- reviews (probation -> promoted | revoked | timeout) --------
-
-def _citers(discovery_entries: list[dict], domain: str) -> set[str]:
-    from .watchlist import entry_domain
-    for e in discovery_entries:
-        if entry_domain(e) == domain:
-            return set(e.get("cited_by") or []) - {"scout"}
-    return set()
-
+# ---------------- reviews (probation -> promoted | revoked | timed_out) ------
 
 def process_reviews(*, watchlist_path, discovery_path, seen, actions,
                     today: str | None = None) -> dict:
     """Evaluate every probation entry. D27 case 2 (2+ distinct citers) wins
-    over yield; a timeout returns the domain to 'proposed' (re-proposable);
-    a yield revoke blocks it. Idempotent: resolved entries leave probation.
-    The discovery queue is loaded once (read-only); flips go through
-    set_discovery_status."""
-    from .watchlist import load_discovery, set_discovery_status, tier_of
+    over yield; a timeout returns the domain to 'proposed' (re-proposable,
+    bucketed separately as timed_out); a yield revoke blocks it. Idempotent:
+    resolved entries leave probation. Both the discovery queue and the
+    watchlist are loaded once and written once at the end (if anything
+    changed)."""
+    from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
+                            flip_entries, entry_domain, proposal_citers, tier_of)
     today = today or _today()
     doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
     disc = load_discovery(discovery_path)
-    out = {"promoted": [], "revoked": [], "waiting": []}
+    out = {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
     keep: list[dict] = []
-    dirty = False
+    watchlist_dirty = False
+    queue_dirty = False
     for s in doc["sources"]:
         if tier_of(s) != "probation":
             keep.append(s)
             continue
         domain = s["id"]
         stats = source_stats(seen, domain)
-        if len(_citers(disc, domain)) >= 2:
+        # Lookup is by domain over the single loaded queue snapshot; a
+        # matching entry that is still 'proposed' here (rather than
+        # 'probation') is harmless -- review is gated on tier=="probation"
+        # on the watchlist side, not on the discovery-queue entry's status.
+        match = next((de for de in disc if entry_domain(de) == domain), None)
+        citers = proposal_citers(match) if match is not None else set()
+        if len(citers) >= 2:
             decision = {"action": "promote", "reason": "cited by 2 distinct verified sources"}
         else:
-            decision = decide_probation(stats, s.get("probation_since") or s["verified_date"], today)
+            since = s.get("probation_since") or s.get("verified_date", "")
+            decision = decide_probation(stats, since, today)
         if decision["action"] == "promote":
             s = {**s, "added_by": PROVENANCE_PROMOTED, "tier": "verified",
                  "verified_date": today,
                  "notes": s.get("notes", "") + f" | promoted {today}: {decision['reason']}"}
             s.pop("probation_since", None)
             keep.append(s)
-            set_discovery_status(discovery_path, domain, "auto_admitted", reason=decision["reason"])
+            queue_dirty |= flip_entries(disc, domain, "auto_admitted", reason=decision["reason"])
             actions.event("source_promoted", {"domain": domain, "rule": decision["reason"],
                                               "screened": stats["screened"], "keeps": stats["keeps"]})
-            out["promoted"].append(domain); dirty = True
+            out["promoted"].append(domain); watchlist_dirty = True
         elif decision["action"] in ("revoke", "timeout"):
             new_status = "blocked" if decision["action"] == "revoke" else "proposed"
-            set_discovery_status(discovery_path, domain, new_status, reason=decision["reason"])
+            queue_dirty |= flip_entries(disc, domain, new_status, reason=decision["reason"])
             actions.event("source_auto_revoked", {"domain": domain, "rule": decision["reason"],
+                                                  "action": decision["action"],
                                                   "screened": stats["screened"], "keeps": stats["keeps"],
                                                   "requeued": decision["action"] == "timeout"})
-            out["revoked"].append(domain); dirty = True
+            bucket = "revoked" if decision["action"] == "revoke" else "timed_out"
+            out[bucket].append(domain); watchlist_dirty = True
         else:
             keep.append(s)
-            out["waiting"].append(domain)
-    if dirty:
+            out["waiting"][domain] = decision["reason"]
+    if watchlist_dirty:
         doc["sources"] = keep
-        Path(watchlist_path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
-                                        encoding="utf-8")
+        write_watchlist_doc(watchlist_path, doc)
+    if queue_dirty:
+        write_discovery(discovery_path, disc)
     return out
