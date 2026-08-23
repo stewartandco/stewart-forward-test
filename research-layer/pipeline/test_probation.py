@@ -19,6 +19,7 @@ from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
 from .probation import process_admissions, PROVENANCE_PROBATION
 from .probation import process_reviews, PROVENANCE_PROMOTED
 from .probation import prioritise_items, probation_counts, PRIORITY_CAP
+from .probation import ADMISSIONS_PER_RUN
 from .seen import SeenStore
 from .scanstatus import ActionLog
 from .approvals import process_approvals, sign_record
@@ -422,12 +423,46 @@ def test_reviews_second_citer_promotes_immediately(tmp_path):
     assert ev["payload"]["rule"] == "cited by 2 distinct verified sources"
 
 
+class _ExplodingSeen:
+    """Stands in for a SeenStore that must never be touched: a watchlist
+    with no probation entries has nothing for process_reviews to compute
+    stats over, so it should return before taking a single seen-store
+    pass, not just discard the result of one."""
+    @property
+    def _latest(self):
+        raise AssertionError("process_reviews touched seen with no probation entries")
+
+
 def test_reviews_ignore_non_probation_entries(tmp_path):
     wl = write_watchlist(tmp_path, [make_source(id="coen.example", added_by="coen")])
     out = process_reviews(watchlist_path=wl, discovery_path=tmp_path / "q.jsonl",
-                          seen=SeenStore(tmp_path / "seen.jsonl"),
+                          seen=_ExplodingSeen(),
                           actions=ActionLog(tmp_path / "act.jsonl"), today="2026-08-02")
     assert out == {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
+
+
+def test_reviews_batches_stats_in_one_pass_matching_source_stats(tmp_path):
+    # Noise from two non-probation sources in the same seen store must not
+    # leak into the probation domain's stats -- and the batched result must
+    # match what source_stats() would compute for that domain alone.
+    domain = "review.example"
+    wl = _probation_wl(tmp_path, domain, since="2026-08-01")
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    for i in range(5):
+        seen.record(f"r{i}", domain, "screen_keep" if i == 0 else "screen_kill", link="h")
+    for i in range(4):
+        seen.record(f"n1-{i}", "noise-one", "screen_kill", link="h")
+    for i in range(3):
+        seen.record(f"n2-{i}", "noise-two", "screen_keep", link="h")
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, f"https://{domain}/", found_in="blog1/i1", reason="cited")
+    set_discovery_status(q, domain, "probation", reason="t")
+    expected = source_stats(seen, domain)
+    assert expected == {"screened": 5, "keeps": 1}
+    out = process_reviews(watchlist_path=wl, discovery_path=q, seen=seen,
+                          actions=ActionLog(tmp_path / "act.jsonl"), today="2026-08-02")
+    window = WINDOW_1 if expected["keeps"] == 0 else WINDOW_2
+    assert out["waiting"][domain] == f"{expected['keeps']} keeps in {expected['screened']}/{window}"
 
 
 def test_admissions_malformed_then_admit_pops_run_counter(tmp_path):
@@ -575,3 +610,60 @@ def test_mixed_approve_and_block_batch_persists_both(tmp_path):
     types = {e["entry_type"] for e in _events(tmp_path / "act.jsonl")}
     assert "source_approved" in types
     assert "source_revoked_by_coen" in types
+
+
+def _idx_html(domain, n=MIN_INDEX_ITEMS):
+    links = "".join(f'<a href="https://{domain}/2026/post-number-{i}">Post {i}</a>'
+                    for i in range(n))
+    return f"<html><head><title>X</title></head><body><p>About text.</p>{links}</body></html>"
+
+
+def test_admissions_bounded_to_max_per_run_leaves_rest_proposed(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    for i in range(25):
+        queue_discovery(q, f"https://d{i}.example/", found_in=f"blog{i}/i1", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    calls = []
+
+    def fetch(url, timeout=30):
+        calls.append(url)
+        domain = url.split("//", 1)[1].split("/", 1)[0]
+        return 200, _idx_html(domain), url  # no feed link -> index mode, one fetch each
+
+    verdict = lambda d, t, a: {"research_source": True, "reason": "quant", "asset_classes": []}
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out1 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                              fetch=fetch, screen=verdict, today="2026-08-24",
+                              max_per_run=20)
+    assert len(calls) == 20                        # exactly 20 prefilter fetches
+    assert len(out1["admitted"]) == 20
+    remaining = [e for e in load_discovery(q) if e["status"] == "proposed"]
+    assert len(remaining) == 5                      # the other 5 untouched, still proposed
+    out2 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                              fetch=fetch, screen=verdict, today="2026-08-24",
+                              max_per_run=20)
+    assert len(out2["admitted"]) == 5
+    assert all(e["status"] != "proposed" for e in load_discovery(q))
+    assert len(calls) == 25
+
+
+def test_admissions_default_max_per_run_is_the_constant(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://only.example/", found_in="blog1/i1", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    import inspect
+    assert inspect.signature(process_admissions).parameters["max_per_run"].default == ADMISSIONS_PER_RUN
+    assert ADMISSIONS_PER_RUN == 20
+
+
+def test_probation_counts_skips_malformed_trailing_json_line(tmp_path):
+    wl = write_watchlist(tmp_path, [make_source()])
+    actions_path = tmp_path / "act.jsonl"
+    actions = ActionLog(actions_path)
+    actions.event("source_promoted", {"domain": "a"})
+    actions.event("source_auto_blocked", {"domain": "b"})
+    # simulate a crash mid-append: a truncated trailing line, no closing brace/newline
+    with actions_path.open("a", encoding="utf-8") as f:
+        f.write('{"entry_type": "source_promoted", "payload": {"domain": "c"}, "ts_utc": "2026-0')
+    c = probation_counts(wl, actions_path, days=30)
+    assert c["promoted"] == 1 and c["blocked"] == 1

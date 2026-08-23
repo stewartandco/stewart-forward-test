@@ -1301,7 +1301,7 @@ def test_pending_tier3_counts_pending_cards_not_discoveries(tmp_path):
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://a.example/x", found_in="s/i", reason="cited")
     queue_discovery(q, "https://b.example/y", found_in="s/i", reason="cited")
-    assert pending_tier3_count(registry, q) == 1
+    assert pending_tier3_count(registry) == 1  # q holds discoveries, no longer counted
 
 
 def test_digest_has_probation_line(tmp_path):
@@ -1316,4 +1316,27 @@ def test_pending_tier3_counts_cards_only_now(tmp_path):
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://x.example/", found_in="blog1/i1", reason="cited")
     reg = Registry(tmp_path / "registry.jsonl")
-    assert pending_tier3_count(reg, q) == 0     # proposals no longer wait on Coen
+    assert pending_tier3_count(reg) == 0     # proposals no longer wait on Coen
+
+
+def test_refresh_sources_updates_next_due_preserving_existing_times(tmp_path):
+    from .scanner import refresh_sources
+    old = [make_source(id="keep"), make_source(id="drop")]
+    wl = write_watchlist(tmp_path, [make_source(id="keep"), make_source(id="new")])
+    next_due = {"keep": 123.0, "drop": 456.0}
+    out = refresh_sources(wl, old, next_due)
+    assert {s["id"] for s in out} == {"keep", "new"}
+    # 'keep' keeps its existing due time exactly; 'new' defaults to due-now;
+    # 'drop' (no longer on the watchlist) is gone
+    assert next_due == {"keep": 123.0, "new": 0.0}
+
+
+def test_refresh_sources_empty_reload_keeps_previous_and_leaves_next_due_untouched(tmp_path, capsys):
+    from .scanner import refresh_sources
+    old = [make_source(id="keep")]
+    wl = write_watchlist(tmp_path, [])
+    next_due = {"keep": 999.0}
+    out = refresh_sources(wl, old, next_due)
+    assert out is old
+    assert next_due == {"keep": 999.0}
+    assert "WARNING" in capsys.readouterr().err

@@ -20,6 +20,7 @@ WINDOW_2 = 80
 PROMOTE_KEEPS = 2
 TIMEOUT_DAYS = 90
 PRIORITY_CAP = 40
+ADMISSIONS_PER_RUN = 20
 BLOCKED_SUBDOMAINS = ("store.", "shop.", "cms.", "app.", "login.", "my.")
 MIN_INDEX_ITEMS = 5
 MAX_MALFORMED_RUNS = 3
@@ -108,12 +109,19 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
 # ---------------- admissions (proposal -> blocked | probation) ----------------
 
 def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
-                       screen, today: str | None = None) -> dict:
+                       screen, today: str | None = None,
+                       max_per_run: int = ADMISSIONS_PER_RUN) -> dict:
     """Case-3 admission pass. `screen(domain, titles, about) -> verdict|None`
     is injected (production binds relevance.screen_source). Returns the
     domains admitted / blocked / deferred this pass. Idempotent. The queue
     is loaded once and written once at the end (if anything changed); same
-    for the watchlist (only when something was admitted)."""
+    for the watchlist (only when something was admitted).
+
+    `max_per_run` bounds the number of entries that reach `prefilter` (a
+    live fetch) in one call -- free "already on watchlist" closeouts don't
+    count against it. The rest stay 'proposed' and are picked up next run;
+    this keeps one flood of proposals from stalling a cycle behind dozens
+    of sequential live fetches."""
     from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
                             flip_entries, entry_domain, is_mechanically_admissible,
                             watchlist_domains)
@@ -123,6 +131,7 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
     known = watchlist_domains(doc)
     out = {"admitted": [], "blocked": [], "deferred": []}
     queue_dirty = False
+    prefiltered = 0
     for e in entries:
         if e.get("status") != "proposed" or is_mechanically_admissible(e):
             continue
@@ -132,6 +141,9 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
             flip_entries(entries, domain, "auto_admitted", reason="already on watchlist")
             queue_dirty = True
             continue
+        if prefiltered >= max_per_run:
+            break
+        prefiltered += 1
         pf = prefilter(e["url"], fetch)
         if not pf["ok"]:
             e.pop("malformed_runs", None)
@@ -211,17 +223,35 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
                             flip_entries, entry_domain, proposal_citers, tier_of)
     today = today or _today()
     doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    probation_ids = {s["id"] for s in doc["sources"] if tier_of(s) == "probation"}
+    if not probation_ids:
+        # Nothing to review: skip the discovery-queue load and the seen-store
+        # scan entirely rather than paying for a pass over data with no
+        # probation entry to use it.
+        return {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
     disc = load_discovery(discovery_path)
     out = {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
     keep: list[dict] = []
     watchlist_dirty = False
     queue_dirty = False
+    # One pass over the seen store instead of one source_stats() scan per
+    # probation entry (source_stats itself is unchanged -- it's still used
+    # directly by tests and other callers; this just batches the same
+    # screened/keeps computation across every probation domain at once).
+    stats_by: dict[str, dict] = {d: {"screened": 0, "keeps": 0} for d in probation_ids}
+    for e in seen._latest.values():
+        sid = e["source_id"]
+        if sid not in probation_ids or e["status"] not in SCREENED_STATUSES:
+            continue
+        stats_by[sid]["screened"] += 1
+        if e["status"] in KEEP_STATUSES:
+            stats_by[sid]["keeps"] += 1
     for s in doc["sources"]:
         if tier_of(s) != "probation":
             keep.append(s)
             continue
         domain = s["id"]
-        stats = source_stats(seen, domain)
+        stats = stats_by[domain]
         # Lookup is by domain over the single loaded queue snapshot; a
         # matching entry that is still 'proposed' here (rather than
         # 'probation') is harmless -- review is gated on tier=="probation"
@@ -305,7 +335,10 @@ def probation_counts(watchlist_path, actions_path, days: int = 30) -> dict:
     for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        e = json.loads(line)
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue          # a truncated trailing line (crash mid-append)
         try:
             when = datetime.strptime((e.get("ts_utc") or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         except ValueError:

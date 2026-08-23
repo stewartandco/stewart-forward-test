@@ -32,7 +32,8 @@ from .seen import SeenStore
 from .budget import BudgetMeter
 from .relevance import screen_items, screen_source, ApiCreditExhausted
 from .approvals import process_approvals
-from .probation import prioritise_items, process_admissions, process_reviews, probation_counts
+from .probation import (prioritise_items, process_admissions, process_reviews,
+                        probation_counts, PRIORITY_CAP)
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
@@ -420,10 +421,36 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
     return admitted
 
 
-def pending_tier3_count(registry: Registry, discovery_path) -> int:
-    """What still waits on Coen: cards in triage. Source proposals are
-    admitted or blocked mechanically (D27 cases 1-3) since 2026-08-24."""
+def pending_tier3_count(registry: Registry) -> int:
+    """What still waits on Coen: cards in triage. Source proposals have been
+    admitted or blocked mechanically (D27 cases 1-3) since the D27 case-3
+    build (2026-08-23/24)."""
     return len(registry.cards(status="pending"))
+
+
+def refresh_sources(watchlist_path, sources: list[dict],
+                    next_due: dict[str, float]) -> list[dict]:
+    """Reload the pollable watchlist after admissions/reviews/approvals may
+    have changed it. `next_due` is updated in place: new ids default to
+    due-now (0.0), ids no longer present are dropped.
+
+    An EMPTY reload almost always means a load/write hazard (a crash
+    mid-write, a transient bad-JSON read) rather than every verified source
+    actually having been revoked in one cycle -- keep polling the previous
+    `sources` list rather than silently going quiet, and leave `next_due`
+    untouched so nothing loses its due time in the process."""
+    reloaded = pollable(load_watchlist(watchlist_path))
+    if not reloaded:
+        print(f"WARNING: watchlist reload from {watchlist_path} came back "
+              f"empty; keeping the previous {len(sources)} source(s) polling "
+              "rather than treating it as 'everything revoked'", file=sys.stderr)
+        return sources
+    for s in reloaded:
+        next_due.setdefault(s["id"], 0.0)
+    keep_ids = {s["id"] for s in reloaded}
+    for sid in [k for k in next_due if k not in keep_ids]:
+        next_due.pop(sid)
+    return reloaded
 
 
 # ---------------- resident loop ----------------
@@ -446,7 +473,8 @@ def _load_api_key(env_path: Path) -> None:
 
 def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                   discovery_path: Path, logs_dir: Path, sources_polled: int,
-                  next_due_utc: str | None, watchlist_path: Path) -> None:
+                  next_due_utc: str | None, watchlist_path: Path,
+                  held: int = 0) -> None:
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     prob = probation_counts(watchlist_path, logs_dir / "reader_actions.jsonl")
     rejections: dict[str, int] = {}
@@ -479,6 +507,8 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                f"/{meter.monthly_cap_usd:.0f} ({budget_state})")
     write_status(
         logs_dir / "status.json", overall=overall, summary=summary,
+        # Flat scalar keys, not a nested "probation" dict -- the /ops
+        # dashboard types items values as strings and can't render a dict.
         items={"sources_polled": sources_polled,
                "items_seen_24h": seen.count_since(hours=24),
                "screened_pass": len(seen.items_with_status("screen_keep"))
@@ -486,8 +516,14 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                "extracted": len(seen.items_with_status("extracted")),
                "cards_registered": scanner_cards_total(registry),
                "budget": "WARN" if budget_state != "OK" else "OK",
-               "probation": prob},
-        pending_tier3=pending_tier3_count(registry, discovery_path),
+               "probation_on": prob["on_probation"],
+               "probation_admitted_30d": prob["admitted"],
+               "probation_promoted_30d": prob["promoted"],
+               "probation_revoked_30d": prob["revoked"],
+               "probation_timed_out_30d": prob["timed_out"],
+               "probation_blocked_30d": prob["blocked"],
+               "probation_held": held},
+        pending_tier3=pending_tier3_count(registry),
         digest_file=digest, next_run=next_due_utc)
 
 
@@ -550,6 +586,9 @@ def run(argv: list[str] | None = None) -> int:
             # picked up by refeedable_deferred on a later cycle.
             probation_ids = {s["id"] for s in sources if tier_of(s) == "probation"}
             new_items, _held = prioritise_items(new_items, probation_ids)
+            if _held:
+                print(f"probation: {len(_held)} items held over the "
+                      f"{PRIORITY_CAP}/source cap")
             try:
                 if new_items:
                     stats = process_new_items(
@@ -576,11 +615,7 @@ def run(argv: list[str] | None = None) -> int:
                     print(f"probation: +{len(adm['admitted'])} admitted, {len(adm['blocked'])} blocked, "
                           f"{len(rev['promoted'])} promoted, {len(rev['revoked'])} revoked, "
                           f"{len(rev['timed_out'])} timed out")
-                sources = pollable(load_watchlist(args.watchlist))
-                for s in sources:
-                    next_due.setdefault(s["id"], 0.0)
-                for sid in [k for k in next_due if k not in {s["id"] for s in sources}]:
-                    next_due.pop(sid)
+                sources = refresh_sources(args.watchlist, sources, next_due)
             except ApiCreditExhausted as exc:
                 actions.event("api_unavailable", {"error": str(exc)[:300],
                                                   "backoff_s": CREDIT_BACKOFF_SECONDS})
@@ -588,7 +623,7 @@ def run(argv: list[str] | None = None) -> int:
                     logs_dir / "status.json", overall="FAIL",
                     summary=f"API unavailable (billing/credentials): {str(exc)[:120]}",
                     items={"budget": meter.state(), "api": "FAIL"},
-                    pending_tier3=pending_tier3_count(registry, discovery_path),
+                    pending_tier3=pending_tier3_count(registry),
                     digest_file=None, next_run=None)
                 print(f"API unavailable; sleeping {CREDIT_BACKOFF_SECONDS}s: {exc}",
                       file=sys.stderr)
@@ -627,12 +662,16 @@ def run(argv: list[str] | None = None) -> int:
                                                "state": meter.state()})
             elif meter.state() == "OK":
                 warned_80 = False
-            upcoming = min(next_due.values())
+            # next_due can only be empty if refresh_sources's empty-reload
+            # guard never fired and every source still vanished some other
+            # way; fall back to a plain interval wake rather than crashing
+            # min() on an empty sequence.
+            upcoming = min(next_due.values()) if next_due else time.time() + args.interval
             next_due_utc = datetime.fromtimestamp(upcoming, tz=timezone.utc)\
                 .strftime("%Y-%m-%dT%H:%M:%SZ")
             _cycle_status(seen, meter, registry, discovery_path, logs_dir,
                           sources_polled=len(due), next_due_utc=next_due_utc,
-                          watchlist_path=args.watchlist)
+                          watchlist_path=args.watchlist, held=len(_held))
             if args.once:
                 return 0
             time.sleep(max(1, min(args.interval, upcoming - time.time())))
