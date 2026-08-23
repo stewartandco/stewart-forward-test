@@ -165,6 +165,7 @@ FEED_XML = """<?xml version="1.0"?><rss><channel><title>X</title>
 <item><title>Post B</title><link>https://x.example/b-long-slug</link><pubDate>Mon, 01 Jun 2026 00:00:00 GMT</pubDate></item>
 </channel></rss>"""
 
+# links need two path segments and a >=6-char slug to pass feeds.article_links
 def _index_html(n):
     links = "".join(f'<a href="https://x.example/2026/post-number-{i}">Post {i}</a>' for i in range(n))
     return f"<html><head><title>X</title></head><body><p>About our quant research.</p>{links}</body></html>"
@@ -209,6 +210,17 @@ def test_prefilter_index_needs_min_items():
     assert r["ok"] is True and r["feed"] is None and len(r["titles"]) >= MIN_INDEX_ITEMS
 
 
+def test_prefilter_empty_feed_falls_back_to_index():
+    empty_feed = '<?xml version="1.0"?><rss><channel><title>X</title></channel></rss>'
+    f = _fetch_factory({
+        "https://x.example/": (200, '<html><link rel="alternate" type="application/rss+xml" href="/feed">'
+                                     f'<body>{_index_html(MIN_INDEX_ITEMS)}</body></html>', "https://x.example/"),
+        "https://x.example/feed": (200, empty_feed, "https://x.example/feed"),
+    })
+    r = prefilter("https://x.example/", f)
+    assert r["ok"] is True and r["feed"] is None and r["reason"] == "index"
+
+
 def _seen_with(tmp_path, source_id, kills=0, keeps=0):
     seen = SeenStore(tmp_path / "seen.jsonl")
     for i in range(kills):
@@ -237,6 +249,9 @@ def test_source_stats_counts_screened_and_keeps(tmp_path):
     (WINDOW_2, 2, 5, "promote"),
     (3, 0, TIMEOUT_DAYS, "timeout"),
     (3, 1, TIMEOUT_DAYS + 10, "timeout"),
+    (WINDOW_1 - 1, 0, 5, "wait"),
+    (3, 0, TIMEOUT_DAYS - 1, "wait"),
+    (WINDOW_1, 0, TIMEOUT_DAYS, "timeout"),  # precedence: timeout beats revoke
 ])
 def test_decide_probation_edges(screened, keeps, days, expected):
     since = "2026-01-01"
@@ -249,3 +264,13 @@ def test_decide_probation_reason_names_the_window():
     assert decide_probation({"screened": 40, "keeps": 0}, "2026-01-01", "2026-01-10")["reason"] == "probation-yield 0/40"
     assert decide_probation({"screened": 80, "keeps": 1}, "2026-01-01", "2026-01-10")["reason"] == "probation-yield 1/80"
     assert decide_probation({"screened": 2, "keeps": 0}, "2026-01-01", "2026-04-02")["reason"] == "probation-timeout"
+
+
+def test_decide_probation_malformed_since_is_total():
+    d = decide_probation({"screened": 3, "keeps": 0}, "2026-13-01", "2026-01-10")
+    assert d["action"] == "wait" and d["reason"] == "bad probation_since '2026-13-01'"
+
+
+def test_decide_probation_future_since_is_total():
+    d = decide_probation({"screened": 3, "keeps": 0}, "2026-06-01", "2026-01-10")
+    assert d["action"] == "wait" and d["reason"] == "probation_since 2026-06-01 is in the future"

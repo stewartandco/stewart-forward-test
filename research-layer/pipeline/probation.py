@@ -8,7 +8,7 @@ docs/2026-08-23-source-probation-filter-design.md
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .feeds import (fetch_url, discover_feed, parse_feed, article_links,
@@ -61,6 +61,7 @@ def prefilter(url: str, fetch=fetch_url) -> dict:
         else:
             feed = None
     if not titles:
+        feed = None  # dead/empty/non-XML feed: fall back to index mode
         titles = [t or link for link, t in article_links(html, final, cap=25)][:10]
         if len(titles) < MIN_INDEX_ITEMS:
             return {"ok": False,
@@ -90,7 +91,12 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
     screened, keeps = stats["screened"], stats["keeps"]
     if keeps >= PROMOTE_KEEPS:
         return {"action": "promote", "reason": f"probation-yield {keeps}/{screened}"}
-    age = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(since, "%Y-%m-%d")).days
+    try:
+        age = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(since, "%Y-%m-%d")).days
+    except ValueError:
+        return {"action": "wait", "reason": f"bad probation_since {since!r}"}
+    if age < 0:
+        return {"action": "wait", "reason": f"probation_since {since} is in the future"}
     if age >= TIMEOUT_DAYS:
         return {"action": "timeout", "reason": "probation-timeout"}
     window = WINDOW_1 if keeps == 0 else WINDOW_2
