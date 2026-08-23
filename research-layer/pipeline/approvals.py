@@ -20,7 +20,8 @@ import hashlib
 from pathlib import Path
 
 from .common import canonical_json
-from .watchlist import load_watchlist, set_discovery_status, VALID_CLASSES
+from .watchlist import (load_watchlist, set_discovery_status, remove_source,
+                        VALID_CLASSES)
 from .scanstatus import ActionLog
 
 DEFAULT_POLL_MINUTES = 360
@@ -104,6 +105,14 @@ def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,
             _flip_proposal(Path(discovery_path), record["domain"], "blocked")
             actions.event("source_blocked", payload)
             result["blocked"] += 1
+            removed = remove_source(watchlist_path, record["domain"])
+            if removed is not None:
+                set_discovery_status(discovery_path, record["domain"], "blocked",
+                                     reason="revoked by Coen (morpheus-ops)")
+                actions.event("source_revoked_by_coen",
+                              {"domain": record["domain"],
+                               "tier": removed.get("tier") or "verified",
+                               "added_by": removed.get("added_by")})
 
     if watchlist_dirty:
         Path(watchlist_path).write_text(

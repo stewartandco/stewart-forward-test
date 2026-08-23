@@ -21,6 +21,7 @@ from .probation import process_reviews, PROVENANCE_PROMOTED
 from .probation import prioritise_items, probation_counts, PRIORITY_CAP
 from .seen import SeenStore
 from .scanstatus import ActionLog
+from .approvals import process_approvals, sign_record
 from datetime import datetime, timedelta
 
 
@@ -486,3 +487,55 @@ def test_probation_counts_from_watchlist_and_chain(tmp_path):
     c = probation_counts(wl, tmp_path / "act.jsonl", days=30)
     assert c == {"on_probation": 2, "admitted": 1, "promoted": 1, "revoked": 1, "timed_out": 1, "blocked": 1}
     assert probation_counts(wl, tmp_path / "missing.jsonl")["admitted"] == 0
+
+
+def test_block_record_revokes_probation_source(tmp_path):
+    wl = _probation_wl(tmp_path, "prob.example")
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://prob.example/", found_in="blog1/i1", reason="cited")
+    set_discovery_status(q, "prob.example", "probation", reason="t")
+    rec = {"id": "prob.example-1", "action": "source_decision", "domain": "prob.example",
+           "url": "https://prob.example/", "decision": "block", "name": "prob.example",
+           "source_class": "blog", "actor": "coen", "via": "morpheus-ops",
+           "ts_utc": "2026-08-24T00:00:00Z"}
+    rec["sig"] = sign_record(rec, "k")
+    (tmp_path / "approvals.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
+                            discovery_path=q, actions=actions,
+                            state_path=tmp_path / "state.json", key="k")
+    assert out["blocked"] == 1
+    assert "prob.example" not in {s["id"] for s in load_watchlist(wl)}
+    assert {e["domain"]: e["status"] for e in load_discovery(q)}["prob.example"] == "blocked"
+    ev = [e for e in _events(tmp_path / "act.jsonl") if e["entry_type"] == "source_revoked_by_coen"]
+    assert len(ev) == 1 and ev[0]["payload"]["tier"] == "probation"
+
+
+def test_block_record_revokes_verified_source_not_in_queue(tmp_path):
+    wl = write_watchlist(tmp_path, [make_source(id="coen.example", url="https://coen.example/")])
+    rec = {"id": "coen.example-1", "action": "source_decision", "domain": "coen.example",
+           "url": "https://coen.example/", "decision": "block", "name": "coen.example",
+           "source_class": "blog", "actor": "coen", "via": "morpheus-ops",
+           "ts_utc": "2026-08-24T00:00:00Z"}
+    rec["sig"] = sign_record(rec, "k")
+    (tmp_path / "approvals.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
+                            discovery_path=tmp_path / "discovery.jsonl", actions=actions,
+                            state_path=tmp_path / "state.json", key="k")
+    assert out["blocked"] == 1 and load_watchlist(wl) == []
+    assert any(e["entry_type"] == "source_revoked_by_coen" and e["payload"]["tier"] == "verified"
+               for e in _events(tmp_path / "act.jsonl"))
+
+
+def test_unsigned_block_record_never_removes_a_source(tmp_path):
+    wl = _probation_wl(tmp_path, "prob.example")
+    rec = {"id": "x", "action": "source_decision", "domain": "prob.example", "url": "https://prob.example/",
+           "decision": "block", "name": "prob.example", "source_class": "blog", "actor": "coen",
+           "via": "morpheus-ops", "ts_utc": "2026-08-24T00:00:00Z", "sig": "bad"}
+    (tmp_path / "approvals.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
+                            discovery_path=tmp_path / "discovery.jsonl",
+                            actions=ActionLog(tmp_path / "act.jsonl"),
+                            state_path=tmp_path / "state.json", key="k")
+    assert out["invalid"] == 1 and "prob.example" in {s["id"] for s in load_watchlist(wl)}
