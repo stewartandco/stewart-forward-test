@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 
 def test_contract_version_bumped_with_case_3():
     from .scanstatus import CONTRACT_VERSION
-    assert CONTRACT_VERSION == "1.7"
+    assert CONTRACT_VERSION == "1.8"
 
 
 def make_source(**o):
