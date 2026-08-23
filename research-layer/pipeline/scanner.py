@@ -643,6 +643,12 @@ def run(argv: list[str] | None = None) -> int:
                 if entry["id"] not in next_due:
                     sources.append(entry)
                     next_due[entry["id"]] = 0.0  # poll the new source now
+            # a block record can revoke a source that refresh_sources already
+            # reloaded into `sources` earlier this cycle; drop it from
+            # polling immediately rather than waiting for next cycle's reload
+            for rid in approvals["revoked"]:
+                sources = [s for s in sources if s["id"] != rid]
+                next_due.pop(rid, None)
             if approvals["approved"] or approvals["blocked"] or approvals["invalid"]:
                 print(f"approvals: +{len(approvals['approved'])} sources, "
                       f"{approvals['blocked']} blocked, "

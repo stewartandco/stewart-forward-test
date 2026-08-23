@@ -853,6 +853,57 @@ def test_block_flips_proposal_without_touching_watchlist(tmp_path):
     assert result["blocked"] == 1 and result["approved"] == []
     assert len(load_watchlist(wl)) == 1
     assert [d["status"] for d in load_discovery(disc)] == ["blocked"]
+    # domain was never on the watchlist, so nothing was actually revoked
+    assert result["revoked"] == []
+
+
+def test_process_approvals_returns_revoked_domains_for_pruning(tmp_path):
+    """`revoked` is what scanner.run() uses to drop a just-blocked source out
+    of `sources`/`next_due` immediately, instead of waiting for the next
+    cycle's refresh_sources() reload."""
+    from .approvals import process_approvals
+    key = "k" * 64
+    wl = write_watchlist(tmp_path, [make_source(id="dead.example",
+                                                url="https://dead.example/blog")])
+    disc = tmp_path / "discovery.jsonl"
+    q = tmp_path / "approvals_queue.jsonl"
+    rec = _approval_record(key, domain="dead.example", decision="block")
+    q.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    result = process_approvals(queue_path=q, watchlist_path=wl,
+                               discovery_path=disc,
+                               actions=ActionLog(tmp_path / "act.jsonl"),
+                               state_path=tmp_path / "st.json", key=key)
+    assert result["blocked"] == 1
+    assert result["revoked"] == ["dead.example"]
+    assert load_watchlist(wl) == []
+
+
+def test_idless_signed_record_is_processed_once_not_every_poll(tmp_path):
+    """A signed record with no 'id' must dedup on the SAME key used to add
+    it to the processed set, or the scanner's next poll cycle re-reads the
+    same approvals_queue.jsonl and reprocesses it forever."""
+    from .approvals import process_approvals, sign_record
+    key = "k" * 64
+    rec = {"action": "source_decision", "domain": "noid.example",
+           "url": "https://noid.example/blog", "decision": "approve",
+           "name": "No Id", "source_class": "blog", "actor": "coen",
+           "via": "morpheus-ops", "ts_utc": "2026-08-15T03:00:00Z"}
+    rec["sig"] = sign_record(rec, key)
+    q = tmp_path / "approvals_queue.jsonl"
+    q.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    wl = write_watchlist(tmp_path, [make_source()])
+    disc = tmp_path / "discovery.jsonl"
+    state = tmp_path / "st.json"
+    actions = ActionLog(tmp_path / "act.jsonl")
+    first = process_approvals(queue_path=q, watchlist_path=wl, discovery_path=disc,
+                              actions=actions, state_path=state, key=key)
+    assert len(first["approved"]) == 1
+    # simulate the scanner's next poll cycle re-reading the same queue file
+    # + state file, exactly as scanner.run() does every loop iteration
+    second = process_approvals(queue_path=q, watchlist_path=wl, discovery_path=disc,
+                               actions=actions, state_path=state, key=key)
+    assert second["approved"] == [] and second["blocked"] == 0 and second["invalid"] == 0
+    assert len(load_watchlist(wl)) == 2  # not re-admitted a second time
 
 
 # ---------------- source scout (weekly) ----------------

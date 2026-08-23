@@ -98,22 +98,6 @@ def tier_of(source: dict) -> str:
     return source.get("tier") or "verified"
 
 
-def remove_source(path: str | Path, source_id: str) -> dict | None:
-    """Delete one watchlist entry by id; returns it, or None if absent."""
-    p = Path(path)
-    doc = json.loads(p.read_text(encoding="utf-8"))
-    keep, removed = [], None
-    for s in doc.get("sources", []):
-        if s["id"] == source_id and removed is None:
-            removed = s
-        else:
-            keep.append(s)
-    if removed is not None:
-        doc["sources"] = keep
-        write_watchlist_doc(p, doc)
-    return removed
-
-
 def normalize_url(url: str) -> str:
     parts = urlsplit(url.strip())
     query = urlencode([(k, v) for k, v in parse_qsl(parts.query)

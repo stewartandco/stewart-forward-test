@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from .watchlist import (load_watchlist, pollable, queue_discovery, load_discovery,
-                        remove_source, set_discovery_status, tier_of)
+                        set_discovery_status, tier_of)
 from .relevance import (build_source_screen_prompt, parse_source_screen,
                         screen_source, SOURCE_SCREEN_SYSTEM,
                         SOURCE_SCREEN_SCHEMA, SOURCE_SCREEN_MAX_TOKENS,
@@ -60,12 +60,7 @@ def test_probation_and_promoted_provenance_are_pollable(tmp_path):
     assert [s["id"] for s in pollable(srcs)] == ["p", "q"]
 
 
-def test_remove_source_and_set_discovery_status(tmp_path):
-    wl = write_watchlist(tmp_path, [make_source(id="a"), make_source(id="b")])
-    removed = remove_source(wl, "a")
-    assert removed["id"] == "a"
-    assert [s["id"] for s in load_watchlist(wl)] == ["b"]
-    assert remove_source(wl, "zzz") is None
+def test_set_discovery_status(tmp_path):
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://x.example/p", found_in="blog1/i1", reason="cited")
     assert set_discovery_status(q, "x.example", "probation", reason="admitted") is True
@@ -564,9 +559,44 @@ def test_block_record_revokes_verified_source_not_in_queue(tmp_path):
     out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
                             discovery_path=tmp_path / "discovery.jsonl", actions=actions,
                             state_path=tmp_path / "state.json", key="k")
-    assert out["blocked"] == 1 and load_watchlist(wl) == []
+    assert out["blocked"] == 1 and out["revoked"] == ["coen.example"]
+    assert load_watchlist(wl) == []
     assert any(e["entry_type"] == "source_revoked_by_coen" and e["payload"]["tier"] == "verified"
                for e in _events(tmp_path / "act.jsonl"))
+
+
+def _refuse_screen(*a, **kw):
+    raise AssertionError("a permanently blocked queue row must never reach source-screen")
+
+
+def test_block_of_legacy_verified_source_writes_permanent_block_row(tmp_path):
+    """A verified source Coen added directly (never discovered through the
+    pipeline) has no discovery-queue row. Blocking it must still leave a
+    permanent 'blocked' row behind, or a future citation of the same domain
+    would sail straight past queue_discovery's dedup and get re-proposed."""
+    wl = write_watchlist(tmp_path, [make_source(id="coen.example", url="https://coen.example/")])
+    q = tmp_path / "discovery.jsonl"
+    rec = {"id": "coen.example-1", "action": "source_decision", "domain": "coen.example",
+           "url": "https://coen.example/", "decision": "block", "name": "coen.example",
+           "source_class": "blog", "actor": "coen", "via": "morpheus-ops",
+           "ts_utc": "2026-08-24T00:00:00Z"}
+    rec["sig"] = sign_record(rec, "k")
+    (tmp_path / "approvals.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
+                            discovery_path=q, actions=actions,
+                            state_path=tmp_path / "state.json", key="k")
+    assert out["blocked"] == 1 and out["revoked"] == ["coen.example"]
+    row = {e["domain"]: e for e in load_discovery(q)}["coen.example"]
+    assert row["status"] == "blocked"
+    # queue_discovery refuses to re-queue a domain with an existing row,
+    # regardless of that row's status
+    assert queue_discovery(q, "https://coen.example/post", found_in="blog1/i9",
+                           reason="cited") is False
+    adm = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                             screen=_refuse_screen)
+    assert adm == {"admitted": [], "blocked": [], "deferred": []}
+    assert load_discovery(q)[0]["status"] == "blocked"
 
 
 def test_unsigned_block_record_never_removes_a_source(tmp_path):
