@@ -174,3 +174,95 @@ def screen_items(client, model: str, items: list[dict], meter,
         out.update(decisions)
         _log_decisions(log_path, model, decisions)
     return out
+
+
+# ---------------- D27 case 3: source-level screen ----------------------------
+
+SOURCE_SCREEN_SYSTEM = INTAKE_PARAMETERS + """
+
+SOURCE MODE. You are now judging a whole SOURCE, not items. You see its domain,
+its 10 most recent item titles, and the start of its landing/about text. Decide
+whether a recurring reader of this source would expect testable trading /
+portfolio-construction / execution / risk / market-microstructure / regime
+research that would pass the item bar above at least occasionally. Macro or
+market commentary without mechanisms, politics, gold-bug or doom sites, product
+or course marketing, news recaps, and general finance journalism are NOT research
+sources. Return research_source true/false, a one-line reason, and the asset
+classes the source mostly covers."""
+
+SOURCE_SCREEN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "research_source": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "asset_classes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["research_source", "reason", "asset_classes"],
+    "additionalProperties": False,
+}
+SOURCE_SCREEN_MAX_TOKENS = 400
+
+
+def build_source_screen_prompt(domain: str, titles: list[str], about: str) -> str:
+    lines = [f"Source domain: {domain}", "", "Recent item titles:"]
+    lines += [f"- {t}" for t in titles] or ["- (none found)"]
+    lines += ["", "Landing/about text (truncated):", about[:300] or "(none)"]
+    return "\n".join(lines)
+
+
+def parse_source_screen(data: dict) -> dict | None:
+    """Strict: a missing or non-boolean verdict is malformed (None), never a pass."""
+    verdict = data.get("research_source") if isinstance(data, dict) else None
+    if not isinstance(verdict, bool):
+        return None
+    classes = data.get("asset_classes")
+    return {"research_source": verdict,
+            "reason": str(data.get("reason", ""))[:300],
+            "asset_classes": [str(c) for c in classes] if isinstance(classes, list) else []}
+
+
+def screen_source(client, model: str, meter, domain: str, titles: list[str],
+                  about: str, log_path: str | Path) -> dict | None:
+    """One metered Sonnet call. Returns the parsed verdict, or None when the
+    budget is closed, the call failed, the model refused, or the output was
+    malformed - the caller treats None as 'not admitted, try again later'."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _log(verdict, reason):
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts_utc": ts, "domain": domain, "model": model,
+                                "verdict": verdict, "reason": reason},
+                               ensure_ascii=False) + "\n")
+
+    if not meter.can_spend():
+        _log(None, "monthly cap reached")
+        return None
+    try:
+        msg = client.messages.create(
+            model=model, max_tokens=SOURCE_SCREEN_MAX_TOKENS,
+            system=SOURCE_SCREEN_SYSTEM,
+            output_config={"format": {"type": "json_schema",
+                                      "schema": SOURCE_SCREEN_SCHEMA}},
+            messages=[{"role": "user",
+                       "content": build_source_screen_prompt(domain, titles, about)}])
+    except Exception as exc:
+        _log(None, f"api_error: {exc}"[:200])
+        if any(m in str(exc).lower() for m in FATAL_API_MARKERS):
+            raise ApiCreditExhausted(str(exc)) from exc
+        return None
+    meter.record_call(model, msg.usage, purpose="source_screen", agent="reader")
+    if msg.stop_reason == "refusal":
+        _log(None, "refusal")
+        return None
+    try:
+        text = next(b.text for b in msg.content if b.type == "text")
+        parsed = parse_source_screen(json.loads(text))
+    except (StopIteration, ValueError, TypeError):
+        parsed = None
+    if parsed is None:
+        _log(None, "malformed")
+        return None
+    _log(parsed["research_source"], parsed["reason"])
+    return parsed
