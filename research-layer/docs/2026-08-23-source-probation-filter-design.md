@@ -61,8 +61,10 @@ entry that D27 cases 1–2 do not admit:
   `tier: "verified"`, `added_by: auto-d27-probation→promoted`, `verified_date` = promotion date.
   0 keeps → **revoked**: entry removed, domain status `blocked`, reason `probation-yield 0/40`.
   Exactly 1 keep → window extends to 80; ≥ 2 by 80 promotes, otherwise revoked `probation-yield 1/80`.
-- **Hard stop:** 90 days on probation without resolution → revoked `probation-timeout`; the domain
-  returns to `proposed` if cited again later (a timeout is not a block).
+- **Hard stop:** 90 days on probation without resolution → revoked `probation-timeout`; the queue row
+  becomes `timed_out` and returns to `proposed` only when a NEW distinct citer appears (a timeout is
+  not a block; a repeat of the original citer does not reopen it — clarification recorded at build,
+  2026-08-24, so a quiet source is not re-screened every 90 days).
 - **D27 case 2 outranks yield:** a second distinct verified citer during probation promotes at once.
 - **Coen's kill authority unchanged:** blocking a domain or deleting a watchlist entry revokes
   permanently; the filter never reopens a `blocked` entry.
