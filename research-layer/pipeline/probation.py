@@ -185,10 +185,15 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
                                                "asset_classes": verdict["asset_classes"],
                                                "url": e["url"], "feed": pf["feed"]})
         out["admitted"].append(domain)
-    if queue_dirty:
-        write_discovery(discovery_path, entries)
+    # Watchlist first, then the queue: a crash between the two leaves a
+    # 'proposed' queue entry plus a watchlist entry, which the next run
+    # closes out cleanly via the "already on watchlist" branch above. The
+    # reverse order would leave a queue entry claiming admission with no
+    # matching watchlist row -- an admission that never actually happened.
     if out["admitted"]:
         write_watchlist_doc(watchlist_path, doc)
+    if queue_dirty:
+        write_discovery(discovery_path, entries)
     return out
 
 
@@ -250,9 +255,15 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
         else:
             keep.append(s)
             out["waiting"][domain] = decision["reason"]
+    # Queue first, then the watchlist: a crash between the two leaves a
+    # resolved queue status (promoted/blocked/reproposed) alongside a stale
+    # probation entry still on the watchlist, which the next run re-resolves
+    # from the queue's status. The reverse order would leave the watchlist
+    # entry already gone with the queue still claiming 'probation' -- a
+    # resolution the queue can no longer explain.
+    if queue_dirty:
+        write_discovery(discovery_path, disc)
     if watchlist_dirty:
         doc["sources"] = keep
         write_watchlist_doc(watchlist_path, doc)
-    if queue_dirty:
-        write_discovery(discovery_path, disc)
     return out

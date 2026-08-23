@@ -35,8 +35,14 @@ def _atomic_write_text(path: str | Path, text: str) -> None:
     suffix and only grows a `.tmp` tail."""
     p = Path(path)
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, p)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p)
+    except BaseException:
+        # a partial write or a failed replace must not leave a stray .tmp
+        # file behind for the next run to trip over
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_watchlist_doc(path: str | Path, doc: dict) -> None:

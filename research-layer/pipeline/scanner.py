@@ -367,9 +367,6 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
 
 # ---------------- D27 quality-bar auto-admission ----------------------------
 
-AUTO_ADMIT_MIN_CITERS = 2
-
-
 def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[dict]:
     """Admit proposals meeting the D27 mechanical bar: scout-researched, or
     cited by >= 2 distinct verified sources. Honest provenance (added_by
