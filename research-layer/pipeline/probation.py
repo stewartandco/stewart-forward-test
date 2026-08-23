@@ -321,4 +321,6 @@ def probation_counts(watchlist_path, actions_path, days: int = 30) -> dict:
             counts["timed_out" if pl.get("action") == "timeout" else "revoked"] += 1
         elif t == "source_auto_blocked":
             counts["blocked"] += 1
+        elif t == "source_revoked_by_coen":
+            counts["revoked"] += 1
     return counts

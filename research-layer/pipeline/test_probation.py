@@ -484,8 +484,9 @@ def test_probation_counts_from_watchlist_and_chain(tmp_path):
     actions.event("source_auto_blocked", {"domain": "c"})
     actions.event("source_auto_admitted", {"domain": "p1", "rule": "probation"})
     actions.event("source_auto_admitted", {"domain": "z", "rule": "scout-researched"})
+    actions.event("source_revoked_by_coen", {"domain": "x", "tier": "probation"})
     c = probation_counts(wl, tmp_path / "act.jsonl", days=30)
-    assert c == {"on_probation": 2, "admitted": 1, "promoted": 1, "revoked": 1, "timed_out": 1, "blocked": 1}
+    assert c == {"on_probation": 2, "admitted": 1, "promoted": 1, "revoked": 2, "timed_out": 1, "blocked": 1}
     assert probation_counts(wl, tmp_path / "missing.jsonl")["admitted"] == 0
 
 
@@ -539,3 +540,33 @@ def test_unsigned_block_record_never_removes_a_source(tmp_path):
                             actions=ActionLog(tmp_path / "act.jsonl"),
                             state_path=tmp_path / "state.json", key="k")
     assert out["invalid"] == 1 and "prob.example" in {s["id"] for s in load_watchlist(wl)}
+
+
+def test_mixed_approve_and_block_batch_persists_both(tmp_path):
+    wl = _probation_wl(tmp_path, "prob.example")
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://prob.example/", found_in="blog1/i1", reason="cited")
+    set_discovery_status(q, "prob.example", "probation", reason="t")
+    approve_rec = {"id": "new.example-1", "action": "source_decision", "domain": "new.example",
+                   "url": "https://new.example/", "decision": "approve", "name": "new.example",
+                   "source_class": "blog", "actor": "coen", "via": "morpheus-ops",
+                   "ts_utc": "2026-08-24T00:00:00Z"}
+    approve_rec["sig"] = sign_record(approve_rec, "k")
+    block_rec = {"id": "prob.example-1", "action": "source_decision", "domain": "prob.example",
+                "url": "https://prob.example/", "decision": "block", "name": "prob.example",
+                "source_class": "blog", "actor": "coen", "via": "morpheus-ops",
+                "ts_utc": "2026-08-24T00:00:00Z"}
+    block_rec["sig"] = sign_record(block_rec, "k")
+    (tmp_path / "approvals.jsonl").write_text(
+        json.dumps(approve_rec) + "\n" + json.dumps(block_rec) + "\n", encoding="utf-8")
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_approvals(queue_path=tmp_path / "approvals.jsonl", watchlist_path=wl,
+                            discovery_path=q, actions=actions,
+                            state_path=tmp_path / "state.json", key="k")
+    ids = {s["id"] for s in load_watchlist(wl)}
+    assert "new.example" in ids
+    assert "prob.example" not in ids
+    assert {e["domain"]: e["status"] for e in load_discovery(q)}["prob.example"] == "blocked"
+    types = {e["entry_type"] for e in _events(tmp_path / "act.jsonl")}
+    assert "source_approved" in types
+    assert "source_revoked_by_coen" in types

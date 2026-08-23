@@ -20,7 +20,7 @@ import hashlib
 from pathlib import Path
 
 from .common import canonical_json
-from .watchlist import (load_watchlist, set_discovery_status, remove_source,
+from .watchlist import (load_watchlist, set_discovery_status, write_watchlist_doc,
                         VALID_CLASSES)
 from .scanstatus import ActionLog
 
@@ -105,8 +105,17 @@ def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,
             _flip_proposal(Path(discovery_path), record["domain"], "blocked")
             actions.event("source_blocked", payload)
             result["blocked"] += 1
-            removed = remove_source(watchlist_path, record["domain"])
+            removed = None
+            remaining = []
+            for s in watchlist_doc["sources"]:
+                if s["id"] == record["domain"] and removed is None:
+                    removed = s
+                else:
+                    remaining.append(s)
             if removed is not None:
+                watchlist_doc["sources"] = remaining
+                known_ids.discard(record["domain"])
+                watchlist_dirty = True
                 set_discovery_status(discovery_path, record["domain"], "blocked",
                                      reason="revoked by Coen (morpheus-ops)")
                 actions.event("source_revoked_by_coen",
@@ -115,9 +124,7 @@ def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,
                                "added_by": removed.get("added_by")})
 
     if watchlist_dirty:
-        Path(watchlist_path).write_text(
-            json.dumps(watchlist_doc, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8")
+        write_watchlist_doc(watchlist_path, watchlist_doc)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(sorted(processed)), encoding="utf-8")
     return result
