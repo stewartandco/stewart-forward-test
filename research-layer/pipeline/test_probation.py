@@ -13,6 +13,7 @@ from .relevance import (build_source_screen_prompt, parse_source_screen,
                         screen_source, SOURCE_SCREEN_SYSTEM,
                         SOURCE_SCREEN_SCHEMA, SOURCE_SCREEN_MAX_TOKENS,
                         ApiCreditExhausted)
+from .probation import prefilter, BLOCKED_SUBDOMAINS, MIN_INDEX_ITEMS
 
 
 def make_source(**o):
@@ -153,3 +154,52 @@ def test_screen_source_fatal_api_error_raises_and_aborts(tmp_path):
     with pytest.raises(ApiCreditExhausted):
         screen_source(_Client(exc=RuntimeError("credit balance is too low")),
                      "m", _Meter(), "x", [], "", log)
+
+
+FEED_XML = """<?xml version="1.0"?><rss><channel><title>X</title>
+<item><title>Post A</title><link>https://x.example/a-long-slug</link><pubDate>Mon, 01 Jul 2026 00:00:00 GMT</pubDate></item>
+<item><title>Post B</title><link>https://x.example/b-long-slug</link><pubDate>Mon, 01 Jun 2026 00:00:00 GMT</pubDate></item>
+</channel></rss>"""
+
+def _index_html(n):
+    links = "".join(f'<a href="https://x.example/2026/post-number-{i}">Post {i}</a>' for i in range(n))
+    return f"<html><head><title>X</title></head><body><p>About our quant research.</p>{links}</body></html>"
+
+def _fetch_factory(pages: dict):
+    def fetch(url, timeout=30):
+        r = pages.get(url)
+        if r is None: return 0, "URLError: nope", url
+        return r
+    return fetch
+
+
+def test_prefilter_blocks_junk_and_subdomains():
+    f = _fetch_factory({})
+    assert prefilter("https://twitter.com/x", f)["ok"] is False
+    for sub in BLOCKED_SUBDOMAINS:
+        r = prefilter(f"https://{sub}example.com/", f)
+        assert r["ok"] is False and "subdomain" in r["reason"]
+
+
+def test_prefilter_blocks_unreachable_after_one_retry():
+    calls = []
+    def f(url, timeout=30):
+        calls.append(url); return 503, "err", url
+    r = prefilter("https://down.example/", f)
+    assert r["ok"] is False and "http 503" in r["reason"] and len(calls) == 2
+
+
+def test_prefilter_accepts_feed_and_collects_titles():
+    f = _fetch_factory({"https://x.example/": (200, '<html><link rel="alternate" type="application/rss+xml" href="/feed"><body>About text here</body></html>', "https://x.example/"),
+                        "https://x.example/feed": (200, FEED_XML, "https://x.example/feed")})
+    r = prefilter("https://x.example/", f)
+    assert r["ok"] is True and r["feed"] == "https://x.example/feed"
+    assert r["titles"] == ["Post A", "Post B"] and "About text" in r["about"]
+
+
+def test_prefilter_index_needs_min_items():
+    thin = _fetch_factory({"https://x.example/": (200, _index_html(MIN_INDEX_ITEMS - 1), "https://x.example/")})
+    assert prefilter("https://x.example/", thin)["ok"] is False
+    ok = _fetch_factory({"https://x.example/": (200, _index_html(MIN_INDEX_ITEMS), "https://x.example/")})
+    r = prefilter("https://x.example/", ok)
+    assert r["ok"] is True and r["feed"] is None and len(r["titles"]) >= MIN_INDEX_ITEMS
