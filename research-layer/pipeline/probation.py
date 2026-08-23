@@ -68,3 +68,32 @@ def prefilter(url: str, fetch=fetch_url) -> dict:
                     "feed": None, "titles": titles, "about": about}
     return {"ok": True, "reason": "feed" if feed else "index", "feed": feed,
             "titles": titles, "about": about}
+
+
+# ---------------- yield ----------------
+
+def source_stats(seen, source_id: str) -> dict:
+    """Screened / kept counts for one source from the seen store's latest
+    statuses. Post-keep states (extracted, paywalled, ...) are keeps."""
+    screened = keeps = 0
+    for e in seen._latest.values():
+        if e["source_id"] != source_id or e["status"] not in SCREENED_STATUSES:
+            continue
+        screened += 1
+        if e["status"] in KEEP_STATUSES:
+            keeps += 1
+    return {"screened": screened, "keeps": keeps}
+
+
+def decide_probation(stats: dict, since: str, today: str) -> dict:
+    """The state machine. Returns {action: promote|revoke|timeout|wait, reason}."""
+    screened, keeps = stats["screened"], stats["keeps"]
+    if keeps >= PROMOTE_KEEPS:
+        return {"action": "promote", "reason": f"probation-yield {keeps}/{screened}"}
+    age = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(since, "%Y-%m-%d")).days
+    if age >= TIMEOUT_DAYS:
+        return {"action": "timeout", "reason": "probation-timeout"}
+    window = WINDOW_1 if keeps == 0 else WINDOW_2
+    if screened >= window:
+        return {"action": "revoke", "reason": f"probation-yield {keeps}/{window}"}
+    return {"action": "wait", "reason": f"{keeps} keeps in {screened}/{window}"}

@@ -14,6 +14,10 @@ from .relevance import (build_source_screen_prompt, parse_source_screen,
                         SOURCE_SCREEN_SCHEMA, SOURCE_SCREEN_MAX_TOKENS,
                         ApiCreditExhausted)
 from .probation import prefilter, BLOCKED_SUBDOMAINS, MIN_INDEX_ITEMS
+from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
+                        PROMOTE_KEEPS, TIMEOUT_DAYS)
+from .seen import SeenStore
+from datetime import datetime, timedelta
 
 
 def make_source(**o):
@@ -203,3 +207,45 @@ def test_prefilter_index_needs_min_items():
     ok = _fetch_factory({"https://x.example/": (200, _index_html(MIN_INDEX_ITEMS), "https://x.example/")})
     r = prefilter("https://x.example/", ok)
     assert r["ok"] is True and r["feed"] is None and len(r["titles"]) >= MIN_INDEX_ITEMS
+
+
+def _seen_with(tmp_path, source_id, kills=0, keeps=0):
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    for i in range(kills):
+        seen.record(f"{source_id}-k{i}", source_id, "screen_kill", link="https://x/k")
+    for i in range(keeps):
+        seen.record(f"{source_id}-p{i}", source_id, "screen_keep", link="https://x/p")
+    return seen
+
+
+def test_source_stats_counts_screened_and_keeps(tmp_path):
+    seen = _seen_with(tmp_path, "p.example", kills=5, keeps=2)
+    seen.record("p.example-x", "p.example", "seen", link="https://x/s")   # unscreened
+    seen.record("p.example-p0", "p.example", "extracted")                  # keep -> extracted still a keep
+    assert source_stats(seen, "p.example") == {"screened": 7, "keeps": 2}
+    assert source_stats(seen, "nobody") == {"screened": 0, "keeps": 0}
+
+
+@pytest.mark.parametrize("screened,keeps,days,expected", [
+    (10, 0, 5, "wait"),
+    (WINDOW_1, 0, 5, "revoke"),
+    (WINDOW_1, PROMOTE_KEEPS, 5, "promote"),
+    (5, PROMOTE_KEEPS, 1, "promote"),
+    (WINDOW_1, 1, 5, "wait"),
+    (WINDOW_2 - 1, 1, 5, "wait"),
+    (WINDOW_2, 1, 5, "revoke"),
+    (WINDOW_2, 2, 5, "promote"),
+    (3, 0, TIMEOUT_DAYS, "timeout"),
+    (3, 1, TIMEOUT_DAYS + 10, "timeout"),
+])
+def test_decide_probation_edges(screened, keeps, days, expected):
+    since = "2026-01-01"
+    today = (datetime(2026, 1, 1) + timedelta(days=days)).strftime("%Y-%m-%d")
+    d = decide_probation({"screened": screened, "keeps": keeps}, since, today)
+    assert d["action"] == expected, d
+
+
+def test_decide_probation_reason_names_the_window():
+    assert decide_probation({"screened": 40, "keeps": 0}, "2026-01-01", "2026-01-10")["reason"] == "probation-yield 0/40"
+    assert decide_probation({"screened": 80, "keeps": 1}, "2026-01-01", "2026-01-10")["reason"] == "probation-yield 1/80"
+    assert decide_probation({"screened": 2, "keeps": 0}, "2026-01-01", "2026-04-02")["reason"] == "probation-timeout"
