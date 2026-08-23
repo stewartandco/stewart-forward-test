@@ -197,3 +197,64 @@ def _bump_malformed(discovery_path, domain: str, n: int) -> None:
             e["malformed_runs"] = n
     Path(discovery_path).write_text(
         "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8")
+
+
+# ---------------- reviews (probation -> promoted | revoked | timeout) --------
+
+def _citers(discovery_entries: list[dict], domain: str) -> set[str]:
+    from .watchlist import entry_domain
+    for e in discovery_entries:
+        if entry_domain(e) == domain:
+            return set(e.get("cited_by") or []) - {"scout"}
+    return set()
+
+
+def process_reviews(*, watchlist_path, discovery_path, seen, actions,
+                    today: str | None = None) -> dict:
+    """Evaluate every probation entry. D27 case 2 (2+ distinct citers) wins
+    over yield; a timeout returns the domain to 'proposed' (re-proposable);
+    a yield revoke blocks it. Idempotent: resolved entries leave probation.
+    The discovery queue is loaded once (read-only); flips go through
+    set_discovery_status."""
+    from .watchlist import load_discovery, set_discovery_status, tier_of
+    today = today or _today()
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    disc = load_discovery(discovery_path)
+    out = {"promoted": [], "revoked": [], "waiting": []}
+    keep: list[dict] = []
+    dirty = False
+    for s in doc["sources"]:
+        if tier_of(s) != "probation":
+            keep.append(s)
+            continue
+        domain = s["id"]
+        stats = source_stats(seen, domain)
+        if len(_citers(disc, domain)) >= 2:
+            decision = {"action": "promote", "reason": "cited by 2 distinct verified sources"}
+        else:
+            decision = decide_probation(stats, s.get("probation_since") or s["verified_date"], today)
+        if decision["action"] == "promote":
+            s = {**s, "added_by": PROVENANCE_PROMOTED, "tier": "verified",
+                 "verified_date": today,
+                 "notes": s.get("notes", "") + f" | promoted {today}: {decision['reason']}"}
+            s.pop("probation_since", None)
+            keep.append(s)
+            set_discovery_status(discovery_path, domain, "auto_admitted", reason=decision["reason"])
+            actions.event("source_promoted", {"domain": domain, "rule": decision["reason"],
+                                              "screened": stats["screened"], "keeps": stats["keeps"]})
+            out["promoted"].append(domain); dirty = True
+        elif decision["action"] in ("revoke", "timeout"):
+            new_status = "blocked" if decision["action"] == "revoke" else "proposed"
+            set_discovery_status(discovery_path, domain, new_status, reason=decision["reason"])
+            actions.event("source_auto_revoked", {"domain": domain, "rule": decision["reason"],
+                                                  "screened": stats["screened"], "keeps": stats["keeps"],
+                                                  "requeued": decision["action"] == "timeout"})
+            out["revoked"].append(domain); dirty = True
+        else:
+            keep.append(s)
+            out["waiting"].append(domain)
+    if dirty:
+        doc["sources"] = keep
+        Path(watchlist_path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                                        encoding="utf-8")
+    return out

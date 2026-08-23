@@ -17,6 +17,7 @@ from .probation import prefilter, BLOCKED_SUBDOMAINS, MIN_INDEX_ITEMS
 from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
                         PROMOTE_KEEPS, TIMEOUT_DAYS)
 from .probation import process_admissions, PROVENANCE_PROBATION
+from .probation import process_reviews, PROVENANCE_PROMOTED
 from .seen import SeenStore
 from .scanstatus import ActionLog
 from datetime import datetime, timedelta
@@ -347,3 +348,67 @@ def test_admissions_skip_scout_and_multi_citer_proposals(tmp_path):
                              today="2026-08-24")
     assert out == {"admitted": [], "blocked": [], "deferred": []}
     assert all(e["status"] == "proposed" for e in load_discovery(q))
+
+
+def _probation_wl(tmp_path, domain, since="2026-08-01"):
+    src = make_source(id=domain, url=f"https://{domain}/", feed=None,
+                      added_by=PROVENANCE_PROBATION, tier="probation",
+                      verified_date=since, probation_since=since)
+    return write_watchlist(tmp_path, [make_source(), src])
+
+
+def test_reviews_promote_revoke_timeout(tmp_path):
+    def prob(d, since):
+        return make_source(id=d, url=f"https://{d}/", feed=None, added_by=PROVENANCE_PROBATION,
+                           tier="probation", verified_date=since, probation_since=since)
+    wl = write_watchlist(tmp_path, [make_source(), prob("win.example", "2026-08-01"),
+                                    prob("lose.example", "2026-08-01"), prob("quiet.example", "2026-05-01"),
+                                    prob("wait.example", "2026-08-01")])
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    for i in range(40): seen.record(f"w{i}", "win.example", "screen_keep" if i < 2 else "screen_kill", link="h")
+    for i in range(40): seen.record(f"l{i}", "lose.example", "screen_kill", link="h")
+    for i in range(3): seen.record(f"q{i}", "quiet.example", "screen_kill", link="h")
+    for i in range(10): seen.record(f"t{i}", "wait.example", "screen_kill", link="h")
+    q = tmp_path / "discovery.jsonl"
+    for d in ("win.example", "lose.example", "quiet.example", "wait.example"):
+        queue_discovery(q, f"https://{d}/", found_in="blog1/i1", reason="cited")
+        set_discovery_status(q, d, "probation", reason="t")
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_reviews(watchlist_path=wl, discovery_path=q, seen=seen,
+                          actions=actions, today="2026-08-20")
+    assert out == {"promoted": ["win.example"], "revoked": ["lose.example", "quiet.example"], "waiting": ["wait.example"]}
+    src = {s["id"]: s for s in load_watchlist(wl)}
+    assert src["win.example"]["added_by"] == PROVENANCE_PROMOTED and src["win.example"]["tier"] == "verified"
+    assert src["win.example"]["verified_date"] == "2026-08-20" and "probation_since" not in src["win.example"]
+    assert "lose.example" not in src and "quiet.example" not in src and "wait.example" in src
+    st = {e["domain"]: e for e in load_discovery(q)}
+    assert st["win.example"]["status"] == "auto_admitted"
+    assert st["lose.example"]["status"] == "blocked" and st["lose.example"]["status_reason"] == "probation-yield 0/40"
+    assert st["quiet.example"]["status"] == "proposed" and st["quiet.example"]["status_reason"] == "probation-timeout"
+    types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
+    assert types.count("source_promoted") == 1 and types.count("source_auto_revoked") == 2
+    assert process_reviews(watchlist_path=wl, discovery_path=q, seen=seen,
+                           actions=actions, today="2026-08-20") == {"promoted": [], "revoked": [], "waiting": ["wait.example"]}
+
+
+def test_reviews_second_citer_promotes_immediately(tmp_path):
+    wl = _probation_wl(tmp_path, "cited.example")
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://cited.example/a", found_in="blog1/i1", reason="cited")
+    set_discovery_status(q, "cited.example", "probation", reason="t")
+    entries = load_discovery(q); entries[0]["cited_by"] = ["blog1", "blog2"]
+    q.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    out = process_reviews(watchlist_path=wl, discovery_path=q,
+                          seen=SeenStore(tmp_path / "seen.jsonl"),
+                          actions=ActionLog(tmp_path / "act.jsonl"), today="2026-08-02")
+    assert out["promoted"] == ["cited.example"]
+    ev = [e for e in _events(tmp_path / "act.jsonl") if e["entry_type"] == "source_promoted"][0]
+    assert ev["payload"]["rule"] == "cited by 2 distinct verified sources"
+
+
+def test_reviews_ignore_non_probation_entries(tmp_path):
+    wl = write_watchlist(tmp_path, [make_source(id="coen.example", added_by="coen")])
+    out = process_reviews(watchlist_path=wl, discovery_path=tmp_path / "q.jsonl",
+                          seen=SeenStore(tmp_path / "seen.jsonl"),
+                          actions=ActionLog(tmp_path / "act.jsonl"), today="2026-08-02")
+    assert out == {"promoted": [], "revoked": [], "waiting": []}
