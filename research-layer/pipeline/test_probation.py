@@ -25,6 +25,11 @@ from .approvals import process_approvals, sign_record
 from datetime import datetime, timedelta
 
 
+def test_contract_version_bumped_with_case_3():
+    from .scanstatus import CONTRACT_VERSION
+    assert CONTRACT_VERSION == "1.7"
+
+
 def make_source(**o):
     src = {"id": "test-blog", "class": "blog", "name": "Test Blog",
            "url": "https://example.org/blog/", "feed": "https://example.org/feed/",

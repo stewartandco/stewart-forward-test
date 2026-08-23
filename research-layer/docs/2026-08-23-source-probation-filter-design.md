@@ -2,7 +2,8 @@
 
 **Status: design APPROVED by Coen 2026-08-23 in session (§1–§5 each approved). Governance: amends
 D27 in `stewartandco-agents/DECISIONS.md` (case 3) and retires the D26 approval write path; to be
-ratified there when this ships. Not built.**
+ratified there when this ships. Not built. BUILT 2026-08-24 on branch feat/source-probation
+(Tasks 1-12); first live pass pending merge.**
 
 ## 0. Decision and scope
 
@@ -35,8 +36,10 @@ entry that D27 cases 1–2 do not admit:
 
 1. **Deterministic pre-filter (no cost).** BLOCK when any of: domain on the junk blacklist
    (`watchlist.py` junk platforms) · hostname begins `store.` `shop.` `cms.` `app.` `login.` `my.` ·
-   URL unreachable (HTTP ≥ 400 or timeout, one retry) · no RSS/Atom feed **and** no index page
-   with ≥ 5 dated items in the trailing 12 months (reuse `feeds.py` parse/extract primitives).
+   URL unreachable (HTTP ≥ 400 or timeout, one retry) · no RSS/Atom feed **and** fewer than 5 same-site
+   article links on the index page (dating index links is not reliable from HTML; the source
+   screen and the yield window carry the quality burden — clarification recorded at build,
+   2026-08-24) (reuse `feeds.py` parse/extract primitives).
    Reason recorded verbatim on the queue entry.
 2. **Source screen (one Sonnet-5 call, ≈ USD 0.003).** Input = 10 latest item titles + first 300
    chars of the landing/about text. Prompt = `INTAKE_PARAMETERS` reframed at source level: *would

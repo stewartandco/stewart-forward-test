@@ -451,8 +451,9 @@ def test_write_status_matches_convention(tmp_path):
     # this file. It reached v1.6 on 2026-08-17 (D34 audit + D35 kill switch)
     # while the runtime still emitted "1.1" -- five versions of drift on the
     # one field a dashboard reads to say which rules an agent is running under.
-    # A decision that only changed a contract has not shipped.
-    assert st["contract_version"] == "1.6"
+    # A decision that only changed a contract has not shipped. Bumped to 1.7
+    # for D27 case 3 (source probation filter, 2026-08-24).
+    assert st["contract_version"] == "1.7"
     assert st["overall"] == "OK"
     assert st["items"]["budget"] == "OK"
     assert st["pending_tier3"] == 7

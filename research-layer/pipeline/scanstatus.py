@@ -17,7 +17,7 @@ DOMAIN = "intelligence"
 # of truth. Bump this in the SAME change as the contract: a version recorded
 # only in the contract has not shipped, and this field is what the dashboard
 # reads to say which rules the agent is running under.
-CONTRACT_VERSION = "1.6"
+CONTRACT_VERSION = "1.7"
 
 
 class ActionLog:
