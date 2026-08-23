@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from .common import canonical_json
 from .watchlist import (load_watchlist, set_discovery_status, write_watchlist_doc,
                         load_discovery, write_discovery, normalize_url, tier_of,
-                        VALID_CLASSES)
+                        VALID_CLASSES, discovery_domain)
 from .scanstatus import ActionLog
 
 DEFAULT_POLL_MINUTES = 360
@@ -111,8 +111,25 @@ def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,
             # block-then-approve of the same domain in one batch: watchlist
             # follows the last signed decision; the queue row stays blocked
             # (only_from=proposed on approve).
-            flipped = set_discovery_status(discovery_path, record["domain"], "blocked",
+            #
+            # Morpheus sends record["domain"] as the WATCHLIST id, which for
+            # sources Coen approved before this field tracked the real URL
+            # domain is NOT the same string (e.g. "carver" vs
+            # "carverwealth.com"). The discovery queue keys every row on the
+            # actual URL domain, so flipping only on record["domain"] can
+            # miss the real queue row entirely -- and a later citation of
+            # the true domain would then sail past queue_discovery's dedup
+            # and re-propose (and eventually re-admit) a source Coen just
+            # blocked. Key the permanent block on the URL domain, and ALSO
+            # flip any row under the raw record["domain"] if one happens to
+            # exist and differs (harmless no-op when it doesn't).
+            url_domain = discovery_domain(record["url"])
+            flipped = set_discovery_status(discovery_path, url_domain, "blocked",
                                            reason="revoked by Coen (morpheus-ops)")
+            if record["domain"] != url_domain:
+                flipped_by_id = set_discovery_status(discovery_path, record["domain"], "blocked",
+                                                      reason="revoked by Coen (morpheus-ops)")
+                flipped = flipped or flipped_by_id
             actions.event("source_blocked", payload)
             result["blocked"] += 1
             if not flipped:
@@ -123,7 +140,7 @@ def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 entries = load_discovery(discovery_path)
                 entries.append({
-                    "url": record["url"], "domain": record["domain"],
+                    "url": record["url"], "domain": url_domain,
                     "normalized": normalize_url(record["url"]),
                     "found_in": "morpheus-ops", "reason": "revoked by Coen",
                     "cited_by": [], "tier": 3, "status": "blocked",

@@ -608,7 +608,7 @@ def run(argv: list[str] | None = None) -> int:
                                          logs_dir / "source_screen_log.jsonl")
                 adm = process_admissions(discovery_path=discovery_path,
                                          watchlist_path=args.watchlist, actions=actions,
-                                         screen=_screen)
+                                         screen=_screen, can_spend=meter.can_spend)
                 rev = process_reviews(watchlist_path=args.watchlist,
                                       discovery_path=discovery_path, seen=seen, actions=actions)
                 if adm["admitted"] or adm["blocked"] or rev["promoted"] or rev["revoked"] or rev["timed_out"]:

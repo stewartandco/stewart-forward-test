@@ -227,10 +227,23 @@ def parse_source_screen(data: dict) -> dict | None:
 
 
 def screen_source(client, model: str, meter, domain: str, titles: list[str],
-                  about: str, log_path: str | Path) -> dict | None:
-    """One metered Sonnet call. Returns the parsed verdict, or None when the
-    budget is closed, the call failed, the model refused, or the output was
-    malformed - the caller treats None as 'not admitted, try again later'."""
+                  about: str, log_path: str | Path) -> tuple[str, object]:
+    """One metered Sonnet call. Returns (kind, payload):
+
+      ("verdict", parsed_dict)  -- success
+      ("malformed", reason)     -- unparseable/invalid schema output
+      ("refusal", None)         -- the model declined
+      ("budget", None)          -- monthly cap already closed (checked
+                                    before any call is made)
+      ("api_error", message)    -- a non-fatal API/network failure
+
+    'malformed' and 'refusal' are the SOURCE's fault (or a one-off model
+    hiccup on this source) and are safe to retry-count against it. 'budget'
+    and 'api_error' are NOT the source's fault -- every other source in the
+    same pass would fail identically -- so callers must leave the source
+    untouched and stop calling rather than count these against it. A fatal
+    billing/credential error still raises ApiCreditExhausted rather than
+    returning, same as before."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -243,7 +256,7 @@ def screen_source(client, model: str, meter, domain: str, titles: list[str],
 
     if not meter.can_spend():
         _log(None, "monthly cap reached")
-        return None
+        return ("budget", None)
     try:
         msg = client.messages.create(
             model=model, max_tokens=SOURCE_SCREEN_MAX_TOKENS,
@@ -258,11 +271,11 @@ def screen_source(client, model: str, meter, domain: str, titles: list[str],
             print(f"  FATAL api error, aborting run: {exc}", file=sys.stderr)
             raise ApiCreditExhausted(str(exc)) from exc
         print(f"  screen call failed: {exc}", file=sys.stderr)
-        return None
+        return ("api_error", str(exc)[:200])
     meter.record_call(model, msg.usage, purpose="source_screen", agent="reader")
     if msg.stop_reason == "refusal":
         _log(None, "refusal")
-        return None
+        return ("refusal", None)
     try:
         text = next(b.text for b in msg.content if b.type == "text")
         parsed = parse_source_screen(json.loads(text))
@@ -270,6 +283,6 @@ def screen_source(client, model: str, meter, domain: str, titles: list[str],
         parsed = None
     if parsed is None:
         _log(None, "malformed")
-        return None
+        return ("malformed", "malformed")
     _log(parsed["research_source"], parsed["reason"])
-    return parsed
+    return ("verdict", parsed)

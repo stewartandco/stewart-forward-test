@@ -54,6 +54,8 @@ def prefilter(url: str, fetch=fetch_url) -> dict:
                     "feed": None, "titles": [], "about": ""}
     about = html_to_text(html)[:300]
     feed = discover_feed(html, final)
+    if feed and not feed.startswith(("http://", "https://")):
+        feed = None  # e.g. feed://... -- never fetch a non-http(s) scheme
     titles: list[str] = []
     if feed:
         fstatus, ftext, _ = fetch(feed)
@@ -110,12 +112,33 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
 
 def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
                        screen, today: str | None = None,
-                       max_per_run: int = ADMISSIONS_PER_RUN) -> dict:
-    """Case-3 admission pass. `screen(domain, titles, about) -> verdict|None`
-    is injected (production binds relevance.screen_source). Returns the
-    domains admitted / blocked / deferred this pass. Idempotent. The queue
-    is loaded once and written once at the end (if anything changed); same
-    for the watchlist (only when something was admitted).
+                       max_per_run: int = ADMISSIONS_PER_RUN,
+                       can_spend=lambda: True) -> dict:
+    """Case-3 admission pass. `screen(domain, titles, about) -> (kind, payload)`
+    is injected (production binds relevance.screen_source, whose return
+    shape this matches exactly). `kind` is one of:
+      'verdict'   -- payload is the parsed dict; the normal path
+      'malformed' -- payload is a reason string; counts toward the
+                     per-source malformed-run cap (source's fault/flake)
+      'refusal'   -- payload is None; counts toward the same cap
+      'budget'    -- payload is None; NOT the source's fault -- the whole
+                     pass stops here without touching this or later entries
+      'api_error' -- payload is an error message; same as 'budget': stop,
+                     don't count, don't touch
+    `can_spend` (production binds meter.can_spend) gates the ENTIRE pass up
+    front: a closed budget returns the empty shape immediately, logging and
+    flipping nothing -- so a monthly cap closing (or a multi-minute API
+    outage straddling several 60s scanner cycles) can never rack up false
+    'malformed x3' blocks against proposals that were never actually
+    screened.
+
+    Returns the domains admitted / blocked / deferred this pass. Idempotent.
+    The queue is loaded once and written once at the end (if anything
+    changed); same for the watchlist (only when something was admitted).
+    Chain events are collected during the loop and only emitted with
+    `actions.event` AFTER both writes succeed, so a crash (or an exception
+    raised out of a write) mid-pass leaves no chain row describing a
+    mutation that was never actually persisted.
 
     `max_per_run` bounds the number of entries that reach `prefilter` (a
     live fetch) in one call -- free "already on watchlist" closeouts don't
@@ -125,13 +148,16 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
     from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
                             flip_entries, entry_domain, is_mechanically_admissible,
                             watchlist_domains)
+    out = {"admitted": [], "blocked": [], "deferred": []}
+    if not can_spend():
+        return out
     today = today or _today()
     entries = load_discovery(discovery_path)
     doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
     known = watchlist_domains(doc)
-    out = {"admitted": [], "blocked": [], "deferred": []}
     queue_dirty = False
     prefiltered = 0
+    pending_events: list[tuple[str, dict]] = []
     for e in entries:
         if e.get("status") != "proposed" or is_mechanically_admissible(e):
             continue
@@ -149,32 +175,37 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
             e.pop("malformed_runs", None)
             flip_entries(entries, domain, "blocked", reason=f"prefilter: {pf['reason']}")
             queue_dirty = True
-            actions.event("source_auto_blocked", {"domain": domain, "rule": "prefilter",
-                                                  "reason": pf["reason"], "url": e["url"]})
+            pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "prefilter",
+                                                            "reason": pf["reason"], "url": e["url"]}))
             out["blocked"].append(domain)
             continue
-        verdict = screen(domain, pf["titles"], pf["about"])
-        if verdict is None:
+        kind, payload = screen(domain, pf["titles"], pf["about"])
+        if kind in ("budget", "api_error"):
+            # not this source's fault, and every remaining call this pass
+            # would fail identically -- stop rather than mis-blame the queue
+            break
+        if kind in ("malformed", "refusal"):
             n = int(e.get("malformed_runs", 0)) + 1
             if n >= MAX_MALFORMED_RUNS:
                 e.pop("malformed_runs", None)
                 flip_entries(entries, domain, "blocked", reason=f"source-screen malformed x{n}")
-                actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
-                                                      "reason": f"malformed x{n}", "url": e["url"]})
+                pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                                "reason": f"malformed x{n}", "url": e["url"]}))
                 out["blocked"].append(domain)
             else:
                 e["malformed_runs"] = n
-                actions.event("source_screen_malformed",
-                              {"domain": domain, "run": n, "url": e["url"]})
+                pending_events.append(("source_screen_malformed",
+                                       {"domain": domain, "run": n, "url": e["url"], "kind": kind}))
                 out["deferred"].append(domain)
             queue_dirty = True
             continue
+        verdict = payload
         if not verdict["research_source"]:
             e.pop("malformed_runs", None)
             flip_entries(entries, domain, "blocked", reason=f"source-screen: {verdict['reason']}")
             queue_dirty = True
-            actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
-                                                  "reason": verdict["reason"], "url": e["url"]})
+            pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                            "reason": verdict["reason"], "url": e["url"]}))
             out["blocked"].append(domain)
             continue
         entry = {
@@ -192,10 +223,10 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         flip_entries(entries, domain, "probation",
                     reason=f"admitted on probation: {verdict['reason']}")
         queue_dirty = True
-        actions.event("source_auto_admitted", {"domain": domain, "rule": "probation",
-                                               "reason": verdict["reason"],
-                                               "asset_classes": verdict["asset_classes"],
-                                               "url": e["url"], "feed": pf["feed"]})
+        pending_events.append(("source_auto_admitted", {"domain": domain, "rule": "probation",
+                                                         "reason": verdict["reason"],
+                                                         "asset_classes": verdict["asset_classes"],
+                                                         "url": e["url"], "feed": pf["feed"]}))
         out["admitted"].append(domain)
     # Watchlist first, then the queue: a crash between the two leaves a
     # 'proposed' queue entry plus a watchlist entry, which the next run
@@ -206,6 +237,10 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         write_watchlist_doc(watchlist_path, doc)
     if queue_dirty:
         write_discovery(discovery_path, entries)
+    # Chain events are emitted last, and only once both writes above have
+    # actually succeeded -- see the docstring.
+    for event_type, payload in pending_events:
+        actions.event(event_type, payload)
     return out
 
 
@@ -214,11 +249,16 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
 def process_reviews(*, watchlist_path, discovery_path, seen, actions,
                     today: str | None = None) -> dict:
     """Evaluate every probation entry. D27 case 2 (2+ distinct citers) wins
-    over yield; a timeout returns the domain to 'proposed' (re-proposable,
-    bucketed separately as timed_out); a yield revoke blocks it. Idempotent:
-    resolved entries leave probation. Both the discovery queue and the
-    watchlist are loaded once and written once at the end (if anything
-    changed)."""
+    over yield; a timeout flips the queue row to 'timed_out' (a dead end,
+    NOT 'proposed' -- process_admissions only ever looks at 'proposed', so a
+    timed-out domain does not silently re-admit itself next cycle; it waits
+    for a genuinely new citer, which queue_discovery flips back to
+    'proposed' on arrival); a yield revoke blocks it. Idempotent: resolved
+    entries leave probation. Both the discovery queue and the watchlist are
+    loaded once and written once at the end (if anything changed). Chain
+    events are collected during the loop and only emitted with
+    `actions.event` AFTER both writes succeed, so a crash mid-pass leaves no
+    chain row describing a mutation that was never actually persisted."""
     from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
                             flip_entries, entry_domain, proposal_citers, tier_of)
     today = today or _today()
@@ -234,6 +274,7 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
     keep: list[dict] = []
     watchlist_dirty = False
     queue_dirty = False
+    pending_events: list[tuple[str, dict]] = []
     # One pass over the seen store instead of one source_stats() scan per
     # probation entry (source_stats itself is unchanged -- it's still used
     # directly by tests and other callers; this just batches the same
@@ -270,23 +311,27 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
             s.pop("probation_since", None)
             keep.append(s)
             queue_dirty |= flip_entries(disc, domain, "auto_admitted", reason=decision["reason"])
-            actions.event("source_promoted", {"domain": domain, "rule": decision["reason"],
-                                              "screened": stats["screened"], "keeps": stats["keeps"]})
+            pending_events.append(("source_promoted", {"domain": domain, "rule": decision["reason"],
+                                                        "screened": stats["screened"], "keeps": stats["keeps"]}))
             out["promoted"].append(domain); watchlist_dirty = True
         elif decision["action"] in ("revoke", "timeout"):
-            new_status = "blocked" if decision["action"] == "revoke" else "proposed"
+            # A timeout goes to 'timed_out', a DEAD END distinct from
+            # 'proposed' -- process_admissions only ever acts on 'proposed'
+            # rows, so this cannot silently re-admit itself next cycle. Only
+            # a genuinely new citer (via queue_discovery) re-opens it.
+            new_status = "blocked" if decision["action"] == "revoke" else "timed_out"
             queue_dirty |= flip_entries(disc, domain, new_status, reason=decision["reason"])
-            actions.event("source_auto_revoked", {"domain": domain, "rule": decision["reason"],
-                                                  "action": decision["action"],
-                                                  "screened": stats["screened"], "keeps": stats["keeps"],
-                                                  "requeued": decision["action"] == "timeout"})
+            pending_events.append(("source_auto_revoked", {"domain": domain, "rule": decision["reason"],
+                                                            "action": decision["action"],
+                                                            "screened": stats["screened"], "keeps": stats["keeps"],
+                                                            "requeued": decision["action"] == "timeout"}))
             bucket = "revoked" if decision["action"] == "revoke" else "timed_out"
             out[bucket].append(domain); watchlist_dirty = True
         else:
             keep.append(s)
             out["waiting"][domain] = decision["reason"]
     # Queue first, then the watchlist: a crash between the two leaves a
-    # resolved queue status (promoted/blocked/reproposed) alongside a stale
+    # resolved queue status (promoted/blocked/timed_out) alongside a stale
     # probation entry still on the watchlist, which the next run re-resolves
     # from the queue's status. The reverse order would leave the watchlist
     # entry already gone with the queue still claiming 'probation' -- a
@@ -296,6 +341,10 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
     if watchlist_dirty:
         doc["sources"] = keep
         write_watchlist_doc(watchlist_path, doc)
+    # Chain events are emitted last, and only once both writes above have
+    # actually succeeded -- see the docstring.
+    for event_type, payload in pending_events:
+        actions.event(event_type, payload)
     return out
 
 

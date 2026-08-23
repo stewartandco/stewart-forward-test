@@ -178,12 +178,21 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
     entries = load_discovery(path)
     existing = next((e for e in entries if entry_domain(e) == domain), None)
     if existing is not None:
-        # accumulate distinct citing sources on open proposals (D27 evidence)
-        if existing.get("status") == "proposed":
+        # accumulate distinct citing sources on open proposals (D27 evidence).
+        # A 'timed_out' domain is a dead end -- process_admissions never
+        # looks at it again -- UNLESS a genuinely new citer shows up, in
+        # which case it re-opens for review by flipping back to 'proposed'
+        # (a repeat of the same citer that timed it out leaves it dead).
+        status = existing.get("status")
+        if status in ("proposed", "timed_out"):
             cited_by = existing.setdefault(
                 "cited_by", [existing.get("found_in", "").split("/", 1)[0]])
             if citer and citer not in cited_by:
                 cited_by.append(citer)
+                if status == "timed_out":
+                    existing["status"] = "proposed"
+                    existing["status_reason"] = "re-cited after timeout"
+                    existing["status_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 write_discovery(path, entries)
         return False
     entry = {
