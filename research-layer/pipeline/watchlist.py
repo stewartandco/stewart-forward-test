@@ -4,6 +4,10 @@ The watchlist is the standing corpus designation: a source may be polled ONLY
 when Coen added it AND stamped verified_date (his one-time verification pass is
 the permanent Tier 3 corpus gate). Anything discovered off-list is queued as a
 proposal in sources/discovery_queue.jsonl and never fetched.
+
+D27 case 3 adds a mechanical middle ground: `auto-d27-probation`/
+`auto-d27-promoted` provenance lets a source poll on probationary terms before
+Coen's own verification pass, tracked via the `tier` field.
 """
 from __future__ import annotations
 
@@ -52,9 +56,11 @@ POLLABLE_PROVENANCE = {"coen", "auto-d27", "auto-d27-probation", "auto-d27-promo
 
 
 def pollable(sources: list[dict]) -> list[dict]:
-    """The verified gate: Coen-stamped entries, plus D27 mechanical
-    admissions (scout-researched or 2+ distinct citers, chain-logged with
-    honest added_by='auto-d27'). Nothing else polls."""
+    """The verified gate: entries carrying one of the four honest provenance
+    values - 'coen' (his own verification pass), 'auto-d27' (D27 mechanical
+    admission: scout-researched or 2+ distinct citers), or the D27 case-3
+    probation pair 'auto-d27-probation' / 'auto-d27-promoted'. Nothing else
+    polls."""
     return [s for s in sources
             if s["added_by"] in POLLABLE_PROVENANCE and s["verified_date"]]
 
@@ -106,6 +112,12 @@ def discovery_domain(url: str) -> str:
     return netloc[4:] if netloc.startswith("www.") else netloc
 
 
+def entry_domain(e: dict) -> str:
+    """A discovery-queue entry's domain: the stamped field, falling back to
+    deriving it from the entry's url for older entries that predate it."""
+    return e.get("domain") or discovery_domain(e["url"])
+
+
 def load_discovery(path: str | Path) -> list[dict]:
     p = Path(path)
     if not p.exists():
@@ -127,9 +139,7 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
         return False
     citer = found_in.split("/", 1)[0]
     entries = load_discovery(path)
-    existing = next((e for e in entries
-                     if (e.get("domain") or discovery_domain(e["url"])) == domain),
-                    None)
+    existing = next((e for e in entries if entry_domain(e) == domain), None)
     if existing is not None:
         # accumulate distinct citing sources on open proposals (D27 evidence)
         if existing.get("status") == "proposed":
@@ -161,17 +171,26 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
 
 
 def set_discovery_status(path: str | Path, domain: str, status: str, *,
-                         reason: str) -> bool:
-    """Flip one discovery-queue entry's status (any prior status) and record
-    why. Returns False when the domain is not queued."""
+                         reason: str, only_from: str | None = None) -> bool:
+    """Flip EVERY discovery-queue entry for this domain to `status` and
+    record why. `only_from`, when given, restricts the flip to entries whose
+    current status equals it (others for the same domain are left alone).
+    Returns False when nothing matched.
+
+    Not safe to call while another function holds an in-memory copy of the
+    queue and will write it back (load once, write once in any pass that
+    also calls this)."""
     entries = load_discovery(path)
     hit = False
     for e in entries:
-        if (e.get("domain") or discovery_domain(e["url"])) == domain:
-            e["status"] = status
-            e["status_reason"] = reason
-            e["status_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            hit = True
+        if entry_domain(e) != domain:
+            continue
+        if only_from is not None and e.get("status") != only_from:
+            continue
+        e["status"] = status
+        e["status_reason"] = reason
+        e["status_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        hit = True
     if hit:
         Path(path).write_text(
             "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),

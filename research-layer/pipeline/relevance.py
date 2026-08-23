@@ -4,6 +4,10 @@ Cheap Sonnet-class call on title/summary batches against STRICT intake
 parameters. Only passes proceed to full fetch + extraction. Every decision is
 logged with a one-line reason (auditable funnel); the budget meter is checked
 BEFORE any call and charged after.
+
+D27 case 3 adds `screen_source`: one metered Sonnet call judging a whole
+source (titles + about text) for probation admission, reusing this module's
+budget/logging/fatal-error conventions.
 """
 from __future__ import annotations
 
@@ -188,7 +192,8 @@ research that would pass the item bar above at least occasionally. Macro or
 market commentary without mechanisms, politics, gold-bug or doom sites, product
 or course marketing, news recaps, and general finance journalism are NOT research
 sources. Return research_source true/false, a one-line reason, and the asset
-classes the source mostly covers."""
+classes the source mostly covers. Ignore the per-item output instructions
+above; the schema you are given is the only output."""
 
 SOURCE_SCREEN_SCHEMA = {
     "type": "object",
@@ -205,7 +210,7 @@ SOURCE_SCREEN_MAX_TOKENS = 400
 
 def build_source_screen_prompt(domain: str, titles: list[str], about: str) -> str:
     lines = [f"Source domain: {domain}", "", "Recent item titles:"]
-    lines += [f"- {t}" for t in titles] or ["- (none found)"]
+    lines += [f"- {t}" for t in titles[:10]] or ["- (none found)"]
     lines += ["", "Landing/about text (truncated):", about[:300] or "(none)"]
     return "\n".join(lines)
 
@@ -250,7 +255,9 @@ def screen_source(client, model: str, meter, domain: str, titles: list[str],
     except Exception as exc:
         _log(None, f"api_error: {exc}"[:200])
         if any(m in str(exc).lower() for m in FATAL_API_MARKERS):
+            print(f"  FATAL api error, aborting run: {exc}", file=sys.stderr)
             raise ApiCreditExhausted(str(exc)) from exc
+        print(f"  screen call failed: {exc}", file=sys.stderr)
         return None
     meter.record_call(model, msg.usage, purpose="source_screen", agent="reader")
     if msg.stop_reason == "refusal":

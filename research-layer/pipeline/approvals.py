@@ -20,8 +20,7 @@ import hashlib
 from pathlib import Path
 
 from .common import canonical_json
-from .watchlist import (load_watchlist, load_discovery, discovery_domain,
-                        VALID_CLASSES)
+from .watchlist import load_watchlist, set_discovery_status, VALID_CLASSES
 from .scanstatus import ActionLog
 
 DEFAULT_POLL_MINUTES = 360
@@ -58,17 +57,8 @@ def _watchlist_entry(record: dict) -> dict:
 
 
 def _flip_proposal(discovery_path: Path, domain: str, status: str) -> None:
-    entries = load_discovery(discovery_path)
-    changed = False
-    for e in entries:
-        if (e.get("domain") or discovery_domain(e["url"])) == domain \
-                and e["status"] == "proposed":
-            e["status"] = status
-            changed = True
-    if changed:
-        Path(discovery_path).write_text(
-            "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
-            encoding="utf-8")
+    set_discovery_status(discovery_path, domain, status,
+                         reason="morpheus-ops decision", only_from="proposed")
 
 
 def process_approvals(*, queue_path: str | Path, watchlist_path: str | Path,

@@ -376,7 +376,7 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
     auto-d27), chain-logged, idempotent (admitted proposals flip status).
     Everything else stays queued for Coen."""
     import json as _json
-    from .watchlist import load_discovery, discovery_domain
+    from .watchlist import load_discovery, discovery_domain, entry_domain
     entries = load_discovery(discovery_path)
     doc = _json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
     known_ids = {s["id"] for s in doc["sources"]}
@@ -387,7 +387,7 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
     for e in entries:
         if e.get("status") != "proposed":
             continue
-        domain = e.get("domain") or discovery_domain(e["url"])
+        domain = entry_domain(e)
         citers = set(e.get("cited_by") or [e.get("found_in", "").split("/", 1)[0]])
         is_scout = "scout" in citers or e.get("found_in", "").startswith("scout/")
         endorsed = len(citers - {"scout"}) >= AUTO_ADMIT_MIN_CITERS

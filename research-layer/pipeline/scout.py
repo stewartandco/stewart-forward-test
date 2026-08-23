@@ -66,9 +66,9 @@ SCOUT_SCHEMA = {
 
 def _known_domains(watchlist_sources: list[dict], discovery: list[dict]) -> set[str]:
     from .scanner import _watchlist_domains
-    from .watchlist import discovery_domain
+    from .watchlist import entry_domain
     known = _watchlist_domains(watchlist_sources)
-    known |= {e.get("domain") or discovery_domain(e["url"]) for e in discovery}
+    known |= {entry_domain(e) for e in discovery}
     return {d for d in known if d}
 
 

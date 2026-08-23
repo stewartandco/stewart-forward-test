@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +9,10 @@ import pytest
 
 from .watchlist import (load_watchlist, pollable, queue_discovery, load_discovery,
                         remove_source, set_discovery_status, tier_of)
+from .relevance import (build_source_screen_prompt, parse_source_screen,
+                        screen_source, SOURCE_SCREEN_SYSTEM,
+                        SOURCE_SCREEN_SCHEMA, SOURCE_SCREEN_MAX_TOKENS,
+                        ApiCreditExhausted)
 
 
 def make_source(**o):
@@ -53,10 +56,6 @@ def test_remove_source_and_set_discovery_status(tmp_path):
     e = load_discovery(q)[0]
     assert e["status"] == "probation" and e["status_reason"] == "admitted"
     assert set_discovery_status(q, "nope.example", "blocked", reason="x") is False
-
-
-from .relevance import (build_source_screen_prompt, parse_source_screen,
-                        screen_source, SOURCE_SCREEN_SYSTEM)
 
 
 class _Meter:
@@ -111,13 +110,46 @@ def test_screen_source_meters_and_logs(tmp_path):
                         tmp_path / "source_screen_log.jsonl")
     assert out["research_source"] is True and meter.calls == ["source_screen"]
     assert client.kwargs["system"] == SOURCE_SCREEN_SYSTEM
+    assert client.kwargs["max_tokens"] == SOURCE_SCREEN_MAX_TOKENS
+    assert client.kwargs["output_config"]["format"]["schema"] is SOURCE_SCREEN_SCHEMA
     row = json.loads((tmp_path / "source_screen_log.jsonl").read_text().splitlines()[0])
     assert row["domain"] == "x.example" and row["verdict"] is True
 
 
-def test_screen_source_returns_none_on_budget_refusal_or_error(tmp_path):
+def test_screen_source_closed_meter_proves_no_spend(tmp_path):
+    # A VALID payload the client would happily return - proves the budget
+    # gate short-circuits before any call is made, not merely that the
+    # (already-null) response of an empty payload happens to come back None.
+    meter = _Meter(ok=False)
+    client = _Client(_source_msg({"research_source": True, "reason": "r",
+                                  "asset_classes": []}))
+    assert screen_source(client, "m", meter, "x", [], "",
+                         tmp_path / "l.jsonl") is None
+    assert client.kwargs is None
+    assert meter.calls == []
+
+
+def test_screen_source_refusal_charges_but_error_does_not(tmp_path):
     log = tmp_path / "l.jsonl"
-    assert screen_source(_Client(_source_msg({})), "m", _Meter(ok=False), "x", [], "", log) is None
-    assert screen_source(_Client(_source_msg({}, stop="refusal")), "m", _Meter(), "x", [], "", log) is None
-    assert screen_source(_Client(exc=RuntimeError("boom")), "m", _Meter(), "x", [], "", log) is None
-    assert screen_source(_Client(_source_msg("not json")), "m", _Meter(), "x", [], "", log) is None
+    refusal_meter = _Meter()
+    assert screen_source(_Client(_source_msg({}, stop="refusal")), "m",
+                         refusal_meter, "x", [], "", log) is None
+    assert refusal_meter.calls == ["source_screen"]
+
+    error_meter = _Meter()
+    assert screen_source(_Client(exc=RuntimeError("boom")), "m",
+                         error_meter, "x", [], "", log) is None
+    assert error_meter.calls == []
+
+
+def test_screen_source_malformed_json_returns_none(tmp_path):
+    log = tmp_path / "l.jsonl"
+    assert screen_source(_Client(_source_msg("not json")), "m", _Meter(), "x",
+                         [], "", log) is None
+
+
+def test_screen_source_fatal_api_error_raises_and_aborts(tmp_path):
+    log = tmp_path / "l.jsonl"
+    with pytest.raises(ApiCreditExhausted):
+        screen_source(_Client(exc=RuntimeError("credit balance is too low")),
+                     "m", _Meter(), "x", [], "", log)
