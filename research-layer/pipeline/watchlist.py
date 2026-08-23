@@ -43,10 +43,12 @@ def load_watchlist(path: str | Path) -> list[dict]:
             raise WatchlistError(f"source {src['id']!r} url must be http(s)")
         if src["feed"] is not None and not str(src["feed"]).startswith(("http://", "https://")):
             raise WatchlistError(f"source {src['id']!r} feed must be http(s) or null")
+        if src.get("tier") not in (None, "verified", "probation"):
+            raise WatchlistError(f"source {src['id']!r} has unknown tier {src['tier']!r}")
     return sources
 
 
-POLLABLE_PROVENANCE = {"coen", "auto-d27"}
+POLLABLE_PROVENANCE = {"coen", "auto-d27", "auto-d27-probation", "auto-d27-promoted"}
 
 
 def pollable(sources: list[dict]) -> list[dict]:
@@ -55,6 +57,28 @@ def pollable(sources: list[dict]) -> list[dict]:
     honest added_by='auto-d27'). Nothing else polls."""
     return [s for s in sources
             if s["added_by"] in POLLABLE_PROVENANCE and s["verified_date"]]
+
+
+def tier_of(source: dict) -> str:
+    """'verified' unless the entry says otherwise (legacy entries carry no tier)."""
+    return source.get("tier") or "verified"
+
+
+def remove_source(path: str | Path, source_id: str) -> dict | None:
+    """Delete one watchlist entry by id; returns it, or None if absent."""
+    p = Path(path)
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    keep, removed = [], None
+    for s in doc.get("sources", []):
+        if s["id"] == source_id and removed is None:
+            removed = s
+        else:
+            keep.append(s)
+    if removed is not None:
+        doc["sources"] = keep
+        p.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                     encoding="utf-8")
+    return removed
 
 
 def normalize_url(url: str) -> str:
@@ -134,3 +158,22 @@ def queue_discovery(path: str | Path, url: str, found_in: str, reason: str) -> b
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
+
+
+def set_discovery_status(path: str | Path, domain: str, status: str, *,
+                         reason: str) -> bool:
+    """Flip one discovery-queue entry's status (any prior status) and record
+    why. Returns False when the domain is not queued."""
+    entries = load_discovery(path)
+    hit = False
+    for e in entries:
+        if (e.get("domain") or discovery_domain(e["url"])) == domain:
+            e["status"] = status
+            e["status_reason"] = reason
+            e["status_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            hit = True
+    if hit:
+        Path(path).write_text(
+            "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
+            encoding="utf-8")
+    return hit
