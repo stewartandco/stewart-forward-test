@@ -103,3 +103,97 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
     if screened >= window:
         return {"action": "revoke", "reason": f"probation-yield {keeps}/{window}"}
     return {"action": "wait", "reason": f"{keeps} keeps in {screened}/{window}"}
+
+
+# ---------------- admissions (proposal -> blocked | probation) ----------------
+
+DEFAULT_POLL_MINUTES_PROBATION = 360
+
+
+def _is_case_1_or_2(entry: dict) -> bool:
+    citers = set(entry.get("cited_by") or [entry.get("found_in", "").split("/", 1)[0]])
+    is_scout = "scout" in citers or entry.get("found_in", "").startswith("scout/")
+    return is_scout or len(citers - {"scout"}) >= 2
+
+
+def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
+                       screen, today: str | None = None) -> dict:
+    """Case-3 admission pass. `screen(domain, titles, about) -> verdict|None`
+    is injected (production binds relevance.screen_source). Returns the
+    domains admitted / blocked / deferred this pass. Idempotent. The queue is
+    loaded once and never written back here; all flips go through
+    set_discovery_status."""
+    from .watchlist import load_discovery, set_discovery_status, entry_domain
+    today = today or _today()
+    entries = load_discovery(discovery_path)
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    known = {s["id"] for s in doc["sources"]}
+    out = {"admitted": [], "blocked": [], "deferred": []}
+    for e in entries:
+        if e.get("status") != "proposed" or _is_case_1_or_2(e):
+            continue
+        domain = entry_domain(e)
+        if domain in known:
+            set_discovery_status(discovery_path, domain, "auto_admitted",
+                                 reason="already on watchlist")
+            continue
+        pf = prefilter(e["url"], fetch)
+        if not pf["ok"]:
+            set_discovery_status(discovery_path, domain, "blocked",
+                                 reason=f"prefilter: {pf['reason']}")
+            actions.event("source_auto_blocked", {"domain": domain, "rule": "prefilter",
+                                                  "reason": pf["reason"], "url": e["url"]})
+            out["blocked"].append(domain)
+            continue
+        verdict = screen(domain, pf["titles"], pf["about"])
+        if verdict is None:
+            n = int(e.get("malformed_runs", 0)) + 1
+            if n >= MAX_MALFORMED_RUNS:
+                set_discovery_status(discovery_path, domain, "blocked",
+                                     reason=f"source-screen malformed x{n}")
+                actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                      "reason": f"malformed x{n}", "url": e["url"]})
+                out["blocked"].append(domain)
+            else:
+                _bump_malformed(discovery_path, domain, n)
+                out["deferred"].append(domain)
+            continue
+        if not verdict["research_source"]:
+            set_discovery_status(discovery_path, domain, "blocked",
+                                 reason=f"source-screen: {verdict['reason']}")
+            actions.event("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                  "reason": verdict["reason"], "url": e["url"]})
+            out["blocked"].append(domain)
+            continue
+        entry = {
+            "id": domain, "class": "blog", "name": domain, "url": e["url"],
+            "feed": pf["feed"], "poll_minutes": DEFAULT_POLL_MINUTES_PROBATION,
+            "added_by": PROVENANCE_PROBATION, "verified_date": today,
+            "tier": "probation", "probation_since": today,
+            "notes": (f"probation from {today} per D27 case 3 (single citation; "
+                      f"screen: {verdict['reason'][:120]}; classes "
+                      f"{','.join(verdict['asset_classes']) or '-'}). Coen-revocable."),
+        }
+        doc["sources"].append(entry)
+        known.add(domain)
+        set_discovery_status(discovery_path, domain, "probation",
+                             reason=f"admitted on probation: {verdict['reason']}")
+        actions.event("source_auto_admitted", {"domain": domain, "rule": "probation",
+                                               "reason": verdict["reason"],
+                                               "asset_classes": verdict["asset_classes"],
+                                               "url": e["url"], "feed": pf["feed"]})
+        out["admitted"].append(domain)
+    if out["admitted"]:
+        Path(watchlist_path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                                        encoding="utf-8")
+    return out
+
+
+def _bump_malformed(discovery_path, domain: str, n: int) -> None:
+    from .watchlist import load_discovery, entry_domain
+    entries = load_discovery(discovery_path)
+    for e in entries:
+        if entry_domain(e) == domain:
+            e["malformed_runs"] = n
+    Path(discovery_path).write_text(
+        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8")

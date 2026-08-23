@@ -16,7 +16,9 @@ from .relevance import (build_source_screen_prompt, parse_source_screen,
 from .probation import prefilter, BLOCKED_SUBDOMAINS, MIN_INDEX_ITEMS
 from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
                         PROMOTE_KEEPS, TIMEOUT_DAYS)
+from .probation import process_admissions, PROVENANCE_PROBATION
 from .seen import SeenStore
+from .scanstatus import ActionLog
 from datetime import datetime, timedelta
 
 
@@ -274,3 +276,74 @@ def test_decide_probation_malformed_since_is_total():
 def test_decide_probation_future_since_is_total():
     d = decide_probation({"screened": 3, "keeps": 0}, "2026-06-01", "2026-01-10")
     assert d["action"] == "wait" and d["reason"] == "probation_since 2026-06-01 is in the future"
+
+
+def _events(path):
+    return [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def _good_pages(domain):
+    return {f"https://{domain}/": (200, '<html><link rel="alternate" type="application/rss+xml" href="/feed"><body>Quant research notes</body></html>', f"https://{domain}/"),
+            f"https://{domain}/feed": (200, FEED_XML.replace("x.example", domain), f"https://{domain}/feed")}
+
+
+def test_admissions_block_prefilter_screen_false_and_admit_true(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://good.example/", found_in="blog1/i1", reason="cited")
+    queue_discovery(q, "https://news.example/", found_in="blog1/i2", reason="cited")
+    queue_discovery(q, "https://down.example/", found_in="blog1/i3", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    pages = {**_good_pages("good.example"), **_good_pages("news.example")}
+    verdicts = {"good.example": {"research_source": True, "reason": "quant", "asset_classes": ["fx"]},
+                "news.example": {"research_source": False, "reason": "news", "asset_classes": []}}
+    screen = lambda domain, titles, about: verdicts.get(domain)
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                             fetch=_fetch_factory(pages), screen=screen, today="2026-08-24")
+    assert out["admitted"] == ["good.example"] and out["blocked"] == ["news.example", "down.example"]
+    st = {e["domain"]: e for e in load_discovery(q)}
+    assert st["good.example"]["status"] == "probation"
+    assert st["news.example"]["status"] == "blocked" and "source-screen" in st["news.example"]["status_reason"]
+    assert st["down.example"]["status"] == "blocked" and "unreachable" in st["down.example"]["status_reason"]
+    src = {s["id"]: s for s in load_watchlist(wl)}["good.example"]
+    assert src["added_by"] == PROVENANCE_PROBATION and src["tier"] == "probation"
+    assert src["probation_since"] == "2026-08-24" and src["feed"] == "https://good.example/feed"
+    assert src["verified_date"] == "2026-08-24" and src["notes"].startswith("probation")
+    types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
+    assert types.count("source_auto_admitted") == 1 and types.count("source_auto_blocked") == 2
+    adm = next(e for e in _events(tmp_path / "act.jsonl") if e["entry_type"] == "source_auto_admitted")
+    assert adm["payload"]["rule"] == "probation"
+    again = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                               fetch=_fetch_factory(pages), screen=screen, today="2026-08-24")
+    assert again["admitted"] == [] and again["blocked"] == []
+
+
+def test_admissions_malformed_screen_retries_then_blocks(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://flaky.example/", found_in="blog1/i1", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    kw = dict(discovery_path=q, watchlist_path=wl, actions=actions,
+              fetch=_fetch_factory(_good_pages("flaky.example")),
+              screen=lambda d, t, a: None)
+    for day in ("2026-08-24", "2026-08-25"):
+        out = process_admissions(today=day, **kw)
+        assert out["admitted"] == [] and out["blocked"] == []
+        assert load_discovery(q)[0]["status"] == "proposed"
+    out = process_admissions(today="2026-08-26", **kw)
+    assert out["blocked"] == ["flaky.example"]
+    assert load_discovery(q)[0]["status_reason"] == "source-screen malformed x3"
+
+
+def test_admissions_skip_scout_and_multi_citer_proposals(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://scouted.example/", found_in="scout/2026-08-15", reason="scout")
+    queue_discovery(q, "https://twice.example/a", found_in="blog1/i1", reason="cited")
+    queue_discovery(q, "https://twice.example/b", found_in="blog2/i2", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    out = process_admissions(discovery_path=q, watchlist_path=wl,
+                             actions=ActionLog(tmp_path / "act.jsonl"),
+                             fetch=_fetch_factory({}), screen=lambda d, t, a: None,
+                             today="2026-08-24")
+    assert out == {"admitted": [], "blocked": [], "deferred": []}
+    assert all(e["status"] == "proposed" for e in load_discovery(q))
