@@ -78,7 +78,7 @@ def write_status(path: str | Path, *, overall: str, summary: str, items: dict,
 def write_digest(dir_path: str | Path, *, date: str, new_by_source: dict,
                  rejections: dict, discoveries: list, paywalled: list,
                  spend_usd: float, cards_registered: int,
-                 budget_state: str = "OK") -> str:
+                 budget_state: str = "OK", probation: dict | None = None) -> str:
     name = f"digest_{date}.txt"
     lines = [f"Reader scanner digest — {date}", "=" * 40, ""]
     lines.append("New items by source:")
@@ -97,7 +97,17 @@ def write_digest(dir_path: str | Path, *, date: str, new_by_source: dict,
     lines.append("")
     lines.append(f"Cards registered by scanner (cumulative): {cards_registered}")
     lines.append("")
-    lines.append("Off-list sources queued for Coen (Tier 3, never fetched):")
+    if probation is not None:
+        lines.append(
+            "Source probation (D27 case 3): "
+            f"on probation {probation['on_probation']} | "
+            f"admitted {probation['admitted']} | "
+            f"promoted {probation['promoted']} | "
+            f"revoked {probation['revoked']} | "
+            f"timed out {probation['timed_out']} | "
+            f"blocked {probation['blocked']}")
+        lines.append("")
+    lines.append("Off-list sources queued today (Tier 3; admitted by D27 rules, never by default):")
     if discoveries:
         lines.extend(f"  {u}" for u in discoveries)
     else:

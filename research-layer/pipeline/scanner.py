@@ -25,13 +25,14 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 from .watchlist import (load_watchlist, pollable, queue_discovery,
-                        load_discovery, DEFAULT_POLL_MINUTES_AUTO)
+                        load_discovery, DEFAULT_POLL_MINUTES_AUTO, tier_of)
 from .feeds import (parse_feed, extract_links, article_links, discover_feed,
                     item_id, html_to_text, looks_paywalled, fetch_url)
 from .seen import SeenStore
 from .budget import BudgetMeter
-from .relevance import screen_items, ApiCreditExhausted
+from .relevance import screen_items, screen_source, ApiCreditExhausted
 from .approvals import process_approvals
+from .probation import prioritise_items, process_admissions, process_reviews, probation_counts
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
@@ -420,10 +421,9 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
 
 
 def pending_tier3_count(registry: Registry, discovery_path) -> int:
-    """The two things waiting on Coen: discovery proposals + cards in triage."""
-    proposals = [d for d in load_discovery(discovery_path)
-                 if d["status"] == "proposed"]
-    return len(proposals) + len(registry.cards(status="pending"))
+    """What still waits on Coen: cards in triage. Source proposals are
+    admitted or blocked mechanically (D27 cases 1-3) since 2026-08-24."""
+    return len(registry.cards(status="pending"))
 
 
 # ---------------- resident loop ----------------
@@ -446,8 +446,9 @@ def _load_api_key(env_path: Path) -> None:
 
 def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                   discovery_path: Path, logs_dir: Path, sources_polled: int,
-                  next_due_utc: str | None) -> None:
+                  next_due_utc: str | None, watchlist_path: Path) -> None:
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    prob = probation_counts(watchlist_path, logs_dir / "reader_actions.jsonl")
     rejections: dict[str, int] = {}
     screen_log = logs_dir / "screen_log.jsonl"
     if screen_log.exists():
@@ -471,7 +472,7 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
         paywalled=[e["link"] for e in seen.items_with_status("paywalled").values()],
         spend_usd=meter.month_spend(),
         cards_registered=scanner_cards_total(registry),
-        budget_state=meter.state())
+        budget_state=meter.state(), probation=prob)
     budget_state = meter.state()
     overall = "OK" if budget_state == "OK" else "WARN"
     summary = (f"scanning; spend USD {meter.month_spend():.2f}"
@@ -484,7 +485,8 @@ def _cycle_status(seen: SeenStore, meter: BudgetMeter, registry: Registry,
                                 + len(seen.items_with_status("extracted")),
                "extracted": len(seen.items_with_status("extracted")),
                "cards_registered": scanner_cards_total(registry),
-               "budget": "WARN" if budget_state != "OK" else "OK"},
+               "budget": "WARN" if budget_state != "OK" else "OK",
+               "probation": prob},
         pending_tier3=pending_tier3_count(registry, discovery_path),
         digest_file=digest, next_run=next_due_utc)
 
@@ -542,6 +544,12 @@ def run(argv: list[str] | None = None) -> int:
                 fresh_ids = {i["item_id"] for i in new_items}
                 new_items.extend(i for i in refeedable_deferred(seen)
                                  if i["item_id"] not in fresh_ids)
+            # D27 case 3: probation-source items screen first each cycle, capped
+            # per source so one noisy probation feed can't starve the backlog.
+            # Items over the cap stay 'seen'/'deferred' in the store and are
+            # picked up by refeedable_deferred on a later cycle.
+            probation_ids = {s["id"] for s in sources if tier_of(s) == "probation"}
+            new_items, _held = prioritise_items(new_items, probation_ids)
             try:
                 if new_items:
                     stats = process_new_items(
@@ -555,6 +563,24 @@ def run(argv: list[str] | None = None) -> int:
                     registry=registry, actions=actions)
                 if inbox_stats["files"]:
                     print(f"inbox: {inbox_stats}")
+                # D27 case 3: single-citation proposals -> prefilter -> source screen -> probation
+                def _screen(domain, titles, about):
+                    return screen_source(client, args.model, meter, domain, titles, about,
+                                         logs_dir / "source_screen_log.jsonl")
+                adm = process_admissions(discovery_path=discovery_path,
+                                         watchlist_path=args.watchlist, actions=actions,
+                                         screen=_screen)
+                rev = process_reviews(watchlist_path=args.watchlist,
+                                      discovery_path=discovery_path, seen=seen, actions=actions)
+                if adm["admitted"] or adm["blocked"] or rev["promoted"] or rev["revoked"] or rev["timed_out"]:
+                    print(f"probation: +{len(adm['admitted'])} admitted, {len(adm['blocked'])} blocked, "
+                          f"{len(rev['promoted'])} promoted, {len(rev['revoked'])} revoked, "
+                          f"{len(rev['timed_out'])} timed out")
+                sources = pollable(load_watchlist(args.watchlist))
+                for s in sources:
+                    next_due.setdefault(s["id"], 0.0)
+                for sid in [k for k in next_due if k not in {s["id"] for s in sources}]:
+                    next_due.pop(sid)
             except ApiCreditExhausted as exc:
                 actions.event("api_unavailable", {"error": str(exc)[:300],
                                                   "backoff_s": CREDIT_BACKOFF_SECONDS})
@@ -605,7 +631,8 @@ def run(argv: list[str] | None = None) -> int:
             next_due_utc = datetime.fromtimestamp(upcoming, tz=timezone.utc)\
                 .strftime("%Y-%m-%dT%H:%M:%SZ")
             _cycle_status(seen, meter, registry, discovery_path, logs_dir,
-                          sources_polled=len(due), next_due_utc=next_due_utc)
+                          sources_polled=len(due), next_due_utc=next_due_utc,
+                          watchlist_path=args.watchlist)
             if args.once:
                 return 0
             time.sleep(max(1, min(args.interval, upcoming - time.time())))

@@ -1289,11 +1289,28 @@ def test_scanner_cards_total_is_cumulative_and_survives_triage(tmp_path):
     assert scanner_cards_total(registry) == 2  # cumulative, not pending
 
 
-def test_pending_tier3_counts_discoveries_plus_pending_cards(tmp_path):
+def test_pending_tier3_counts_pending_cards_not_discoveries(tmp_path):
+    # 08-24: D27 case 3 admits/blocks proposals mechanically, so they no
+    # longer wait on Coen -- only cards in triage count now.
     from .test_pipeline import make_card
     registry = Registry(tmp_path / "reg.jsonl")
     registry.register_card(make_card())
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://a.example/x", found_in="s/i", reason="cited")
     queue_discovery(q, "https://b.example/y", found_in="s/i", reason="cited")
-    assert pending_tier3_count(registry, q) == 3
+    assert pending_tier3_count(registry, q) == 1
+
+
+def test_digest_has_probation_line(tmp_path):
+    f = write_digest(tmp_path, date="20260824", new_by_source={}, rejections={},
+                     discoveries=[], paywalled=[], spend_usd=0.0, cards_registered=0,
+                     probation={"on_probation": 3, "admitted": 2, "promoted": 1, "revoked": 0, "timed_out": 1, "blocked": 4})
+    text = (tmp_path / f).read_text(encoding="utf-8")
+    assert "Source probation (D27 case 3): on probation 3 | admitted 2 | promoted 1 | revoked 0 | timed out 1 | blocked 4" in text
+
+
+def test_pending_tier3_counts_cards_only_now(tmp_path):
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://x.example/", found_in="blog1/i1", reason="cited")
+    reg = Registry(tmp_path / "registry.jsonl")
+    assert pending_tier3_count(reg, q) == 0     # proposals no longer wait on Coen
