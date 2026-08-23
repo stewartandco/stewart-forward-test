@@ -18,6 +18,7 @@ from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
                         PROMOTE_KEEPS, TIMEOUT_DAYS)
 from .probation import process_admissions, PROVENANCE_PROBATION
 from .probation import process_reviews, PROVENANCE_PROMOTED
+from .probation import prioritise_items, probation_counts, PRIORITY_CAP
 from .seen import SeenStore
 from .scanstatus import ActionLog
 from datetime import datetime, timedelta
@@ -457,3 +458,31 @@ def test_admissions_known_via_watchlist_domain_not_id(tmp_path):
     assert out == {"admitted": [], "blocked": [], "deferred": []}
     e = load_discovery(q)[0]
     assert e["status"] == "auto_admitted" and e["status_reason"] == "already on watchlist"
+
+
+def test_prioritise_items_puts_probation_first_capped_and_keeps_backlog():
+    items = [{"item_id": f"b{i}", "source_id": "backlog"} for i in range(5)]
+    items += [{"item_id": f"p{i}", "source_id": "prob.example"} for i in range(PRIORITY_CAP + 10)]
+    items += [{"item_id": f"q{i}", "source_id": "other.example"} for i in range(3)]
+    out, held = prioritise_items(items, {"prob.example", "other.example"})
+    ids = [i["item_id"] for i in out]
+    assert ids[:PRIORITY_CAP] == [f"p{i}" for i in range(PRIORITY_CAP)]
+    assert ids[PRIORITY_CAP:PRIORITY_CAP + 3] == ["q0", "q1", "q2"]
+    assert ids[-5:] == [f"b{i}" for i in range(5)]          # backlog never dropped
+    assert [i["item_id"] for i in held] == [f"p{i}" for i in range(PRIORITY_CAP, PRIORITY_CAP + 10)]
+    assert prioritise_items([], set()) == ([], [])
+
+
+def test_probation_counts_from_watchlist_and_chain(tmp_path):
+    wl = write_watchlist(tmp_path, [make_source(), make_source(id="p1", added_by=PROVENANCE_PROBATION, tier="probation"),
+                                    make_source(id="p2", added_by=PROVENANCE_PROBATION, tier="probation")])
+    actions = ActionLog(tmp_path / "act.jsonl")
+    actions.event("source_promoted", {"domain": "a"})
+    actions.event("source_auto_revoked", {"domain": "b", "action": "revoke"})
+    actions.event("source_auto_revoked", {"domain": "b2", "action": "timeout"})
+    actions.event("source_auto_blocked", {"domain": "c"})
+    actions.event("source_auto_admitted", {"domain": "p1", "rule": "probation"})
+    actions.event("source_auto_admitted", {"domain": "z", "rule": "scout-researched"})
+    c = probation_counts(wl, tmp_path / "act.jsonl", days=30)
+    assert c == {"on_probation": 2, "admitted": 1, "promoted": 1, "revoked": 1, "timed_out": 1, "blocked": 1}
+    assert probation_counts(wl, tmp_path / "missing.jsonl")["admitted"] == 0

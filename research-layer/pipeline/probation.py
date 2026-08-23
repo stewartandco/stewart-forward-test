@@ -8,7 +8,7 @@ docs/2026-08-23-source-probation-filter-design.md
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .feeds import (fetch_url, discover_feed, parse_feed, article_links,
@@ -267,3 +267,58 @@ def process_reviews(*, watchlist_path, discovery_path, seen, actions,
         doc["sources"] = keep
         write_watchlist_doc(watchlist_path, doc)
     return out
+
+
+# ---------------- scheduling + visibility ----------------
+
+def prioritise_items(items: list[dict], probation_ids: set[str],
+                     cap: int = PRIORITY_CAP) -> tuple[list[dict], list[dict]]:
+    """Probation-source items first (at most `cap` per source), then everything
+    else in original order. Items over the cap are returned separately so the
+    caller can leave them for the next cycle (they stay 'seen' in the store)."""
+    first, rest, held = [], [], []
+    per: dict[str, int] = {}
+    for it in items:
+        sid = it["source_id"]
+        if sid in probation_ids:
+            if per.get(sid, 0) < cap:
+                first.append(it); per[sid] = per.get(sid, 0) + 1
+            else:
+                held.append(it)
+        else:
+            rest.append(it)
+    return first + rest, held
+
+
+def probation_counts(watchlist_path, actions_path, days: int = 30) -> dict:
+    """Real counts: probation entries on the watchlist now, plus chain events in
+    the trailing window. Nothing derived that the chain did not record."""
+    from .watchlist import tier_of
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    on_probation = sum(1 for s in doc.get("sources", []) if tier_of(s) == "probation")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    counts = {"on_probation": on_probation, "admitted": 0, "promoted": 0,
+              "revoked": 0, "timed_out": 0, "blocked": 0}
+    p = Path(actions_path)
+    if not p.exists():
+        return counts
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        e = json.loads(line)
+        try:
+            when = datetime.strptime((e.get("ts_utc") or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        t, pl = e.get("entry_type"), e.get("payload", {})
+        if t == "source_auto_admitted" and pl.get("rule") == "probation":
+            counts["admitted"] += 1
+        elif t == "source_promoted":
+            counts["promoted"] += 1
+        elif t == "source_auto_revoked":
+            counts["timed_out" if pl.get("action") == "timeout" else "revoked"] += 1
+        elif t == "source_auto_blocked":
+            counts["blocked"] += 1
+    return counts
