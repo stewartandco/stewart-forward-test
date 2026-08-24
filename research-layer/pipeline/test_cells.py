@@ -46,6 +46,9 @@ def test_classes_registry_crypto_unchanged():
     c = cells.CLASSES["crypto"]
     assert c["assets"] == cells.ASSETS and c["timeframes"] == cells.TIMEFRAMES
     assert c["session"] == "24x7" and c["periods_per_year"] == 365 and c["bar_kind"] == "ohlcv"
+    # a same-day 24x7 feed has no honest lag to declare
+    assert c["max_end_lag_days"] == 0
+    assert isinstance(c["max_end_lag_days"], int) and c["max_end_lag_days"] >= 0
     # back-compat aliases still the crypto grid, same objects
     assert cells.all_cells() == [(a, tf) for a in cells.ASSETS for tf in cells.TIMEFRAMES]
     assert cells.phase_cells(1) == [(a, tf) for a in cells.ASSETS for tf in cells.PHASE_1_TIMEFRAMES]
@@ -61,6 +64,11 @@ def test_fx_class_declared():
     assert c["cost_model"]["short_financing_per_year"] == -0.015
     assert [e[0] for e in c["eras"]] == ["pre_gfc", "gfc_zirp", "tightening", "post_2022"]
     assert cells.class_cells("fx") == [(a, "1d") for a in c["assets"]]
+    # FRED H.10 is a WEEKLY release of the prior week's daily fixes, posted
+    # Mondays: a fetch just before that release can see up to ~9 calendar
+    # days of lag, so 10 is declared as the honest ceiling.
+    assert c["max_end_lag_days"] == 10
+    assert isinstance(c["max_end_lag_days"], int) and c["max_end_lag_days"] >= 0
 
 
 def test_live_classes_gates_activation():

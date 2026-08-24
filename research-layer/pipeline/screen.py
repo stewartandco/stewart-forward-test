@@ -19,7 +19,7 @@ import hashlib
 import argparse
 from pathlib import Path
 
-from .cells import cell_id
+from .cells import CLASSES, cell_id
 from .parallel import run_all, CellError
 from .registry import Registry
 from .engine import run_spec
@@ -103,12 +103,23 @@ def assert_cells_comparable(data_end: dict[str, str],
     `class_of` (cell_id -> asset class, built by the caller from each spec's
     own declared universe) makes the rule PER-CLASS (spec s10.6): the same-day
     rule above still applies WITHIN a class exactly as before, but cells in
-    DIFFERENT classes may end up to 3 calendar days apart, because a 24x7
-    crypto close and a 5-day fx fix are never going to land on the same
-    calendar day and a strict same-day rule would refuse every mixed-class
-    gauntlet run forever. `class_of=None` (the default, every caller before
-    this amendment) keeps today's single-class behaviour exactly -- one
-    same-day rule across every cell -- so crypto-only runs are byte-identical.
+    DIFFERENT classes may end up to `3 + max(lag_a, lag_b)` calendar days
+    apart, where each lag is that class's OWN `cells.CLASSES[cls]
+    ["max_end_lag_days"]` -- a 24x7 crypto close and a 5-day fx fix are never
+    going to land on the same calendar day (the base 3-day weekend
+    allowance), and some sources lag further still on top of that for
+    reasons that have nothing to do with truncation. A real run found this
+    the hard way (2026-08-24): the fx snapshot's source, FRED H.10, is a
+    WEEKLY release, so a fetch just before its Monday release can end up to
+    9 days behind a same-day crypto fetch -- a real data fact, declared once
+    in cells.py rather than absorbed here as a wider blanket allowance. A
+    SAME-class pair (crypto-crypto, fx-fx) never reaches this allowance at
+    all -- the WITHIN-class same-day rule above is untouched and always
+    applies first -- so the crypto-only path, which only ever compares
+    crypto-crypto, is unaffected by this field's existence. `class_of=None`
+    (the default, every caller before the per-class amendment) keeps today's
+    single-class behaviour exactly -- one same-day rule across every cell --
+    so crypto-only runs are byte-identical.
     """
     empty = sorted(cid for cid, end in data_end.items() if not end)
     if empty:
@@ -151,7 +162,10 @@ def assert_cells_comparable(data_end: dict[str, str],
                 f"the reported search space.")
 
     # Cross-class: a weekend/holiday gap between a 24x7 close and an fx fix
-    # is expected, not truncation, so allow up to 3 calendar days apart.
+    # is expected, not truncation, so allow a BASE 3 calendar days apart, plus
+    # whatever each class's own source honestly lags by
+    # (cells.CLASSES[cls]["max_end_lag_days"]) -- declared per class, never
+    # widened here to paper over one observed gap.
     from datetime import date as _date
     days = {cid: _date.fromisoformat(end[:10]) for cid, end in data_end.items()}
     ids = sorted(days)
@@ -160,10 +174,17 @@ def assert_cells_comparable(data_end: dict[str, str],
             if class_of[a] == class_of[b]:
                 continue
             gap = abs((days[a] - days[b]).days)
-            if gap > 3:
+            lag_a = CLASSES.get(class_of[a], {}).get("max_end_lag_days", 0)
+            lag_b = CLASSES.get(class_of[b], {}).get("max_end_lag_days", 0)
+            worst_lag = max(lag_a, lag_b)
+            worst_cls = class_of[a] if lag_a >= lag_b else class_of[b]
+            allowed = 3 + worst_lag
+            if gap > allowed:
                 raise ValueError(
-                    f"cells stop more than 3 calendar days apart across "
-                    f"classes, so they cannot be compared: {a} "
+                    f"cells stop {gap} calendar days apart across classes, "
+                    f"more than the {allowed}-day allowance (3 base + "
+                    f"{worst_lag} declared max_end_lag_days for "
+                    f"{worst_cls!r}), so they cannot be compared: {a} "
                     f"({data_end[a][:10]}, {class_of[a]}) vs {b} "
                     f"({data_end[b][:10]}, {class_of[b]}). Re-fetch to a "
                     f"common end date.")

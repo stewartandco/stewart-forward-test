@@ -24,13 +24,15 @@ from .screen import assert_cells_comparable
 
 def test_cells_comparable_per_class():
     # crypto (Saturday close) vs fx (Friday fix), 1 calendar day apart across
-    # classes -- passes under the <=3-day cross-class allowance.
+    # classes -- passes well within the allowance.
     assert_cells_comparable(
         {"BTCUSDT_1d": "2026-08-22", "EUR_1d": "2026-08-21"},
         class_of={"BTCUSDT_1d": "crypto", "EUR_1d": "fx"})
 
     # two fx cells ending on different days: the WITHIN-class same-day rule
-    # still applies, so this still raises even though both are fx.
+    # still applies, so this still raises even though both are fx -- fx's
+    # own declared max_end_lag_days never widens the WITHIN-class rule, only
+    # the cross-class one.
     with pytest.raises(ValueError, match="within class 'fx'"):
         assert_cells_comparable(
             {"EUR_1d": "2026-08-21", "GBP_1d": "2026-08-19"},
@@ -42,11 +44,29 @@ def test_cells_comparable_per_class():
             {"BTCUSDT_1d": "2026-08-22", "EUR_1d": ""},
             class_of={"BTCUSDT_1d": "crypto", "EUR_1d": "fx"})
 
-    # cross-class ends more than 3 calendar days apart still raise
-    with pytest.raises(ValueError, match="3 calendar days"):
+    # Real-run finding (2026-08-24): FRED H.10 (the fx snapshot's source) is
+    # a WEEKLY release, so a fetch just before its Monday post can leave fx
+    # up to 9 calendar days behind a same-day crypto fetch. cells.CLASSES
+    # declares fx's max_end_lag_days=10, so the allowance is 3+10=13 and a
+    # 9-day gap PASSES -- this exact shape crashed before this fix.
+    assert_cells_comparable(
+        {"BTCUSD_1d": "2026-08-23", "AUD_1d": "2026-08-14"},
+        class_of={"BTCUSD_1d": "crypto", "AUD_1d": "fx"})
+
+    # A 14-day gap exceeds the 13-day allowance (3 base + fx's declared 10)
+    # and still raises, naming the allowance.
+    with pytest.raises(ValueError, match=r"13-day allowance"):
         assert_cells_comparable(
-            {"BTCUSDT_1d": "2026-08-22", "EUR_1d": "2026-08-10"},
-            class_of={"BTCUSDT_1d": "crypto", "EUR_1d": "fx"})
+            {"BTCUSD_1d": "2026-08-23", "AUD_1d": "2026-08-09"},
+            class_of={"BTCUSD_1d": "crypto", "AUD_1d": "fx"})
+
+    # crypto-vs-crypto: same-class, so the WITHIN-class same-day rule applies
+    # regardless of any class's declared max_end_lag_days -- unchanged from
+    # before this field existed (regression).
+    with pytest.raises(ValueError, match="within class 'crypto'"):
+        assert_cells_comparable(
+            {"BTCUSDT_1d": "2026-08-22", "ETHUSDT_1d": "2026-08-21"},
+            class_of={"BTCUSDT_1d": "crypto", "ETHUSDT_1d": "crypto"})
 
     # class_of=None keeps today's exact single-class behaviour: same-day
     # everywhere, no cross-class allowance at all.

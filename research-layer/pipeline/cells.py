@@ -41,14 +41,26 @@ FX_ERAS = (("pre_gfc", "1999-01-01", "2007-12-31"), ("gfc_zirp", "2008-01-01", "
 # The authoritative class registry. Declaring a class here does NOT activate it:
 # LIVE_CLASSES gates what generations may sweep (spec s2: activation moves the
 # trial denominator, declaration never does).
+# max_end_lag_days: the honest ceiling on how many calendar days a class's
+# own data can lag a same-day fetch, DECLARED per source rather than derived
+# from any one observed gap (real-run finding, 2026-08-24). crypto is 0: a
+# 24x7 feed fetched today ends today. fx's snapshot adapter reads FRED H.10,
+# which is a WEEKLY release of the prior week's daily fixes, posted Mondays
+# -- a fetch run just before that Monday release can see up to ~9 calendar
+# days of lag (the whole prior week plus the weekend before it), so 10 is
+# declared as the ceiling with a day of headroom, not the exact observed
+# value. screen.assert_cells_comparable's cross-class allowance derives from
+# this field; it must never be widened to paper over a real gap without
+# updating the declaration here first.
 CLASSES = {
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
                "cost_model": None,      # crypto cost stays composer.COST_MODEL (unchanged path)
-               "eras": ()},
+               "eras": (), "max_end_lag_days": 0},
     "fx": {"assets": FX_ASSETS, "timeframes": ("1d",), "session": "fx_5d",
            "periods_per_year": 261, "bar_kind": "single_fix",
-           "cost_model": FX_COST_MODEL, "eras": FX_ERAS},
+           "cost_model": FX_COST_MODEL, "eras": FX_ERAS,
+           "max_end_lag_days": 10},
 }
 LIVE_CLASSES = ("crypto", "fx")   # fx ACTIVATED 2026-08-24 (Coen), first real generation same day
 
@@ -68,7 +80,13 @@ for _cls, _spec in CLASSES.items():
     if SESSION_PERIODS.get(_spec["session"]) != _spec["periods_per_year"]:
         raise AssertionError(
             f"SESSION_PERIODS[{_spec['session']!r}] disagrees with CLASSES[{_cls!r}] periods_per_year")
-del _cls, _spec, _asset
+for _cls, _spec in CLASSES.items():
+    _lag = _spec.get("max_end_lag_days")
+    if not isinstance(_lag, int) or isinstance(_lag, bool) or _lag < 0:
+        raise AssertionError(
+            f"CLASSES[{_cls!r}]['max_end_lag_days'] must be a declared "
+            f"non-negative int, got {_lag!r}")
+del _cls, _spec, _asset, _lag
 
 
 def all_cells() -> list[tuple[str, str]]:
