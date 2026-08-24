@@ -56,18 +56,60 @@ COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 # input for a cell class's family proposals -- data, not inference. Crypto's
 # entry is unused today because crypto stays unrestricted (every accepted
 # card feeds it, exactly as before this task); it is declared here anyway so
-# a future tightening of the crypto feed has one place to change. Only "fx"
-# is wired into run() (Track 1); the fuller table (equities/rates/futures
-# proxy routing) ships with Track 2 per spec s10.8.
-ROUTING = {"crypto": ("crypto",), "fx": ("fx", "cross")}
+# a future tightening of the crypto feed has one place to change. "fx" wired
+# in Track 1; "equity_etf" (Track 2a, spec s4's routing table: `equities` +
+# `cross` cards) wired here. The futures proxy lane (below) is additive to
+# this table, not a member of it -- a futures card is never tagged
+# `equities`, so it can only reach equity_etf via INDEX_FUTURES_PROXY_TOPICS.
+ROUTING = {"crypto": ("crypto",), "fx": ("fx", "cross"), "equity_etf": ("equities", "cross")}
 
 # spec s3/s10.7: fx cells carry single-fix daily bars (open=high=low=close),
 # so any block whose semantics require a real intrabar range distinct from
 # close would be silently fed degenerate inputs rather than erroring. These
 # types are excluded from families proposed for a non-crypto, single-fix
-# class instead. pct_stop is the remaining stop for fx families.
+# class instead. pct_stop is the remaining stop for fx families. Kept as a
+# standalone module constant (not renamed/removed -- pinned by
+# test_composer_fx.py) even though the authoritative source for exclusion is
+# now cells.CLASSES[cls]["excluded_block_types"] (T4-rider-3, track 2a): the
+# fx entry there carries these exact four values, test-pinned equal.
 RANGE_REQUIRING = {"channel_breakout", "channel_breakout_dense",
                    "atr_stop", "atr_stop_dense"}
+
+# Track 2a addendum s"Routing": the futures->equity_etf PROXY lane (spec
+# s10.8). A futures-tagged card routes to equity_etf ONLY when its topics
+# intersect this declared set -- data, reviewed at build time, never
+# inferred from the card text at runtime.
+#
+# MEASURED against the live registry (research-layer/registry_log.jsonl,
+# read-only scratch scan, 2026-08-24): of 342 futures-tagged cards, 20 name a
+# specific index-future instrument in their claim text (E-mini S&P 500 / ES /
+# VIX futures). Their topic tags were compared against the full futures
+# corpus's topic frequency to find topics that are genuinely DISCRIMINATING
+# for index-related content rather than generic quant-research topics that
+# happen to co-occur (e.g. "market microstructure" and "bar sampling" appear
+# on the majority of ALL futures cards regardless of instrument, because most
+# of this corpus is Lopez-de-Prado-style ML/microstructure research that uses
+# E-mini S&P futures as its illustrative dataset without the CLAIM itself
+# being about index-level behaviour). The six below are the topics that
+# appear ONLY (ratio 1.0) or almost only on the index-named subset, with at
+# least 2 real occurrences each, naming an actual index-futures product
+# (S&P 500 / ES futures, or the VIX futures term structure and its TVIX/
+# contango consequences):
+#   S&P 500 (1/1), ES futures (1/1), VIX futures (2/2),
+#   VIX futures term structure (2/2), TVIX (3/4), contango (2/3)
+#
+# As of the same scan, ZERO futures-tagged cards are ACCEPTED (342/342
+# pending) -- the corpus has been harvested but nothing has cleared triage
+# yet, so this lane is ARMED but currently EMPTY in the live registry: a real
+# --asset-class equity_etf composer run today would route zero cards via this
+# path (the native `equities`/`cross` ROUTING entry above is unaffected).
+# test_composer_equity.py's positive-routing test is therefore
+# fixture-injected rather than drawn from the live registry, per the
+# addendum's instruction for this exact situation.
+INDEX_FUTURES_PROXY_TOPICS = frozenset({
+    "S&P 500", "ES futures", "VIX futures",
+    "VIX futures term structure", "TVIX", "contango",
+})
 
 
 def composition_fingerprint(spec: dict) -> str:
@@ -563,9 +605,17 @@ def system_prompt_for(asset_class: str) -> str:
     trial counts and screen/gauntlet outcomes, not a lesson that
     generalizes, so repeating them to the fx proposer would misstate a
     chain history it was never part of.
+
+    "equity_etf" (track 2a) follows the same pattern with its own honesty
+    limits in place of fx's single-fix-bar limits: split-adjusted PRICE
+    returns with dividends excluded, and a survivorship-alive-in-2026
+    universe (spec "Honesty limits" #1-2) -- both named explicitly so a
+    family never claims an edge this data cannot see.
     """
     if asset_class == "crypto":
         return SYSTEM_PROMPT
+    if asset_class == "equity_etf":
+        return _equity_etf_system_prompt()
     if asset_class != "fx":
         raise ValueError(f"no proposer brief declared for asset_class {asset_class!r}")
     cls_spec = cells.CLASSES["fx"]
@@ -601,6 +651,79 @@ change what a sound family looks like:
   there is no intrabar information to draw on.
 
 This is the first generation proposed for this class: there is no fx
+generation history yet to report.
+
+Rules:
+- Use ONLY the block types and parameter grid values given in the grammar.
+- Every family must cite the card_ids that motivate it. Cite only cards that
+  genuinely inform the composition; do not decorate with irrelevant citations.
+- Exactly one entry block; at least one stop and one risk block per family.
+- Every family must state a regime_hypothesis: which market conditions it
+  expects to work in, and why it is not merely levered exposure to an upward
+  drift. A family whose edge disappears when drift and volatility fall should
+  say so plainly.
+- Short-capable types exist: trend_scan_ds and ma_cross_ds take a direction
+  parameter (long, short, both), and regime_ma_short permits entries below a
+  moving average. channel_breakout and zscore_reversion already accept
+  direction: both.
+- regime_ma and regime_ma_short cannot appear in the same family: their
+  filters are mutually exclusive and the spec would never trade. Express
+  "long in one regime, short in the other" as two separate families.
+- Choose sweep axes ONLY where the cited research motivates exploring the
+  parameter, and sweep them on a DENSE block type (the *_dense variants).
+  Coarse types may be USED at fixed values but may NOT be swept.
+- Every swept axis must declare at least THREE values that are CONTIGUOUS on
+  that parameter's declared grid, e.g. [35, 55, 75], never [20, 55, 100].
+  Selection requires a registered sibling one step BELOW and one step ABOVE a
+  candidate on every swept axis, so a two-value sweep and a gapped sweep can
+  never produce a survivor and will be rejected.
+- Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
+  axes at three: five values leave three eligible candidates, three leave one.
+- Propose fewer, better-grounded families over many weak ones. If the cards
+  support only two good families, propose two."""
+
+
+def _equity_etf_system_prompt() -> str:
+    """Track 2a's mission-statement + honesty-limits brief, split out of
+    system_prompt_for like the fx branch (kept separate rather than inlined
+    so the dispatcher above stays a short, readable table of branches).
+    """
+    cls_spec = cells.CLASSES["equity_etf"]
+    assets = ", ".join(cls_spec["assets"])
+    n_assets = len(cls_spec["assets"])
+    cost = cls_spec["cost_model"]
+    commission = f"{cost['commission_per_side']:.5f}"
+    slippage = f"{cost['slippage_ticks']:.5f}"
+    financing = f"{cost['short_financing_per_year']:.1%}"
+    return f"""\
+You are the Composer agent in Stewart & Co.'s research pipeline. You design
+candidate trading strategies for the equity-index ETF universe ({n_assets}
+daily OHLCV series tracking major equity indices: {assets}) as compositions
+of typed blocks, grounded in accepted research cards.
+
+The equity_etf universe, stated plainly because two honesty limits shape what
+a sound family can honestly claim:
+- Returns are split-adjusted PRICE returns; dividends are excluded from every
+  series. A long-only strategy's edge is therefore systematically
+  understated relative to a total-return investor -- worst for the
+  higher-yield markets in this universe -- so a family must not claim an
+  edge that depends on dividend income this data cannot see.
+- The universe is survivorship-alive-in-2026: every fund in it exists today,
+  so a fund that would have been delisted somewhere in this history is not
+  represented, and a family reasoning about historical fund mortality is
+  reasoning about data this universe does not carry.
+- Each bar is a REAL daily OHLC bar (Tiingo daily bars), unlike fx's
+  single-fix bars: range-based block types are eligible here, and none are
+  excluded for this class.
+- The calendar is a weekday calendar (each fund's own trading days), not
+  crypto's 24x7 grid: there is no Saturday or Sunday bar and no synthetic
+  filling of holiday holes.
+- The declared cost model charges {commission} commission per side plus
+  {slippage} slippage per side, and accrues a short financing cost of
+  {financing} per year on every bar a position is held short.
+- Strategies must be implementable from daily OHLCV alone.
+
+This is the first generation proposed for this class: there is no equity_etf
 generation history yet to report.
 
 Rules:
@@ -767,13 +890,22 @@ def propose_families(model: str, accepted: dict[str, dict],
             f"REFUSED: pipeline budget at cap "
             f"({meter.month_spend():.2f} of {meter.monthly_cap_usd:.2f} USD "
             f"this month). The Composer will not spend past D33's limit.")
+    # T4-rider-3 (track 2a): read the excluded set from the class's own
+    # declaration (cells.CLASSES[cls]["excluded_block_types"]) rather than
+    # always naming RANGE_REQUIRING -- equity_etf declares an EMPTY set (real
+    # OHLC bars, spec s"Class declaration"), so this note is skipped entirely
+    # for it, exactly like crypto. Only fx (today) has anything to name.
+    excluded_types = (cells.CLASSES[asset_class]["excluded_block_types"]
+                      if asset_class != "crypto" else frozenset())
     exclusion_note = ""
-    if asset_class != "crypto":
+    if excluded_types:
+        bar_kind = cells.CLASSES[asset_class]["bar_kind"]
+        reason = ("single-fix daily bars (no real intrabar high/low distinct "
+                  "from close)" if bar_kind == "single_fix" else f"bar_kind {bar_kind!r}")
         exclusion_note = (
             f"\n\nThis run targets asset_class={asset_class!r} cells with "
-            f"single-fix daily bars (no real intrabar high/low distinct from "
-            f"close): do NOT propose these excluded block types: "
-            f"{sorted(RANGE_REQUIRING)}.")
+            f"{reason}: do NOT propose these excluded block types: "
+            f"{sorted(excluded_types)}.")
     with client.messages.stream(
         model=model,
         max_tokens=32_000,
@@ -814,7 +946,8 @@ def normalize_proposal(families: list[dict]) -> list[dict]:
 
 def drift_record(run_id: str, dry_run: bool, specs: list[dict],
                  routing: dict | None = None,
-                 routed_card_ids: list[str] | None = None) -> dict:
+                 routed_card_ids: list[str] | None = None,
+                 proxy_routed_card_ids: list[str] | None = None) -> dict:
     """What one Composer run emitted. Written for both the dry run and the real
     run so the gap between the batch Coen approved and the batch that got
     chained stops being invisible.
@@ -825,7 +958,18 @@ def drift_record(run_id: str, dry_run: bool, specs: list[dict],
     keys: routing names the asset_class + eligible card tags (spec s4),
     routed_card_ids is the accepted-card feed actually shown to the
     proposer, so a family's absence is auditable back to routing, not a
-    silent drop."""
+    silent drop.
+
+    proxy_routed_card_ids (track 2a, spec s10.8/"Routing"): the futures-
+    tagged card_ids that reached the proposer via INDEX_FUTURES_PROXY_TOPICS
+    rather than a native ROUTING tag -- recorded here, on the DRIFT RECORD,
+    not on the strategy registration (T4 built routing/routed_card_ids on
+    the drift record for fx, never on the spec payload itself; this stays
+    consistent with that, rather than the parent spec's "recorded on the
+    registration" prose). Stays None for crypto and fx runs, where the
+    concept does not apply; an equity_etf run always sets it (even to []
+    when the proxy lane finds nothing), so an empty list is visibly "the
+    lane ran and found none" rather than "this run predates the lane"."""
     record = {"run_id": run_id,
              "mode": "dry" if dry_run else "real",
              "n_specs": len(specs),
@@ -834,6 +978,8 @@ def drift_record(run_id: str, dry_run: bool, specs: list[dict],
     if routing is not None:
         record["routing"] = routing
         record["routed_card_ids"] = routed_card_ids or []
+    if proxy_routed_card_ids is not None:
+        record["proxy_routed_card_ids"] = proxy_routed_card_ids
     return record
 
 
@@ -901,6 +1047,7 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # defensively treated as ["cross"] here too rather than dropped.
     routing_info = None
     routed_card_ids = None
+    proxy_routed_card_ids = None
     if args.asset_class == "crypto":
         propose_input = accepted
     else:
@@ -909,6 +1056,21 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             cid: c for cid, c in accepted.items()
             if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & eligible_tags
         }
+        # Track 2a / spec s10.8: the futures->equity_etf PROXY lane. A
+        # futures-tagged card is not eligible via ROUTING above (futures
+        # cards never carry an "equities" or "cross" tag by definition of
+        # this check), so it can only reach the proposer here, and only when
+        # its topics intersect the declared INDEX_FUTURES_PROXY_TOPICS set.
+        # Additive to propose_input (a dict keyed by card_id, so a card that
+        # somehow matched both paths is never double-counted or duplicated).
+        if args.asset_class == "equity_etf":
+            proxy_cards = {
+                cid: c for cid, c in accepted.items()
+                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
+                and set((c.get("tags") or {}).get("topics") or []) & INDEX_FUTURES_PROXY_TOPICS
+            }
+            proxy_routed_card_ids = sorted(proxy_cards)
+            propose_input = {**propose_input, **proxy_cards}
         routed_card_ids = sorted(propose_input)
         routing_info = {"asset_class": args.asset_class,
                         "eligible_tags": sorted(eligible_tags)}
@@ -935,7 +1097,14 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     accepted_ids = set(accepted)
     known_fps = registered_fingerprints(registry)
     run_fps: dict[str, str] = {}
-    excluded_types = RANGE_REQUIRING if args.asset_class != "crypto" else frozenset()
+    # T4-rider-3 (spec s10.7 addendum, track 2a): the exclusion set is now a
+    # per-class DECLARATION (cells.CLASSES[cls]["excluded_block_types"])
+    # instead of an inferred "any non-crypto class" rule -- equity_etf has
+    # real OHLC bars and excludes nothing, unlike fx's single-fix bars.
+    # crypto's declared set is frozenset() too, so this is byte-identical to
+    # the old `if args.asset_class != "crypto" else frozenset()` branch for
+    # every class that existed before this change.
+    excluded_types = cells.CLASSES[args.asset_class]["excluded_block_types"]
     kept, dropped, seen_names = [], 0, set()
     for fam in proposals:
         name = fam.get("family", "?")
@@ -1002,7 +1171,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     all_specs = [s for _, specs in kept for s in specs]
     _persist_drift_record(
         drift_record(args.run_id, args.dry_run, all_specs,
-                    routing=routing_info, routed_card_ids=routed_card_ids),
+                    routing=routing_info, routed_card_ids=routed_card_ids,
+                    proxy_routed_card_ids=proxy_routed_card_ids),
         args.registry)
 
     for fam, specs in kept:

@@ -17,7 +17,7 @@
       "additionalProperties": false,
       "properties": {
         "assets": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "asset_class": {"enum": ["futures", "equities", "crypto", "fx", "options", "rates", "commodities", "cross"]},
+        "asset_class": {"enum": ["futures", "equities", "crypto", "fx", "options", "rates", "commodities", "cross", "equity_etf"]},
         "timeframe": {"type": "string"},
         "session": {"type": ["string", "null"]}
       }
