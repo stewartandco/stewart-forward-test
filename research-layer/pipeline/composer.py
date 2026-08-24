@@ -404,7 +404,8 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
 
 
 def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str,
-                            asset_class: str) -> list[dict]:
+                            asset_class: str,
+                            proxy_card_ids: frozenset[str] = frozenset()) -> list[dict]:
     """Non-crypto counterpart of expand_family (spec s4/s10.7-8).
 
     The family's blocks and sweep axes expand exactly like the crypto path
@@ -428,17 +429,46 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     per-cell expansion below is exhaustive over cells.class_cells(asset_class)
     regardless of which of the class's assets the family named, so the
     model's chosen subset is validated and then discarded here.
+
+    proxy_card_ids (Coen, 2026-08-25: proxy routing is recorded on the
+    REGISTRATION, not only on the run-level drift record): the full set of
+    card_ids that reached this run's proposer via INDEX_FUTURES_PROXY_TOPICS
+    rather than a native ROUTING tag (run()'s proxy_routed_card_ids, as a
+    frozenset). A family whose OWN card_ids intersect this set gets that
+    intersection stamped on every spec it expands to:
+    provenance["routed_via"] = "proxy" and
+    provenance["proxy_card_ids"] = the sorted intersection (that family's
+    proxy subset, not the whole run's). A family that cites no proxy card
+    gets NEITHER key -- their absence IS "natively routed", so no null or
+    empty-list placeholder is ever written. This makes the Norgate re-test
+    set (spec D2/D4) chain-queryable per strategy, independent of whatever a
+    later run's drift record says. Default frozenset() so every existing
+    caller (fx, and any equity_etf caller that predates this task) keeps
+    emitting neither key, byte-identical to before this change.
+    composition_fingerprint reads only universe+blocks, so this NEVER
+    affects a spec's identity, its N accounting, or resurrection-guard
+    de-duplication (test-pinned).
     """
     cls_spec = cells.CLASSES[asset_class]
     timeframe = cls_spec["timeframes"][0]
     axes = fam.get("sweep", [])
     combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
+    fam_proxy_card_ids = sorted(set(fam["card_ids"]) & proxy_card_ids)
     specs = []
     for combo in combos:
         blocks = copy.deepcopy(fam["blocks"])
         for ax, val in zip(axes, combo):
             blocks[ax["block"]]["params"][ax["param"]] = val
         _snap_to_grid(blocks)
+        provenance = {
+            "card_ids": sorted(fam["card_ids"]),
+            "parent_strategy_id": None,
+            "sibling_group_id": f"{fam['family']}-{run_id}",
+            "generation": 0,
+        }
+        if fam_proxy_card_ids:
+            provenance["routed_via"] = "proxy"
+            provenance["proxy_card_ids"] = fam_proxy_card_ids
         base = {
             "strategy_id": None,
             "version": 1,
@@ -448,12 +478,7 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
             "universe": {"assets": [], "asset_class": asset_class,
                          "timeframe": timeframe, "session": cls_spec["session"]},
             "blocks": blocks,
-            "provenance": {
-                "card_ids": sorted(fam["card_ids"]),
-                "parent_strategy_id": None,
-                "sibling_group_id": f"{fam['family']}-{run_id}",
-                "generation": 0,
-            },
+            "provenance": provenance,
             "generator": {
                 "agent": "composer",
                 "model": model,
@@ -1139,8 +1164,9 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         if args.asset_class == "crypto":
             specs = expand_family(fam, args.run_id, args.model, created_utc)
         else:
-            specs = expand_family_for_class(fam, args.run_id, args.model,
-                                            created_utc, args.asset_class)
+            specs = expand_family_for_class(
+                fam, args.run_id, args.model, created_utc, args.asset_class,
+                proxy_card_ids=frozenset(proxy_routed_card_ids or ()))
         kept_specs, drop_notes, malformed = screen_siblings(
             specs, known_fps, run_fps)
         if malformed:

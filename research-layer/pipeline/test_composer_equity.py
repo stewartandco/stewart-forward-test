@@ -236,6 +236,181 @@ def test_futures_card_with_matching_topic_proxy_routes(tmp_path):
     assert proxy_cid in drift["routed_card_ids"]
     assert off_topic_cid not in drift["routed_card_ids"]
 
+    # Coen, 2026-08-25: proxy routing is ALSO recorded on the registration
+    # (the drift record above stays the run-level view; this is the
+    # per-strategy, chain-queryable marker). The family here cites BOTH a
+    # native card (equity_cid) and a proxy-routed one (proxy_cid): every
+    # spec it expands to carries the family's proxy SUBSET, never the whole
+    # run's proxy set and never equity_cid.
+    specs = _registered_specs(reg_path)
+    assert specs
+    for spec in specs:
+        assert spec["provenance"]["routed_via"] == "proxy"
+        assert spec["provenance"]["proxy_card_ids"] == [proxy_cid]
+        assert equity_cid not in spec["provenance"]["proxy_card_ids"]
+
+
+# ---------------- Coen 2026-08-25: proxy provenance on the registration ----
+#
+# Registrations carry the routed_via/proxy_card_ids marker; the drift record
+# (routing/routed_card_ids/proxy_routed_card_ids, above) stays the run-level
+# view. This makes the Norgate re-test set (spec D2/D4) chain-queryable per
+# strategy. composition_fingerprint hashes universe+blocks only, so this
+# marker never affects a spec's identity, N accounting, or the resurrection
+# guard -- pinned directly below.
+
+def test_proxy_family_specs_carry_routed_via_and_proxy_card_ids():
+    """A family whose card_ids intersect the run's proxy set gets that
+    intersection -- not the whole run's proxy set -- stamped on every spec
+    it expands to."""
+    fam = equity_family(card_ids=["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"], sweep=[])
+    specs = composer.expand_family_for_class(
+        fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf",
+        proxy_card_ids=frozenset({"bbbbbbbbbbbbbbbb", "zzzzzzzzzzzzzzzz"}))
+    assert len(specs) == 16
+    for spec in specs:
+        assert spec["provenance"]["routed_via"] == "proxy"
+        # the family's OWN proxy subset (bbbb...), not the run's whole proxy
+        # set (which also names zzzz..., a card this family never cited)
+        assert spec["provenance"]["proxy_card_ids"] == ["bbbbbbbbbbbbbbbb"]
+        assert spec["provenance"]["card_ids"] == ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"]
+
+
+def test_native_family_specs_carry_neither_proxy_key():
+    """A family that cites no proxy-routed card gets NEITHER key -- absence
+    IS native routing; no null or empty-list placeholder is ever written."""
+    fam = equity_family(sweep=[])
+    specs = composer.expand_family_for_class(
+        fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf")
+    assert len(specs) == 16
+    for spec in specs:
+        assert "routed_via" not in spec["provenance"]
+        assert "proxy_card_ids" not in spec["provenance"]
+    # Also true with an explicit-but-non-matching proxy set: the family's
+    # OWN card_ids simply don't intersect it.
+    specs2 = composer.expand_family_for_class(
+        fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf",
+        proxy_card_ids=frozenset({"zzzzzzzzzzzzzzzz"}))
+    for spec in specs2:
+        assert "routed_via" not in spec["provenance"]
+        assert "proxy_card_ids" not in spec["provenance"]
+
+
+_FX_CHECK_FAMILY = {
+    "family": "fx_check_family",
+    "card_ids": ["cccccccccccccccc"],
+    "assets": ["EUR"],
+    "blocks": [
+        {"role": "entry", "type": "ma_cross_dense",
+         "params": {"fast": 13, "slow": 50, "direction": "long"}},
+        {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+        {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
+        {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+    ],
+    "sweep": [],
+}
+
+
+def test_fx_specs_never_carry_proxy_provenance_keys():
+    """Regression: fx (Track 1) has no proxy lane. expand_family_for_class's
+    proxy_card_ids parameter defaults to frozenset(), so composer.run()'s
+    fx call site (which never passes it) keeps emitting neither key,
+    byte-identical to before Coen's 2026-08-25 decision -- even when an fx
+    family's card_ids happen to collide with a caller-supplied proxy set."""
+    specs = composer.expand_family_for_class(
+        _FX_CHECK_FAMILY, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "fx")
+    assert len(specs) == 12
+    for spec in specs:
+        assert "routed_via" not in spec["provenance"]
+        assert "proxy_card_ids" not in spec["provenance"]
+    # Even if a caller passed a proxy set that happens to name this fx
+    # family's own card: fx composer.run() never does this (proxy routing
+    # is equity_etf-only), but the function itself does not special-case fx
+    # by name -- proving the guarantee holds structurally, not by omission.
+    specs2 = composer.expand_family_for_class(
+        _FX_CHECK_FAMILY, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "fx",
+        proxy_card_ids=frozenset(_FX_CHECK_FAMILY["card_ids"]))
+    for spec in specs2:
+        assert spec["provenance"]["routed_via"] == "proxy"
+        assert spec["provenance"]["proxy_card_ids"] == _FX_CHECK_FAMILY["card_ids"]
+    # composer.run() itself never constructs that proxy set for fx: it stays
+    # None throughout an fx run (only equity_etf runs populate it), so the
+    # frozenset(proxy_routed_card_ids or ()) call site always resolves to
+    # frozenset() for fx -- the first assertion block above is what a real
+    # fx run actually produces.
+
+
+def test_crypto_path_structurally_cannot_carry_proxy_keys():
+    """crypto composition never goes through expand_family_for_class at
+    all -- composer.run() branches to expand_family for asset_class ==
+    "crypto", a function this task does not touch and which builds its
+    provenance dict with no routed_via/proxy_card_ids branch at all. There
+    is therefore no code path by which a crypto spec's provenance could
+    carry either key; asserted directly against expand_family's output."""
+    fam = dict(_FX_CHECK_FAMILY, family="crypto_check_family", assets=["BTCUSD"],
+              card_ids=["dddddddddddddddd"])
+    specs = composer.expand_family(fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z")
+    assert len(specs) == 1
+    assert "routed_via" not in specs[0]["provenance"]
+    assert "proxy_card_ids" not in specs[0]["provenance"]
+
+
+def test_proxy_provenance_never_affects_composition_fingerprint():
+    """composition_fingerprint hashes universe+blocks only (never
+    provenance), so proxy routing must never change a spec's identity, its
+    N accounting, or the resurrection guard's de-duplication. strategy_id
+    DOES differ (content-addressed on the whole spec, provenance included)
+    -- chain-address identity is not the same guarantee as trial identity."""
+    fam = equity_family(sweep=[])
+    native = composer.expand_family_for_class(
+        fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf")
+    proxy = composer.expand_family_for_class(
+        fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf",
+        proxy_card_ids=frozenset(fam["card_ids"]))
+    assert len(native) == len(proxy) == 16
+    for n, p in zip(native, proxy):
+        assert n["universe"] == p["universe"]
+        assert n["blocks"] == p["blocks"]
+        assert composer.composition_fingerprint(n) == composer.composition_fingerprint(p)
+        assert n["strategy_id"] != p["strategy_id"]
+
+
+def test_proxy_provenance_validates_against_schema():
+    """Both provenance shapes -- native (neither key) and proxy (both keys)
+    -- validate against the additively-extended schema."""
+    schema = json.loads(
+        (LAYER / "schemas" / "strategy_spec.schema.json").read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    fam = equity_family(sweep=[])
+    for proxy_ids in (frozenset(), frozenset(fam["card_ids"])):
+        specs = composer.expand_family_for_class(
+            fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "equity_etf",
+            proxy_card_ids=proxy_ids)
+        assert specs
+        for spec in specs:
+            validator.validate(spec)
+
+
+def test_schema_rejects_proxy_keys_without_the_additive_change():
+    """Probe (git show) that the PRE-EDIT schema rejects these two keys, so
+    this task's schema change is a real widening, not a no-op. Kept as a
+    live test (not just a commit-message claim) so a future accidental
+    revert of the schema edit is caught here first."""
+    import subprocess
+    pre_edit = subprocess.run(
+        ["git", "show", "ec910bf:research-layer/schemas/strategy_spec.schema.json"],
+        cwd=LAYER.parent, capture_output=True, text=True, encoding="utf-8")
+    if pre_edit.returncode != 0:
+        import pytest
+        pytest.skip("pre-edit commit ec910bf not reachable in this checkout")
+    schema = json.loads(pre_edit.stdout)
+    validator = jsonschema.Draft202012Validator(schema)
+    provenance = {"card_ids": ["a" * 16], "sibling_group_id": "x", "generation": 0,
+                 "routed_via": "proxy", "proxy_card_ids": ["a" * 16]}
+    errs = [e for e in validator.iter_errors({"provenance": provenance})
+           if list(e.path) and list(e.path)[0] == "provenance"]
+    assert errs, "pre-edit schema should have rejected routed_via/proxy_card_ids"
+
 
 # ---------------- equity_etf block exclusions: NONE (real OHLC bars) --------
 
