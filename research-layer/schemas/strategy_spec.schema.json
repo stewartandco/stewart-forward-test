@@ -69,7 +69,8 @@
       "additionalProperties": false,
       "properties": {
         "commission_per_side": {"type": "number", "minimum": 0},
-        "slippage_ticks": {"type": "number", "minimum": 0}
+        "slippage_ticks": {"type": "number", "minimum": 0},
+        "short_financing_per_year": {"type": "number"}
       }
     }
   },

@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from .common import content_id
 from .registry import Registry
 from .blocks import BLOCK_TYPES, validate_block, block_type_payload
+from . import cells
 
 PIPELINE_VERSION = "g1.0.0"
 DEFAULT_MODEL = "claude-opus-5"
@@ -50,6 +51,23 @@ UNIVERSE_BASE = {"asset_class": "crypto", "timeframe": "1d", "session": "24x7"}
 COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 # ^ both are FRACTIONS of notional (10 bps + 5 bps); the field name
 #   slippage_ticks is inherited from spec schema v1 — see design doc.
+
+# spec s4 (D2): a declared table of which card asset_class TAGS are eligible
+# input for a cell class's family proposals -- data, not inference. Crypto's
+# entry is unused today because crypto stays unrestricted (every accepted
+# card feeds it, exactly as before this task); it is declared here anyway so
+# a future tightening of the crypto feed has one place to change. Only "fx"
+# is wired into run() (Track 1); the fuller table (equities/rates/futures
+# proxy routing) ships with Track 2 per spec s10.8.
+ROUTING = {"crypto": ("crypto",), "fx": ("fx", "cross")}
+
+# spec s3/s10.7: fx cells carry single-fix daily bars (open=high=low=close),
+# so any block whose semantics require a real intrabar range distinct from
+# close would be silently fed degenerate inputs rather than erroring. These
+# types are excluded from families proposed for a non-crypto, single-fix
+# class instead. pct_stop is the remaining stop for fx families.
+RANGE_REQUIRING = {"channel_breakout", "channel_breakout_dense",
+                   "atr_stop", "atr_stop_dense"}
 
 
 def composition_fingerprint(spec: dict) -> str:
@@ -137,8 +155,13 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
     return kept_specs, drop_notes, False
 
 
-def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list[str]:
-    """Return error strings; empty = family is expandable."""
+def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
+                    excluded_types: frozenset[str] = frozenset()) -> list[str]:
+    """Return error strings; empty = family is expandable.
+
+    excluded_types (spec s10.7): block types banned for the family's target
+    class -- empty by default so every existing crypto caller is unchanged.
+    fx families are validated with excluded_types=RANGE_REQUIRING."""
     errors = []
     if not re.fullmatch(r"[a-z0-9_]+", fam.get("family", "")):
         errors.append(f"family name {fam.get('family')!r} must match [a-z0-9_]+")
@@ -164,6 +187,10 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
                       "gate AND is empty, so the spec would never trade")
     for b in blocks:
         errors.extend(validate_block(b.get("role"), b.get("type"), b.get("params", {})))
+        if b.get("type") in excluded_types:
+            errors.append(
+                f"block type {b.get('type')!r} requires a real high/low "
+                f"distinct from close and is excluded on bar_kind single_fix")
 
     seen_axes = set()
     for ax in fam.get("sweep", []):
@@ -230,9 +257,13 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int) -> list
     return errors
 
 
-def _build_name(assets: list[str], family: str, blocks: list[dict]) -> str:
+def _build_name(assets: list[str], family: str, blocks: list[dict],
+                timeframe: str = UNIVERSE_BASE["timeframe"]) -> str:
+    # timeframe defaults to the crypto grid's "1d" so the crypto call site
+    # (expand_family) is untouched; the non-crypto path (expand_family_for_
+    # class) passes its own class timeframe explicitly (spec s4).
     bits = ["+".join(a.replace("USD", "") for a in assets),
-            UNIVERSE_BASE["timeframe"], family]
+            timeframe, family]
     for b in blocks:
         for p, v in sorted(b["params"].items()):
             short = "".join(w[0] for w in p.split("_"))
@@ -292,6 +323,69 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
         }
         spec["strategy_id"] = content_id(spec, "strategy_id")
         specs.append(spec)
+    return specs
+
+
+def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str,
+                            asset_class: str) -> list[dict]:
+    """Non-crypto counterpart of expand_family (spec s4/s10.7-8).
+
+    The family's blocks and sweep axes expand exactly like the crypto path
+    (same combo loop, same _snap_to_grid), but the universe/cost_model come
+    from cells.CLASSES[asset_class] rather than UNIVERSE_BASE/COST_MODEL, and
+    every combo explodes further into one spec PER CELL of that class via
+    the existing expand_universe: a cell is one asset at the class's declared
+    timeframe, the same unit-of-survival contract cells.py declares for
+    crypto (a strategy that only works on one fx pair must not be excluded).
+    expand_universe already carries the base spec's asset_class/session onto
+    every cell spec untouched, so the base universe built here just needs to
+    be correct once. Deterministic: same family + run_id + timestamp -> same
+    strategy_ids, exactly like expand_family.
+
+    fam["assets"] is NOT used for cell selection here (that comes from
+    cells.class_cells(asset_class)) -- it still passes through
+    validate_family's crypto-only ALLOWED_ASSETS check unchanged (that check
+    is out of this task's scope), so callers pass any value accepted there.
+    """
+    cls_spec = cells.CLASSES[asset_class]
+    timeframe = cls_spec["timeframes"][0]
+    axes = fam.get("sweep", [])
+    combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
+    specs = []
+    for combo in combos:
+        blocks = copy.deepcopy(fam["blocks"])
+        for ax, val in zip(axes, combo):
+            blocks[ax["block"]]["params"][ax["param"]] = val
+        _snap_to_grid(blocks)
+        base = {
+            "strategy_id": None,
+            "version": 1,
+            "created_utc": created_utc,
+            "name": "",   # recomputed per cell below, once its asset is known
+            "family": fam["family"],
+            "universe": {"assets": [], "asset_class": asset_class,
+                         "timeframe": timeframe, "session": cls_spec["session"]},
+            "blocks": blocks,
+            "provenance": {
+                "card_ids": sorted(fam["card_ids"]),
+                "parent_strategy_id": None,
+                "sibling_group_id": f"{fam['family']}-{run_id}",
+                "generation": 0,
+            },
+            "generator": {
+                "agent": "composer",
+                "model": model,
+                "pipeline_version": PIPELINE_VERSION,
+                "run_id": run_id,
+            },
+            "cost_model": dict(cls_spec["cost_model"]),
+        }
+        for cell_spec in expand_universe(base, cells.class_cells(asset_class)):
+            cell_spec["name"] = _build_name(
+                cell_spec["universe"]["assets"], fam["family"],
+                cell_spec["blocks"], cell_spec["universe"]["timeframe"])
+            cell_spec["strategy_id"] = content_id(cell_spec, "strategy_id")
+            specs.append(cell_spec)
     return specs
 
 
@@ -509,7 +603,8 @@ def _client_and_meter():
 
 
 def propose_families(model: str, accepted: dict[str, dict],
-                     max_families: int, client=None, meter=None) -> list[dict]:
+                     max_families: int, client=None, meter=None,
+                     asset_class: str = "crypto") -> list[dict]:
     """Propose idea families, recording the spend against the pipeline's cap.
 
     Until 2026-08-22 this called anthropic directly with no record_call, so the
@@ -517,6 +612,11 @@ def propose_families(model: str, accepted: dict[str, dict],
     could not see it and could not bind it, and neither of generation 4's two
     live calls left a ledger row. The cap is checked BEFORE the call, because a
     cap that only notices after the money is gone is a report, not a cap.
+
+    asset_class defaults to "crypto" (today's unrestricted prompt, unchanged).
+    A non-crypto class appends one line naming its excluded block types
+    (spec s10.7) so the model does not spend a family on a block that
+    validate_family will reject anyway.
     """
     if client is None or meter is None:
         client, meter = _client_and_meter()
@@ -525,6 +625,13 @@ def propose_families(model: str, accepted: dict[str, dict],
             f"REFUSED: pipeline budget at cap "
             f"({meter.month_spend():.2f} of {meter.monthly_cap_usd:.2f} USD "
             f"this month). The Composer will not spend past D33's limit.")
+    exclusion_note = ""
+    if asset_class != "crypto":
+        exclusion_note = (
+            f"\n\nThis run targets asset_class={asset_class!r} cells with "
+            f"single-fix daily bars (no real intrabar high/low distinct from "
+            f"close): do NOT propose these excluded block types: "
+            f"{sorted(RANGE_REQUIRING)}.")
     with client.messages.stream(
         model=model,
         max_tokens=32_000,
@@ -536,6 +643,7 @@ def propose_families(model: str, accepted: dict[str, dict],
                 f"Block grammar:\n{grammar_summary()}\n\n"
                 f"Accepted research cards:\n{cards_summary(accepted)}\n\n"
                 f"Propose up to {max_families} strategy families per your rules."
+                f"{exclusion_note}"
             ),
         }],
     ) as stream:
@@ -561,15 +669,29 @@ def normalize_proposal(families: list[dict]) -> list[dict]:
     return families
 
 
-def drift_record(run_id: str, dry_run: bool, specs: list[dict]) -> dict:
+def drift_record(run_id: str, dry_run: bool, specs: list[dict],
+                 routing: dict | None = None,
+                 routed_card_ids: list[str] | None = None) -> dict:
     """What one Composer run emitted. Written for both the dry run and the real
     run so the gap between the batch Coen approved and the batch that got
-    chained stops being invisible."""
-    return {"run_id": run_id,
-            "mode": "dry" if dry_run else "real",
-            "n_specs": len(specs),
-            "strategy_ids": [s["strategy_id"] for s in specs],
-            "families": sorted({s["family"] for s in specs})}
+    chained stops being invisible.
+
+    routing/routed_card_ids stay None for crypto runs (the default), so the
+    crypto shape of this dict is byte-identical to before this task
+    (regression-pinned in test_composer_fx.py). A non-crypto run adds both
+    keys: routing names the asset_class + eligible card tags (spec s4),
+    routed_card_ids is the accepted-card feed actually shown to the
+    proposer, so a family's absence is auditable back to routing, not a
+    silent drop."""
+    record = {"run_id": run_id,
+             "mode": "dry" if dry_run else "real",
+             "n_specs": len(specs),
+             "strategy_ids": [s["strategy_id"] for s in specs],
+             "families": sorted({s["family"] for s in specs})}
+    if routing is not None:
+        record["routing"] = routing
+        record["routed_card_ids"] = routed_card_ids or []
+    return record
 
 
 def drift_between(dry: dict, real: dict) -> dict:
@@ -609,6 +731,10 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                     default=datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-manual")
     ap.add_argument("--dry-run", action="store_true",
                     help="print families and specs, do not write to the registry")
+    ap.add_argument("--asset-class", choices=sorted(cells.CLASSES), default="crypto",
+                    help="cell class to compose for (spec s4); crypto is "
+                         "today's unrestricted default and every new branch "
+                         "below is guarded on asset_class != 'crypto'")
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
@@ -625,12 +751,32 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
               "never mutate a chained params_schema.")
         return 1
 
+    # Card routing (spec s4/D2): crypto stays unrestricted (every accepted
+    # card feeds it, unchanged). A non-crypto class only shows the proposer
+    # cards tagged for its ROUTING entry; reader.py:162 defaults an untagged
+    # card's asset_classes to ["cross"], so a card with no tags at all is
+    # defensively treated as ["cross"] here too rather than dropped.
+    routing_info = None
+    routed_card_ids = None
+    if args.asset_class == "crypto":
+        propose_input = accepted
+    else:
+        eligible_tags = set(ROUTING[args.asset_class])
+        propose_input = {
+            cid: c for cid, c in accepted.items()
+            if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & eligible_tags
+        }
+        routed_card_ids = sorted(propose_input)
+        routing_info = {"asset_class": args.asset_class,
+                        "eligible_tags": sorted(eligible_tags)}
+
     if propose_fn is None:
-        proposals = propose_families(args.model, accepted, args.max_families)
+        proposals = propose_families(args.model, propose_input, args.max_families,
+                                     asset_class=args.asset_class)
         # NB the dry run reaches here too: it makes the same call and costs the
         # same, so it is metered the same.
     else:
-        proposals = propose_fn(accepted)
+        proposals = propose_fn(propose_input)
     if len(proposals) > args.max_families:
         print(f"  NOTE: {len(proposals) - args.max_families} families beyond "
               f"--max-families {args.max_families} discarded unvalidated.")
@@ -646,10 +792,12 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     accepted_ids = set(accepted)
     known_fps = registered_fingerprints(registry)
     run_fps: dict[str, str] = {}
+    excluded_types = RANGE_REQUIRING if args.asset_class != "crypto" else frozenset()
     kept, dropped, seen_names = [], 0, set()
     for fam in proposals:
         name = fam.get("family", "?")
-        errors = validate_family(fam, accepted_ids, args.sibling_cap)
+        errors = validate_family(fam, accepted_ids, args.sibling_cap,
+                                 excluded_types=excluded_types)
         if name in seen_names:
             errors.append("duplicate family name in this run")
         if errors:
@@ -659,7 +807,11 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                 print(f"    - {e}")
             continue
         seen_names.add(name)
-        specs = expand_family(fam, args.run_id, args.model, created_utc)
+        if args.asset_class == "crypto":
+            specs = expand_family(fam, args.run_id, args.model, created_utc)
+        else:
+            specs = expand_family_for_class(fam, args.run_id, args.model,
+                                            created_utc, args.asset_class)
         kept_specs, drop_notes, malformed = screen_siblings(
             specs, known_fps, run_fps)
         if malformed:
@@ -705,7 +857,9 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # specs, the real run chained 24 with a directional mirror dropped.
     all_specs = [s for _, specs in kept for s in specs]
     _persist_drift_record(
-        drift_record(args.run_id, args.dry_run, all_specs), args.registry)
+        drift_record(args.run_id, args.dry_run, all_specs,
+                    routing=routing_info, routed_card_ids=routed_card_ids),
+        args.registry)
 
     for fam, specs in kept:
         print(f"family {fam['family']}: {len(specs)} sibling(s), "
