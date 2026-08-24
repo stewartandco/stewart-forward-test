@@ -102,6 +102,14 @@ PBO_NULL_DRAWS = 200
 CSCV_SPLITS = 16
 PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 
+# Below this many shared calendar days, an "intersection" is not a common
+# history worth clustering on -- it is noise dressed as a trial count. A real
+# dry-run generation hit this: 12 fx pairs with genuinely different real
+# inception dates (Bretton-Woods-era pairs from 1971 through EUR from its
+# 1999 launch) produced ragged calendars that would otherwise cluster on
+# whatever few days happen to overlap the shortest-lived pair.
+MIN_TRIALS_COMMON_DAYS = 100
+
 # The fixed order in which gates are evaluated and reported. 'dsr' is
 # DELIBERATELY ABSENT: protocol-v4 still computes and records the deflated
 # Sharpe, but it does not gate entry to paper trading and — new in v4 — it no
@@ -318,11 +326,14 @@ def daily_returns_with_dates(equity: list[tuple[str, float]]
     """Same values as daily_returns_from_curve, paired with the DATE each
     return is attributed to (equity[i]'s date, for the step from i-1 to i).
 
-    A single-class run never needs the dates -- every spec's curve already
-    shares one calendar -- but a mixed-class run pools a 24x7 calendar with a
-    5-day fx calendar, and cluster.correlation compares series BY INDEX, so
-    the dates are the only way to find what those series actually share
-    (spec s10.6)."""
+    A run whose specs are ALREADY on one shared calendar never needs the
+    dates. Two things break that: a mixed-class run pools a 24x7 calendar
+    with a 5-day fx calendar, and a same-class run can still be ragged --
+    registered specs on assets with genuinely different history starts
+    (fx pairs each have their own real inception date; the crypto grid's
+    five assets were listed on different days too). cluster.correlation
+    compares series BY INDEX, so the dates are the only way to find what
+    those series actually share (spec s10.6)."""
     return [(equity[i][0], equity[i][1] / equity[i - 1][1] - 1)
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
@@ -513,20 +524,53 @@ def run(argv: list[str] | None = None) -> int:
     for s in all_specs:
         full_results[s["strategy_id"]] = run_spec(s, _spec_bars(bars_by_cell, s))
 
-    # Single-class runs (today: every crypto-only chain) keep the exact prior
-    # arithmetic -- native per-spec calendars, no intersection -- so this is
-    # byte-identical and regression-covered by test_gauntlet.py. A run whose
-    # registered specs span >1 class pools a 24x7 calendar with a 5-day fx
-    # calendar; cluster.correlation compares series BY INDEX, so those must be
-    # trimmed to the dates every series actually shares before clustering
-    # (spec s10.6), else k and the recorded deflated Sharpe are silently wrong.
+    # A run whose registered specs are ALREADY on one shared calendar (today:
+    # every real crypto chain, which has only ever registered the legacy
+    # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
+    # prior arithmetic: native per-spec calendars, no intersection, so this
+    # stays byte-identical and regression-covered by test_gauntlet.py.
+    #
+    # Two things make that assumption false and must intersect FIRST, before
+    # check_aligned ever runs, not after it raises:
+    #   - classes_present > 1: a 24x7 crypto calendar pooled with a 5-day fx
+    #     calendar (spec s10.6);
+    #   - ragged (real dry-run finding, 2026-08-24): registered specs on the
+    #     SAME class can still have genuinely different calendars. 12 fx
+    #     pairs each start on their own real inception date (most G10 pairs
+    #     1971, EUR 1999, ZAR/SGD 1980/81, MXN 1993) with NO duplicate dates
+    #     anywhere (verified: every pinned CSV's row count equals its unique
+    #     date count) -- the raggedness is genuine history, not a bug. The
+    #     same landmine exists latently for crypto too the moment a
+    #     generation ever registers the full 5-asset ...USDT grid together
+    #     (BTCUSDT/ETHUSDT: 3272 bars; SOLUSDT: 2182; XRPUSDT: 3012; BNBUSDT:
+    #     3191 -- different listing dates), just never triggered because
+    #     production has only ever used the same-length legacy pair. Gating
+    #     on raggedness rather than on class alone closes that landmine too.
+    # cluster.correlation compares series BY INDEX, so any of the above must
+    # be trimmed to the dates every series actually shares before clustering,
+    # else k and the recorded deflated Sharpe are silently wrong -- or, before
+    # this fix, check_aligned simply refused the whole run.
     classes_present = {s["universe"].get("asset_class", "crypto")
                        for s in all_specs}
-    if len(classes_present) > 1:
+    raw_lengths = {sid: len(res["equity"]) for sid, res in full_results.items()}
+    ragged = len(set(raw_lengths.values())) > 1
+    if len(classes_present) > 1 or ragged:
         dated_by_id = {sid: daily_returns_with_dates(res["equity"])
                        for sid, res in full_results.items()}
         returns_by_id, common_dates = intersect_returns(dated_by_id)
         trials_alignment, trials_common_days = "intersection", len(common_dates)
+        if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
+            def _span(rows):
+                return (f"{min(d for d, _ in rows)}..{max(d for d, _ in rows)} "
+                       f"({len(rows)}d)") if rows else "(no returns)"
+            detail = "; ".join(f"{sid}={_span(rows)}"
+                               for sid, rows in sorted(dated_by_id.items()))
+            raise ValueError(
+                f"the intersection calendar across {len(dated_by_id)} "
+                f"registered strategies is only {len(common_dates)} day(s) "
+                f"-- too short to cluster on (minimum "
+                f"{MIN_TRIALS_COMMON_DAYS}). Ragged calendars or a mismatched "
+                f"class pairing left almost no shared history: {detail}")
     else:
         returns_by_id = {sid: daily_returns_from_curve(res["equity"])
                          for sid, res in full_results.items()}
