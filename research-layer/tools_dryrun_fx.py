@@ -1,11 +1,16 @@
-"""tools_dryrun_fx.py -- Track-1 ship-bar step 3 harness (spec s8, step 3):
+"""tools_dryrun_fx.py -- Track-1/2a ship-bar step 3 harness (spec s8, step 3):
 "Dry-run generation on the track's cells only: full compose->screen->gauntlet
 pass, no API budget, nothing registered to the chain, results to a throwaway
-dir; reviewed." Plan: docs/plans/2026-08-24-sp4-track1-fx.md Task 6.
+dir; reviewed." Plans: docs/plans/2026-08-24-sp4-track1-fx.md Task 6 (fx,
+the original build) and docs/2026-08-24-sp4-track2a-addendum.md (--asset-class
+parameterisation, equity_etf).
 
 This is a TOOL, not a pipeline module (like sweep_measure.py, verify_registry.py
 at the layer root) -- runnable directly with `python tools_dryrun_fx.py
---workdir <dir>`, never imported by pipeline/ code.
+--workdir <dir> [--asset-class fx|equity_etf]`, never imported by pipeline/
+code. The filename stays fx-scoped (this task's brief: rename NOT allowed)
+even though the harness itself is now class-parametric; --asset-class
+defaults to "fx" so every existing invocation without the flag is unchanged.
 
 What it does, in order:
   1. Refuses, LOUDLY, before touching anything, if the throwaway registry
@@ -13,26 +18,27 @@ What it does, in order:
      registry_log.jsonl). This check runs even when --registry was left at
      its default -- the default is always a fresh path under --workdir, so
      the only way to hit this refusal is an explicit, wrong --registry.
-  2. Refuses if the real fx snapshot (Task 2's pinned adapter output,
-     research-layer/data/<ID>_1d.csv + tradfi_snapshot_manifest.json) is not
-     present, naming `python -m pipeline.tradfi_data snapshot --classes fx`
-     as the fix. Nothing is created before this check either.
-  3. Seeds a FRESH throwaway registry under --workdir with 3 fx-tagged
+  2. Refuses if the real snapshot for --asset-class (Task 2's pinned adapter
+     output, research-layer/data/<ID>_1d.csv + tradfi_snapshot_manifest.json,
+     for every asset the class declares) is not present, naming
+     `python -m pipeline.tradfi_data snapshot --classes <asset-class>` as the
+     fix. Nothing is created before this check either.
+  3. Seeds a FRESH throwaway registry under --workdir with 3 class-tagged
      accepted cards + 1 crypto-tagged accepted card (register_card +
      review_card, the same two-call pattern every seeded-registry test
      fixture in this package uses).
-  4. Composes: composer.run(["--asset-class", "fx", ...], propose_fn=...)
+  4. Composes: composer.run(["--asset-class", <class>, ...], propose_fn=...)
      with a BUILT-IN fixture family (ma_cross_dense entry sweep, pct_stop,
-     r_multiple target, fixed_fraction risk) citing the seeded fx cards --
-     no API call, ever (propose_fn bypasses propose_families entirely, so
-     no budget meter call happens). NOT --dry-run: the specs REGISTER to the
-     throwaway chain, because screen and gauntlet need real chain state to
-     walk, exactly as the plan specifies.
+     r_multiple target, fixed_fraction risk) citing the seeded class-tagged
+     cards -- no API call, ever (propose_fn bypasses propose_families
+     entirely, so no budget meter call happens). NOT --dry-run: the specs
+     REGISTER to the throwaway chain, because screen and gauntlet need real
+     chain state to walk, exactly as the plan specifies.
   5. Chains the screen and gauntlet protocol notes on the THROWAWAY registry
      only (screen.PROTOCOL / gauntlet.PROTOCOL), then runs screen.run() then
      gauntlet.run() for real (not --dry-run, same reason as step 4) against
-     the throwaway registry and the REAL data/ directory -- fx snapshot CSVs
-     and crypto CSVs alike, read-only.
+     the throwaway registry and the REAL data/ directory -- the class's
+     snapshot CSVs and crypto CSVs alike, read-only.
   6. Prints a summary table and exits 0 only if every stage ran AND at least
      one spec reached a gauntlet verdict; otherwise exits nonzero with a
      named reason.
@@ -44,6 +50,7 @@ research-layer/artifacts/, or research-layer/logs/ -- every write lands under
 Usage:
     python tools_dryrun_fx.py --workdir /path/to/scratch
     python tools_dryrun_fx.py --workdir /path/to/scratch --data-dir data --cutoff 2023-12-31
+    python tools_dryrun_fx.py --workdir /path/to/scratch --asset-class equity_etf
 """
 from __future__ import annotations
 
@@ -68,12 +75,19 @@ from pipeline.registry import Registry                         # noqa: E402
 LAYER_ROOT = Path(__file__).resolve().parent
 LIVE_REGISTRY = LAYER_ROOT / "registry_log.jsonl"
 DEFAULT_DATA_DIR = LAYER_ROOT / "data"
-SNAPSHOT_COMMAND = "python -m pipeline.tradfi_data snapshot --classes fx"
-RUN_ID = "dryrun-fx"
+DEFAULT_ASSET_CLASS = "fx"
+# Every non-crypto declared class is a valid harness target; crypto is
+# excluded because it has no snapshot adapter (it fetches its own data) and
+# is not what this harness's ship-bar step is for.
+NON_CRYPTO_CLASSES = tuple(sorted(c for c in cells.CLASSES if c != "crypto"))
 
 REFUSED_LIVE_CHAIN = 2
 REFUSED_NO_SNAPSHOT = 3
 FAILED_SHIP_BAR = 1
+
+
+def snapshot_command(asset_class: str) -> str:
+    return f"python -m pipeline.tradfi_data snapshot --classes {asset_class}"
 
 
 # ---------------------------------------------------------------- fixtures --
@@ -85,19 +99,18 @@ def _fixture_source_meta() -> dict:
             "credibility_tier": "practitioner"}
 
 
-def _fixture_card(claim: str, quote: str, asset_classes: list[str]) -> dict:
+def _fixture_card(claim: str, quote: str, asset_classes: list[str], run_id: str) -> dict:
     raw = {"claim": claim, "quote": quote, "locator": "sec 1",
            "asset_classes": asset_classes, "topics": ["trend"],
            "horizon": "swing", "testability_score": 0.8,
            "data_required": ["daily OHLCV"], "notes": None}
-    return build_card(raw, _fixture_source_meta(), "dryrun-fixture", RUN_ID)
+    return build_card(raw, _fixture_source_meta(), "dryrun-fixture", run_id)
 
 
-# Three DISTINCT fx-tagged cards (distinct claim/quote -> distinct card_id)
-# plus one crypto-tagged card, seeded so the fx routing table (composer.
-# ROUTING["fx"] = ("fx", "cross")) has something real to exclude: the crypto
-# card is accepted but never cited, proving routing rather than merely
-# declaring it.
+# Three DISTINCT claim/quote pairs per class (distinct text -> distinct
+# card_id) so the class's routing table (composer.ROUTING[cls]) has
+# something real to route on; a fourth, crypto-tagged card is always seeded
+# too (never cited), proving routing rather than merely declaring it.
 FX_CLAIMS = [
     ("Daily fx fixing series show short-horizon trend continuation after a "
      "moving-average crossover.",
@@ -110,54 +123,91 @@ FX_CLAIMS = [
      "stop-outs that a degenerate single-fix range would otherwise create.",
      "a percentage stop avoids spurious intrabar triggers on single-fix series"),
 ]
+EQUITY_ETF_CLAIMS = [
+    ("Equity index ETFs show short-horizon trend continuation after a "
+     "moving-average crossover on daily bars.",
+     "moving average crossovers on daily equity index ETF bars show "
+     "continuation over the following weeks"),
+    ("Equity index ETFs with a persistent fast/slow moving-average gap tend "
+     "to keep that gap for several more sessions.",
+     "the fast/slow moving average gap persists across subsequent daily "
+     "sessions on equity index ETFs"),
+    ("Percentage stops sized off the daily close avoid whipsaw exits that a "
+     "tight range-based stop would otherwise trigger on equity index ETFs.",
+     "a percentage stop avoids spurious exits on equity index ETF daily bars"),
+]
+CLAIMS_BY_CLASS = {"fx": FX_CLAIMS, "equity_etf": EQUITY_ETF_CLAIMS}
+CARD_TAG_BY_CLASS = {"fx": "fx", "equity_etf": "equities"}   # composer.ROUTING's eligible tag
 CRYPTO_CLAIM = ("Crypto trend strategies are the incumbent, unrestricted "
-                "card feed and must stay excluded from the fx family here.",
+                "card feed and must stay excluded from the class family here.",
                 "the incumbent crypto card feed remains unrestricted")
 
 
-def seed_cards(registry: Registry) -> tuple[list[str], str]:
-    """Register + review 3 fx-tagged + 1 crypto-tagged card, all accepted.
+def seed_cards(registry: Registry, asset_class: str, run_id: str) -> tuple[list[str], str]:
+    """Register + review 3 class-tagged + 1 crypto-tagged card, all accepted.
 
     Mirrors the seeded_registry()/`_register_accepted()` pattern used by
-    pipeline/test_composer.py and pipeline/test_composer_fx.py: register with
-    review.status="pending" (build_card's default), then review_card(...,
-    "accepted", ...). Returns (fx_card_ids, crypto_card_id).
+    pipeline/test_composer.py, pipeline/test_composer_fx.py and
+    pipeline/test_composer_equity.py: register with review.status="pending"
+    (build_card's default), then review_card(..., "accepted", ...). Returns
+    (class_card_ids, crypto_card_id).
     """
-    fx_ids = []
-    for claim, quote in FX_CLAIMS:
-        card = _fixture_card(claim, quote, ["fx"])
+    if asset_class not in CLAIMS_BY_CLASS:
+        raise ValueError(f"no fixture claims declared for asset_class {asset_class!r} "
+                         f"(declared: {sorted(CLAIMS_BY_CLASS)})")
+    tag = CARD_TAG_BY_CLASS[asset_class]
+    class_ids = []
+    for claim, quote in CLAIMS_BY_CLASS[asset_class]:
+        card = _fixture_card(claim, quote, [tag], run_id)
         registry.register_card(card)
-        registry.review_card(card["card_id"], "accepted", "dryrun-fx-harness")
-        fx_ids.append(card["card_id"])
-    crypto_card = _fixture_card(CRYPTO_CLAIM[0], CRYPTO_CLAIM[1], ["crypto"])
+        registry.review_card(card["card_id"], "accepted", "dryrun-harness")
+        class_ids.append(card["card_id"])
+    crypto_card = _fixture_card(CRYPTO_CLAIM[0], CRYPTO_CLAIM[1], ["crypto"], run_id)
     registry.register_card(crypto_card)
-    registry.review_card(crypto_card["card_id"], "accepted", "dryrun-fx-harness")
-    return fx_ids, crypto_card["card_id"]
+    registry.review_card(crypto_card["card_id"], "accepted", "dryrun-harness")
+    return class_ids, crypto_card["card_id"]
 
 
-def fixture_family(fx_card_ids: list[str]) -> dict:
-    """ma_cross_dense entry (3-point contiguous sweep on `fast`), pct_stop
-    (the one stop RANGE_REQUIRING does not exclude on single-fix bars),
-    r_multiple target, fixed_fraction risk -- the exact shape spec s10.7
-    prescribes for fx families and the shape pipeline/test_composer_fx.py's
-    fx_family() fixture proves valid against validate_family. Reimplemented
-    here (not imported) so this operational tool has no dependency on any
-    test module.
+def fixture_family(card_ids: list[str], asset_class: str) -> dict:
+    """ma_cross_dense entry (3-point contiguous sweep on `fast`), pct_stop,
+    r_multiple target, fixed_fraction risk -- the exact shape
+    pipeline/test_composer_fx.py's fx_family() and
+    pipeline/test_composer_equity.py's equity_family() fixtures prove valid
+    against validate_family. Reimplemented here (not imported) so this
+    operational tool has no dependency on any test module.
 
-    "assets" is vestigial: validate_family's ALLOWED_ASSETS check is
-    crypto-only (composer.py, unchanged scope); the real per-cell assets for
-    an --asset-class fx run come from cells.class_cells("fx") inside
-    expand_family_for_class.
+    RANGE blocks (atr_stop, channel_breakout) are eligible for equity_etf
+    (real OHLC bars, no exclusions declared) but this fixture stays minimal
+    and reuses pct_stop for both classes -- the addendum's explicit
+    instruction ("keep the fixture minimal").
+
+    "card_ids" is real (validate_family checks citations against the
+    accepted set). "assets" must be a real, non-empty subset of the class's
+    OWN declared assets (real-fx-generation finding, composer.py task 6b
+    follow-up: validate_family checks fam["assets"] against
+    cells.CLASSES[asset_class]["assets"] for any non-crypto class, not the
+    crypto-only ALLOWED_ASSETS list this fixture used to lean on by
+    omission -- the first real fx generation dropped all 5 model-proposed
+    families on exactly this check, and this harness carried the same
+    now-stale ["BTCUSD"] until this fix). It is still NOT cell-selecting:
+    the real per-cell assets come from cells.class_cells(asset_class) inside
+    expand_family_for_class, which ignores this field entirely once
+    validate_family has passed it.
     """
+    cls_spec = cells.CLASSES[asset_class]
+    if cls_spec["bar_kind"] == "single_fix":
+        bar_note = ("pct_stop is used in place of a range-based stop because "
+                    "single-fix bars carry no real intrabar high/low")
+    else:
+        bar_note = ("pct_stop is used to keep this fixture minimal; real "
+                    "OHLC range-based stops are eligible for this class")
     return {
-        "family": "dryrun_fx_trend",
-        "rationale": "Dry-run fixture: MA-cross trend continuation on fx daily fixes.",
-        "regime_hypothesis": ("Trending fx pairs continue after a fast/slow "
-                               "crossover on their daily fix; pct_stop is used "
-                               "in place of a range-based stop because single-"
-                               "fix bars carry no real intrabar high/low."),
-        "card_ids": list(fx_card_ids),
-        "assets": ["BTCUSD"],
+        "family": f"dryrun_{asset_class}_trend",
+        "rationale": f"Dry-run fixture: MA-cross trend continuation on {asset_class} daily bars.",
+        "regime_hypothesis": (f"Trending {asset_class} instruments continue after a "
+                               f"fast/slow crossover on their daily bar; {bar_note}."),
+        "card_ids": list(card_ids),
+        "assets": [cls_spec["assets"][0]],
         "blocks": [
             {"role": "entry", "type": "ma_cross_dense",
              "params": {"fast": 13, "slow": 50, "direction": "long"}},
@@ -185,21 +235,24 @@ def refuse_if_live_chain(registry_path: Path) -> str | None:
     return None
 
 
-def refuse_if_no_snapshot(data_dir: Path) -> str | None:
-    """None if the Task-2 fx snapshot looks present and complete; otherwise
-    the loud refusal message naming the exact command to fix it."""
+def refuse_if_no_snapshot(data_dir: Path, asset_class: str) -> str | None:
+    """None if the class's pinned snapshot (Task 2's adapter output) looks
+    present and complete; otherwise the loud refusal message naming the
+    exact command to fix it."""
+    cls_spec = cells.CLASSES[asset_class]
+    probe_asset = cls_spec["assets"][0]
     manifest = data_dir / "tradfi_snapshot_manifest.json"
-    eur_csv = data_dir / "EUR_1d.csv"
-    missing_assets = [a for a in cells.FX_ASSETS
+    probe_csv = data_dir / f"{probe_asset}_1d.csv"
+    missing_assets = [a for a in cls_spec["assets"]
                       if not (data_dir / f"{a}_1d.csv").exists()]
-    if not eur_csv.exists() or not manifest.exists() or missing_assets:
+    if not probe_csv.exists() or not manifest.exists() or missing_assets:
         detail = f"; also missing: {', '.join(missing_assets)}" if (
-            missing_assets and eur_csv.exists()) else ""
-        return (f"REFUSED: no fx snapshot at {data_dir} "
-                f"(EUR_1d.csv exists={eur_csv.exists()}, "
+            missing_assets and probe_csv.exists()) else ""
+        return (f"REFUSED: no {asset_class} snapshot at {data_dir} "
+                f"({probe_asset}_1d.csv exists={probe_csv.exists()}, "
                 f"tradfi_snapshot_manifest.json exists={manifest.exists()}"
-                f"{detail}). Run `{SNAPSHOT_COMMAND}` first (Task 2's pinned "
-                f"adapter), then re-run this harness.")
+                f"{detail}). Run `{snapshot_command(asset_class)}` first "
+                f"(Task 2's pinned adapter), then re-run this harness.")
     return None
 
 
@@ -219,8 +272,8 @@ def _graveyard_reasons(entries: list[dict]) -> Counter:
                    and e["payload"]["to"] == "graveyard")
 
 
-def print_summary(compose_n: int, screen_entries: list[dict],
-                  gauntlet_entries: list[dict]) -> dict:
+def print_summary(asset_class: str, run_id: str, compose_n: int,
+                  screen_entries: list[dict], gauntlet_entries: list[dict]) -> dict:
     screen_verdicts = [e for e in screen_entries
                        if e["entry_type"] == "verdict"
                        and e["payload"]["stage"] == "screened"]
@@ -241,7 +294,7 @@ def print_summary(compose_n: int, screen_entries: list[dict],
     alignments = sorted({e["payload"]["metrics"].get("trials_alignment")
                          for e in gauntlet_verdicts})
 
-    print("\n=== FX dry-run summary (run-id " + RUN_ID + ") ===")
+    print(f"\n=== {asset_class} dry-run summary (run-id {run_id}) ===")
     print(f"specs composed:      {compose_n}")
     print(f"screened:             {len(screen_verdicts)}  "
           f"(pass={screen_pass}, fail={len(screen_verdicts) - screen_pass})")
@@ -266,18 +319,23 @@ def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="tools_dryrun_fx.py",
         description=(
-            "Track-1 ship-bar step 3 harness (spec s8, step 3): a fixture-"
-            "driven fx dry-run generation -- compose -> screen -> gauntlet -- "
-            "on a THROWAWAY registry under --workdir. It never touches the "
-            "live chain (research-layer/registry_log.jsonl), never spends "
-            "Anthropic API budget (propose_fn is injected), and never writes "
-            "to research-layer/artifacts or research-layer/logs. It DOES "
-            "read the real research-layer/data snapshot written by "
-            f"`{SNAPSHOT_COMMAND}` (refused loudly if absent)."))
+            "Track-1/2a ship-bar step 3 harness (spec s8, step 3): a "
+            "fixture-driven dry-run generation -- compose -> screen -> "
+            "gauntlet -- on a THROWAWAY registry under --workdir. It never "
+            "touches the live chain (research-layer/registry_log.jsonl), "
+            "never spends Anthropic API budget (propose_fn is injected), and "
+            "never writes to research-layer/artifacts or research-layer/logs. "
+            "It DOES read the real research-layer/data snapshot for "
+            "--asset-class, written by `python -m pipeline.tradfi_data "
+            "snapshot --classes <asset-class>` (refused loudly if absent)."))
     ap.add_argument("--workdir", required=True, type=Path,
                     help="scratch directory; a fresh timestamped subfolder "
                          "is created under it for this run's throwaway "
                          "registry, artifacts and logs")
+    ap.add_argument("--asset-class", choices=NON_CRYPTO_CLASSES, default=DEFAULT_ASSET_CLASS,
+                    help=f"non-crypto cell class to dry-run (default: "
+                         f"{DEFAULT_ASSET_CLASS!r}); choices are every "
+                         f"declared class except crypto: {NON_CRYPTO_CLASSES}")
     ap.add_argument("--registry", type=Path, default=None,
                     help="override the throwaway registry path (default: a "
                          "fresh path under --workdir). Refused if it "
@@ -289,9 +347,11 @@ def run(argv: list[str] | None = None) -> int:
                     help="train/OOS cutoff passed to screen and gauntlet "
                          "(default: each stage's own DEFAULT_CUTOFF)")
     args = ap.parse_args(argv)
+    asset_class = args.asset_class
 
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = args.workdir / f"dryrun-fx-{run_stamp}"
+    run_id = f"dryrun-{asset_class}"
+    run_dir = args.workdir / f"dryrun-{asset_class}-{run_stamp}"
     registry_path = args.registry if args.registry is not None else (
         run_dir / "registry_log.jsonl")
 
@@ -301,37 +361,39 @@ def run(argv: list[str] | None = None) -> int:
         print(refusal, file=sys.stderr)
         return REFUSED_LIVE_CHAIN
 
-    # Guard 2: the fx snapshot must already exist (Task 2's job, not this
-    # harness's). Still before any write.
-    refusal = refuse_if_no_snapshot(args.data_dir)
+    # Guard 2: the class's snapshot must already exist (Task 2's job, not
+    # this harness's). Still before any write.
+    refusal = refuse_if_no_snapshot(args.data_dir, asset_class)
     if refusal:
         print(refusal, file=sys.stderr)
         return REFUSED_NO_SNAPSHOT
 
     run_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir = run_dir / "artifacts"
-    print(f"throwaway registry: {registry_path}")
+    print(f"asset class:         {asset_class}")
+    print(f"throwaway registry:  {registry_path}")
     print(f"throwaway artifacts: {artifacts_dir}")
     print(f"reading data from:   {args.data_dir}  (read-only)")
 
     registry = Registry(registry_path)
-    fx_card_ids, crypto_card_id = seed_cards(registry)
-    print(f"seeded {len(fx_card_ids)} fx-tagged card(s) {fx_card_ids} + "
-          f"1 crypto-tagged card {crypto_card_id!r} (accepted)")
+    class_card_ids, crypto_card_id = seed_cards(registry, asset_class, run_id)
+    print(f"seeded {len(class_card_ids)} {asset_class}-tagged card(s) "
+          f"{class_card_ids} + 1 crypto-tagged card {crypto_card_id!r} (accepted)")
 
     n0 = 0
 
     def propose_fn(cards):
-        # cards is the routed input (fx + cross only, per composer.ROUTING);
-        # the fixture ignores it and always cites the seeded fx cards, so a
-        # routing bug (the crypto card leaking in) would show up as an extra
-        # entry in `cards`, not as a change to what gets proposed here.
-        return [fixture_family(fx_card_ids)]
+        # cards is the routed input (class + cross only, per composer.
+        # ROUTING); the fixture ignores it and always cites the seeded
+        # class-tagged cards, so a routing bug (the crypto card leaking in)
+        # would show up as an extra entry in `cards`, not as a change to
+        # what gets proposed here.
+        return [fixture_family(class_card_ids, asset_class)]
 
-    print("\n--- compose (--asset-class fx, propose_fn injected, no API call) ---")
+    print(f"\n--- compose (--asset-class {asset_class}, propose_fn injected, no API call) ---")
     compose_rc = composer.run(
-        ["--asset-class", "fx", "--registry", str(registry_path),
-         "--run-id", RUN_ID],
+        ["--asset-class", asset_class, "--registry", str(registry_path),
+         "--run-id", run_id],
         propose_fn=propose_fn)
     compose_entries, n1 = _new_entries(registry_path, n0)
     n_composed = sum(1 for e in compose_entries if e["entry_type"] == "strategy_registered")
@@ -342,8 +404,8 @@ def run(argv: list[str] | None = None) -> int:
 
     # Protocol anchors, chained to the THROWAWAY chain only -- screen.run()
     # and gauntlet.run() both hard-refuse a real (non-dry) run without one.
-    registry.append("note", {"text": f"{screen.PROTOCOL}: fx dry-run harness anchor"})
-    registry.append("note", {"text": f"{gauntlet.PROTOCOL}: fx dry-run harness anchor"})
+    registry.append("note", {"text": f"{screen.PROTOCOL}: {asset_class} dry-run harness anchor"})
+    registry.append("note", {"text": f"{gauntlet.PROTOCOL}: {asset_class} dry-run harness anchor"})
     n1 += 2
 
     cutoff_args = ["--cutoff", args.cutoff] if args.cutoff else []
@@ -366,7 +428,7 @@ def run(argv: list[str] | None = None) -> int:
         print(f"\nSHIP BAR NOT MET: gauntlet exited {gauntlet_rc}.", file=sys.stderr)
         return FAILED_SHIP_BAR
 
-    summary = print_summary(n_composed, screen_entries, gauntlet_entries)
+    summary = print_summary(asset_class, run_id, n_composed, screen_entries, gauntlet_entries)
 
     if summary["n_gauntlet_verdicts"] < 1:
         print("\nSHIP BAR NOT MET: no spec reached a gauntlet verdict "

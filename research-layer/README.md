@@ -207,45 +207,59 @@ Mechanics worth knowing:
   window's realized volatility and records both readings, so any v2 verdict
   can be re-derived under the v1 rule.
 
-### FX track (SP4)
+### Non-crypto asset classes (SP4)
 
-Track 1 of the market-expansion sub-project
-(`docs/2026-08-24-market-expansion-sp4-design.md`) generalises the composer,
-screen and gauntlet path to non-crypto asset classes, starting with FX.
-`pipeline/cells.py` declares the `fx` class (12 FRED pairs, daily fixes,
-session `fx_5d`); declaring a class is not the same as activating it, see the
-activation note below.
+The market-expansion sub-project
+(`docs/2026-08-24-market-expansion-sp4-design.md`, track addenda under
+`docs/`) generalises the composer, screen and gauntlet path to non-crypto
+asset classes, one class per track. `pipeline/cells.py`'s `CLASSES` is the
+authoritative declaration of every class's assets, timeframes, session, cost
+model, eras and excluded block types; declaring a class there is not the
+same as activating it, see the activation note below.
+
+- Track 1: `fx` (12 FRED pairs, daily fixes, session `fx_5d`, single-fix
+  bars) -- ACTIVATED 2026-08-24, first real generation the same day.
+- Track 2a: `equity_etf` (16 Tiingo-backed equity-index ETFs, daily OHLCV,
+  session `us_equity_5d`) -- declared, **not yet active**.
 
 ```bash
-# 1. Snapshot the pinned fx series from the trading-systems free lane into
-#    research-layer/data/, verified against the producer's manifest sha256.
-#    Refuses, naming each id, on anything unpinned, hash-mismatched, or
-#    carrying a failed integrity verdict; writes nothing partial.
+# 1. Snapshot the pinned series for one class from the trading-systems free
+#    lane into research-layer/data/, verified against the producer's
+#    manifest sha256. Refuses, naming each id, on anything unpinned,
+#    hash-mismatched, or carrying a failed integrity verdict; writes nothing
+#    partial.
 python -m pipeline.tradfi_data snapshot --classes fx
+python -m pipeline.tradfi_data snapshot --classes equity_etf
 
 # 2. Ship-bar step 3 (spec s8): a fixture-driven compose -> screen ->
 #    gauntlet dry run on a THROWAWAY registry, no API call, nothing written
-#    to the live chain. Requires step 1 to have already run; refuses loudly,
-#    naming the command above, if the fx snapshot is missing.
+#    to the live chain. --asset-class defaults to fx; pass any declared
+#    non-crypto class. Requires step 1 to have already run for that class;
+#    refuses loudly, naming the command above, if that class's snapshot is
+#    missing.
 python tools_dryrun_fx.py --workdir <scratch-dir>
+python tools_dryrun_fx.py --workdir <scratch-dir> --asset-class equity_etf
 ```
 
 `tools_dryrun_fx.py` seeds its own throwaway research cards and strategy
-specs and prints a summary: specs composed, screen pass/fail with burial
-reasons, gauntlet verdicts per gate, how many fx verdicts carry an
-`era_summary`, and the trials alignment mode. It exits 0 only when every
-stage ran and at least one spec reached a gauntlet verdict; every artifact it
-produces lands under the given `--workdir`, never under `registry_log.jsonl`,
-`artifacts/` or `logs/`.
+specs, class-tagged to whichever `--asset-class` was passed, and prints a
+summary: specs composed, screen pass/fail with burial reasons, gauntlet
+verdicts per gate, how many of that class's verdicts carry an `era_summary`,
+and the trials alignment mode. It exits 0 only when every stage ran and at
+least one spec reached a gauntlet verdict; every artifact it produces lands
+under the given `--workdir`, never under `registry_log.jsonl`, `artifacts/`
+or `logs/`.
 
 **Activation is Coen's call, not a code change to make lightly.**
-`pipeline/cells.py`'s `LIVE_CLASSES` currently reads `("crypto",)`. Declaring
-the `fx` class in `CLASSES` puts no fx trial into any denominator by itself;
-only adding `"fx"` to `LIVE_CLASSES` does, because that is the switch that
-lets a real generation sweep fx cells for the first time. Flipping it is
-therefore a denominator event (spec §2 and §7): it ships as its own reviewed
-commit, only after Coen has reviewed a clean dry run (step 2 above) and given
-the go for the first real fx generation (spec §8, step 4).
+`pipeline/cells.py`'s `LIVE_CLASSES` reads `("crypto", "fx")` as of Track 1's
+activation; `equity_etf` is declared in `CLASSES` but deliberately absent
+from `LIVE_CLASSES`. Declaring a class puts no trial into any denominator by
+itself; only adding it to `LIVE_CLASSES` does, because that is the switch
+that lets a real generation sweep that class's cells for the first time.
+Flipping it is therefore a denominator event (spec §2 and §7): it ships as
+its own reviewed commit, only after Coen has reviewed a clean dry run (step 2
+above) and given the go for that class's first real generation (spec §8,
+step 4).
 
 Offline tests (no API key needed): `python -m pytest pipeline/`
 
