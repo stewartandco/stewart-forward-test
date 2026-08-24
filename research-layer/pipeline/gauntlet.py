@@ -333,8 +333,22 @@ def daily_returns_with_dates(equity: list[tuple[str, float]]
     (fx pairs each have their own real inception date; the crypto grid's
     five assets were listed on different days too). cluster.correlation
     compares series BY INDEX, so the dates are the only way to find what
-    those series actually share (spec s10.6)."""
-    return [(equity[i][0], equity[i][1] / equity[i - 1][1] - 1)
+    those series actually share (spec s10.6).
+
+    FAILURE THIS GUARDS AGAINST (real run, 2026-08-24): a bar's `date` string
+    is carried through verbatim from its CSV, and this repo's CSVs do not
+    all agree on format -- the legacy BTCUSD_1d.csv (what real crypto specs
+    actually register against, spec s10.9) is bare `YYYY-MM-DD`, while the
+    fx snapshot adapter and the modern ...USDT grid write `YYYY-MM-DD
+    HH:MM:SS`. Two overlapping calendars (1999-2026, both sides) whose keys
+    never compare equal intersect to an empty set -- "intersection ... is
+    only 0 day(s)" across 455 real strategies -- not because the calendars
+    disagreed, but because the STRINGS did. Normalising every key to
+    date-only HERE, in the one place every dated return series is built,
+    closes it by construction: every downstream consumer (intersect_returns,
+    era_summary's date-string comparisons) sees one format no matter which
+    CSV convention produced the bar."""
+    return [(str(equity[i][0])[:10], equity[i][1] / equity[i - 1][1] - 1)
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
 
@@ -363,6 +377,72 @@ def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
         m = dict(rows)
         out[sid] = [m[d] for d in common_sorted]
     return out, common_sorted
+
+
+def _calendar_range_overlap_days(dated_by_id: dict[str, list[tuple[str, float]]]) -> int:
+    """Naive overlap, in days, of every series' own [min, max] date SPAN
+    (not its actual trading days -- a full calendar-day count between the
+    earliest shared start and the latest shared end).
+
+    This is a DIAGNOSTIC heuristic only, not a clustering input: a large
+    positive value here alongside a near-zero actual intersection is the
+    signature of a key-format mismatch (string date keys that never compare
+    equal despite covering the same calendar), the exact shape of the
+    2026-08-24 real-run defect. Genuinely disjoint calendars (a strategy
+    retired in 2010, another that only starts in 2020) score at or below
+    zero here too, so this alone never decides anything -- it only tells
+    _raise_too_short_intersection whether to add a breadcrumb."""
+    spans = []
+    for rows in dated_by_id.values():
+        if not rows:
+            return 0
+        dates = [str(d)[:10] for d, _ in rows]
+        spans.append((min(dates), max(dates)))
+    latest_start = max(s for s, _ in spans)
+    earliest_end = min(e for _, e in spans)
+    if latest_start > earliest_end:
+        return 0
+    from datetime import date as _date
+    return (_date.fromisoformat(earliest_end)
+            - _date.fromisoformat(latest_start)).days + 1
+
+
+def _raise_too_short_intersection(
+        dated_by_id: dict[str, list[tuple[str, float]]],
+        common_dates: list[str]) -> None:
+    """Refuse to cluster on an intersection shorter than
+    MIN_TRIALS_COMMON_DAYS, naming every series' own date span so the reader
+    does not have to re-derive what went wrong from a bare day count.
+
+    If every series' own [min, max] span overlaps generously
+    (_calendar_range_overlap_days >= MIN_TRIALS_COMMON_DAYS) even though the
+    actual intersection came up empty or nearly so, that combination is the
+    signature of a key-format mismatch rather than a genuine data gap --
+    named as a question, not a diagnosis, since daily_returns_with_dates
+    already normalises every key it builds to date-only and should make this
+    unreachable in practice. Kept as a cheap breadcrumb for whoever hits the
+    next one of these."""
+    def _span(rows):
+        return (f"{min(d for d, _ in rows)}..{max(d for d, _ in rows)} "
+               f"({len(rows)}d)") if rows else "(no returns)"
+    detail = "; ".join(f"{sid}={_span(rows)}"
+                       for sid, rows in sorted(dated_by_id.items()))
+    hint = ""
+    range_overlap = _calendar_range_overlap_days(dated_by_id)
+    if range_overlap >= MIN_TRIALS_COMMON_DAYS:
+        hint = (f" Each series' own date span overlaps by ~{range_overlap} "
+               f"calendar days even though the actual intersection is only "
+               f"{len(common_dates)} -- key-format mismatch? (one builder's "
+               f"date strings may carry a time suffix or other formatting "
+               f"the other's does not; daily_returns_with_dates normalises "
+               f"every key it builds to date-only, so this should not "
+               f"happen unless something bypassed it).")
+    raise ValueError(
+        f"the intersection calendar across {len(dated_by_id)} "
+        f"registered strategies is only {len(common_dates)} day(s) "
+        f"-- too short to cluster on (minimum "
+        f"{MIN_TRIALS_COMMON_DAYS}). Ragged calendars or a mismatched "
+        f"class pairing left almost no shared history: {detail}.{hint}")
 
 
 def era_summary(trades: list[dict], eras: tuple[tuple[str, str, str], ...]
@@ -560,17 +640,7 @@ def run(argv: list[str] | None = None) -> int:
         returns_by_id, common_dates = intersect_returns(dated_by_id)
         trials_alignment, trials_common_days = "intersection", len(common_dates)
         if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
-            def _span(rows):
-                return (f"{min(d for d, _ in rows)}..{max(d for d, _ in rows)} "
-                       f"({len(rows)}d)") if rows else "(no returns)"
-            detail = "; ".join(f"{sid}={_span(rows)}"
-                               for sid, rows in sorted(dated_by_id.items()))
-            raise ValueError(
-                f"the intersection calendar across {len(dated_by_id)} "
-                f"registered strategies is only {len(common_dates)} day(s) "
-                f"-- too short to cluster on (minimum "
-                f"{MIN_TRIALS_COMMON_DAYS}). Ragged calendars or a mismatched "
-                f"class pairing left almost no shared history: {detail}")
+            _raise_too_short_intersection(dated_by_id, common_dates)
     else:
         returns_by_id = {sid: daily_returns_from_curve(res["equity"])
                          for sid, res in full_results.items()}

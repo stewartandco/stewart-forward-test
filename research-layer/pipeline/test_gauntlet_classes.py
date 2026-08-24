@@ -14,8 +14,9 @@ import pytest
 
 from . import cells
 from .cluster import effective_trials
-from .gauntlet import (MIN_TRIALS_COMMON_DAYS, check_aligned,
-                       daily_returns_with_dates, era_summary, intersect_returns)
+from .gauntlet import (MIN_TRIALS_COMMON_DAYS, _raise_too_short_intersection,
+                       check_aligned, daily_returns_with_dates, era_summary,
+                       intersect_returns)
 from .registry import Registry
 from .screen import assert_cells_comparable
 
@@ -107,6 +108,35 @@ def test_intersect_returns_empty_when_no_shared_dates():
     aligned, common = intersect_returns(dated)
     assert common == []
     assert aligned == {"A": [], "B": []}
+
+
+def test_date_key_normalisation_fixes_the_real_run_mismatch():
+    """Real-run finding (2026-08-24): a bar's `date` string is carried
+    through verbatim from its CSV, and this repo's CSVs disagree on format
+    -- the legacy BTCUSD_1d.csv (what real crypto specs register against,
+    spec s10.9) is bare `YYYY-MM-DD`, while the fx snapshot adapter's CSVs
+    (and the modern ...USDT grid) are `YYYY-MM-DD HH:MM:SS` (verified
+    against the pinned data/ directory). Two overlapping calendars whose
+    keys never compare equal intersect to an empty set: 455 real strategies
+    produced "intersection ... is only 0 day(s)". Reproduced here at the
+    smallest possible scale: the SAME calendar week, one series bare-dated,
+    the other timestamped."""
+    week = ["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"]
+    bare_equity = ([("2026-08-09", 1.0)]
+                   + [(d, 1.0 + 0.001 * i) for i, d in enumerate(week, 1)])
+    ts_equity = ([("2026-08-09 00:00:00", 1.0)]
+                + [(f"{d} 00:00:00", 1.0 + 0.002 * i)
+                   for i, d in enumerate(week, 1)])
+
+    crypto_dated = daily_returns_with_dates(bare_equity)
+    fx_dated = daily_returns_with_dates(ts_equity)
+    # normalised to date-only by construction, regardless of the source format
+    assert [d for d, _ in crypto_dated] == week
+    assert [d for d, _ in fx_dated] == week
+
+    aligned, common = intersect_returns({"crypto": crypto_dated, "fx": fx_dated})
+    assert common == week
+    assert len(common) == 5             # not 0 -- the pre-fix result
 
 
 # ---------------- Step 3: fx era summaries ----------------------------------
@@ -321,6 +351,58 @@ def test_mixed_registry_e2e_unequal_history_intersects_before_check_aligned(tmp_
     assert "era_summary" not in verdicts[crypto_spec["strategy_id"]]["metrics"]
 
 
+def _with_time_suffix(bars: list[dict]) -> list[dict]:
+    """Same bars, dated `YYYY-MM-DD HH:MM:SS` -- the EUR_1d.csv / modern
+    ...USDT-grid convention, verified against the pinned data/ directory
+    (2026-08-24) -- rather than _daily_bars/_weekday_bars's bare ISO dates."""
+    return [dict(b, date=b["date"] + " 00:00:00") for b in bars]
+
+
+def test_mixed_registry_e2e_divergent_date_key_formats_still_intersect(tmp_path):
+    """Real-run finding (2026-08-24): 455 real strategies produced
+    'intersection ... is only 0 day(s)' even though their calendars overlap
+    1999-2026, because registered crypto specs load the legacy BTCUSD_1d.csv
+    (bare `YYYY-MM-DD` dates -- production crypto uses this ticker per spec
+    s10.9, verified against the pinned CSV) while fx specs load the
+    snapshot adapter's CSVs (`YYYY-MM-DD HH:MM:SS`, also verified). Before
+    daily_returns_with_dates normalised every key to date-only, those two
+    string formats never compared equal over any date, no matter how much
+    the actual calendars overlapped. The previous mixed e2e above could not
+    have caught this: _daily_bars and _weekday_bars both emit bare dates, so
+    its two fixtures happened to already share a format. This one pins the
+    genuinely divergent pairing end to end."""
+    from .gauntlet import run as gauntlet_run
+
+    reg, crypto_spec, gbp_spec, eur_spec = mixed_class_gauntlet_registry(tmp_path)
+    data = write_data_dir(tmp_path, {
+        # bare dates, exactly _daily_bars's own format -- matches the real
+        # legacy BTCUSD_1d.csv this crypto spec's ticker would really load
+        "BTCUSD": _daily_bars(datetime.date(2020, 1, 1), datetime.date(2020, 12, 31)),
+        # ` 00:00:00`-suffixed -- matches the real EUR_1d.csv/GBP_1d.csv
+        "GBP": _with_time_suffix(_weekday_bars(
+            datetime.date(2015, 1, 1), datetime.date(2020, 12, 31))),
+        "EUR": _with_time_suffix(_weekday_bars(
+            datetime.date(2020, 1, 1), datetime.date(2020, 12, 31))),
+    })
+    art = tmp_path / "art"
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data),
+                       "--artifacts-dir", str(art)])
+    assert rc == 0          # pre-fix: ValueError, "intersection ... is only
+                            # 0 day(s)" -- completing at all is the point
+
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+               for e in reg.entries() if e["entry_type"] == "verdict"
+               and e["payload"]["stage"] == "gauntlet"}
+    assert len(verdicts) == 3
+    for spec in (crypto_spec, gbp_spec, eur_spec):
+        m = verdicts[spec["strategy_id"]]["metrics"]
+        assert m["trials_alignment"] == "intersection"
+        # the exact number the unequal-history test above derives
+        # independently; the point here is ONLY that it is not 0
+        assert m["trials_common_days"] > 0
+
+
 def test_ragged_same_class_intersection_below_minimum_raises(tmp_path):
     """Two fx pairs whose calendars barely overlap must not silently cluster
     on a handful of shared days -- that reads as a real trial count when it
@@ -387,6 +469,45 @@ def test_ragged_intersection_below_minimum_raises_through_run(tmp_path):
                      "--artifacts-dir", str(tmp_path / "art")])
     msg = str(exc.value)
     assert long_lived["strategy_id"] in msg and short_lived["strategy_id"] in msg
+
+
+def test_too_short_intersection_hints_key_format_mismatch_when_ranges_overlap():
+    """Breadcrumb for the next person: if the actual intersection came up
+    empty/short but each series' own [min, max] date span overlaps
+    generously, that combination is the signature of a key-format mismatch
+    (exactly the 2026-08-24 real-run shape) rather than a genuine data gap,
+    so the error message should say so. Built by deliberately NOT calling
+    daily_returns_with_dates -- simulating a hypothetical caller that
+    bypassed the normalisation fix -- so this stays meaningful even though
+    the fix makes it unreachable through the real run() path today."""
+    days = [(datetime.date(2020, 1, 1) + datetime.timedelta(days=i)).isoformat()
+           for i in range(150)]           # >> MIN_TRIALS_COMMON_DAYS
+    mismatched = {
+        "crypto1": [(d, 0.001) for d in days],           # bare, unsuffixed
+        "fx1": [(f"{d} 00:00:00", 0.001) for d in days],  # timestamped
+    }
+    _, common = intersect_returns(mismatched)
+    assert common == []                  # reproduces the real 0-day result
+
+    with pytest.raises(ValueError, match="key-format mismatch") as exc:
+        _raise_too_short_intersection(mismatched, common)
+    msg = str(exc.value)
+    assert "crypto1" in msg and "fx1" in msg
+    assert "150" in msg or "149" in msg   # the overlap figure appears
+
+
+def test_too_short_intersection_omits_hint_when_ranges_genuinely_disjoint():
+    """A real data gap (one series ended, the other only just started) must
+    not get misdiagnosed as a formatting bug -- no breadcrumb when the spans
+    themselves barely overlap."""
+    genuinely_disjoint = {
+        "retired": [("2005-01-01", 0.001), ("2010-01-01", 0.001)],
+        "new": [("2020-01-01", 0.001), ("2020-01-02", 0.001)],
+    }
+    with pytest.raises(ValueError) as exc:
+        _raise_too_short_intersection(genuinely_disjoint, [])
+    msg = str(exc.value)
+    assert "key-format mismatch" not in msg
 
 
 # ---------------- Step 2b (T3-review rider): quarantine threading ----------
