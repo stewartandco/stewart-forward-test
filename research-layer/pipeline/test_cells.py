@@ -137,7 +137,9 @@ def test_equity_etf_declared_not_active():
     # "equity_etf") is Coen's call after the dry-run ship-bar step (spec s8),
     # exactly as it was for fx before it.
     assert "equity_etf" in cells.CLASSES
-    assert cells.LIVE_CLASSES == ("crypto", "fx")
+    # activation 2026-08-25 (Coen): the declared-vs-active split is now pinned
+    # by test_live_classes_gates_activation; this test keeps the declaration.
+    assert "equity_etf" in cells.LIVE_CLASSES
     assert "equity_etf" not in cells.LIVE_CLASSES
 
 
