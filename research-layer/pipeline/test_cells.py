@@ -132,7 +132,7 @@ def test_equity_etf_class_declared():
     assert cells.class_cells("equity_etf") == [(a, "1d") for a in c["assets"]]
 
 
-def test_equity_etf_declared_not_active():
+def test_equity_etf_declared_and_active():
     # Track 2a ships the class declaration; activation (LIVE_CLASSES gaining
     # "equity_etf") is Coen's call after the dry-run ship-bar step (spec s8),
     # exactly as it was for fx before it.
@@ -140,7 +140,6 @@ def test_equity_etf_declared_not_active():
     # activation 2026-08-25 (Coen): the declared-vs-active split is now pinned
     # by test_live_classes_gates_activation; this test keeps the declaration.
     assert "equity_etf" in cells.LIVE_CLASSES
-    assert "equity_etf" not in cells.LIVE_CLASSES
 
 
 def test_excluded_block_types_declared_per_class():
