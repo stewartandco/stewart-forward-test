@@ -34,7 +34,14 @@ def correlation(a: list[float], b: list[float]) -> float:
 
 
 def distance(rho: float) -> float:
-    """Lopez de Prado's correlation distance: rho=1 -> 0, rho=-1 -> 1."""
+    """Lopez de Prado's correlation distance: rho=1 -> 0, rho=-1 -> 1.
+
+    rho is clamped to [-1, 1]: correlation() on near-identical series can
+    overshoot 1.0 by a few ulp (first seen 2026-08-24, fx sibling specs on an
+    intersection window: rho = 1 + 1.1e-16 made sqrt() raise), and the clamp
+    is the honest fix -- a float artifact, not a data question.
+    """
+    rho = max(-1.0, min(1.0, rho))
     return math.sqrt(0.5 * (1 - rho))
 
 

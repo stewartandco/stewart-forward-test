@@ -240,3 +240,14 @@ def test_perfectly_correlated_siblings_give_zero_variance():
     k, _, var = effective_trials(series)
     assert k >= 2
     assert var == pytest.approx(0.0, abs=1e-12)
+
+
+def test_distance_clamps_float_overshoot_rho():
+    """rho a few ulp above 1.0 (near-identical series) must not raise.
+
+    Real occurrence 2026-08-24: fx sibling specs on an intersection window
+    produced rho = 1 + 1.1e-16 and sqrt(0.5*(1-rho)) raised ValueError.
+    """
+    assert distance(1.0 + 1.1102230246251565e-16) == 0.0
+    assert distance(-1.0 - 2.220446049250313e-16) == 1.0
+    assert distance(1.0) == 0.0 and distance(-1.0) == 1.0
