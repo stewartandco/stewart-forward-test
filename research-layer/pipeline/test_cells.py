@@ -72,8 +72,9 @@ def test_fx_class_declared():
 
 
 def test_live_classes_gates_activation():
-    # fx activated 2026-08-24 (Coen's go): the denominator event for the fx cells.
-    assert cells.LIVE_CLASSES == ("crypto", "fx")
+    # fx activated 2026-08-24, equity_etf 2026-08-25 (Coen's go each time):
+    # activation is the denominator event for a class's cells.
+    assert cells.LIVE_CLASSES == ("crypto", "fx", "equity_etf")
 
 
 def test_validate_cell_class_aware():

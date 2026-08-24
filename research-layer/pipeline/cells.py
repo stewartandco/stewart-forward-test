@@ -98,7 +98,7 @@ CLASSES = {
                    "max_end_lag_days": 4,
                    "excluded_block_types": frozenset()},
 }
-LIVE_CLASSES = ("crypto", "fx")   # fx ACTIVATED 2026-08-24 (Coen), first real generation same day
+LIVE_CLASSES = ("crypto", "fx", "equity_etf")   # fx ACTIVATED 2026-08-24; equity_etf ACTIVATED 2026-08-25 (Coen)
 # equity_etf is DECLARED here (Track 2a) but deliberately NOT in LIVE_CLASSES:
 # activation is Coen's call, after the dry-run ship-bar step (spec s8), same
 # as fx before it -- see the CLASSES/LIVE_CLASSES docstring above.
