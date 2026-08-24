@@ -269,6 +269,12 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
     # divided by the session's periods_per_year. Absent key -> 0.0 per bar,
     # so a crypto cost_model (no financing key) is arithmetic-identical to
     # before this field existed.
+    # TRAP (spec s10.11): periods_per_year silently defaults to 365 on any
+    # caller that forgets to derive it from the spec's session, so a
+    # mis-stamped or missing-session fx spec would financing-accrue at the
+    # crypto rate with no error -- closed in practice by every caller
+    # deriving it from cells.SESSION_PERIODS (run_spec here, quarantine.py's
+    # observe_day), never by trusting this default.
     fin_per_bar = cost_model.get("short_financing_per_year", 0.0) / periods_per_year
     equity, curve, trades = 1.0, [], []
     pos = None  # {side, entry_px, entry_i, stop, target, deadline, notional}

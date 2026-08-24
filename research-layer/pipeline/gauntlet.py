@@ -52,6 +52,7 @@ import hashlib
 import argparse
 from pathlib import Path
 
+from . import cells
 from .registry import Registry
 from .engine import run_spec
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
@@ -312,6 +313,52 @@ def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
 
+def daily_returns_with_dates(equity: list[tuple[str, float]]
+                             ) -> list[tuple[str, float]]:
+    """Same values as daily_returns_from_curve, paired with the DATE each
+    return is attributed to (equity[i]'s date, for the step from i-1 to i).
+
+    A single-class run never needs the dates -- every spec's curve already
+    shares one calendar -- but a mixed-class run pools a 24x7 calendar with a
+    5-day fx calendar, and cluster.correlation compares series BY INDEX, so
+    the dates are the only way to find what those series actually share
+    (spec s10.6)."""
+    return [(equity[i][0], equity[i][1] / equity[i - 1][1] - 1)
+            for i in range(1, len(equity)) if equity[i - 1][1] > 0]
+
+
+def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
+                      ) -> tuple[dict[str, list[float]], list[str]]:
+    """Align every series onto the dates common to ALL of them, sorted.
+
+    Returns (returns_by_id, common_dates). Every output series has the same
+    length by construction, so check_aligned passes trivially and
+    effective_trials clusters on dates every strategy actually shares --
+    the INTERSECTION calendar (spec s10.6), not a native one that would
+    silently correlate different dates index-by-index."""
+    common: set[str] | None = None
+    for rows in dated_by_id.values():
+        dates = {d for d, _ in rows}
+        common = dates if common is None else (common & dates)
+    common_sorted = sorted(common or set())
+    out = {sid: [dict(rows)[d] for d in common_sorted]
+           for sid, rows in dated_by_id.items()}
+    return out, common_sorted
+
+
+def era_summary(trades: list[dict], eras: tuple[tuple[str, str, str], ...]
+                ) -> dict[str, dict]:
+    """Per-era {n_trades, net_pnl}, bucketed by entry_date, for a class whose
+    CLASSES entry declares eras (fx first, spec §6). RECORDED, never gated:
+    protocol-v6 has no era gate, and this replaces no FAIL_ORDER member."""
+    out = {}
+    for name, start, end in eras:
+        bucket = [t for t in trades if start <= t["entry_date"] <= end]
+        out[name] = {"n_trades": len(bucket),
+                     "net_pnl": compound(contributions(bucket))}
+    return out
+
+
 def check_aligned(returns_by_id: dict[str, list[float]]) -> None:
     """Fail closed on ragged return series before clustering.
 
@@ -427,23 +474,55 @@ def run(argv: list[str] | None = None) -> int:
     bars_by_cell, data_hashes, data_end = load_cell_data(
         args.data_dir, cells_needed, "9999-12-31")          # full history
 
+    # cell_id -> asset class, read from each spec's OWN declared universe
+    # rather than cells.class_of_asset: production crypto specs register
+    # legacy BTCUSD/ETHUSD tickers that are not members of cells.CLASSES's
+    # ...USDT grid (spec s10.9), so deriving class from the ticker would
+    # raise on every one of them. asset_class already travels on every
+    # registered spec's universe (composer stamps it; legacy fixtures declare
+    # it explicitly too), so reading it back is both safe and exact.
+    class_of: dict[str, str] = {}
+    for s in all_specs:
+        tf = s["universe"].get("timeframe", "1d")
+        cls = s["universe"].get("asset_class", "crypto")
+        for a in s["universe"]["assets"]:
+            class_of[cells.cell_id(a, tf)] = cls
+
     # This stage COMPARES: clustering pools trials registry-wide, CSCV runs
     # over a sibling family, and plateau selection ranks neighbours. Comparing
     # cells whose bars stop on different days scores truncation as strategy
     # failure, so refuse before any of that runs. The screen needs no such gate
     # -- it judges each spec against a fixed threshold and compares nothing.
-    assert_cells_comparable(data_end)
+    # class_of makes the rule per-class (spec s10.6): the same-day rule still
+    # applies within one class, but a crypto close and an fx fix may land up
+    # to 3 calendar days apart without refusing the run.
+    assert_cells_comparable(data_end, class_of=class_of)
 
     # clustering needs every sibling's full-run curve (incl. graveyarded)
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
                 for s in all_specs}
     full_results: dict[str, dict] = {}
-    returns_by_id: dict[str, list[float]] = {}
     for s in all_specs:
-        sid = s["strategy_id"]
-        res = run_spec(s, _spec_bars(bars_by_cell, s))
-        full_results[sid] = res
-        returns_by_id[sid] = daily_returns_from_curve(res["equity"])
+        full_results[s["strategy_id"]] = run_spec(s, _spec_bars(bars_by_cell, s))
+
+    # Single-class runs (today: every crypto-only chain) keep the exact prior
+    # arithmetic -- native per-spec calendars, no intersection -- so this is
+    # byte-identical and regression-covered by test_gauntlet.py. A run whose
+    # registered specs span >1 class pools a 24x7 calendar with a 5-day fx
+    # calendar; cluster.correlation compares series BY INDEX, so those must be
+    # trimmed to the dates every series actually shares before clustering
+    # (spec s10.6), else k and the recorded deflated Sharpe are silently wrong.
+    classes_present = {s["universe"].get("asset_class", "crypto")
+                       for s in all_specs}
+    if len(classes_present) > 1:
+        dated_by_id = {sid: daily_returns_with_dates(res["equity"])
+                       for sid, res in full_results.items()}
+        returns_by_id, common_dates = intersect_returns(dated_by_id)
+        trials_alignment, trials_common_days = "intersection", len(common_dates)
+    else:
+        returns_by_id = {sid: daily_returns_from_curve(res["equity"])
+                         for sid, res in full_results.items()}
+        trials_alignment, trials_common_days = "native", None
     group_n: dict[str, int] = {}
     for g in group_of.values():
         group_n[g] = group_n.get(g, 0) + 1
@@ -609,6 +688,23 @@ def run(argv: list[str] | None = None) -> int:
         metrics["pbo_family_kill"] = g in killed_groups
         if metrics["pbo_family_kill"] and passed:
             passed, reason = False, "pbo_family_kill"
+
+        # Clustering alignment (spec s10.6), recorded so a reader of the
+        # verdict never has to infer which calendar `trials_n` was computed
+        # over. "native" (single-class, the crypto-only path today) carries
+        # no common-day count -- there was no intersection to take.
+        metrics["trials_alignment"] = trials_alignment
+        metrics["trials_common_days"] = trials_common_days
+
+        # Era summaries (spec §6): recorded, never gated -- protocol-v6 has
+        # no era gate, and FAIL_ORDER is unchanged. Only classes that declare
+        # non-empty eras (fx first) get the key at all; a crypto verdict
+        # carries no era_summary, matching cells.CLASSES["crypto"]["eras"] ==
+        # () exactly.
+        spec_class = s["universe"].get("asset_class", "crypto")
+        eras = cells.CLASSES.get(spec_class, {}).get("eras", ())
+        if eras:
+            metrics["era_summary"] = era_summary(res["trades"], eras)
 
         # Corroborating numbers: RECORDED, never gating. Each carries the
         # WINDOW it was computed over, because a verdict is a public

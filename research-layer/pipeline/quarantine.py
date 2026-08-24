@@ -52,6 +52,7 @@ import hashlib
 import argparse
 from pathlib import Path
 
+from . import cells
 from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
                        DuplicateQuarantineSnapshot)
 from .engine import simulate_asset
@@ -232,7 +233,15 @@ def observe_day(spec: dict, bars_by_asset: dict[str, list[dict]], date: str,
         bars = bars_by_asset[asset]
         if not bars or bars[-1]["date"] != date:
             raise ValueError(f"no {asset} bar for {date}")
-        book = simulate_asset(spec["blocks"], bars, spec["cost_model"])
+        # Spec s10.11 (T3 review): mirror run_spec's periods_per_year
+        # derivation here too. Without it, an fx spec reaching quarantine
+        # would forward-run on /365 financing and sqrt(365) vol sizing --
+        # silently diverging from the same spec's screen/gauntlet numbers at
+        # the funnel's endpoint, the stage nothing downstream re-checks.
+        periods_per_year = cells.SESSION_PERIODS.get(
+            spec["universe"].get("session"), 365)
+        book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
+                              periods_per_year)
         pos = book["position"]
         exited = [t for t in book["trades"] if t["exit_date"] == date]
         if exited:

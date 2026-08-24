@@ -81,7 +81,8 @@ def load_cell_data(data_dir: Path, cells, cutoff: str) -> tuple[dict, dict, dict
     return bars_by_cell, data_hashes, data_end
 
 
-def assert_cells_comparable(data_end: dict[str, str]) -> None:
+def assert_cells_comparable(data_end: dict[str, str],
+                            class_of: dict[str, str] | None = None) -> None:
     """Refuse to compare cells whose data stops on different DAYS.
 
     A cell is the unit of survival, so a strategy that "died on SOL 1d" when
@@ -98,6 +99,16 @@ def assert_cells_comparable(data_end: dict[str, str]) -> None:
     contract's success metrics require every cell tested to be present in the
     trial denominator: no quiet subsetting of the reported search space. The
     fix is a re-fetch to a common end date, not a smaller comparison.
+
+    `class_of` (cell_id -> asset class, built by the caller from each spec's
+    own declared universe) makes the rule PER-CLASS (spec s10.6): the same-day
+    rule above still applies WITHIN a class exactly as before, but cells in
+    DIFFERENT classes may end up to 3 calendar days apart, because a 24x7
+    crypto close and a 5-day fx fix are never going to land on the same
+    calendar day and a strict same-day rule would refuse every mixed-class
+    gauntlet run forever. `class_of=None` (the default, every caller before
+    this amendment) keeps today's single-class behaviour exactly -- one
+    same-day rule across every cell -- so crypto-only runs are byte-identical.
     """
     empty = sorted(cid for cid, end in data_end.items() if not end)
     if empty:
@@ -105,16 +116,57 @@ def assert_cells_comparable(data_end: dict[str, str]) -> None:
             f"cell(s) loaded with no bars, so their data end is unknown: "
             f"{', '.join(empty)}. An empty cell must not compare equal to "
             f"every other cell.")
-    by_day: dict[str, list[str]] = {}
-    for cid, end in sorted(data_end.items()):
-        by_day.setdefault(end[:10], []).append(cid)
-    if len(by_day) > 1:
-        detail = "; ".join(f"{day}: {', '.join(cids)}"
-                           for day, cids in sorted(by_day.items()))
-        raise ValueError(
-            f"cells stop on different days, so they cannot be compared: "
-            f"{detail}. Re-fetch to a common end date; excluding the short "
-            f"cells would quietly shrink the reported search space.")
+    if class_of is None:
+        by_day: dict[str, list[str]] = {}
+        for cid, end in sorted(data_end.items()):
+            by_day.setdefault(end[:10], []).append(cid)
+        if len(by_day) > 1:
+            detail = "; ".join(f"{day}: {', '.join(cids)}"
+                               for day, cids in sorted(by_day.items()))
+            raise ValueError(
+                f"cells stop on different days, so they cannot be compared: "
+                f"{detail}. Re-fetch to a common end date; excluding the "
+                f"short cells would quietly shrink the reported search space.")
+        return
+
+    # Per-class: the exact same-day rule, applied WITHIN each declared class.
+    by_class: dict[str, dict[str, str]] = {}
+    for cid, end in data_end.items():
+        cls = class_of.get(cid)
+        if cls is None:
+            raise ValueError(f"{cid!r} has no declared class in class_of; "
+                             f"every cell being compared must name one.")
+        by_class.setdefault(cls, {})[cid] = end
+    for cls, ends in by_class.items():
+        by_day = {}
+        for cid, end in sorted(ends.items()):
+            by_day.setdefault(end[:10], []).append(cid)
+        if len(by_day) > 1:
+            detail = "; ".join(f"{day}: {', '.join(cids)}"
+                               for day, cids in sorted(by_day.items()))
+            raise ValueError(
+                f"cells stop on different days within class {cls!r}, so "
+                f"they cannot be compared: {detail}. Re-fetch to a common "
+                f"end date; excluding the short cells would quietly shrink "
+                f"the reported search space.")
+
+    # Cross-class: a weekend/holiday gap between a 24x7 close and an fx fix
+    # is expected, not truncation, so allow up to 3 calendar days apart.
+    from datetime import date as _date
+    days = {cid: _date.fromisoformat(end[:10]) for cid, end in data_end.items()}
+    ids = sorted(days)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if class_of[a] == class_of[b]:
+                continue
+            gap = abs((days[a] - days[b]).days)
+            if gap > 3:
+                raise ValueError(
+                    f"cells stop more than 3 calendar days apart across "
+                    f"classes, so they cannot be compared: {a} "
+                    f"({data_end[a][:10]}, {class_of[a]}) vs {b} "
+                    f"({data_end[b][:10]}, {class_of[b]}). Re-fetch to a "
+                    f"common end date.")
 
 
 class SpecJob:
