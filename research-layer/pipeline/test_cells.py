@@ -91,16 +91,63 @@ def test_validate_cell_class_aware():
 
 def test_class_of_asset():
     assert cells.class_of_asset("EUR") == "fx" and cells.class_of_asset("BTCUSDT") == "crypto"
+    # SPY is now a declared equity_etf asset (Track 2a) -- no longer usable as
+    # the "undeclared" probe below; QQQ covers the equity_etf membership case.
+    assert cells.class_of_asset("SPY") == "equity_etf"
     import pytest
     with pytest.raises(ValueError):
-        cells.class_of_asset("SPY")
+        cells.class_of_asset("TLT")   # bond ETF lane, not declared until Track 2b
 
 
 def test_unknown_class_and_session_sync():
     import pytest
     with pytest.raises(ValueError, match="not a declared class"):
-        cells.class_cells("equities")
+        cells.class_cells("bond_etf")
     with pytest.raises(ValueError, match="not a declared class"):
-        cells.validate_cell("EUR", "1d", asset_class="equities")
+        cells.validate_cell("EUR", "1d", asset_class="bond_etf")
     for cls, spec in cells.CLASSES.items():
         assert cells.SESSION_PERIODS[spec["session"]] == spec["periods_per_year"], cls
+
+
+# ---------------- Track 2a: equity_etf class (declared, not active) ----------------
+
+def test_equity_etf_class_declared():
+    c = cells.CLASSES["equity_etf"]
+    assert c["assets"] == ("SPY", "QQQ", "IWM", "DIA", "MDY", "EFA", "EEM", "EWJ",
+                           "EWG", "EWU", "EWA", "EWC", "EWH", "FXI", "EWZ", "EWY")
+    assert len(c["assets"]) == 16
+    assert c["timeframes"] == ("1d",) and c["session"] == "us_equity_5d"
+    assert c["periods_per_year"] == 252 and c["bar_kind"] == "ohlcv"
+    assert c["cost_model"] == {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                               "short_financing_per_year": -0.005}
+    assert [e[0] for e in c["eras"]] == ["dotcom_gfc", "qe_bull", "covid_cycle", "post_2022"]
+    assert c["eras"] == (
+        ("dotcom_gfc", "1993-01-01", "2008-12-31"),
+        ("qe_bull", "2009-01-01", "2019-12-31"),
+        ("covid_cycle", "2020-01-01", "2021-12-31"),
+        ("post_2022", "2022-01-01", "9999-12-31"))
+    assert c["max_end_lag_days"] == 4
+    assert isinstance(c["max_end_lag_days"], int) and c["max_end_lag_days"] >= 0
+    assert cells.class_cells("equity_etf") == [(a, "1d") for a in c["assets"]]
+
+
+def test_equity_etf_declared_not_active():
+    # Track 2a ships the class declaration; activation (LIVE_CLASSES gaining
+    # "equity_etf") is Coen's call after the dry-run ship-bar step (spec s8),
+    # exactly as it was for fx before it.
+    assert "equity_etf" in cells.CLASSES
+    assert cells.LIVE_CLASSES == ("crypto", "fx")
+    assert "equity_etf" not in cells.LIVE_CLASSES
+
+
+def test_excluded_block_types_declared_per_class():
+    # T4-rider-3 (addendum): every class carries its own excluded_block_types
+    # rather than composer inferring "any non-crypto class" from asset_class.
+    assert cells.CLASSES["crypto"]["excluded_block_types"] == frozenset()
+    assert cells.CLASSES["fx"]["excluded_block_types"] == frozenset(
+        {"channel_breakout", "channel_breakout_dense", "atr_stop", "atr_stop_dense"})
+    # equity_etf carries REAL OHLC bars (bar_kind "ohlcv"), unlike fx's
+    # single-fix bars, so no block type is excluded on range grounds.
+    assert cells.CLASSES["equity_etf"]["excluded_block_types"] == frozenset()
+    for cls, spec in cells.CLASSES.items():
+        assert isinstance(spec["excluded_block_types"], frozenset), cls

@@ -38,6 +38,25 @@ FX_COST_MODEL = {"commission_per_side": 0.00005, "slippage_ticks": 0.00010,
 FX_ERAS = (("pre_gfc", "1999-01-01", "2007-12-31"), ("gfc_zirp", "2008-01-01", "2015-12-31"),
            ("tightening", "2016-01-01", "2021-12-31"), ("post_2022", "2022-01-01", "9999-12-31"))
 
+# fx cells carry single-fix daily bars (open=high=low=close, §3), so any block
+# whose semantics require a real intrabar range distinct from close would be
+# silently fed a degenerate input rather than erroring. Track 2a's addendum
+# (T4-rider-3) moves this from composer.py's "any non-crypto class" coupling
+# to a per-class declaration here; composer.RANGE_REQUIRING carries the same
+# four values (test-pinned equal, never re-declared independently).
+FX_EXCLUDED_BLOCK_TYPES = frozenset({"channel_breakout", "channel_breakout_dense",
+                                      "atr_stop", "atr_stop_dense"})
+
+# Track 2a (SP4 addendum docs/2026-08-24-sp4-track2a-addendum.md): the second
+# non-crypto class, declared but NOT activated (see LIVE_CLASSES below).
+# Assets are the manifest's equity-index ETF lane, in manifest order.
+EQUITY_ETF_ASSETS = ("SPY", "QQQ", "IWM", "DIA", "MDY", "EFA", "EEM", "EWJ",
+                     "EWG", "EWU", "EWA", "EWC", "EWH", "FXI", "EWZ", "EWY")
+EQUITY_ETF_COST_MODEL = {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                         "short_financing_per_year": -0.005}   # Phase C table: 2.0 bps/side, -0.5%/yr short financing
+EQUITY_ETF_ERAS = (("dotcom_gfc", "1993-01-01", "2008-12-31"), ("qe_bull", "2009-01-01", "2019-12-31"),
+                   ("covid_cycle", "2020-01-01", "2021-12-31"), ("post_2022", "2022-01-01", "9999-12-31"))
+
 # The authoritative class registry. Declaring a class here does NOT activate it:
 # LIVE_CLASSES gates what generations may sweep (spec s2: activation moves the
 # trial denominator, declaration never does).
@@ -56,15 +75,27 @@ CLASSES = {
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
                "cost_model": None,      # crypto cost stays composer.COST_MODEL (unchanged path)
-               "eras": (), "max_end_lag_days": 0},
+               "eras": (), "max_end_lag_days": 0,
+               "excluded_block_types": frozenset()},
     "fx": {"assets": FX_ASSETS, "timeframes": ("1d",), "session": "fx_5d",
            "periods_per_year": 261, "bar_kind": "single_fix",
            "cost_model": FX_COST_MODEL, "eras": FX_ERAS,
-           "max_end_lag_days": 10},
+           "max_end_lag_days": 10,
+           "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES},
+    # Track 2a: declared, NOT in LIVE_CLASSES. bar_kind "ohlcv" (real Tiingo
+    # daily OHLC), so no block type is excluded on range grounds -- unlike fx.
+    "equity_etf": {"assets": EQUITY_ETF_ASSETS, "timeframes": ("1d",), "session": "us_equity_5d",
+                   "periods_per_year": 252, "bar_kind": "ohlcv",
+                   "cost_model": EQUITY_ETF_COST_MODEL, "eras": EQUITY_ETF_ERAS,
+                   "max_end_lag_days": 4,
+                   "excluded_block_types": frozenset()},
 }
 LIVE_CLASSES = ("crypto", "fx")   # fx ACTIVATED 2026-08-24 (Coen), first real generation same day
+# equity_etf is DECLARED here (Track 2a) but deliberately NOT in LIVE_CLASSES:
+# activation is Coen's call, after the dry-run ship-bar step (spec s8), same
+# as fx before it -- see the CLASSES/LIVE_CLASSES docstring above.
 
-SESSION_PERIODS = {"24x7": 365, "fx_5d": 261}
+SESSION_PERIODS = {"24x7": 365, "fx_5d": 261, "us_equity_5d": 252}
 
 # Every class's declared assets must be disjoint from every other class's -
 # a ticker that could mean two different classes is a declaration bug, not a
@@ -86,7 +117,13 @@ for _cls, _spec in CLASSES.items():
         raise AssertionError(
             f"CLASSES[{_cls!r}]['max_end_lag_days'] must be a declared "
             f"non-negative int, got {_lag!r}")
-del _cls, _spec, _asset, _lag
+for _cls, _spec in CLASSES.items():
+    _excl = _spec.get("excluded_block_types")
+    if not isinstance(_excl, frozenset) or not all(isinstance(t, str) for t in _excl):
+        raise AssertionError(
+            f"CLASSES[{_cls!r}]['excluded_block_types'] must be a declared "
+            f"frozenset of block-type strings, got {_excl!r}")
+del _cls, _spec, _asset, _lag, _excl
 
 
 def all_cells() -> list[tuple[str, str]]:
