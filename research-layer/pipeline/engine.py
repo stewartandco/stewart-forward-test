@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 import statistics
 
+from . import cells
+
 
 # ---------------- indicators (aligned lists; None during warmup) ----------
 
@@ -66,13 +68,18 @@ def trend_tstat(window_closes: list[float]) -> float:
     return slope / se
 
 
-def realized_ann_vol(closes: list[float], n: int) -> list:
-    """Annualized stdev of daily log returns over n returns (sqrt(365))."""
+def realized_ann_vol(closes: list[float], n: int, periods_per_year: int = 365) -> list:
+    """Annualized stdev of daily log returns over n returns.
+
+    periods_per_year defaults to 365 (crypto, 24x7) and is threaded from the
+    spec's class config (spec s10 item 4) for non-crypto sessions -- fx_5d
+    uses 261. Crypto callers that never pass it get the exact prior
+    sqrt(365) arithmetic."""
     rets = [None] + [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
     out = [None] * len(closes)
     for i in range(n, len(closes)):
         window = rets[i - n + 1:i + 1]
-        out[i] = statistics.stdev(window) * math.sqrt(365) if len(window) > 1 else None
+        out[i] = statistics.stdev(window) * math.sqrt(periods_per_year) if len(window) > 1 else None
     return out
 
 
@@ -219,7 +226,8 @@ def _tightest_stop(stops: list[dict], entry_px: float, side: int,
     return entry_px - side * min(candidates)
 
 
-def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> dict:
+def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
+                   periods_per_year: int = 365) -> dict:
     """Run one asset's book.
 
     Returns {trades, equity, position}:
@@ -253,10 +261,15 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
         if s["type"] in ("atr_stop", "atr_stop_dense"):
             atr_series[(s["params"]["atr_len"],)] = atr_wilder(bars, s["params"]["atr_len"])
     closes = [b["close"] for b in bars]
-    vol_series = (realized_ann_vol(closes, risk["params"]["lookback"])
+    vol_series = (realized_ann_vol(closes, risk["params"]["lookback"], periods_per_year)
                   if risk["type"] == "vol_target" else None)
 
     per_side = cost_model["commission_per_side"] + cost_model["slippage_ticks"]
+    # Spec s10 item 5: short_financing_per_year accrues per bar held SHORT,
+    # divided by the session's periods_per_year. Absent key -> 0.0 per bar,
+    # so a crypto cost_model (no financing key) is arithmetic-identical to
+    # before this field existed.
+    fin_per_bar = cost_model.get("short_financing_per_year", 0.0) / periods_per_year
     equity, curve, trades = 1.0, [], []
     pos = None  # {side, entry_px, entry_i, stop, target, deadline, notional}
 
@@ -286,6 +299,10 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
             if exit_px is not None:
                 gross = pos["side"] * (exit_px / pos["entry_px"] - 1)
                 net = gross - 2 * per_side
+                if pos["side"] == -1:
+                    # per-bar financing over the whole holding period, added
+                    # at exit alongside the round-trip's costs (spec s10.5)
+                    net += fin_per_bar * (i - pos["entry_i"])
                 equity += pos["notional"] * net
                 trades.append({"side": "long" if pos["side"] == 1 else "short",
                                "entry_date": bars[pos["entry_i"]]["date"],
@@ -327,6 +344,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict) -> di
         mtm = equity
         if pos is not None:
             unreal = pos["side"] * (b["close"] / pos["entry_px"] - 1)
+            if pos["side"] == -1:
+                unreal += fin_per_bar * (i - pos["entry_i"])
             mtm = equity + pos["notional"] * unreal
         curve.append(mtm)
 
@@ -353,10 +372,14 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
     """Run a strategy spec: one independent equal-capital book per universe
     asset, combined by mean. Returns {trades, equity, metrics}; equity is
     [(date, combined_equity)] over the shortest common calendar."""
+    # Spec s10 item 4: periods_per_year is derived from the universe's
+    # session via the class registry (crypto 24x7 -> 365, fx_5d -> 261);
+    # an unrecognised/missing session falls back to 365 (today's behaviour).
+    periods_per_year = cells.SESSION_PERIODS.get(spec["universe"].get("session"), 365)
     books = {}
     for asset in spec["universe"]["assets"]:
         books[asset] = simulate_asset(spec["blocks"], bars_by_asset[asset],
-                                      spec["cost_model"])
+                                      spec["cost_model"], periods_per_year)
     n = min(len(bars_by_asset[a]) for a in books)
     dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
     for a in books:
