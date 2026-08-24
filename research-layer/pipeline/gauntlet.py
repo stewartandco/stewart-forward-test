@@ -341,8 +341,16 @@ def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
         dates = {d for d, _ in rows}
         common = dates if common is None else (common & dates)
     common_sorted = sorted(common or set())
-    out = {sid: [dict(rows)[d] for d in common_sorted]
-           for sid, rows in dated_by_id.items()}
+    # TRAP: dict(rows) is O(days) to build. Building it INSIDE the per-date
+    # comprehension below (once per common date, not once per series) makes
+    # this whole function O(specs x days x len) instead of O(specs x days) --
+    # silent at fixture scale, an hour-long stall at the first real mixed run
+    # (155 registered specs, ~7000 fx common days). Hoist it: one dict build
+    # per series, not one per (series, date) pair.
+    out = {}
+    for sid, rows in dated_by_id.items():
+        m = dict(rows)
+        out[sid] = [m[d] for d in common_sorted]
     return out, common_sorted
 
 

@@ -121,7 +121,7 @@ def test_crypto_class_declares_no_eras():
 # ---------------- end-to-end: crypto path unaffected ------------------------
 
 from .test_gauntlet import gauntlet_registry, chain_gauntlet_note
-from .test_screen import write_data_dir, dated_target_hit_bars
+from .test_screen import write_data_dir, dated_target_hit_bars, screening_registry
 
 
 def test_crypto_verdict_native_alignment_no_era_summary(tmp_path):
@@ -147,6 +147,120 @@ def test_crypto_verdict_native_alignment_no_era_summary(tmp_path):
     assert m["trials_alignment"] == "native"
     assert m["trials_common_days"] is None
     assert "era_summary" not in m
+
+
+# ---------------- end-to-end: mixed crypto+fx registry ----------------------
+#
+# Everything above exercises the per-class helpers in isolation. Nothing
+# forced gauntlet.run() itself to walk its per-class wiring (the spec_class
+# lookup, the eras fetch, the intersection recording at the metrics-append
+# site) on any branch but the no-op single-class one -- this closes that gap
+# with a real mixed registry through the real CLI entrypoint.
+
+import datetime
+
+from .common import content_id
+
+
+def eur_flat_bars():
+    """15 weekday-only bars, 2023-01-02..2023-01-20 (a Monday through a
+    Friday), flat close. fast==slow at every warm bar on a flat series, so
+    ma_cross never crosses -- zero trades, deliberately: evaluate_spec's
+    empty-trades path (contributions([]) == [], bootstrap_paths([], ...))
+    is already exercised elsewhere, and the fx spec's only job here is its
+    CALENDAR SHAPE, weekday-only against BTCUSD's every-day one."""
+    d, end = datetime.date(2023, 1, 2), datetime.date(2023, 1, 20)
+    bars = []
+    while d <= end:
+        if d.weekday() < 5:
+            bars.append({"date": d.isoformat(), "open": 1.10, "high": 1.10,
+                        "low": 1.10, "close": 1.10, "volume": 0.0})
+        d += datetime.timedelta(days=1)
+    return bars
+
+
+def _fx_spec(card_id):
+    return {
+        "strategy_id": None, "version": 1,
+        "created_utc": "2026-08-24T00:00:00Z",
+        "name": "fx mixed-class test", "family": "fx_mixed_test",
+        "universe": {"assets": ["EUR"], "asset_class": "fx",
+                     "timeframe": "1d", "session": "fx_5d"},
+        "blocks": [
+            {"role": "entry", "type": "ma_cross", "params": {"fast": 3, "slow": 5}},
+            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"card_ids": [card_id], "parent_strategy_id": None,
+                       "sibling_group_id": "fx-mixed-test-g", "generation": 0},
+        "generator": {"agent": "composer", "model": "m",
+                      "pipeline_version": "g1.0.0", "run_id": "t"},
+        "cost_model": dict(cells.FX_COST_MODEL),
+    }
+
+
+def mixed_class_gauntlet_registry(tmp_path):
+    """One crypto strategy (screening_registry's usual fixture) and one fx
+    strategy, BOTH advanced to 'gauntlet' state in the SAME registry -- the
+    only way a real run ever spans >1 class."""
+    reg, crypto_spec = screening_registry(tmp_path)
+    reg.append("note", {"text": "screen-protocol-v1: test anchor"})
+    reg.record_state_change(crypto_spec["strategy_id"], "screened", "test")
+    reg.record_verdict(crypto_spec["strategy_id"], "screened", "pass",
+                       {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
+                        "max_dd": -0.1}, "0" * 64)
+    reg.record_state_change(crypto_spec["strategy_id"], "gauntlet", None)
+
+    fx_spec = _fx_spec(crypto_spec["provenance"]["card_ids"][0])
+    fx_spec["strategy_id"] = content_id(fx_spec, "strategy_id")
+    reg.register_strategy(fx_spec)
+    reg.record_state_change(fx_spec["strategy_id"], "screened", "test")
+    reg.record_verdict(fx_spec["strategy_id"], "screened", "pass",
+                       {"trades": 0, "net_pnl": 0.0, "win_rate": 0.0,
+                        "max_dd": 0.0}, "0" * 64)
+    reg.record_state_change(fx_spec["strategy_id"], "gauntlet", None)
+
+    chain_gauntlet_note(reg)
+    return reg, crypto_spec, fx_spec
+
+
+def test_mixed_registry_e2e_intersection_and_era_summary(tmp_path):
+    from .gauntlet import run as gauntlet_run
+
+    reg, crypto_spec, fx_spec = mixed_class_gauntlet_registry(tmp_path)
+    # BTCUSD: every calendar day 2023-01-01..2023-01-23 (dated_target_hit_bars).
+    # EUR: weekdays only, 2023-01-02..2023-01-20, wholly inside BTC's range and
+    # ending 3 calendar days before it -- right at the cross-class allowance.
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "EUR": eur_flat_bars()})
+    art = tmp_path / "art"
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data),
+                       "--artifacts-dir", str(art)])
+    assert rc == 0
+
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+               for e in reg.entries() if e["entry_type"] == "verdict"
+               and e["payload"]["stage"] == "gauntlet"}
+    assert len(verdicts) == 2
+
+    # Each series' own first bar drops out of its return-dated series
+    # (daily_returns_with_dates), so EUR contributes 14 return-dates
+    # (2023-01-03..2023-01-20, all weekdays) and every one of them falls
+    # inside BTC's continuous 2023-01-02..2023-01-23 return-date range --
+    # the intersection is exactly EUR's 14 dates.
+    fx_m = verdicts[fx_spec["strategy_id"]]["metrics"]
+    assert fx_m["trials_alignment"] == "intersection"
+    assert fx_m["trials_common_days"] == 14
+    assert set(fx_m["era_summary"]) == {"pre_gfc", "gfc_zirp", "tightening",
+                                        "post_2022"}
+
+    # The run-level alignment fields are recorded on EVERY verdict of a
+    # mixed run, crypto included; only era_summary is per-spec-class.
+    crypto_m = verdicts[crypto_spec["strategy_id"]]["metrics"]
+    assert crypto_m["trials_alignment"] == "intersection"
+    assert crypto_m["trials_common_days"] == 14
+    assert "era_summary" not in crypto_m
 
 
 # ---------------- Step 2b (T3-review rider): quarantine threading ----------
