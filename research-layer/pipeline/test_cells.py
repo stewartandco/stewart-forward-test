@@ -85,3 +85,13 @@ def test_class_of_asset():
     import pytest
     with pytest.raises(ValueError):
         cells.class_of_asset("SPY")
+
+
+def test_unknown_class_and_session_sync():
+    import pytest
+    with pytest.raises(ValueError, match="not a declared class"):
+        cells.class_cells("equities")
+    with pytest.raises(ValueError, match="not a declared class"):
+        cells.validate_cell("EUR", "1d", asset_class="equities")
+    for cls, spec in cells.CLASSES.items():
+        assert cells.SESSION_PERIODS[spec["session"]] == spec["periods_per_year"], cls

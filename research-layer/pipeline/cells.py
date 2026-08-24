@@ -63,7 +63,12 @@ for _cls, _spec in CLASSES.items():
         if _asset in _seen:
             raise AssertionError(f"asset {_asset!r} declared in both class {_seen[_asset]!r} and {_cls!r}")
         _seen[_asset] = _cls
-del _seen, _cls, _spec, _asset
+del _seen
+for _cls, _spec in CLASSES.items():
+    if SESSION_PERIODS.get(_spec["session"]) != _spec["periods_per_year"]:
+        raise AssertionError(
+            f"SESSION_PERIODS[{_spec['session']!r}] disagrees with CLASSES[{_cls!r}] periods_per_year")
+del _cls, _spec, _asset
 
 
 def all_cells() -> list[tuple[str, str]]:
@@ -77,9 +82,16 @@ def phase_cells(phase: int) -> list[tuple[str, str]]:
     return all_cells()
 
 
+def _class_spec(asset_class: str) -> dict:
+    """CLASSES lookup that refuses unknown classes loudly (ValueError, not KeyError)."""
+    if asset_class not in CLASSES:
+        raise ValueError(f"{asset_class!r} is not a declared class: {sorted(CLASSES)}")
+    return CLASSES[asset_class]
+
+
 def class_cells(asset_class: str) -> list[tuple[str, str]]:
     """Every declared cell for one class (assets x timeframes, fixed order)."""
-    spec = CLASSES[asset_class]
+    spec = _class_spec(asset_class)
     return [(a, tf) for a in spec["assets"] for tf in spec["timeframes"]]
 
 
@@ -88,7 +100,8 @@ def class_of_asset(asset: str) -> str:
     for cls, spec in CLASSES.items():
         if asset in spec["assets"]:
             return cls
-    raise ValueError(f"{asset!r} is not a declared asset of any class: {sorted(CLASSES)}")
+    declared = "; ".join(f"{c}: {spec['assets']}" for c, spec in CLASSES.items())
+    raise ValueError(f"{asset!r} is not a declared asset of any class ({declared})")
 
 
 def cell_id(asset: str, timeframe: str) -> str:
@@ -106,7 +119,7 @@ def validate_cell(asset: str, timeframe: str, asset_class: str | None = None) ->
     """
     if asset_class is None:
         asset_class = class_of_asset(asset)
-    spec = CLASSES[asset_class]
+    spec = _class_spec(asset_class)
     if asset not in spec["assets"]:
         raise ValueError(f"{asset!r} is not a declared {asset_class} asset: {spec['assets']}")
     if timeframe not in spec["timeframes"]:
