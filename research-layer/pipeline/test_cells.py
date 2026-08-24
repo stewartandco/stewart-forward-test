@@ -40,3 +40,48 @@ def test_unknown_cells_are_rejected_not_silently_accepted():
         cells.validate_cell("DOGEUSDT", "1h")
     with pytest.raises(ValueError):
         cells.validate_cell("BTCUSDT", "3m")
+
+
+def test_classes_registry_crypto_unchanged():
+    c = cells.CLASSES["crypto"]
+    assert c["assets"] == cells.ASSETS and c["timeframes"] == cells.TIMEFRAMES
+    assert c["session"] == "24x7" and c["periods_per_year"] == 365 and c["bar_kind"] == "ohlcv"
+    # back-compat aliases still the crypto grid, same objects
+    assert cells.all_cells() == [(a, tf) for a in cells.ASSETS for tf in cells.TIMEFRAMES]
+    assert cells.phase_cells(1) == [(a, tf) for a in cells.ASSETS for tf in cells.PHASE_1_TIMEFRAMES]
+
+
+def test_fx_class_declared():
+    c = cells.CLASSES["fx"]
+    assert c["assets"] == ("EUR", "GBP", "AUD", "NZD", "JPY", "CAD", "CHF", "SEK", "NOK", "MXN", "SGD", "ZAR")
+    assert c["timeframes"] == ("1d",) and c["session"] == "fx_5d"
+    assert c["periods_per_year"] == 261 and c["bar_kind"] == "single_fix"
+    assert c["cost_model"]["commission_per_side"] == 0.00005
+    assert c["cost_model"]["slippage_ticks"] == 0.00010
+    assert c["cost_model"]["short_financing_per_year"] == -0.015
+    assert [e[0] for e in c["eras"]] == ["pre_gfc", "gfc_zirp", "tightening", "post_2022"]
+    assert cells.class_cells("fx") == [(a, "1d") for a in c["assets"]]
+
+
+def test_live_classes_gates_activation():
+    assert cells.LIVE_CLASSES == ("crypto",)      # fx declared, NOT active until the real generation
+
+
+def test_validate_cell_class_aware():
+    assert cells.validate_cell("BTCUSDT", "1h") == ("BTCUSDT", "1h")          # crypto inferred, unchanged
+    assert cells.validate_cell("EUR", "1d") == ("EUR", "1d")                   # fx inferred
+    assert cells.validate_cell("EUR", "1d", asset_class="fx") == ("EUR", "1d")
+    import pytest
+    with pytest.raises(ValueError):
+        cells.validate_cell("EUR", "1h")            # fx has no 1h
+    with pytest.raises(ValueError):
+        cells.validate_cell("EUR", "1d", asset_class="crypto")
+    with pytest.raises(ValueError):
+        cells.validate_cell("DOGEUSDT", "1d")
+
+
+def test_class_of_asset():
+    assert cells.class_of_asset("EUR") == "fx" and cells.class_of_asset("BTCUSDT") == "crypto"
+    import pytest
+    with pytest.raises(ValueError):
+        cells.class_of_asset("SPY")
