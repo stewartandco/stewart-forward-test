@@ -75,6 +75,90 @@ def test_snapshot_records_missing_verdict_and_still_writes(tmp_path):
     assert man["series"]["EUR"]["verdict"] == "missing"
 
 
+def test_snapshot_refuses_explicit_asset_outside_class(tmp_path):
+    """SPY is pinned, verified, and sha-clean -- but it is not a declared fx
+    asset. Without a membership check, --classes fx --assets SPY would pass
+    a real equities OHLC series through fx's single_fix flattening and record
+    a verified-looking lie (bar_kind: single_fix, sha256_verified: true) for
+    data that was never fx at all."""
+    root = tmp_path / "ts"
+    (root / "data" / "tradfi").mkdir(parents=True)
+    (root / "results" / "tradfi").mkdir(parents=True)
+    closes = [("2026-08-18", 410.0), ("2026-08-19", 411.5)]
+    idx = pd.to_datetime([d for d, _ in closes])
+    df = pd.DataFrame({"open": [c - 1 for _, c in closes], "high": [c + 1 for _, c in closes],
+                       "low": [c - 2 for _, c in closes], "close": [c for _, c in closes],
+                       "volume": [1000.0, 1200.0]}, index=idx)
+    df.index.name = "date"
+    df.to_parquet(root / "data" / "tradfi" / "free_equities_SPY_1d.parquet")
+    sha = _canon_sha(closes)
+    manifest = {"snapshot_utc": "2026-08-23",
+                "selected": [{"id": "SPY", "lane": "equities", "sha256": sha,
+                              "history_start": closes[0][0], "rows": len(closes)}],
+                "excluded": []}
+    (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (root / "data" / "tradfi" / "verdict_SPY.json").write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+
+    out = tmp_path / "layer"
+    with pytest.raises(td.SnapshotRefused) as excinfo:
+        td.snapshot(root, out, classes=("fx",), assets=("SPY",))
+    message = str(excinfo.value)
+    assert "SPY" in message and "fx" in message
+    assert not (out / "data" / "SPY_1d.csv").exists()
+
+
+def test_snapshot_refuses_unknown_class(tmp_path):
+    root = _mk_source(tmp_path, CLOSES)
+    with pytest.raises(ValueError, match="not a declared class"):
+        td.snapshot(root, tmp_path / "layer", classes=("bonds",), assets=("EUR",))
+
+
+def test_snapshot_manifest_merges_across_subset_reruns(tmp_path):
+    """A subset re-run (--assets EUR after a full fx snapshot) must not blow
+    away GBP's provenance: GBP's CSV stays on disk, so its manifest entry
+    must stay too, untouched, while EUR's entry updates."""
+    root = tmp_path / "ts"
+    (root / "data" / "tradfi").mkdir(parents=True)
+    (root / "results" / "tradfi").mkdir(parents=True)
+
+    def _write_asset(asset_id, closes):
+        idx = pd.to_datetime([d for d, _ in closes])
+        df = pd.DataFrame({"open": float("nan"), "high": float("nan"), "low": float("nan"),
+                           "close": [c for _, c in closes], "volume": float("nan")}, index=idx)
+        df.index.name = "date"
+        df.to_parquet(root / "data" / "tradfi" / f"free_fx_{asset_id}_1d.parquet")
+        (root / "data" / "tradfi" / f"verdict_{asset_id}.json").write_text(
+            json.dumps({"verdict": "ok"}), encoding="utf-8")
+        return _canon_sha([(d, c) for d, c in closes if c == c])
+
+    eur_closes = CLOSES
+    gbp_closes = [("2026-08-18", 0.8501), ("2026-08-19", 0.8512)]
+    eur_sha = _write_asset("EUR", eur_closes)
+    gbp_sha = _write_asset("GBP", gbp_closes)
+
+    manifest = {"snapshot_utc": "2026-08-23", "selected": [
+        {"id": "EUR", "lane": "fx", "sha256": eur_sha, "history_start": eur_closes[0][0], "rows": len(eur_closes)},
+        {"id": "GBP", "lane": "fx", "sha256": gbp_sha, "history_start": gbp_closes[0][0], "rows": len(gbp_closes)},
+    ], "excluded": []}
+    (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    out = tmp_path / "layer"
+    written_full = td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    assert set(written_full) == {"EUR", "GBP"}
+    man1 = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    gbp_entry_v1 = man1["series"]["GBP"]
+    assert gbp_entry_v1["rows_written"] == 2
+
+    written_subset = td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert written_subset == ["EUR"]
+    assert (out / "data" / "GBP_1d.csv").exists()          # never touched, never deleted
+
+    man2 = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert man2["series"]["GBP"] == gbp_entry_v1            # carried forward, byte-identical
+    assert man2["series"]["EUR"]["rows_written"] == 3
+    assert man2["previous_snapshot_utc"] == man1["snapshot_utc"]
+
+
 def test_snapshot_refuses_sha_mismatch_and_writes_nothing(tmp_path):
     root = _mk_source(tmp_path, CLOSES, sha="0" * 64)
     out = tmp_path / "layer"

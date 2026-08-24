@@ -50,12 +50,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-
-import pandas as pd
 
 from . import cells
 
@@ -70,6 +69,8 @@ class SnapshotRefused(RuntimeError):
 
 def _closes(df: pd.DataFrame) -> pd.Series:
     """Numeric close series, date-sorted. Mirrors `free_integrity._closes`."""
+    import pandas as pd
+
     close = pd.to_numeric(df["close"], errors="coerce")
     close.index = pd.DatetimeIndex(close.index)
     return close.sort_index()
@@ -83,7 +84,7 @@ def series_sha256_canon(df: pd.DataFrame) -> str:
     underscore-private) so Task 2 Step 4's parity script and this module's
     own tests can both call it directly.
     """
-    import hashlib
+    import pandas as pd
 
     close = _closes(df).dropna()
     canon = "\n".join(f"{pd.Timestamp(d).date()},{c:.6f}" for d, c in close.items())
@@ -125,6 +126,8 @@ def _check_verdict(ts_root: Path, asset_id: str) -> tuple[str | None, str]:
 
 def _write_series_csv(out_data_dir: Path, asset_id: str, df: pd.DataFrame, bar_kind: str) -> int:
     """Write `<asset_id>_1d.csv` in the `data_import.py` convention. Returns rows written."""
+    import pandas as pd
+
     close = _closes(df).dropna()
     out = out_data_dir / f"{asset_id}_1d.csv"
     with out.open("w", encoding="utf-8", newline="") as f:
@@ -148,9 +151,20 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     `layer_root/data/`, verified against `results/tradfi/free_universe_manifest.json`.
 
     Two-phase: every requested id is verified (pinned, verdict clear, sha
-    match) before anything is written. Any refusal aborts the whole call with
-    every refusal named; nothing partial is ever written.
+    match, and -- when --assets was given explicitly -- a declared member of
+    the requested class) before anything is written. Any refusal aborts the
+    whole call with every refusal named; nothing partial is ever written.
+
+    A subset re-run (e.g. `--assets EUR` after a full-class snapshot) merges
+    into any existing `tradfi_snapshot_manifest.json` in layer_root/data
+    key-wise: the ids just (re)verified overwrite their entries, every other
+    id already on file carries its original per-series metadata forward
+    unchanged. This is what keeps that manifest an honest provenance record
+    for every CSV actually sitting in data/ -- a subset run never leaves an
+    older CSV on disk with no manifest entry at all.
     """
+    import pandas as pd
+
     ts_root = Path(ts_root)
     layer_root = Path(layer_root)
 
@@ -158,13 +172,23 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     pinned = {row["id"]: row for row in manifest.get("selected", [])}
 
+    refusals: list[str] = []
     requested: list[tuple[str, str]] = []
     for cls in classes:
-        cls_assets = assets if assets is not None else cells.CLASSES[cls]["assets"]
-        for asset_id in cls_assets:
+        cls_assets = cells._class_spec(cls)["assets"]
+        candidate_ids = assets if assets is not None else cls_assets
+        for asset_id in candidate_ids:
+            # Only membership-check an EXPLICIT --assets list: the default
+            # (assets=None) already comes straight from cls_assets, so this
+            # only ever fires when a caller named an id that class does not
+            # declare -- e.g. classes=("fx",) assets=("SPY",), which would
+            # otherwise pass a real equities OHLC series through fx's
+            # single_fix flattening and record a verified-looking lie.
+            if assets is not None and asset_id not in cls_assets:
+                refusals.append(f"{asset_id}: not a declared {cls} asset")
+                continue
             requested.append((cls, asset_id))
 
-    refusals: list[str] = []
     verified: dict[str, tuple[pd.DataFrame, dict, str, str]] = {}
     for cls, asset_id in requested:
         row = pinned.get(asset_id)
@@ -201,20 +225,33 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     written: list[str] = []
     series_manifest: dict[str, dict] = {}
     for asset_id, (df, row, cls, verdict_value) in verified.items():
-        bar_kind = cells.CLASSES[cls]["bar_kind"]
+        bar_kind = cells._class_spec(cls)["bar_kind"]
         rows_written = _write_series_csv(out_data_dir, asset_id, df, bar_kind)
         written.append(asset_id)
         series_manifest[asset_id] = {**row, "bar_kind": bar_kind,
                                       "sha256_verified": True, "rows_written": rows_written,
                                       "verdict": verdict_value}
 
+    manifest_out_path = out_data_dir / "tradfi_snapshot_manifest.json"
+    previous_manifest: dict | None = None
+    if manifest_out_path.exists():
+        try:
+            previous_manifest = json.loads(manifest_out_path.read_text(encoding="utf-8"))
+        except Exception:
+            previous_manifest = None    # a corrupt prior manifest is not this run's problem to fix
+
+    merged_series = dict(previous_manifest["series"]) if previous_manifest else {}
+    merged_series.update(series_manifest)      # ids just verified overwrite; every other id carries forward
+
     snapshot_manifest = {
         "snapshot_utc": datetime.now(timezone.utc).isoformat(),
         "source_snapshot_utc": manifest.get("snapshot_utc"),
-        "series": series_manifest,
+        "series": merged_series,
     }
-    (out_data_dir / "tradfi_snapshot_manifest.json").write_text(
-        json.dumps(snapshot_manifest, indent=2), encoding="utf-8")
+    if previous_manifest and "snapshot_utc" in previous_manifest:
+        snapshot_manifest["previous_snapshot_utc"] = previous_manifest["snapshot_utc"]
+
+    manifest_out_path.write_text(json.dumps(snapshot_manifest, indent=2), encoding="utf-8")
 
     return written
 
@@ -232,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="comma-separated asset ids; default = every declared asset in --classes")
     snap.add_argument("--ts-root", default=None,
                        help="trading-systems repo root (default: $TRADING_SYSTEMS_ROOT or "
-                            fr"{DEFAULT_TS_ROOT}")
+                            fr"{DEFAULT_TS_ROOT})")
     snap.add_argument("--out", default=None,
                        help="research-layer root to write data/ into (default: parent of pipeline/)")
 
