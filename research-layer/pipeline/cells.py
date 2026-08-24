@@ -84,6 +84,14 @@ CLASSES = {
            "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES},
     # Track 2a: declared, NOT in LIVE_CLASSES. bar_kind "ohlcv" (real Tiingo
     # daily OHLC), so no block type is excluded on range grounds -- unlike fx.
+    # max_end_lag_days 4 VERIFIED (track 2a review, 2026-08-25) against the
+    # real snapshot, not carried from the draft unverified: all 16 equity
+    # parquets end 2026-08-21 (Fri), fetched_utc 2026-08-23T00:32Z --
+    # observed lag 2 calendar days (a weekend fetch after Friday's
+    # same-evening Tiingo publish). 4 is declared as the ceiling with 2 days
+    # of headroom over that observation (covers a run against a holiday
+    # weekend, not just an ordinary one), not the exact observed value --
+    # same convention as fx's max_end_lag_days above.
     "equity_etf": {"assets": EQUITY_ETF_ASSETS, "timeframes": ("1d",), "session": "us_equity_5d",
                    "periods_per_year": 252, "bar_kind": "ohlcv",
                    "cost_model": EQUITY_ETF_COST_MODEL, "eras": EQUITY_ETF_ERAS,

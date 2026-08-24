@@ -147,15 +147,25 @@ def test_equity_card_routing(tmp_path):
 
 # ---------------- futures->equity_etf proxy lane (spec s10.8) ----------------
 #
-# The live registry has ZERO accepted futures cards as of the 2026-08-24
-# measurement recorded on composer.INDEX_FUTURES_PROXY_TOPICS (342/342
-# futures-tagged cards pending), so the positive-routing case here is
-# fixture-injected rather than drawn from real registry state, per the
-# addendum's instruction for exactly this situation.
+# CORRECTED 2026-08-25 (track 2a review): the live registry does NOT have
+# zero accepted futures cards. The first pass (2026-08-24) measured review
+# status by reading the embedded review.status on card_registered payloads,
+# which is always "pending" at registration time and never folds in the
+# later card_reviewed entries the way Registry.cards(status=...) does (the
+# same join composer.run() itself uses to build `accepted`) -- so it wrongly
+# reported 342/342 pending. Measured correctly THROUGH Registry.cards(): of
+# 342 futures-tagged cards, 216 are accepted, 42 rejected, 84 pending.
+# Intersecting the 216 accepted cards' topics against
+# composer.INDEX_FUTURES_PROXY_TOPICS finds exactly ONE real match:
+# f3c7efcd1bb41166 (topic "S&P 500") -- so a real equity_etf composer run
+# today proxy-routes that one card. Both facts are pinned below: the real
+# match against the live registry (read-only), and the routing MECHANISM
+# itself against fixture-injected cards, so the mechanism stays covered even
+# if that one card is later re-triaged.
 
 def test_index_futures_proxy_topics_measured_and_bounded():
-    """Sanity on the declared constant itself: 3-6 topics (addendum's
-    instruction), all strings, frozen so it cannot be mutated at runtime."""
+    """Sanity on the declared constant itself: 3-6 topics (build brief
+    2026-08-24), all strings, frozen so it cannot be mutated at runtime."""
     topics = composer.INDEX_FUTURES_PROXY_TOPICS
     assert isinstance(topics, frozenset)
     assert 3 <= len(topics) <= 6
@@ -166,6 +176,26 @@ def test_index_futures_proxy_topics_measured_and_bounded():
         "S&P 500", "ES futures", "VIX futures",
         "VIX futures term structure", "TVIX", "contango",
     })
+
+
+def test_live_registry_has_exactly_one_accepted_proxy_match():
+    """Pinned against the LIVE registry (read-only -- no writes, no compose/
+    screen/gauntlet run against it, matching this package's convention of
+    treating the live chain as read-only from tests). If this ever fails
+    because the corpus was re-triaged, re-measure through Registry.cards()
+    and update this assertion together with composer.py's comment -- never
+    one without the other (that mismatch is exactly what this fix corrects)."""
+    live = Registry(LAYER / "registry_log.jsonl")
+    accepted = live.cards(status="accepted")
+    futures_accepted = {
+        cid: c for cid, c in accepted.items()
+        if "futures" in (c.get("tags") or {}).get("asset_classes", [])
+    }
+    matches = {
+        cid for cid, c in futures_accepted.items()
+        if set((c.get("tags") or {}).get("topics") or []) & composer.INDEX_FUTURES_PROXY_TOPICS
+    }
+    assert matches == {"f3c7efcd1bb41166"}
 
 
 def test_futures_card_with_matching_topic_proxy_routes(tmp_path):

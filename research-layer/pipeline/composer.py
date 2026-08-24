@@ -81,31 +81,40 @@ RANGE_REQUIRING = {"channel_breakout", "channel_breakout_dense",
 # inferred from the card text at runtime.
 #
 # MEASURED against the live registry (research-layer/registry_log.jsonl,
-# read-only scratch scan, 2026-08-24): of 342 futures-tagged cards, 20 name a
-# specific index-future instrument in their claim text (E-mini S&P 500 / ES /
-# VIX futures). Their topic tags were compared against the full futures
-# corpus's topic frequency to find topics that are genuinely DISCRIMINATING
-# for index-related content rather than generic quant-research topics that
-# happen to co-occur (e.g. "market microstructure" and "bar sampling" appear
-# on the majority of ALL futures cards regardless of instrument, because most
-# of this corpus is Lopez-de-Prado-style ML/microstructure research that uses
-# E-mini S&P futures as its illustrative dataset without the CLAIM itself
-# being about index-level behaviour). The six below are the topics that
-# appear ONLY (ratio 1.0) or almost only on the index-named subset, with at
-# least 2 real occurrences each, naming an actual index-futures product
-# (S&P 500 / ES futures, or the VIX futures term structure and its TVIX/
-# contango consequences):
+# read-only scratch scan, 2026-08-24, corrected 2026-08-25 -- see below): of
+# 342 futures-tagged cards, 20 name a specific index-future instrument in
+# their claim text (E-mini S&P 500 / ES / VIX futures). Their topic tags were
+# compared against the full futures corpus's topic frequency to find topics
+# that are genuinely DISCRIMINATING for index-related content rather than
+# generic quant-research topics that happen to co-occur (e.g. "market
+# microstructure" and "bar sampling" appear on the majority of ALL futures
+# cards regardless of instrument, because most of this corpus is
+# Lopez-de-Prado-style ML/microstructure research that uses E-mini S&P
+# futures as its illustrative dataset without the CLAIM itself being about
+# index-level behaviour). The six below are the topics that appear ONLY
+# (ratio 1.0) or almost only on the index-named subset, with at least 2 real
+# occurrences each, naming an actual index-futures product (S&P 500 / ES
+# futures, or the VIX futures term structure and its TVIX/contango
+# consequences):
 #   S&P 500 (1/1), ES futures (1/1), VIX futures (2/2),
 #   VIX futures term structure (2/2), TVIX (3/4), contango (2/3)
 #
-# As of the same scan, ZERO futures-tagged cards are ACCEPTED (342/342
-# pending) -- the corpus has been harvested but nothing has cleared triage
-# yet, so this lane is ARMED but currently EMPTY in the live registry: a real
-# --asset-class equity_etf composer run today would route zero cards via this
-# path (the native `equities`/`cross` ROUTING entry above is unaffected).
-# test_composer_equity.py's positive-routing test is therefore
-# fixture-injected rather than drawn from the live registry, per the
-# addendum's instruction for this exact situation.
+# CORRECTED 2026-08-25 (track 2a review): the first pass measured card review
+# status by reading the embedded review.status on card_registered payloads,
+# which is always "pending" at registration time -- it does not fold in the
+# later card_reviewed entries the way Registry.cards(status=...) does, so it
+# wrongly reported 342/342 pending. Re-measured THROUGH Registry.cards(),
+# the same join the composer itself uses to build `accepted` in run(): of
+# the 342 futures-tagged cards, 216 are accepted, 42 rejected, 84 still
+# pending. Intersecting the 216 accepted futures cards' topics against the
+# set below finds exactly ONE match today: f3c7efcd1bb41166 (topic
+# "S&P 500"). The lane is therefore not empty -- a real --asset-class
+# equity_etf composer run today would proxy-route that one card (the native
+# `equities`/`cross` ROUTING entry above is unaffected and unrelated).
+# test_composer_equity.py pins this real match directly rather than only
+# exercising a fixture-injected case (build brief 2026-08-24 asked for a
+# fixture-injected positive case only if measurement found zero accepted
+# matches; it did not).
 INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
@@ -249,9 +258,16 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     for b in blocks:
         errors.extend(validate_block(b.get("role"), b.get("type"), b.get("params", {})))
         if b.get("type") in excluded_types:
+            # Named the CLASS, not a hardcoded bar_kind (track 2a review
+            # nit): fx is the only class with a non-empty excluded_types
+            # today, but a future class's own reason for excluding a block
+            # type need not be single_fix bars, so the class's own declared
+            # bar_kind is read back rather than assumed.
+            bar_kind = cells.CLASSES.get(asset_class, {}).get("bar_kind", "unknown")
             errors.append(
                 f"block type {b.get('type')!r} requires a real high/low "
-                f"distinct from close and is excluded on bar_kind single_fix")
+                f"distinct from close and is excluded for class {asset_class!r} "
+                f"(bar_kind {bar_kind!r})")
 
     seen_axes = set()
     for ax in fam.get("sweep", []):

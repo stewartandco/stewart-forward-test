@@ -206,6 +206,13 @@ def test_fx_card_routing(tmp_path):
     drift = _drift_record(reg_path)
     assert drift["routing"] == {"asset_class": "fx", "eligible_tags": ["cross", "fx"]}
     assert set(drift["routed_card_ids"]) == {fx_cid, untagged_cid}
+    # Track 2a review (missing regression, closed here): the futures->
+    # equity_etf proxy lane is equity_etf-only. drift_record's
+    # proxy_routed_card_ids param stays None for every fx run, so the key
+    # must be ABSENT from the drift dict entirely, not present-and-empty
+    # (that shape is reserved for equity_etf runs, where it always appears
+    # because the proxy lane always ran).
+    assert "proxy_routed_card_ids" not in drift
 
 
 # ---------------- fx block exclusions ----------------

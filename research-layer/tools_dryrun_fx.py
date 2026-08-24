@@ -178,8 +178,9 @@ def fixture_family(card_ids: list[str], asset_class: str) -> dict:
 
     RANGE blocks (atr_stop, channel_breakout) are eligible for equity_etf
     (real OHLC bars, no exclusions declared) but this fixture stays minimal
-    and reuses pct_stop for both classes -- the addendum's explicit
-    instruction ("keep the fixture minimal").
+    and reuses pct_stop for both classes -- build brief 2026-08-24's
+    explicit instruction ("keep the fixture minimal"; the addendum itself
+    does not prescribe a fixture shape).
 
     "card_ids" is real (validate_family checks citations against the
     accepted set). "assets" must be a real, non-empty subset of the class's
