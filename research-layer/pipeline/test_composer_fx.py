@@ -1,12 +1,18 @@
-"""Offline tests for the class-aware composer (--asset-class), Task 4 of the
-SP4 Track 1 plan (docs/plans/2026-08-24-sp4-track1-fx.md). No API calls: every
-run() invocation injects propose_fn, exactly like test_composer.py.
+"""Offline tests for the class-aware composer (--asset-class), Tasks 4 and 6b
+of the SP4 Track 1 plan (docs/plans/2026-08-24-sp4-track1-fx.md). No API
+calls: the first five tests below (Task 4) run() injecting propose_fn,
+exactly like test_composer.py; the Task 6b tests below them inject a stub
+client + a real BudgetMeter pointed at a tmp ledger, so propose_families
+itself runs and the exact request it would send a live model can be
+captured and pinned.
 
 Run: python -m pytest pipeline/test_composer_fx.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +21,7 @@ import jsonschema
 from . import composer
 from . import cells as cells_mod
 from . import reader
+from .budget import BudgetMeter
 from .registry import Registry
 from .test_pipeline import make_card
 from .test_composer import good_family, seeded_registry
@@ -244,3 +251,150 @@ def test_fx_specs_validate_against_schema(tmp_path):
     assert specs
     for spec in specs:
         validator.validate(spec)
+
+
+# ---------------- Task 6b: per-class proposer brief (stub client) ----------------
+#
+# The T4 review (docs/plans/2026-08-24-sp4-track1-fx.md, "Task 6b") found that
+# on --asset-class fx runs the model still received the crypto mission
+# statement (SYSTEM_PROMPT's "crypto daily bars (BTCUSD, ETHUSD)" + the
+# gen-1/2 crypto history) and a schema whose assets enum forces BTCUSD/
+# ETHUSD. Every test above bypasses propose_families entirely via propose_fn,
+# so none of them could ever have caught that: this section injects a stub
+# client instead, so the exact request composer.propose_families would send
+# a live model can be captured and asserted on.
+
+# Captured from composer.py at commit 854e929 (pre-task-6b, the exact HEAD
+# this task started from): sha256 of SYSTEM_PROMPT (utf-8) and of
+# PROPOSAL_SCHEMA (json.dumps sort_keys). Task 6b's system_prompt_for/
+# proposal_schema_for must return these two objects BY IDENTITY on
+# asset_class="crypto" (identity, not reconstruction), so this pin is the
+# byte-for-byte guarantee that a real crypto model call never changed.
+CRYPTO_SYSTEM_PROMPT_SHA256 = "1235a1bf292d3434fbeb38cb3e24713e3a80d9b4f8ebb384776af2e1e0c2c1d7"
+CRYPTO_PROPOSAL_SCHEMA_SHA256 = "8345ffec2e7f2c20b80695acd50bad53df1b9fa32e6a07c5707f5b38750c48ce"
+
+
+class _FakeStream:
+    """The context-manager shape client.messages.stream(...) returns."""
+
+    def __init__(self, message):
+        self._message = message
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def get_final_message(self):
+        return self._message
+
+
+class _FakeClient:
+    """Captures the exact kwargs passed to messages.stream and returns a
+    canned structured-output message, so propose_families runs to
+    completion with no network call. usage is an empty SimpleNamespace:
+    BudgetMeter.record_call reads every field via getattr(..., 0), so an
+    empty usage records a zero-cost row rather than raising."""
+
+    def __init__(self, families=()):
+        self.captured: dict = {}
+        families = list(families)
+
+        class _Messages:
+            @staticmethod
+            def stream(**kwargs):
+                self.captured.update(kwargs)
+                message = types.SimpleNamespace(
+                    usage=types.SimpleNamespace(),
+                    stop_reason="end_turn",
+                    content=[types.SimpleNamespace(
+                        type="text", text=json.dumps({"families": families}))],
+                )
+                return _FakeStream(message)
+
+        self.messages = _Messages()
+
+
+def _meter(tmp_path) -> BudgetMeter:
+    return BudgetMeter(tmp_path / "ledger.jsonl", monthly_cap_usd=20.0, agent="pipeline")
+
+
+def test_crypto_prompt_and_schema_are_byte_identical_to_pre_edit(tmp_path):
+    """(a) Crypto system prompt + schema pinned against the pre-edit values,
+    both as module constants and as what propose_families actually sends."""
+    assert hashlib.sha256(composer.SYSTEM_PROMPT.encode("utf-8")).hexdigest() \
+        == CRYPTO_SYSTEM_PROMPT_SHA256
+    assert hashlib.sha256(
+        json.dumps(composer.PROPOSAL_SCHEMA, sort_keys=True).encode("utf-8")
+    ).hexdigest() == CRYPTO_PROPOSAL_SCHEMA_SHA256
+
+    # Identity, not reconstruction: task 6b's dispatchers must hand back the
+    # exact pre-existing objects on the default class.
+    assert composer.system_prompt_for("crypto") is composer.SYSTEM_PROMPT
+    assert composer.proposal_schema_for("crypto") is composer.PROPOSAL_SCHEMA
+
+    client = _FakeClient(families=[])
+    composer.propose_families(composer.DEFAULT_MODEL, {}, 8,
+                              client=client, meter=_meter(tmp_path))
+    assert client.captured["system"] is composer.SYSTEM_PROMPT
+    assert client.captured["output_config"]["format"]["schema"] is composer.PROPOSAL_SCHEMA
+
+
+def test_fx_prompt_names_the_real_universe_and_drops_crypto_history(tmp_path):
+    """(b) On asset_class="fx", the system prompt names the 12-pair fx
+    universe, single-fix bars, the weekday calendar and no-carry returns,
+    and never mentions crypto's mission statement or its gen-1/2 history.
+    The user message still carries the existing excluded-block-types line
+    (spec s10.7, unchanged by this task)."""
+    client = _FakeClient(families=[])
+    composer.propose_families(composer.DEFAULT_MODEL, {}, 8,
+                              client=client, meter=_meter(tmp_path),
+                              asset_class="fx")
+
+    system = client.captured["system"]
+    assert system is not composer.SYSTEM_PROMPT
+    assert system == composer.system_prompt_for("fx")
+
+    # The crypto mission statement must not leak into an fx run.
+    assert "crypto daily bars" not in system
+    assert "BTCUSD" not in system
+    assert "ETHUSD" not in system
+    assert "Generation 1" not in system
+    assert "Generation 2" not in system
+
+    # The real fx universe, pulled from cells.CLASSES["fx"], is named.
+    for asset in cells_mod.CLASSES["fx"]["assets"]:
+        assert asset in system
+    assert "12" in system
+    assert "single-fix" in system
+    assert "weekday" in system.lower()
+    assert "carry" in system.lower()
+
+    # The existing exclusion line (added by Task 4) still travels in the
+    # user message; this task does not move or duplicate it.
+    user_content = client.captured["messages"][0]["content"]
+    for excluded_type in sorted(composer.RANGE_REQUIRING):
+        assert excluded_type in user_content
+
+
+def test_fx_schema_assets_enum_is_the_fx_universe(tmp_path):
+    """(c) The fx schema's assets enum is cells.CLASSES["fx"]["assets"], not
+    ALLOWED_ASSETS -- the model may propose any subset; per-cell expansion
+    (expand_family_for_class) overrides it regardless (see
+    proposal_schema_for's docstring)."""
+    client = _FakeClient(families=[])
+    composer.propose_families(composer.DEFAULT_MODEL, {}, 8,
+                              client=client, meter=_meter(tmp_path),
+                              asset_class="fx")
+
+    schema = client.captured["output_config"]["format"]["schema"]
+    assert schema is not composer.PROPOSAL_SCHEMA
+    enum = schema["properties"]["families"]["items"]["properties"]["assets"]["items"]["enum"]
+    assert enum == list(cells_mod.CLASSES["fx"]["assets"])
+
+    # Nothing else in the schema moved.
+    stripped_fx = json.loads(json.dumps(schema))
+    stripped_fx["properties"]["families"]["items"]["properties"]["assets"]["items"]["enum"] = \
+        list(composer.ALLOWED_ASSETS)
+    assert stripped_fx == composer.PROPOSAL_SCHEMA

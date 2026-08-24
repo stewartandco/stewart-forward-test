@@ -523,6 +523,119 @@ Rules:
   support only two good families, propose two."""
 
 
+def system_prompt_for(asset_class: str) -> str:
+    """The Composer's mission-statement + history brief for one class.
+
+    "crypto" returns SYSTEM_PROMPT verbatim (identity, not reconstruction),
+    so the crypto call site's exact bytes are never touched by this function
+    existing.
+
+    T4's review (task 6b, spec s10.7 pre-activation rider) found the live
+    model still reasoned against "crypto daily bars (BTCUSD, ETHUSD)" and the
+    crypto generation-1/2 history on --asset-class fx runs. The fx branch
+    below states the REAL fx universe, pulling the asset list from
+    cells.CLASSES["fx"]["assets"] rather than a second hardcoded copy, and
+    omits the gen-1/2 paragraphs entirely: those report concrete crypto
+    trial counts and screen/gauntlet outcomes, not a lesson that
+    generalizes, so repeating them to the fx proposer would misstate a
+    chain history it was never part of.
+    """
+    if asset_class == "crypto":
+        return SYSTEM_PROMPT
+    if asset_class != "fx":
+        raise ValueError(f"no proposer brief declared for asset_class {asset_class!r}")
+    cls_spec = cells.CLASSES["fx"]
+    assets = ", ".join(cls_spec["assets"])
+    cost = cls_spec["cost_model"]
+    commission = f"{cost['commission_per_side']:.5f}"
+    slippage = f"{cost['slippage_ticks']:.5f}"
+    financing = f"{cost['short_financing_per_year']:.1%}"
+    return f"""\
+You are the Composer agent in Stewart & Co.'s research pipeline. You design
+candidate trading strategies for the fx universe (12 USD-per-foreign FRED
+daily spot fixes: {assets}) as compositions of typed blocks, grounded
+in accepted research cards.
+
+The fx universe, stated plainly because it differs from crypto in ways that
+change what a sound family looks like:
+- Each bar is one daily spot fix, not a real OHLC bar: open, high, low and
+  close are all the same value and volume is 0. True range degenerates to
+  |close minus previous close|, so any block whose semantics need a real
+  high/low distinct from close is excluded outright rather than silently fed
+  a degenerate input.
+- The calendar is a weekday calendar (the series' own published fix days,
+  five per week), not crypto's 24x7 grid: there is no Saturday or Sunday bar
+  and no synthetic filling of holiday holes.
+- The declared cost model charges {commission} commission per side plus
+  {slippage} slippage per side, and accrues a short financing cost of
+  {financing} per year on every bar a position is held short. Financing is
+  a COST, not a return input: the interest-rate differential between the
+  two currencies (carry) is excluded from returns entirely, so a family
+  whose thesis depends on collecting carry will not show it in this cost
+  model.
+- Strategies must be implementable from the daily single-fix bar alone:
+  there is no intrabar information to draw on.
+
+This is the first generation proposed for this class: there is no fx
+generation history yet to report.
+
+Rules:
+- Use ONLY the block types and parameter grid values given in the grammar.
+- Every family must cite the card_ids that motivate it. Cite only cards that
+  genuinely inform the composition; do not decorate with irrelevant citations.
+- Exactly one entry block; at least one stop and one risk block per family.
+- Every family must state a regime_hypothesis: which market conditions it
+  expects to work in, and why it is not merely levered exposure to an upward
+  drift. A family whose edge disappears when drift and volatility fall should
+  say so plainly.
+- Short-capable types exist: trend_scan_ds and ma_cross_ds take a direction
+  parameter (long, short, both), and regime_ma_short permits entries below a
+  moving average. channel_breakout and zscore_reversion already accept
+  direction: both.
+- regime_ma and regime_ma_short cannot appear in the same family: their
+  filters are mutually exclusive and the spec would never trade. Express
+  "long in one regime, short in the other" as two separate families.
+- Choose sweep axes ONLY where the cited research motivates exploring the
+  parameter, and sweep them on a DENSE block type (the *_dense variants).
+  Coarse types may be USED at fixed values but may NOT be swept.
+- Every swept axis must declare at least THREE values that are CONTIGUOUS on
+  that parameter's declared grid, e.g. [35, 55, 75], never [20, 55, 100].
+  Selection requires a registered sibling one step BELOW and one step ABOVE a
+  candidate on every swept axis, so a two-value sweep and a gapped sweep can
+  never produce a survivor and will be rejected.
+- Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
+  axes at three: five values leave three eligible candidates, three leave one.
+- Propose fewer, better-grounded families over many weak ones. If the cards
+  support only two good families, propose two."""
+
+
+def proposal_schema_for(asset_class: str) -> dict:
+    """The structured-output schema for one class's proposer call.
+
+    "crypto" returns PROPOSAL_SCHEMA verbatim (identity, not reconstruction,
+    task 6b), so the crypto call site's exact schema object is never touched
+    by this function existing.
+
+    A non-crypto class only swaps the "assets" enum, deep-copied off
+    PROPOSAL_SCHEMA rather than hand-duplicating the families/blocks/sweep
+    structure, and pulls the enum from cells.CLASSES[asset_class]["assets"]
+    (never a second hardcoded copy of the asset list).
+
+    The enum is close to vestigial even so, consistent with T4's documented
+    friction (spec s10.7): validate_family's ALLOWED_ASSETS check is
+    crypto-only, and expand_family_for_class ignores fam["assets"] entirely,
+    sourcing the real per-cell assets from cells.class_cells(asset_class)
+    instead. The model may propose any subset of the class's declared assets
+    here; per-cell expansion overrides it regardless of what was proposed.
+    """
+    if asset_class == "crypto":
+        return PROPOSAL_SCHEMA
+    schema = copy.deepcopy(PROPOSAL_SCHEMA)
+    assets = list(cells.CLASSES[asset_class]["assets"])
+    schema["properties"]["families"]["items"]["properties"]["assets"]["items"]["enum"] = assets
+    return schema
+
+
 def expand_universe(spec: dict, cells: list[tuple[str, str]]) -> list[dict]:
     """One spec per declared cell.
 
@@ -614,9 +727,12 @@ def propose_families(model: str, accepted: dict[str, dict],
     cap that only notices after the money is gone is a report, not a cap.
 
     asset_class defaults to "crypto" (today's unrestricted prompt, unchanged).
-    A non-crypto class appends one line naming its excluded block types
-    (spec s10.7) so the model does not spend a family on a block that
-    validate_family will reject anyway.
+    A non-crypto class gets its own mission-statement + schema from
+    system_prompt_for/proposal_schema_for (task 6b, spec s10.7 pre-activation
+    rider): the crypto mission statement and BTCUSD/ETHUSD-only schema must
+    never reach a non-crypto run. It also appends one line naming its
+    excluded block types so the model does not spend a family on a block
+    that validate_family will reject anyway.
     """
     if client is None or meter is None:
         client, meter = _client_and_meter()
@@ -635,8 +751,9 @@ def propose_families(model: str, accepted: dict[str, dict],
     with client.messages.stream(
         model=model,
         max_tokens=32_000,
-        system=SYSTEM_PROMPT,
-        output_config={"format": {"type": "json_schema", "schema": PROPOSAL_SCHEMA}},
+        system=system_prompt_for(asset_class),
+        output_config={"format": {"type": "json_schema",
+                                  "schema": proposal_schema_for(asset_class)}},
         messages=[{
             "role": "user",
             "content": (
