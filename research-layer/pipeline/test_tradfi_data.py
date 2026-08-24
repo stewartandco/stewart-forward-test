@@ -18,8 +18,14 @@ def _canon_sha(pairs):     # independent mirror of free_integrity.series_sha256 
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
-def _mk_source(tmp_path, closes, sha=None, verdict="ok"):
-    """A minimal trading-systems tree: manifest + parquet + verdict for EUR."""
+def _mk_source(tmp_path, closes, sha=None, verdict="ok", write_verdict=True):
+    """A minimal trading-systems tree: manifest + parquet + verdict for EUR.
+
+    The verdict file is `verdict_EUR.json` -- the real producer naming
+    (`tradfi/free_fetch.py:354-355` `verdict_path`, id-keyed, lane-independent),
+    not the `free_fx_EUR_1d.verdict.json` guess an earlier draft used.
+    write_verdict=False omits the file entirely (the MISSING-verdict path).
+    """
     root = tmp_path / "ts"
     (root / "data" / "tradfi").mkdir(parents=True)
     (root / "results" / "tradfi").mkdir(parents=True)
@@ -34,7 +40,8 @@ def _mk_source(tmp_path, closes, sha=None, verdict="ok"):
                               "history_start": closes[0][0], "rows": len(closes)}],
                 "excluded": []}
     (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (root / "data" / "tradfi" / "free_fx_EUR_1d.verdict.json").write_text(json.dumps({"verdict": verdict}), encoding="utf-8")
+    if write_verdict:
+        (root / "data" / "tradfi" / "verdict_EUR.json").write_text(json.dumps({"verdict": verdict}), encoding="utf-8")
     return root
 
 
@@ -55,6 +62,17 @@ def test_snapshot_writes_filled_csv_and_manifest(tmp_path):
     assert man["source_snapshot_utc"] == "2026-08-23"
     assert man["series"]["EUR"]["bar_kind"] == "single_fix"
     assert man["series"]["EUR"]["sha256_verified"] is True
+    assert man["series"]["EUR"]["verdict"] == "ok"
+
+
+def test_snapshot_records_missing_verdict_and_still_writes(tmp_path):
+    root = _mk_source(tmp_path, CLOSES, write_verdict=False)
+    assert not (root / "data" / "tradfi" / "verdict_EUR.json").exists()
+    out = tmp_path / "layer"
+    written = td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert written == ["EUR"]
+    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert man["series"]["EUR"]["verdict"] == "missing"
 
 
 def test_snapshot_refuses_sha_mismatch_and_writes_nothing(tmp_path):

@@ -21,6 +21,17 @@ collected before anything is raised, and nothing is written to the layer's
 `data/` directory when any requested id refuses (verify-all-then-write-all,
 never partial).
 
+The verdict file lookup mirrors `tradfi/free_fetch.py:354-355`'s
+`verdict_path` exactly -- `verdict_{ins_id}.json`, keyed by instrument id
+alone, independent of lane (plan correction: an earlier draft of this module
+guessed `free_{lane}_{id}_1d.verdict.json`, which does not exist in the real
+tree and would have silently treated every real verdict as "missing"). A
+MISSING file still passes, but the pass is no longer invisible: the snapshot
+manifest's per-series entry records `"verdict"` as whatever the file's
+`verdict` field said (e.g. `"ok"`, `"warn"`), or `"missing"` when no file was
+found. `"fail"` never appears there because that id is refused outright and
+gets no manifest entry at all.
+
 FX OHLC honesty (spec s3): FRED H.10 series are one daily spot fix, so the
 source parquet carries NaN open/high/low/volume -- only close is real. For any
 class whose `bar_kind` is `"single_fix"` (fx today), the CSV this module
@@ -83,26 +94,33 @@ def _cache_path(ts_root: Path, lane: str, asset_id: str) -> Path:
     return ts_root / "data" / "tradfi" / f"free_{lane}_{asset_id}_1d.parquet"
 
 
-def _verdict_path(ts_root: Path, lane: str, asset_id: str) -> Path:
-    return ts_root / "data" / "tradfi" / f"free_{lane}_{asset_id}_1d.verdict.json"
-
-
-def _check_verdict(ts_root: Path, lane: str, asset_id: str) -> str | None:
-    """Return a refusal reason, or None if the id is clear to proceed.
-
-    Mirrors `free_fetch.load`: no verdict file passes; an unreadable or
-    malformed verdict file fails closed; verdict "fail" refuses.
+def _verdict_path(ts_root: Path, asset_id: str) -> Path:
+    """`tradfi/free_fetch.py:354-355` `verdict_path` exactly: `verdict_{ins_id}.json`,
+    keyed by instrument id alone -- NOT lane- or timeframe-qualified.
     """
-    vp = _verdict_path(ts_root, lane, asset_id)
+    return ts_root / "data" / "tradfi" / f"verdict_{asset_id}.json"
+
+
+def _check_verdict(ts_root: Path, asset_id: str) -> tuple[str | None, str]:
+    """Return (refusal_reason_or_None, verdict_value_to_record).
+
+    Mirrors `free_fetch.load`: a MISSING verdict file passes -- recorded here
+    as `"missing"` so a silently absent verdict stays visible in the snapshot
+    manifest instead of being indistinguishable from a genuine `"ok"`; an
+    unreadable/malformed verdict file fails closed; verdict `"fail"` refuses
+    (and therefore is never the recorded value -- a refused id gets no
+    manifest entry at all).
+    """
+    vp = _verdict_path(ts_root, asset_id)
     if not vp.exists():
-        return None
+        return None, "missing"
     try:
         verdict = json.loads(vp.read_text(encoding="utf-8"))["verdict"]
     except Exception as e:
-        return f"{asset_id}: verdict file unreadable ({e})"
+        return f"{asset_id}: verdict file unreadable ({e})", "unreadable"
     if verdict == "fail":
-        return f"{asset_id}: last integrity verdict is fail"
-    return None
+        return f"{asset_id}: last integrity verdict is fail", "fail"
+    return None, verdict
 
 
 def _write_series_csv(out_data_dir: Path, asset_id: str, df: pd.DataFrame, bar_kind: str) -> int:
@@ -147,7 +165,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
             requested.append((cls, asset_id))
 
     refusals: list[str] = []
-    verified: dict[str, tuple[pd.DataFrame, dict, str]] = {}
+    verified: dict[str, tuple[pd.DataFrame, dict, str, str]] = {}
     for cls, asset_id in requested:
         row = pinned.get(asset_id)
         if row is None:
@@ -155,7 +173,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
             continue
         lane = row["lane"]
 
-        verdict_refusal = _check_verdict(ts_root, lane, asset_id)
+        verdict_refusal, verdict_value = _check_verdict(ts_root, asset_id)
         if verdict_refusal is not None:
             refusals.append(verdict_refusal)
             continue
@@ -172,7 +190,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
                 f"{asset_id}: sha256 mismatch (manifest {row['sha256']}, computed {actual_sha})")
             continue
 
-        verified[asset_id] = (df, row, cls)
+        verified[asset_id] = (df, row, cls, verdict_value)
 
     if refusals:
         raise SnapshotRefused("; ".join(refusals))
@@ -182,12 +200,13 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
 
     written: list[str] = []
     series_manifest: dict[str, dict] = {}
-    for asset_id, (df, row, cls) in verified.items():
+    for asset_id, (df, row, cls, verdict_value) in verified.items():
         bar_kind = cells.CLASSES[cls]["bar_kind"]
         rows_written = _write_series_csv(out_data_dir, asset_id, df, bar_kind)
         written.append(asset_id)
         series_manifest[asset_id] = {**row, "bar_kind": bar_kind,
-                                      "sha256_verified": True, "rows_written": rows_written}
+                                      "sha256_verified": True, "rows_written": rows_written,
+                                      "verdict": verdict_value}
 
     snapshot_manifest = {
         "snapshot_utc": datetime.now(timezone.utc).isoformat(),
