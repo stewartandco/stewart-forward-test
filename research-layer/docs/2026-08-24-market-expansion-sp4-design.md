@@ -14,7 +14,7 @@ on the same honestly-limited data.
 | # | Decision |
 |---|---|
 | D1 | Grid = **as large as the free lane allows**: all 38 pinned instruments become cells (12 FX + 16 equity-index ETFs + 8 bond ETFs + GLD/SLV), daily timeframe only (the lane has no intraday). Per-asset isolation stays absolute: a cell is tested on its own data with its own metrics, never pooled. |
-| D2 | Routing = **B+C**: crypto cells keep today's unrestricted card feed (no mid-funnel behaviour change); non-crypto cells receive class-matched cards + cross-asset cards; futures/rates cards proxy-route to the nearest ETF/FX cells with `routed_via: "proxy"` recorded on the registration so Norgate-native cells can re-test them later. |
+| D2 | Routing = **B+C**: crypto cells keep today's unrestricted card feed (no mid-funnel behaviour change); non-crypto cells receive class-matched cards + `cross`-tagged cards; futures/rates cards proxy-route to the nearest ETF/FX cells with `routed_via: "proxy"` recorded on the registration so Norgate-native cells can re-test them later. |
 | D3 | Build order = **one class per track, shipped smooth and bugless before the next**: Track 1 FX (12 cells) → Track 2a equity-index ETFs (16) → Track 2b bond + metal ETFs (10) → Track 3 futures (Norgate-gated, native cells + proxy re-tests). |
 | D4 | Data architecture = **pinned snapshot adapter** (option A): the research layer copies series out of trading-systems, verifies each against `free_universe_manifest.json` sha256, refuses unpinned or mismatched series, and records the manifest `snapshot_utc` on every registration built from it. No runtime cross-repo reads, no duplicate fetcher. |
 
@@ -87,7 +87,7 @@ A declared table in `pipeline/composer.py` — data, not inference:
 | `equities` | equity_etf + crypto |
 | `rates` | bond_etf (proxy, recorded) + crypto |
 | `futures` | nearest lane by underlying: index→equity_etf, rates→bond_etf, metals→metal_etf, fx→fx (all proxy, recorded) + crypto |
-| `cross_asset` / untagged | all live classes |
+| `cross` / untagged | all live classes |
 
 - Crypto cells receive every card (today's behaviour, unchanged — D2/C).
 - Any non-native routing sets `routed_via: "proxy"` plus the proxy target on the
@@ -118,14 +118,15 @@ The label stays "CTA-lite: financials + metals", never breadth it does not have.
   on each market's own trading days; no cross-market alignment, no synthetic filling of
   holiday holes. `fx_5d` session = the series' own published fix days.
 - Named eras for fx (history 1999→now): `pre_gfc` (1999-01→2007-12), `gfc_zirp`
-  (2008-01→2015-12), `tightening` (2016-01→2021-12), `post_2022` (2022-01→now). Era-bearing
-  gates (recency, era depth) use these cuts for fx cells; crypto cells keep their existing
-  cuts. ETF era cuts are declared in the 2a/2b addenda (histories differ per fund).
+  (2008-01→2015-12), `tightening` (2016-01→2021-12), `post_2022` (2022-01→now). No era GATE exists in
+  protocol-v6; these cuts are RECORDED as per-era return summaries in fx gauntlet verdicts
+  (record-don't-gate, consistent with v6), available to a future protocol change. ETF era cuts are declared in the 2a/2b addenda (histories differ per fund).
 
 ## 7. Protocol and N accounting
 
-- Funnel = protocol-v6 unchanged: same gates (dual recency → sharpe floor → oos sign →
-  edge decay → mc_p05 → p_ruin → cost stress), same recorded-not-gated statistics (PBO,
+- Funnel = protocol-v6 unchanged: same gates, exactly as coded in `gauntlet.py` FAIL_ORDER
+  (sharpe_floor → oos_negative → edge_decay → mc_p05 → p_ruin → cost_stress — there is NO
+  recency gate in code; earlier prose claiming one was wrong), same recorded-not-gated statistics (PBO,
   self-perturbation), same quarantine accounting (`quarantine-live-protocol-v1` — its BH
   bar already rises with survivor count; new-class survivors enter the same pool).
 - New cells enter the trial denominator at class ACTIVATION (the generation that first
@@ -157,3 +158,15 @@ are expected to be small addenda + activation.
   views are a later, separate Morpheus change once non-crypto registrations exist).
 - Reader/probation changes (source pipeline is class-agnostic already).
 - Any change to crypto cells, families, or the live quarantine.
+
+## 10. Post-approval amendments (2026-08-24, from code verification; approved design intent unchanged)
+
+1. **Gates**: §7 corrected — protocol-v6's coded FAIL_ORDER has six gates and no recency gate; the spec now names exactly the coded battery. Eras (§6) are recorded per-era summaries, not gate inputs.
+2. **Vocabulary**: `cross` (the schema enum literal), not `cross_asset`.
+3. **Adapter mechanics** (§3): FX parquets carry NaN open/high/low/volume (only `close` is real); the o=h=l=c fill is the ADAPTER's transformation. The manifest `sha256` is `free_integrity.series_sha256` — canonical `YYYY-MM-DD,{close:.6f}` lines over NaN-dropped, date-sorted closes — so the adapter re-verifies by reimplementing that 10-line canonicalisation (cross-repo code import is banned; direct parquet read follows the `data_import.py` precedent) with a parity test against the live manifest, and also honours the producer's integrity verdict file (refuse `fail`, fail-closed on unreadable).
+4. **Annualisation**: `sqrt(365)` / `TRADING_DAYS=365` are hardcoded 24x7 assumptions; a `periods_per_year` (365 crypto, 261 fx_5d) is threaded from the class config through `realized_ann_vol`/`window_vol` with crypto defaults byte-identical.
+5. **Financing**: the engine has no financing term; it gains `short_financing_per_year` in the cost model (fx -1.5%/yr, accrued per held short bar / periods_per_year); absent key = 0.0 = crypto byte-identical. The fx 1.5 bps/side declared cost splits commission_per_side 0.00005 + slippage_ticks 0.00010 so the cost-stress gate (doubles slippage) keeps a real bite.
+6. **Mixed-class gauntlet**: `assert_cells_comparable` becomes per-class (fx ends Friday, crypto ends daily); the cross-strategy clustering for `effective_trials` aligns return series on the INTERSECTION calendar across classes (correlations estimated on common dates), recorded in the verdict; per-spec metrics stay on each cell's own calendar.
+7. **FX block exclusions made concrete**: with single-fix bars the range-requiring set is `channel_breakout`, `channel_breakout_dense`, `atr_stop`, `atr_stop_dense`; the remaining stop for fx families is `pct_stop`. The engine's intrabar stop/target branches are unreachable on o=h=l=c bars (exits collapse to open-price fills) — accepted and recorded.
+8. **Routing v1 narrowed**: Track 1 fx cells receive `fx` + `cross` cards only. Futures-card proxy routing needs an underlying-detection rule that cards do not reliably carry; it ships with Track 2 (ETF lanes map cleaner) and is recorded then. D2's intent (proxies recorded for Norgate re-test) is unchanged.
+9. **Crypto by-name reality**: production crypto specs use legacy `BTCUSD`/`ETHUSD` daily assets while `cells.py` declares the `…USDT` grid; the generalisation keeps BOTH untouched (crypto behaviour byte-identical, regression-tested) and does NOT unify them — that cleanup is out of scope.
