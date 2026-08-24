@@ -51,17 +51,21 @@ def fx_family(**overrides):
     one stop RANGE_REQUIRING does not exclude), r_multiple target,
     fixed_fraction risk.
 
-    "assets" is vestigial here: validate_family's ALLOWED_ASSETS check is
-    crypto-only (out of this task's scope, unchanged) and has nothing to do
-    with fx cell selection -- the real per-cell assets come from
-    cells.class_cells("fx") inside expand_family_for_class. The field only
-    needs to satisfy that legacy check, so it stays a crypto ticker.
+    "assets" is real now (real-fx-generation finding, task 6b follow-up):
+    validate_family checks it against cells.CLASSES[asset_class]["assets"]
+    when asset_class != "crypto" (the first real fx generation dropped all
+    5 model-proposed families on this exact check still enforcing BTCUSD/
+    ETHUSD), so this fixture carries an actual fx pair rather than the
+    crypto ticker it used to need only to satisfy a crypto-only check. It
+    is still NOT a cell-selecting field: the real per-cell assets come from
+    cells.class_cells("fx") inside expand_family_for_class, which ignores
+    this field entirely when building specs.
     """
     fam = {
         "family": "fx_trend_family",
         "rationale": "FX trend continuation on daily fixes.",
         "card_ids": ["aaaaaaaaaaaaaaaa"],
-        "assets": ["BTCUSD"],
+        "assets": ["EUR"],
         "blocks": [
             {"role": "entry", "type": "ma_cross_dense",
              "params": {"fast": 13, "slow": 50, "direction": "long"}},
@@ -207,12 +211,17 @@ def test_fx_card_routing(tmp_path):
 # ---------------- fx block exclusions ----------------
 
 def test_fx_block_exclusions():
+    # asset_class="fx" on every call below: fx_family()'s "assets" is now a
+    # real fx pair (real-fx-generation finding, task 6b follow-up), checked
+    # against cells.CLASSES["fx"]["assets"] rather than the crypto-only
+    # ALLOWED_ASSETS these calls used to rely on by omission.
     assert composer.RANGE_REQUIRING == {"channel_breakout", "channel_breakout_dense",
                                         "atr_stop", "atr_stop_dense"}
 
     good = fx_family()
     assert composer.validate_family(
-        good, ACCEPTED_FX, 25, excluded_types=composer.RANGE_REQUIRING) == []
+        good, ACCEPTED_FX, 25, excluded_types=composer.RANGE_REQUIRING,
+        asset_class="fx") == []
 
     for excluded_type, role in (("atr_stop", "stop"), ("channel_breakout", "entry")):
         bad = fx_family()
@@ -222,14 +231,42 @@ def test_fx_block_exclusions():
                               if excluded_type == "atr_stop"
                               else {"lookback": 55, "direction": "long"}}
         errs = composer.validate_family(
-            bad, ACCEPTED_FX, 25, excluded_types=composer.RANGE_REQUIRING)
+            bad, ACCEPTED_FX, 25, excluded_types=composer.RANGE_REQUIRING,
+            asset_class="fx")
         assert any(excluded_type in e and "single_fix" in e for e in errs), errs
 
-    # Without excluded_types (the crypto default), the same family is fine.
+    # Without excluded_types, the same family is fine even though it still
+    # targets fx: block exclusion and the asset_class check are independent.
     bad = fx_family()
     bad["blocks"][1] = {"role": "stop", "type": "atr_stop",
                         "params": {"atr_len": 14, "mult": 2.0}}
-    assert composer.validate_family(bad, ACCEPTED_FX, 25) == []
+    assert composer.validate_family(bad, ACCEPTED_FX, 25, asset_class="fx") == []
+
+
+# ---------------- Task 6b follow-up: class-aware assets check ----------------
+#
+# The first real fx generation dropped all 5 model-proposed families:
+# validate_family's assets check still enforced ALLOWED_ASSETS (BTCUSD/
+# ETHUSD) against every asset_class, including fx, because the dry-run
+# fixture above carried a vestigial ["BTCUSD"] and no test ever exercised a
+# real fx-shaped "assets" field through validate_family with asset_class=
+# "fx". These three tests close that gap directly.
+
+def test_fx_family_with_fx_assets_passes_validate_family():
+    assert composer.validate_family(
+        fx_family(), ACCEPTED_FX, 25, asset_class="fx") == []
+
+
+def test_fx_family_with_crypto_asset_rejected_naming_fx():
+    bad = fx_family(assets=["BTCUSD"])
+    errs = composer.validate_family(bad, ACCEPTED_FX, 25, asset_class="fx")
+    assert any("BTCUSD" in e and "fx" in e for e in errs), errs
+
+
+def test_fx_family_with_unknown_asset_rejected_naming_fx():
+    bad = fx_family(assets=["XXXYYY"])
+    errs = composer.validate_family(bad, ACCEPTED_FX, 25, asset_class="fx")
+    assert any("XXXYYY" in e and "fx" in e for e in errs), errs
 
 
 # ---------------- fx specs are schema-valid ----------------

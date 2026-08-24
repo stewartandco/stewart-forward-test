@@ -156,12 +156,26 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
 
 
 def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
-                    excluded_types: frozenset[str] = frozenset()) -> list[str]:
+                    excluded_types: frozenset[str] = frozenset(),
+                    asset_class: str = "crypto") -> list[str]:
     """Return error strings; empty = family is expandable.
 
     excluded_types (spec s10.7): block types banned for the family's target
     class -- empty by default so every existing crypto caller is unchanged.
-    fx families are validated with excluded_types=RANGE_REQUIRING."""
+    fx families are validated with excluded_types=RANGE_REQUIRING.
+
+    asset_class (real-fx-generation finding, task 6b follow-up): which
+    class's declared assets fam["assets"] is checked against. Defaults to
+    "crypto" so every existing caller -- none of which passes this
+    argument -- keeps checking against ALLOWED_ASSETS exactly as before
+    (crypto specs use the legacy BTCUSD/ETHUSD names, never the cells.py
+    …USDT grid, so "crypto" is never resolved through cells.CLASSES here).
+    A non-crypto class checks against cells.CLASSES[asset_class]["assets"]
+    instead and names the class in the error, because the first real fx
+    generation dropped all 5 proposed families on this exact check still
+    enforcing BTCUSD/ETHUSD against a model that had correctly been told
+    (via proposal_schema_for) to propose fx tickers.
+    """
     errors = []
     if not re.fullmatch(r"[a-z0-9_]+", fam.get("family", "")):
         errors.append(f"family name {fam.get('family')!r} must match [a-z0-9_]+")
@@ -170,8 +184,13 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     for cid in fam.get("card_ids", []):
         if cid not in accepted_ids:
             errors.append(f"card {cid} not accepted (or unknown)")
-    if not fam.get("assets") or not set(fam["assets"]) <= set(ALLOWED_ASSETS):
-        errors.append(f"assets {fam.get('assets')} must be a non-empty subset of {list(ALLOWED_ASSETS)}")
+    allowed = ALLOWED_ASSETS if asset_class == "crypto" else cells.CLASSES[asset_class]["assets"]
+    if not fam.get("assets") or not set(fam["assets"]) <= set(allowed):
+        if asset_class == "crypto":
+            errors.append(f"assets {fam.get('assets')} must be a non-empty subset of {list(allowed)}")
+        else:
+            errors.append(f"assets {fam.get('assets')} must be a non-empty subset of "
+                          f"{asset_class} assets {list(allowed)}")
 
     blocks = fam.get("blocks", [])
     roles = [b.get("role") for b in blocks]
@@ -343,9 +362,14 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     strategy_ids, exactly like expand_family.
 
     fam["assets"] is NOT used for cell selection here (that comes from
-    cells.class_cells(asset_class)) -- it still passes through
-    validate_family's crypto-only ALLOWED_ASSETS check unchanged (that check
-    is out of this task's scope), so callers pass any value accepted there.
+    cells.class_cells(asset_class)): validate_family now checks it against
+    THIS class's own declared assets (real-fx-generation finding, task 6b
+    follow-up), rather than the crypto-only ALLOWED_ASSETS list it used to
+    be pinned against regardless of asset_class -- so the field is a real,
+    class-checked value on this path. It is still not a cell-selecting one:
+    per-cell expansion below is exhaustive over cells.class_cells(asset_class)
+    regardless of which of the class's assets the family named, so the
+    model's chosen subset is validated and then discarded here.
     """
     cls_spec = cells.CLASSES[asset_class]
     timeframe = cls_spec["timeframes"][0]
@@ -621,12 +645,14 @@ def proposal_schema_for(asset_class: str) -> dict:
     structure, and pulls the enum from cells.CLASSES[asset_class]["assets"]
     (never a second hardcoded copy of the asset list).
 
-    The enum is close to vestigial even so, consistent with T4's documented
-    friction (spec s10.7): validate_family's ALLOWED_ASSETS check is
-    crypto-only, and expand_family_for_class ignores fam["assets"] entirely,
-    sourcing the real per-cell assets from cells.class_cells(asset_class)
-    instead. The model may propose any subset of the class's declared assets
-    here; per-cell expansion overrides it regardless of what was proposed.
+    The enum still is not cell-selecting, consistent with T4's documented
+    friction (spec s10.7): validate_family now checks fam["assets"] against
+    this same per-class list (real-fx-generation finding, task 6b follow-up)
+    so the model's proposal is genuinely validated, but expand_family_for_
+    class still ignores fam["assets"] entirely when building specs, sourcing
+    the real per-cell assets from cells.class_cells(asset_class) instead.
+    The model may propose any subset of the class's declared assets here;
+    per-cell expansion overrides it regardless of what was proposed.
     """
     if asset_class == "crypto":
         return PROPOSAL_SCHEMA
@@ -914,7 +940,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     for fam in proposals:
         name = fam.get("family", "?")
         errors = validate_family(fam, accepted_ids, args.sibling_cap,
-                                 excluded_types=excluded_types)
+                                 excluded_types=excluded_types,
+                                 asset_class=args.asset_class)
         if name in seen_names:
             errors.append("duplicate family name in this run")
         if errors:
