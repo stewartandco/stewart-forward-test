@@ -50,7 +50,7 @@ CLASSES = {
            "periods_per_year": 261, "bar_kind": "single_fix",
            "cost_model": FX_COST_MODEL, "eras": FX_ERAS},
 }
-LIVE_CLASSES = ("crypto",)
+LIVE_CLASSES = ("crypto", "fx")   # fx ACTIVATED 2026-08-24 (Coen), first real generation same day
 
 SESSION_PERIODS = {"24x7": 365, "fx_5d": 261}
 
