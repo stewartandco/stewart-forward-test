@@ -8,12 +8,34 @@ signals on close t, fills at open t+1; warmup enforced; same-bar stop+target
 from __future__ import annotations
 
 import math
-import statistics
 
 from . import cells
 
+# SP4 Task P4: bumped by hand on ANY change to this module that can alter a
+# simulated number (trade fills, equity, sizing) -- never on a comment-only
+# or refactor-with-no-numeric-effect edit. pipeline/simcache.py (Task P1)
+# folds this into its cache key so an on-disk cache entry built under a
+# prior engine revision is never served as if it still matched today's
+# arithmetic. Bumped to "e2" by the float-stdev change below (was implicitly
+# "e1" pre-SP4; no prior constant existed so there is nothing to diff against).
+ENGINE_REV = "e2"
+
 
 # ---------------- indicators (aligned lists; None during warmup) ----------
+
+def _sample_stdev(values: list[float]) -> float:
+    """Two-pass float sample stdev (n-1 denominator): mean, then mean of
+    squared deviations, then sqrt. Same (n-1) semantics as
+    `statistics.stdev`, computed in plain floats instead of exact Fraction
+    arithmetic -- statistics.stdev converts every value to a Fraction and
+    only rounds back to float at the very end, which is exact but pays for
+    it on every call; this pays with float rounding in the last few ulps
+    instead (see the same-answer proof in test_engine_classes.py)."""
+    n = len(values)
+    mean = sum(values) / n
+    var = sum((x - mean) ** 2 for x in values) / (n - 1)
+    return math.sqrt(var)
+
 
 def sma(values: list[float], n: int) -> list:
     out = [None] * len(values)
@@ -25,7 +47,7 @@ def sma(values: list[float], n: int) -> list:
 def stdev(values: list[float], n: int) -> list:
     out = [None] * len(values)
     for i in range(n - 1, len(values)):
-        out[i] = statistics.stdev(values[i - n + 1:i + 1])
+        out[i] = _sample_stdev(values[i - n + 1:i + 1])
     return out
 
 
@@ -79,7 +101,7 @@ def realized_ann_vol(closes: list[float], n: int, periods_per_year: int = 365) -
     out = [None] * len(closes)
     for i in range(n, len(closes)):
         window = rets[i - n + 1:i + 1]
-        out[i] = statistics.stdev(window) * math.sqrt(periods_per_year) if len(window) > 1 else None
+        out[i] = _sample_stdev(window) * math.sqrt(periods_per_year) if len(window) > 1 else None
     return out
 
 
