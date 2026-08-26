@@ -2129,6 +2129,47 @@ def test_a_malformed_base_snapshot_refuses_rather_than_supplements(
     assert supplements(reg) == []
 
 
+def test_time_stamped_dates_record_like_bare_dates(tmp_path, capsys):
+    """The tradfi snapshot CSVs (FX/eq) stamp dates as 'YYYY-MM-DD 00:00:00'
+    while crypto files carry bare dates. Without normalization at the load
+    boundary the readiness check can never equal --date, so an FX spec would
+    defer FOREVER with its bars on disk -- the exact failure the addendum
+    exists to end -- and hash_bars_through's bytewise cutoff would exclude
+    the cutoff-day bar from the very provenance that licenses its row. Same
+    bug class as the gauntlet's 2026-08-24 date-key normalization."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    # replace the short bare-date ETHUSD series with a STAMPED one that
+    # covers the date -- the tradfi CSV shape
+    stamped = ["date,open,high,low,close,volume"]
+    stamped += [f"{b['date']} 00:00:00,100.0,100.0,100.0,100.0,1.0"
+                for b in flat_dated_bars(n=23)]
+    (data / "ETHUSD_1d.csv").write_text("\n".join(stamped) + "\n",
+                                        encoding="utf-8")
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    assert "deferred" not in capsys.readouterr().out
+    rows = decisions(reg)
+    assert len(rows) == 3
+    eth = [r for r in rows if r["asset"] == "ETHUSD"]
+    assert len(eth) == 1
+    assert eth[0]["date"] == "2023-01-22"          # bare, like every row
+    # the cutoff-day STAMPED bar is inside the chained provenance hash
+    assert (bars_sha_of(data, "ETHUSD", "2023-01-22")
+            != quarantine_mod.hash_bars_through(data, "ETHUSD",
+                                                "2023-01-21"))
+    assert (snapshots(reg)[0]["bars_sha256"]["ETHUSD"]
+            == bars_sha_of(data, "ETHUSD", "2023-01-22"))
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    # --review keys owed dates the same way rows are keyed: only 2023-01-23
+    # (existing but unrecorded) is owed, not a phantom stamped 01-22
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--review")) == 0
+    review = capsys.readouterr().out
+    assert "unrecorded bar dates in window: 1" in review
+    assert "partially recorded dates: 0" in review
+
+
 def test_a_base_landing_between_the_two_chain_reads_is_reconciled(
         tmp_path, capsys, monkeypatch):
     """data_snapshots and snapshot_supplements are two separate un-locked

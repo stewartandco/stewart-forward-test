@@ -177,10 +177,12 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
     ignores bars after `date` and still catches a restatement of the bars that
     matter.
 
-    Reproducible with shell tools, which is the point of recording it at all:
+    Reproducible with shell tools, which is the point of recording it at all
+    (substr because the tradfi CSVs stamp dates as 'YYYY-MM-DD 00:00:00';
+    for bare-date files it is the whole field and changes nothing):
 
         { head -n 1 BTCUSD_1d.csv;
-          awk -F, 'NR>1 && $1<="2026-08-17"' BTCUSD_1d.csv; } \
+          awk -F, 'NR>1 && substr($1,1,10)<="2026-08-17"' BTCUSD_1d.csv; } \
             | tr -d '\r' | sha256sum
 
     LF normalization is load-bearing because this repo produces CRLF working
@@ -203,10 +205,13 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
             f"{asset}: price file is empty, so there is nothing to hash as "
             f"the provenance of {date}")
     header, rows = lines[0], lines[1:]
-    cutoff = date.encode()
-    # dates are zero-padded ISO, so bytewise <= is the same ordering load_bars
-    # applies to the parsed strings
-    kept = [r for r in rows if r.split(b",", 1)[0] <= cutoff]
+    cutoff = date.encode()[:10]
+    # dates are zero-padded ISO, so bytewise <= on the DATE PART is the same
+    # ordering load_bars' fence applies. The [:10] matters for the tradfi
+    # CSVs: b"2026-08-25 00:00:00" > b"2026-08-25" bytewise, so without it
+    # the cutoff-day bar would be excluded from the very hash that is
+    # supposed to prove what that day's decisions were computed from.
+    kept = [r for r in rows if r.split(b",", 1)[0][:10] <= cutoff]
     body = b"".join(line + b"\n" for line in [header] + kept)
     return hashlib.sha256(body).hexdigest()
 
@@ -308,6 +313,24 @@ def observe_day(spec: dict, bars_by_asset: dict[str, list[dict]], date: str,
     return rows
 
 
+def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
+    """load_bars with every date normalized to its DATE PART.
+
+    The tradfi snapshot CSVs (FX/eq) stamp dates as 'YYYY-MM-DD 00:00:00'
+    while the crypto files carry bare dates, and every comparison in this
+    module -- readiness, the rebase zero point, owed dates, decision rows --
+    is a plain-date comparison. Without this boundary an FX spec would defer
+    FOREVER with its bars on disk, because 'D 00:00:00' never equals 'D'.
+    The gauntlet hit the same class of bug on 2026-08-24 and normalizes with
+    str()[:10]; this is the recorder's copy of that decision. Daily bars
+    only: intraday timeframes, where the time part is load-bearing, never
+    reach this module."""
+    bars = load_bars(data_dir, asset, cutoff)
+    for b in bars:
+        b["date"] = b["date"][:10]
+    return bars
+
+
 def _load_eligible_bars_or_refuse(data_dir: Path, assets: list[str],
                                   date: str) -> dict[str, list[dict]] | None:
     """Bars <= date for every asset an eligible spec trades, or None after
@@ -321,7 +344,7 @@ def _load_eligible_bars_or_refuse(data_dir: Path, assets: list[str],
             print(f"REFUSED: no price file for {asset} at {path}.",
                   file=sys.stderr)
             return None
-        bars_by_asset[asset] = load_bars(data_dir, asset, date)
+        bars_by_asset[asset] = _daily_bars(data_dir, asset, date)
     return bars_by_asset
 
 
@@ -333,7 +356,7 @@ def _owed_by_date(data_dir: Path, spec: dict, after: str,
     for asset in spec["universe"]["assets"]:
         if not (data_dir / f"{asset}_1d.csv").exists():
             return None
-        for b in load_bars(data_dir, asset, through):
+        for b in _daily_bars(data_dir, asset, through):
             if b["date"] > after:
                 owed.setdefault(b["date"], set()).add(asset)
     return owed
@@ -347,7 +370,7 @@ def _last_bar_date(data_dir: Path, spec: dict) -> str | None:
     for asset in spec["universe"]["assets"]:
         if not (data_dir / f"{asset}_1d.csv").exists():
             return None
-        bars = load_bars(data_dir, asset, "9999-12-31")
+        bars = _daily_bars(data_dir, asset, "9999-12-31")
         if not bars:
             return None
         if latest is None or bars[-1]["date"] > latest:
