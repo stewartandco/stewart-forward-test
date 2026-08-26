@@ -125,7 +125,10 @@ python verify_registry.py registry_log.jsonl
    trusted to the Composer's in-process guard.
 9. `quarantine_data_snapshot` dates are unique, and every
    `quarantine_decision` is covered by an **earlier** snapshot naming its
-   asset with a well-formed digest.
+   asset with a well-formed digest. Since the 2026-08-27 per-class-calendars
+   addendum, an asset-disjoint `quarantine_data_snapshot_supplement`
+   (following a base snapshot for its date) can extend that coverage for a
+   class whose source published late.
 
 Invariant 8 is why the script is **not** self-contained: it imports
 `composition_fingerprint` from `pipeline/composer.py` rather than
@@ -193,8 +196,12 @@ Mechanics worth knowing:
   selection is neighbourhood-floor plateau selection instead (see above).
 - **Quarantine is a real daily forward test.** Each quarantined strategy posts
   one `quarantine_decision` per asset per trading day, computed from bars up to
-  that day only, preceded by a `quarantine_data_snapshot` recording the SHA-256
-  of the price files behind it. Paper-trading forward on bars that did not
+  that day only, preceded by a `quarantine_data_snapshot` (or, for a class
+  backfilled after its source published late, a
+  `quarantine_data_snapshot_supplement`) recording the SHA-256 of the price
+  files behind it. Since 2026-08-27 the runner records per spec: a spec whose
+  class has not published the date's bar defers loudly instead of refusing
+  every other spec's day (docs/2026-08-27-quarantine-per-class-calendars-addendum.md). Paper-trading forward on bars that did not
   exist at selection time cannot be gamed by search — and because the runner is
   deliberately idempotent and backfillable, selective *recording* is guarded
   separately: `--review` reconstructs the days a strategy owed from the price

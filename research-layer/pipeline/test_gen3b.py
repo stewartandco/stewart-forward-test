@@ -1213,22 +1213,27 @@ def test_a_restated_price_file_refuses_the_whole_day(tmp_path, capsys):
     assert sum(1 for _ in reg.entries()) == before      # nothing written
 
 
-def test_a_snapshot_that_misses_a_needed_asset_refuses(tmp_path, capsys):
-    """The chain is append-only, so a snapshot cannot be amended to cover an
-    asset it never named, and a second snapshot for the date would break
-    uniqueness. Hand-chained here because a legitimate forward record cannot
-    produce it: a strategy is only ever recorded for dates strictly after its
-    own quarantine entry, so its assets first appear on a date with no
-    snapshot yet."""
+def test_a_snapshot_missing_a_needed_asset_gets_a_supplement(tmp_path, capsys):
+    """CHANGED by the 2026-08-27 per-class-calendars addendum. This scenario
+    is now the legitimate shape of a class backfill: a date's base snapshot
+    was chained when only some classes had published bars, and the late
+    class's assets arrive afterwards. The chain is still append-only and the
+    base still unique per date, so the late assets' provenance lands as a
+    quarantine_data_snapshot_supplement chained before their rows. 'Covered
+    but with a DIFFERENT hash' (a restatement) stays fatal -- see
+    test_a_restated_price_file_refuses_the_whole_day."""
     reg, spec, data = quarantined_two_asset(tmp_path)
     reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
     capsys.readouterr()
-    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
-    err = capsys.readouterr().err
-    assert "REFUSED" in err
-    assert "ETHUSD" in err
-    assert decisions(reg) == []
-    assert len(snapshots(reg)) == 1
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert len(decisions(reg)) == 2
+    assert len(snapshots(reg)) == 1                 # base stays unique
+    sups = [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_data_snapshot_supplement"]
+    assert len(sups) == 1
+    assert sups[0] == snap_payload(data, ["ETHUSD"])
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
 
 
 def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
@@ -1275,8 +1280,8 @@ def test_snapshot_conflicts_is_empty_when_the_bars_are_unchanged():
 
 
 def test_refused_day_chains_no_snapshot(tmp_path, capsys):
-    """A day refused for a missing bar must not leave provenance for a record
-    that does not exist."""
+    """A refused day (here: every eligible spec deferred, the stall guard)
+    must not leave provenance for a record that does not exist."""
     reg, spec, data = quarantined(tmp_path)
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-30")) == 1
     assert snapshots(reg) == []
@@ -1469,6 +1474,8 @@ def test_schema_documents_quarantine_decision_and_the_v3_amendment():
     assert "quarantine → live" in text
     assert "composition_fingerprint" in text   # invariant 8 disclosed
     assert "`quarantine_data_snapshot`" in text
+    # 2026-08-27 per-class-calendars addendum disclosed
+    assert "`quarantine_data_snapshot_supplement`" in text
 
 
 # ---------------- bars_sha256: the hash that keeps backfill working --------
@@ -1878,3 +1885,351 @@ def test_verifier_survives_an_unhashable_key_field(tmp_path, etype, payload):
     assert out.returncode == 1
     assert "must be a non-empty string" in out.stdout
     walk_reached_the_end(reg, out)
+
+
+# ------- per-class calendars (2026-08-27 addendum): deferral + supplements ---
+#
+# docs/2026-08-27-quarantine-per-class-calendars-addendum.md is the
+# pre-declared contract these tests pin. Trigger: 2026-08-26, when the first
+# FX-owed day refused the WHOLE pool (crypto included) because the FRED-fed
+# CHF series structurally lags ~a week behind the crypto calendar.
+
+from .registry import OverlappingQuarantineSupplement
+
+
+def supplements(reg):
+    return [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_data_snapshot_supplement"]
+
+
+def quarantined_split_calendar(tmp_path):
+    """Two quarantined strategies on different calendars: the BTCUSD-only spec
+    (bar for 2023-01-22 on disk) plus a BTCUSD+ETHUSD one whose ETHUSD series
+    ends 2023-01-21 -- the publication-lag shape of 2026-08-26."""
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"deflated_sharpe": 0.5}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    two = json.loads(json.dumps(spec))
+    two["universe"] = dict(two["universe"], assets=["BTCUSD", "ETHUSD"])
+    two["strategy_id"] = None
+    two["strategy_id"] = content_id(two, "strategy_id")
+    reg.register_strategy(two)
+    reg.record_state_change(two["strategy_id"], "screened", "test")
+    reg.record_state_change(two["strategy_id"], "gauntlet", None)
+    reg.record_state_change(two["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "ETHUSD": flat_dated_bars(n=21)})
+    return reg, spec, two, data
+
+
+def extend_ethusd(data, dates=("2023-01-22", "2023-01-23"), px=100.0):
+    """The late class publishes: append the missing daily bars."""
+    with (data / "ETHUSD_1d.csv").open("a", newline="",
+                                       encoding="utf-8") as f:
+        for d in dates:
+            f.write(f"{d},{px},{px},{px},{px},1.0\n")
+
+
+def test_missing_bar_defers_the_spec_not_the_day(tmp_path, capsys):
+    """The 2026-08-26 incident in miniature: the spec whose class has not
+    published must wait, and ONLY that spec. The ready spec records, the
+    snapshot covers exactly what was recorded, and the run succeeds."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "deferred: no ETHUSD bar for 2023-01-22" in out
+    assert "data ends 2023-01-21" in out
+    rows = decisions(reg)
+    assert len(rows) == 1
+    assert rows[0]["strategy_id"] == spec["strategy_id"]
+    assert rows[0]["asset"] == "BTCUSD"
+    assert snapshots(reg) == [snap_payload(data, ["BTCUSD"])]
+    assert supplements(reg) == []
+
+
+def test_deferred_spec_records_on_rerun_once_the_bar_arrives(tmp_path, capsys):
+    """The backfill half: after the late class publishes, re-running the SAME
+    date records the deferred spec, chains a supplement for only the newly
+    covered asset, leaves the base snapshot untouched, and the whole chain
+    still verifies under extended invariant 9."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    extend_ethusd(data)
+    capsys.readouterr()
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    rows = decisions(reg)
+    assert len(rows) == 3                      # spec BTC + two's BTC and ETH
+    by_sid = {r["strategy_id"] for r in rows}
+    assert by_sid == {spec["strategy_id"], two["strategy_id"]}
+    assert len(snapshots(reg)) == 1            # base stays unique per date
+    sups = supplements(reg)
+    assert len(sups) == 1
+    assert sups[0] == snap_payload(data, ["ETHUSD"])
+    # the supplement licenses its rows: it must precede the ETHUSD decision
+    types = [(e["entry_type"], e["payload"].get("asset"))
+             for e in reg.entries()]
+    assert (types.index(("quarantine_data_snapshot_supplement", None))
+            < types.index(("quarantine_decision", "ETHUSD")))
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    assert "quarantine_data_snapshot_supplement=1" in out.stdout
+
+
+def test_every_eligible_spec_deferred_is_refused(tmp_path, capsys):
+    """The stall guard. While crypto (which trades every calendar day) is in
+    the pool, a day where NOTHING can be recorded means the data pipeline is
+    dead, and going quiet on it would hide exactly the outage most likely to
+    persist unattended."""
+    reg, spec, data = quarantined(tmp_path)
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-30"))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "every eligible strategy" in err
+    assert decisions(reg) == []
+    assert snapshots(reg) == []
+
+
+def test_a_missing_price_file_is_still_a_hard_refusal(tmp_path, capsys):
+    """Deferral is for a bar that has not published, never for a file that is
+    not there: a wrong path or broken data dir must not read as lag."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    (data / "ETHUSD_1d.csv").unlink()
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 1
+    assert "REFUSED" in capsys.readouterr().err
+    assert decisions(reg) == []
+
+
+def test_supplement_requires_an_earlier_base_snapshot(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    with pytest.raises(ValueError, match="no quarantine_data_snapshot"):
+        reg.record_quarantine_snapshot_supplement(
+            {"date": "2023-01-22", "data_sha256": {"ETHUSD": "a" * 64},
+             "bars_sha256": {"ETHUSD": "b" * 64}})
+    assert not reg.log_path.exists()
+
+
+def test_supplement_refuses_overlap_with_existing_coverage(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.record_quarantine_snapshot(
+        {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64},
+         "bars_sha256": {"BTCUSD": "b" * 64}})
+    with pytest.raises(OverlappingQuarantineSupplement, match="already"):
+        reg.record_quarantine_snapshot_supplement(
+            {"date": "2023-01-22", "data_sha256": {"BTCUSD": "c" * 64},
+             "bars_sha256": {"BTCUSD": "d" * 64}})
+    sup = {"date": "2023-01-22", "data_sha256": {"ETHUSD": "c" * 64},
+           "bars_sha256": {"ETHUSD": "d" * 64}}
+    reg.record_quarantine_snapshot_supplement(dict(sup))
+    # overlap with a PRIOR SUPPLEMENT is refused the same way
+    with pytest.raises(OverlappingQuarantineSupplement, match="already"):
+        reg.record_quarantine_snapshot_supplement(dict(sup))
+    assert len(supplements(reg)) == 1
+
+
+def test_supplement_error_carries_the_chained_coverage(tmp_path):
+    """The .chained attribute is what lets a losing concurrent writer
+    reconcile instead of crashing -- same contract as the base snapshot's
+    DuplicateQuarantineSnapshot."""
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.record_quarantine_snapshot(
+        {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64},
+         "bars_sha256": {"BTCUSD": "b" * 64}})
+    with pytest.raises(OverlappingQuarantineSupplement) as e:
+        reg.record_quarantine_snapshot_supplement(
+            {"date": "2023-01-22", "data_sha256": {"BTCUSD": "c" * 64},
+             "bars_sha256": {"BTCUSD": "d" * 64}})
+    assert issubclass(OverlappingQuarantineSupplement, ValueError)
+    assert e.value.chained["bars_sha256"] == {"BTCUSD": "b" * 64}
+
+
+def test_supplement_rejects_a_malformed_payload(tmp_path):
+    """Same shape guard as the base snapshot -- a supplement is provenance."""
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.record_quarantine_snapshot(
+        {"date": "2023-01-22", "data_sha256": {"BTCUSD": "a" * 64},
+         "bars_sha256": {"BTCUSD": "b" * 64}})
+    with pytest.raises(ValueError):
+        reg.record_quarantine_snapshot_supplement({"date": "2023-01-22"})
+    assert supplements(reg) == []
+
+
+def test_an_identical_concurrent_supplement_is_reconciled(tmp_path, capsys,
+                                                          monkeypatch):
+    """A scheduler retry overlapping the backfill run must resolve quietly
+    when what landed is exactly what this run would have written -- the
+    base-snapshot precedent, applied to supplements."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    extend_ethusd(data)
+    reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
+    # this run's pre-read misses the supplement; the under-lock guard fires
+    monkeypatch.setattr(quarantine_mod, "snapshot_supplements", lambda r: {})
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert len(supplements(reg)) == 1
+    assert len(decisions(reg)) == 3
+
+
+def test_a_conflicting_concurrent_supplement_refuses(tmp_path, capsys,
+                                                     monkeypatch):
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    extend_ethusd(data)
+    reg.record_quarantine_snapshot_supplement(
+        dict(snap_payload(data, ["ETHUSD"]),
+             bars_sha256={"ETHUSD": "e" * 64}))
+    monkeypatch.setattr(quarantine_mod, "snapshot_supplements", lambda r: {})
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    assert "REFUSED" in capsys.readouterr().err
+    assert len(decisions(reg)) == 1            # only the first run's row
+
+
+def test_restated_bar_on_a_supplemented_asset_refuses(tmp_path, capsys):
+    """'Not covered yet' became the supplement path; 'covered but different'
+    must stay fatal for supplement-covered assets exactly as for base ones."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    extend_ethusd(data)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    # restate the ETHUSD 2023-01-22 bar itself, then re-run the date
+    csv_path = data / "ETHUSD_1d.csv"
+    lines = csv_path.read_text(encoding="utf-8").splitlines()
+    i = next(i for i, l in enumerate(lines) if l.startswith("2023-01-22,"))
+    lines[i] = "2023-01-22,100.0,100.0,100.0,101.0,1.0"
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "ETHUSD" in err
+
+
+def test_a_malformed_base_snapshot_refuses_rather_than_supplements(
+        tmp_path, capsys):
+    """The 'or {} fails CLOSED' rule survives the addendum: a base snapshot
+    whose bars_sha256 is unusable covers nothing, and papering over it with a
+    supplement for everything would legitimise a defective provenance record.
+    Only a hand-appended fake can produce this; it needs human eyes."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append("quarantine_data_snapshot",
+               {"date": "2023-01-22", "data_sha256": {},
+                "bars_sha256": {}})
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    assert "REFUSED" in capsys.readouterr().err
+    assert decisions(reg) == []
+    assert supplements(reg) == []
+
+
+def test_a_base_landing_between_the_two_chain_reads_is_reconciled(
+        tmp_path, capsys, monkeypatch):
+    """data_snapshots and snapshot_supplements are two separate un-locked
+    walks of the log: a concurrent run can chain base+supplement BETWEEN
+    them, leaving this run seeing 'supplement but no base' on a perfectly
+    healthy chain. The runner must read the base again before crying defect
+    -- a false REFUSED here would page the Sentinel for nothing."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    extend_ethusd(data)
+    reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
+    real = quarantine_mod.data_snapshots
+    calls = {"n": 0}
+
+    def racy(registry):
+        calls["n"] += 1
+        return {} if calls["n"] == 1 else real(registry)
+
+    monkeypatch.setattr(quarantine_mod, "data_snapshots", racy)
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert calls["n"] >= 2                     # it actually re-read
+    assert len(decisions(reg)) == 3
+    assert len(snapshots(reg)) == 1
+    assert len(supplements(reg)) == 1
+
+
+def test_a_file_with_no_bars_yet_defers_with_its_own_wording(tmp_path,
+                                                             capsys):
+    """Addendum rule 1 footnote: a file with a header but zero bars <= date
+    has no 'data ends' value to print, so the deferral line says so instead.
+    Still a deferral, not a refusal -- the file EXISTS."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    header = (data / "ETHUSD_1d.csv").read_text(
+        encoding="utf-8").splitlines()[0]
+    (data / "ETHUSD_1d.csv").write_text(header + "\n", encoding="utf-8")
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "deferred: no ETHUSD bar for 2023-01-22" in out
+    assert "(no bars on or before the date)" in out
+    assert len(decisions(reg)) == 1
+
+
+def test_a_supplement_without_a_base_refuses_the_runner_too(tmp_path, capsys):
+    """Only a hand-appended entry can produce this (the writer requires the
+    base), so the runner must not record against provenance the verifier
+    already rejects."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append("quarantine_data_snapshot_supplement",
+               snap_payload(data, ["BTCUSD"]))
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    assert "REFUSED" in capsys.readouterr().err
+    assert decisions(reg) == []
+
+
+def test_verifier_rejects_a_supplement_without_an_earlier_base(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append("quarantine_data_snapshot_supplement",
+               {"date": "2023-01-22", "data_sha256": {"ETHUSD": "a" * 64},
+                "bars_sha256": {"ETHUSD": "b" * 64}})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "no earlier quarantine_data_snapshot" in out.stdout
+
+
+def test_verifier_rejects_an_overlapping_supplement(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    reg.append("quarantine_data_snapshot_supplement",
+               snap_payload(data, ["BTCUSD"]))
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "already covered" in out.stdout
+
+
+def test_verifier_rejects_a_decision_before_its_supplement(tmp_path):
+    """Order still matters: a supplement chained AFTER the row it would have
+    to license proves nothing about what the row was computed from."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
+    reg.append("quarantine_decision",
+               {"strategy_id": spec["strategy_id"], "date": "2023-01-22",
+                "asset": "ETHUSD", "action": "hold", "price": 100.0,
+                "position_frac": 0.0, "equity": 1.0})
+    reg.append("quarantine_data_snapshot_supplement",
+               snap_payload(data, ["ETHUSD"]))
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "no earlier quarantine_data_snapshot" in out.stdout
+
+
+def test_verifier_reports_a_malformed_supplement_instead_of_crashing(tmp_path):
+    reg, spec, data = quarantined(tmp_path)
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    reg.append("quarantine_data_snapshot_supplement",
+               {"date": "2023-01-22", "data_sha256": 7,
+                "bars_sha256": {"ETHUSD": "b" * 64}})
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1
+    assert "data_sha256" in out.stdout
+    n = sum(1 for _ in reg.entries())
+    assert f"Entries           : {n}" in out.stdout

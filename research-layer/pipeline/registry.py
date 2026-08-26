@@ -68,6 +68,19 @@ class DuplicateQuarantineSnapshot(ValueError):
     """
 
 
+class OverlappingQuarantineSupplement(ValueError):
+    """A quarantine_data_snapshot_supplement names an asset the date already
+    covers (via the base snapshot or a prior supplement).
+
+    Introduced by the 2026-08-27 per-class-calendars addendum. Same contract
+    as DuplicateQuarantineSnapshot: checked under the append lock because a
+    conflicting double-coverage on an append-only chain could never be
+    repaired, and `.chained` carries the date's merged coverage
+    ({"data_sha256": ..., "bars_sha256": ...}) so a losing concurrent writer
+    can compare hashes and reconcile instead of guessing.
+    """
+
+
 def parse_iso_date(value: object, field: str = "date") -> datetime:
     """Strict YYYY-MM-DD.
 
@@ -403,3 +416,54 @@ class Registry:
                     dup.chained = e["payload"]
                     raise dup
             return self._append_locked("quarantine_data_snapshot", row)
+
+    def record_quarantine_snapshot_supplement(self, payload: dict) -> dict:
+        """Provenance for assets that became recordable AFTER the date's base
+        snapshot was chained -- the backfill of a class whose source publishes
+        late (2026-08-27 per-class-calendars addendum).
+
+        Same payload shape and shape guard as the base snapshot. Rules,
+        checked under the append lock for the reason spelled out on
+        OverlappingQuarantineSupplement:
+          * an EARLIER base snapshot for the date must exist -- a supplement
+            with nothing to supplement is a fabricated provenance root;
+          * the supplement's assets must be disjoint from everything the date
+            already covers (base plus prior supplements).
+        """
+        row = validated_quarantine_snapshot(payload)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.log_path):
+            base = None
+            covered = {"data_sha256": {}, "bars_sha256": {}}
+            for e in self.entries():
+                if e["entry_type"] not in ("quarantine_data_snapshot",
+                                           "quarantine_data_snapshot_supplement"):
+                    continue
+                p = e["payload"]
+                if p.get("date") != row["date"]:
+                    continue
+                if e["entry_type"] == "quarantine_data_snapshot":
+                    if base is not None:
+                        continue          # defective duplicate: first wins
+                    base = p
+                for field in QUARANTINE_SNAPSHOT_DIGEST_KEYS:
+                    m = p.get(field)
+                    if isinstance(m, dict):
+                        for a, h in m.items():
+                            covered[field].setdefault(a, h)
+            if base is None:
+                raise ValueError(
+                    f"no quarantine_data_snapshot for {row['date']}: a "
+                    f"supplement extends a date's provenance, it cannot "
+                    f"start it")
+            overlap = sorted(set(row["bars_sha256"])
+                             & set(covered["bars_sha256"]))
+            if overlap:
+                clash = OverlappingQuarantineSupplement(
+                    f"assets already covered for {row['date']}: "
+                    f"{overlap} -- the chain is append-only, so conflicting "
+                    f"double-coverage could never be repaired")
+                clash.chained = covered
+                raise clash
+            return self._append_locked(
+                "quarantine_data_snapshot_supplement", row)

@@ -18,6 +18,14 @@ REM explicit --date. --review also reports how long after its bar each row was
 REM chained, so a backfilled record and a faithfully-kept one stay
 REM distinguishable.
 REM
+REM PER-CLASS CALENDARS (2026-08-27 addendum, see docs/): a spec whose class
+REM has not published the date's bar (FRED-fed FX lags ~a week) is DEFERRED
+REM for the day while on-time classes still record -- that is exit 0, by
+REM design, with "deferred:" lines in the log. Deferred dates are backfilled
+REM with explicit --date runs once the bars publish; `--review` lists what is
+REM owed. A missing price FILE, every-spec-deferred, or a bar restatement is
+REM still exit 1.
+REM
 REM EXIT CODE IS LOAD-BEARING: Ops Sentinel alarms on a nonzero last result, so
 REM this script exits 0 only when both Python steps succeeded. Every path uses
 REM the ABSOLUTE log path -- the git block changes directory, and a relative
@@ -34,9 +42,11 @@ cd /d "%LAYER%"
 if not exist "%LAYER%\logs" mkdir "%LAYER%\logs"
 echo ==== %DATE% %TIME% ==== >> "%LOG%"
 
-REM 1. Refresh the committed price CSVs. quarantine REFUSES a date with no bar,
-REM    so a stale data dir silently stalls the forward record. The fetcher drops
-REM    the exchange's currently-open kline, so this never writes a partial bar.
+REM 1. Refresh the committed price CSVs. A stale crypto data dir defers every
+REM    crypto spec, which the all-deferred guard turns into exit 1 -- so this
+REM    refresh staying healthy is what keeps the daily record alive. The
+REM    fetcher drops the exchange's currently-open kline, so this never
+REM    writes a partial bar.
 python -m pipeline.data_fetch >> "%LOG%" 2>&1
 if errorlevel 1 goto :fail
 

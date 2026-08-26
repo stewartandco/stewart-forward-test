@@ -25,14 +25,22 @@ Conventions:
   * A decision for date D describes what the book DID on D's bar (entries fill
     at D's open on a signal from D-1's close) and its state at D's close. It is
     a record, not an instruction for D+1.
-  * Bars up to and including D only. A date with no bar is REFUSED - a decision
-    is never invented for a non-trading day.
+  * Bars up to and including D only. A decision is never invented for a bar
+    that is not on disk. Per-spec since the 2026-08-27 per-class-calendars
+    addendum (docs/2026-08-27-quarantine-per-class-calendars-addendum.md):
+    a spec whose universe is missing D's bar is DEFERRED for the day, loudly,
+    while specs whose bars are all present still record -- a class whose
+    source publishes late (FRED-fed FX) must not refuse the classes that are
+    on time. A missing price FILE, or a day where EVERY eligible spec
+    defers, is still a hard refusal.
   * Dates at or before a strategy's quarantine-entry date are skipped: they
     precede its forward record.
   * `equity` is rebased to 1.0 at the last bar on or before the entry date.
   * Idempotent per (strategy_id, date, asset), so a missed day can be
     backfilled without duplicating.
-  * One `quarantine_data_snapshot` per date, chained BEFORE that date's rows,
+  * One base `quarantine_data_snapshot` per date -- extended, when a deferred
+    class is backfilled after the base was chained, by asset-disjoint
+    `quarantine_data_snapshot_supplement` entries -- chained BEFORE the rows,
     recording two SHA-256s per asset: `data_sha256` of the whole price file
     (what screen.py and gauntlet.py already record) and `bars_sha256` of the
     bars up to and including that date. Because each day is recomputed from
@@ -54,7 +62,8 @@ from pathlib import Path
 
 from . import cells
 from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
-                       DuplicateQuarantineSnapshot)
+                       DuplicateQuarantineSnapshot,
+                       OverlappingQuarantineSupplement)
 from .engine import simulate_asset
 from .screen import load_bars
 
@@ -116,6 +125,32 @@ def data_snapshots(registry: Registry) -> dict[str, dict]:
         if e["entry_type"] == "quarantine_data_snapshot":
             out.setdefault(e["payload"]["date"], e["payload"])
     return out
+
+
+def snapshot_supplements(registry: Registry) -> dict[str, list[dict]]:
+    """{date: [payloads in chain order]} for every
+    quarantine_data_snapshot_supplement on the chain (2026-08-27 addendum).
+    A cheap pre-read only, like data_snapshots; the authoritative disjointness
+    check is Registry.record_quarantine_snapshot_supplement under the lock."""
+    out: dict[str, list[dict]] = {}
+    for e in registry.entries():
+        if e["entry_type"] == "quarantine_data_snapshot_supplement":
+            out.setdefault(e["payload"]["date"], []).append(e["payload"])
+    return out
+
+
+def merged_bars_coverage(base: dict, sups: list[dict]) -> dict[str, str]:
+    """{asset: bars_sha256} covered for a date: the base snapshot first, then
+    supplements in chain order, first writer wins on a (defective) overlap --
+    the data_snapshots first-wins precedent, and the same merge the verifier
+    performs for decision coverage."""
+    merged: dict[str, str] = {}
+    for p in [base] + sups:
+        m = p.get("bars_sha256")
+        if isinstance(m, dict):
+            for a, h in m.items():
+                merged.setdefault(a, h)
+    return merged
 
 
 def hash_price_files(data_dir: Path, assets: list[str]) -> dict[str, str]:
@@ -183,23 +218,23 @@ def hash_bars_used(data_dir: Path, assets: list[str],
 
 def snapshot_conflicts(recorded: dict[str, str],
                        current: dict[str, str]) -> list[str]:
-    """Why `current` cannot be reconciled with the snapshot already chained
-    for that date. Empty means the day may proceed. Both maps are
+    """Why `current` cannot be reconciled with the coverage already chained
+    for that date. Empty means the overlapping assets match. Both maps are
     bars_sha256, never data_sha256: a refresh that only appends future bars
     must be a non-event.
 
     Split out so the comparison is testable without running the whole command
-    -- the check_aligned precedent. A snapshot covering MORE assets than this
-    run needs is not a conflict: a strategy may have been buried since.
+    -- the check_aligned precedent. Coverage of MORE assets than this run
+    needs is not a conflict: a strategy may have been buried since. Since the
+    2026-08-27 per-class-calendars addendum, an asset in `current` that the
+    chain does not cover YET is not a conflict either -- that is the
+    supplement path, a class backfilled after the base snapshot was chained.
+    Only 'covered but with a DIFFERENT hash' -- a restatement of bars that
+    rows were computed from -- is irreconcilable.
     """
     reasons = []
     for asset in sorted(current):
-        if asset not in recorded:
-            reasons.append(
-                f"{asset}: the chained snapshot for this date names no hash "
-                f"for it. The chain is append-only, so the snapshot cannot be "
-                f"amended and a second one would break its uniqueness.")
-        elif recorded[asset] != current[asset]:
+        if asset in recorded and recorded[asset] != current[asset]:
             reasons.append(
                 f"{asset}: the bars up to this date have changed since it was "
                 f"recorded (chained {recorded[asset]}, recomputed "
@@ -273,13 +308,12 @@ def observe_day(spec: dict, bars_by_asset: dict[str, list[dict]], date: str,
     return rows
 
 
-def _load_day_bars_or_refuse(data_dir: Path, assets: list[str],
-                             date: str) -> dict[str, list[dict]] | None:
-    """Bars <= date for every asset, or None after printing the refusal.
-
-    All-or-nothing, and resolved BEFORE anything is chained: a day with a hole
-    in it is refused whole rather than recorded in part.
-    """
+def _load_eligible_bars_or_refuse(data_dir: Path, assets: list[str],
+                                  date: str) -> dict[str, list[dict]] | None:
+    """Bars <= date for every asset an eligible spec trades, or None after
+    printing the refusal. A missing price FILE is a hard refusal -- a wrong
+    path or a broken data dir must never read as publication lag -- while a
+    missing BAR is judged per spec by the caller (2026-08-27 addendum)."""
     bars_by_asset: dict[str, list[dict]] = {}
     for asset in assets:
         path = data_dir / f"{asset}_1d.csv"
@@ -287,13 +321,7 @@ def _load_day_bars_or_refuse(data_dir: Path, assets: list[str],
             print(f"REFUSED: no price file for {asset} at {path}.",
                   file=sys.stderr)
             return None
-        bars = load_bars(data_dir, asset, date)
-        if not bars or bars[-1]["date"] != date:
-            print(f"REFUSED: no {asset} bar for {date}. A decision is never "
-                  f"invented for a non-trading day; backfill the data or pick "
-                  f"a real trading day.", file=sys.stderr)
-            return None
-        bars_by_asset[asset] = bars
+        bars_by_asset[asset] = load_bars(data_dir, asset, date)
     return bars_by_asset
 
 
@@ -507,21 +535,58 @@ def run(argv: list[str] | None = None) -> int:
         else:
             eligible.append(sid)
 
+    # Per-class calendars (2026-08-27 addendum): a spec records only when
+    # EVERY asset in its universe has a bar for the date. A missing bar with
+    # the file present is publication lag (FRED-fed FX runs ~a week behind
+    # the crypto calendar): that spec DEFERS, loudly, and an explicit --date
+    # backfill records it once the bar publishes. A missing FILE stays a hard
+    # refusal inside the loader.
     bars_by_asset: dict[str, list[dict]] = {}
+    ready: list[str] = []
     if eligible:
-        assets = sorted({a for sid in eligible
-                         for a in specs[sid]["universe"]["assets"]})
-        loaded = _load_day_bars_or_refuse(args.data_dir, assets, args.date)
+        loaded = _load_eligible_bars_or_refuse(
+            args.data_dir,
+            sorted({a for sid in eligible
+                    for a in specs[sid]["universe"]["assets"]}),
+            args.date)
         if loaded is None:
             return 1
         bars_by_asset = loaded
+        for sid in eligible:
+            missing = [a for a in specs[sid]["universe"]["assets"]
+                       if not bars_by_asset[a]
+                       or bars_by_asset[a][-1]["date"] != args.date]
+            if missing:
+                a = missing[0]
+                ends = (f"data ends {bars_by_asset[a][-1]['date']}"
+                        if bars_by_asset[a]
+                        else "no bars on or before the date")
+                print(f"{sid}  deferred: no {a} bar for {args.date} yet "
+                      f"({ends})")
+            else:
+                ready.append(sid)
+        if not ready:
+            # While a class that trades every calendar day is in the pool, a
+            # day where NOTHING can record means the data pipeline is dead,
+            # and going quiet would hide exactly the outage most likely to
+            # persist unattended. Revisit if the pool ever goes tradfi-only.
+            print(f"REFUSED: nothing recorded for {args.date} -- every "
+                  f"eligible strategy was deferred for a missing bar. Either "
+                  f"the data refresh is broken, or every class is late at "
+                  f"once; backfill with an explicit --date once bars exist.",
+                  file=sys.stderr)
+            return 1
 
+    if ready:
+        assets = sorted({a for sid in ready
+                         for a in specs[sid]["universe"]["assets"]})
         # Provenance BEFORE any decision row, because invariant 9 asks for an
         # EARLIER snapshot: recording the bars afterwards would prove nothing
         # about what the rows were computed from.
         bars_digests = hash_bars_used(args.data_dir, assets, args.date)
         recorded = data_snapshots(registry).get(args.date)
-        if recorded is None:
+        sups = snapshot_supplements(registry).get(args.date, [])
+        if recorded is None and not sups:
             try:
                 registry.record_quarantine_snapshot(
                     {"date": args.date,
@@ -531,24 +596,73 @@ def run(argv: list[str] | None = None) -> int:
                 # another process chained this date's provenance between the
                 # read above and this write; reconcile against what landed
                 recorded = dup.chained
-        if recorded is not None:
-            # `or {}` fails CLOSED: a snapshot with no usable bars_sha256
-            # covers nothing, so every asset is reported and the day refused
-            conflicts = snapshot_conflicts(recorded.get("bars_sha256") or {},
-                                           bars_digests)
-            if conflicts:
+                sups = snapshot_supplements(registry).get(args.date, [])
+        if recorded is not None or sups:
+            if recorded is None:
+                # The two chain reads above are separate un-locked walks, so
+                # a concurrent run can chain base+supplement BETWEEN them and
+                # leave this one seeing 'supplement but no base' on a healthy
+                # chain. Read the base again before crying defect: after the
+                # re-read, a supplement with genuinely no base can only be a
+                # hand-appended entry (the writer requires the base), which
+                # the verifier rejects -- recording against it would
+                # compound the defect.
+                recorded = data_snapshots(registry).get(args.date)
+            if recorded is None:
+                print(f"REFUSED: {args.date} has supplement provenance but "
+                      f"no base quarantine_data_snapshot -- a defective "
+                      f"chain needs human eyes, not more rows.",
+                      file=sys.stderr)
+                return 1
+            if (not isinstance(recorded.get("bars_sha256"), dict)
+                    or not recorded["bars_sha256"]):
+                # fails CLOSED, the `or {}` precedent: a base snapshot with
+                # no usable bars_sha256 covers nothing, and papering over it
+                # with a supplement for everything would legitimise a
+                # fabricated provenance root
                 print(f"REFUSED: the quarantine_data_snapshot chained for "
-                      f"{args.date} does not match the bars this run would "
-                      f"use, so re-running the date would not reproduce the "
-                      f"rows already on the chain:", file=sys.stderr)
+                      f"{args.date} carries no usable bars_sha256 map, so it "
+                      f"covers nothing -- {', '.join(sorted(bars_digests))} "
+                      f"included -- and cannot be supplemented honestly.",
+                      file=sys.stderr)
+                return 1
+            covered = merged_bars_coverage(recorded, sups)
+            conflicts = snapshot_conflicts(covered, bars_digests)
+            if conflicts:
+                print(f"REFUSED: the provenance chained for {args.date} does "
+                      f"not match the bars this run would use, so re-running "
+                      f"the date would not reproduce the rows already on the "
+                      f"chain:", file=sys.stderr)
                 for reason in conflicts:
                     print(f"  {reason}", file=sys.stderr)
                 return 1
+            new_assets = sorted(set(bars_digests) - set(covered))
+            if new_assets:
+                # the backfill of a class deferred when the base was chained
+                try:
+                    registry.record_quarantine_snapshot_supplement(
+                        {"date": args.date,
+                         "data_sha256": hash_price_files(args.data_dir,
+                                                         new_assets),
+                         "bars_sha256": {a: bars_digests[a]
+                                         for a in new_assets}})
+                except OverlappingQuarantineSupplement as clash:
+                    # a concurrent writer covered (some of) these assets
+                    # between the read above and this write; absorb only an
+                    # IDENTICAL cover -- anything else is irreconcilable
+                    landed = clash.chained.get("bars_sha256", {})
+                    if any(landed.get(a) != bars_digests[a]
+                           for a in new_assets):
+                        print(f"REFUSED: a concurrent supplement for "
+                              f"{args.date} covers {new_assets} with "
+                              f"different bar hashes than this run computed.",
+                              file=sys.stderr)
+                        return 1
 
     seen = existing_decisions(registry)
     n_written = n_skipped = 0
     try:
-        for sid in eligible:
+        for sid in ready:
             for row in observe_day(specs[sid], bars_by_asset, args.date,
                                    entered[sid]):
                 key = (row["strategy_id"], row["date"], row["asset"])

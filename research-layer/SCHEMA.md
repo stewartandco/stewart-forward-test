@@ -343,6 +343,7 @@ Common envelope:
 | `state_change` | `{strategy_id, from, to, reason?}` | lifecycle transition |
 | `quarantine_decision` | `{strategy_id, date, asset, action, price, position_frac, equity}` | daily quarantine forward runner — one row per strategy per asset per trading day |
 | `quarantine_data_snapshot` | `{date, data_sha256: {asset: hex}, bars_sha256: {asset: hex}}` | once per date, immediately before that date's decision rows — the price data those decisions were computed from, hashed whole-file and bars-through-that-date |
+| `quarantine_data_snapshot_supplement` | same shape as `quarantine_data_snapshot` | 2026-08-27 per-class-calendars addendum: extends a date's provenance for a class whose source published after the base snapshot was chained (FRED-fed FX lags the crypto calendar ~a week). Must follow a base snapshot for its date, name only assets the date does not already cover, and precede the rows it licenses |
 | `block_type_registered` | `{role, type, params_schema}` | block grammar grows |
 | `note` | `{text}` | rare human annotations (incidents, corrections) |
 
@@ -367,11 +368,21 @@ quarantine-entry date, so a forward record always starts at 1.
 missed day can be backfilled.
 
 Every `quarantine_decision` must be preceded by a `quarantine_data_snapshot`
-for its date naming its asset. The runner recomputes each strategy's whole book
-from the first bar every day — which is what makes a backfilled row identical
-to a live one — so the identity of the price data is load-bearing: without it,
-a re-fetch or vendor restatement would silently change what a reproduction
-yields for every historical day.
+— or, for a class backfilled after the base snapshot was chained, a
+`quarantine_data_snapshot_supplement` — for its date naming its asset. The
+runner recomputes each strategy's whole book from the first bar every day —
+which is what makes a backfilled row identical to a live one — so the identity
+of the price data is load-bearing: without it, a re-fetch or vendor
+restatement would silently change what a reproduction yields for every
+historical day.
+
+Since the 2026-08-27 per-class-calendars addendum
+(`docs/2026-08-27-quarantine-per-class-calendars-addendum.md`), the daily
+runner records per spec: a spec whose universe is missing that date's bar is
+deferred (loudly, exit 0) rather than refusing every other spec's day, and its
+dates are backfilled by explicit `--date` runs once the bars publish. A
+missing price file, a day where every eligible spec defers, or a restatement
+of covered bars stays a hard refusal.
 
 The snapshot hashes each asset's price file two ways, and the difference
 matters:
@@ -424,6 +435,9 @@ bundle tamper-evident without bloating the registry.
    same check the writer applies, so a hand-appended fake cannot license a
    date. Every `quarantine_decision` is covered by an **earlier** snapshot for
    its date naming its asset in both maps — no forward record exists without
-   the provenance of the bars behind it.
+   the provenance of the bars behind it. A
+   `quarantine_data_snapshot_supplement` must follow a base snapshot for its
+   date and be asset-disjoint from the date's prior coverage; it licenses
+   decisions exactly as the base does.
 
 Run: `python research-layer/verify_registry.py research-layer/examples/registry_log.example.jsonl`

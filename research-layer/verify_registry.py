@@ -20,7 +20,12 @@ invariants:
      the writer applies, so a hand-appended fake cannot license a date), and
      every quarantine_decision is covered by an EARLIER snapshot for its date
      naming its asset in both maps — so no forward record exists without the
-     provenance of the bars behind it
+     provenance of the bars behind it. Since the 2026-08-27 per-class-
+     calendars addendum, a quarantine_data_snapshot_supplement (same shape)
+     may extend a date's coverage for a class that published late: it must
+     FOLLOW a base snapshot for its date, name only assets the date does not
+     already cover, and it licenses decisions exactly as the base does —
+     earlier-than-the-row, both maps
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -99,6 +104,43 @@ def _canonical_json(obj) -> str:
 
 def _entry_hash(entry: dict) -> str:
     return hashlib.sha256(_canonical_json(entry).encode("utf-8")).hexdigest()
+
+
+def snapshot_digest_coverage(lineno, etype, payload, fail):
+    """The digest-map half of invariant 9, shared by quarantine_data_snapshot
+    and quarantine_data_snapshot_supplement.
+
+    `named` is what the entry CLAIMS, `valid` is what survives the same digest
+    test the writer applies. Checking the format here is the point of
+    invariant 9: a verifier that accepted digests the writer rejects would
+    leave an outsider unable to tell a real provenance record from a
+    fabricated one. Returns the covered assets: the INTERSECTION of the VALID
+    sets, because an asset hashed only one way, or carrying something that is
+    not a digest, is not provenanced and must not license a decision.
+    """
+    named, valid, bad_map = [], [], False
+    for field in QUARANTINE_SNAPSHOT_DIGEST_KEYS:
+        m = payload.get(field)
+        if not isinstance(m, dict):
+            fail(lineno, f"{etype} {field} is not an {{asset: sha256}} map")
+            bad_map = True
+            named.append(set())
+            valid.append(set())
+            continue
+        named.append(set(m))
+        good = {a for a, h in m.items()
+                if isinstance(a, str) and is_sha256_hex(h)}
+        if set(m) - good:
+            fail(lineno, f"{etype} {field}: not a sha256 digest for "
+                         f"{sorted(repr(a) for a in set(m) - good)}")
+        valid.append(good)
+    # skipped when a map was unusable: it would report a second, misleading
+    # reason for the same defect
+    if not bad_map and named[0] != named[1]:
+        fail(lineno, f"{etype} names different assets in "
+                     f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[0]} and "
+                     f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[1]}")
+    return valid[0] & valid[1]
 
 
 def verify(log_path: Path) -> int:
@@ -268,40 +310,8 @@ def verify(log_path: Path) -> int:
 
             elif etype == "quarantine_data_snapshot":
                 d = payload.get("date")
-                # `named` is what the entry CLAIMS, `valid` is what survives
-                # the same digest test the writer applies. Checking the format
-                # here is the point of invariant 9: a verifier that accepted
-                # digests the writer rejects would leave an outsider unable to
-                # tell a real provenance record from a fabricated one.
-                named, valid, bad_map = [], [], False
-                for field in QUARANTINE_SNAPSHOT_DIGEST_KEYS:
-                    m = payload.get(field)
-                    if not isinstance(m, dict):
-                        fail(lineno, f"quarantine_data_snapshot {field} is "
-                                     f"not an {{asset: sha256}} map")
-                        bad_map = True
-                        named.append(set())
-                        valid.append(set())
-                        continue
-                    named.append(set(m))
-                    good = {a for a, h in m.items()
-                            if isinstance(a, str) and is_sha256_hex(h)}
-                    if set(m) - good:
-                        fail(lineno, f"quarantine_data_snapshot {field}: not a "
-                                     f"sha256 digest for "
-                                     f"{sorted(repr(a) for a in set(m) - good)}")
-                    valid.append(good)
-                # skipped when a map was unusable: it would report a second,
-                # misleading reason for the same defect
-                if not bad_map and named[0] != named[1]:
-                    fail(lineno, f"quarantine_data_snapshot names different "
-                                 f"assets in "
-                                 f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[0]} and "
-                                 f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[1]}")
-                # coverage is the INTERSECTION of the VALID sets: an asset
-                # hashed only one way, or carrying something that is not a
-                # digest, is not provenanced and must not license a decision
-                covered = valid[0] & valid[1]
+                covered = snapshot_digest_coverage(lineno, etype, payload,
+                                                   fail)
                 if not isinstance(d, str):
                     # a list date would raise on the dict lookup below
                     fail(lineno, f"quarantine_data_snapshot date {d!r} is not "
@@ -310,6 +320,31 @@ def verify(log_path: Path) -> int:
                     fail(lineno, f"duplicate quarantine_data_snapshot for {d}")
                 else:
                     snapshots[d] = covered
+
+            elif etype == "quarantine_data_snapshot_supplement":
+                # 2026-08-27 per-class-calendars addendum: a supplement
+                # extends a date's coverage for a class that published after
+                # the base snapshot was chained. Same digest rules as the
+                # base; additionally it must FOLLOW a base for its date and
+                # be asset-disjoint from what the date already covers.
+                d = payload.get("date")
+                covered = snapshot_digest_coverage(lineno, etype, payload,
+                                                   fail)
+                if not isinstance(d, str):
+                    fail(lineno, f"quarantine_data_snapshot_supplement date "
+                                 f"{d!r} is not a string")
+                elif d not in snapshots:
+                    fail(lineno, f"quarantine_data_snapshot_supplement for "
+                                 f"{d}: no earlier quarantine_data_snapshot "
+                                 f"for its date -- a supplement extends a "
+                                 f"date's provenance, it cannot start it")
+                else:
+                    overlap = sorted(covered & snapshots[d])
+                    if overlap:
+                        fail(lineno, f"quarantine_data_snapshot_supplement "
+                                     f"for {d}: assets already covered "
+                                     f"{overlap}")
+                    snapshots[d] |= covered
 
             elif etype == "quarantine_decision":
                 sid = payload.get("strategy_id")
