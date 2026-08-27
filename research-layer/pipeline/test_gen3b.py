@@ -596,6 +596,26 @@ def test_decision_row_shape_and_values_on_entry_day(tmp_path):
     assert r["equity"] == pytest.approx(1.0)
 
 
+def test_quarantine_date_run_defers_when_chain_lock_held(tmp_path, capsys):
+    """A held chain.lock defers the daily run with exit 0, a clear line, and
+    ZERO chain writes -- the --date backfill covers the gap."""
+    from .chainlock import ChainLock
+    reg, spec, data = quarantined(tmp_path)
+    chain_len_before = len(reg.log_path.read_text(encoding="utf-8")
+                           .splitlines())
+    other = ChainLock(reg.log_path.parent / "logs", holder="session",
+                      purpose="manual work")
+    other.acquire()
+    try:
+        rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    finally:
+        other.release()
+    assert rc == 0
+    assert "deferred_lock" in capsys.readouterr().out
+    assert len(reg.log_path.read_text(encoding="utf-8")
+              .splitlines()) == chain_len_before
+
+
 def test_decision_on_exit_day(tmp_path):
     reg, spec, data = quarantined(tmp_path)
     quarantine_run(["--registry", str(reg.log_path), "--data-dir", str(data),
