@@ -122,3 +122,21 @@ def test_custom_lock_name_is_independent_of_chain_lock(tmp_path):
         assert (tmp_path / "chain.lock").exists()   # untouched by instance.release()
     finally:
         chain.release()
+
+
+def test_holder_alive_true_for_own_pid(tmp_path):
+    lk = ChainLock(tmp_path, holder="loop-instance", purpose="x")
+    lk.acquire()
+    try:
+        assert lk.holder_alive() is True
+    finally:
+        lk.release()
+
+
+def test_holder_alive_false_for_bogus_pid(tmp_path):
+    (tmp_path / "chain.lock").write_text(
+        json.dumps({"holder": "loop-instance", "pid": 4_000_000,
+                   "ts_utc": "2020-01-01T00:00:00+00:00", "purpose": "x"}),
+        encoding="utf-8")
+    lk = ChainLock(tmp_path, holder="loop-instance", purpose="y")
+    assert lk.holder_alive() is False

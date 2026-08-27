@@ -122,7 +122,7 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
     assert status["items"]["asset_class"] == "fx"
-    assert status["items"]["chain_entries_added"] == "0"       # FakeRunner touches nothing
+    assert status["items"]["chain_growth"] == "0"       # FakeRunner touches nothing
     assert status["items"]["run_id"].endswith("-loop-fx")
 
 
@@ -276,16 +276,127 @@ def test_composer_cap_refusal_parks_not_fails(tmp_path):
     assert "fx" not in st.get("classes", {})           # watermark NOT advanced
 
 
-def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path):
+def test_composer_dry_run_cap_refusal_also_parks_not_fails(tmp_path):
+    """composer.run() calls the metered propose_families BEFORE it ever
+    branches on --dry-run, so the hard-cap refusal can surface on the
+    DRY-RUN preflight call too -- the park remap must cover both composer
+    invocations, not only the real run."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    ledger = layer / "logs" / "budget_ledger.jsonl"
+
+    class _ComposerDryRunCapRefusalRunner(FakeRunner):
+        def __call__(self, argv, **kw):
+            if ("-m" in argv and argv[argv.index("-m") + 1] == "pipeline.composer"
+                    and "--dry-run" in argv):
+                from datetime import datetime, timezone
+                month = datetime.now(timezone.utc).strftime("%Y-%m")
+                with ledger.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
+                                        "usd": 20.0, "purpose": "composer",
+                                        "model": "claude-sonnet-5",
+                                        "agent": "pipeline"}) + "\n")
+                self.calls.append(list(argv))
+                class R: pass
+                r = R(); r.returncode = 1
+                return r
+            return super().__call__(argv, **kw)
+
+    fr = _ComposerDryRunCapRefusalRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer"]  # never reached real run
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_budget"
+    assert status["overall"] == "WARN"
+    assert "budget_cap" in status["escalations"]
+
+
+def test_composer_failure_in_batch_stop_band_without_cap_crossing_stays_stage_failed(tmp_path):
+    """16-20 USD is the batch-stop band, not the hard cap: a genuine
+    composer crash there must remain stage_failed, never get remapped to a
+    budget park. The remap predicate is may_spend (>=20 hard cap), NOT
+    may_start_batch (>=16 batch-stop) -- this pins that it is narrow."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    ledger = layer / "logs" / "budget_ledger.jsonl"
+
+    class _ComposerCrashInBandRunner(FakeRunner):
+        def __call__(self, argv, **kw):
+            if ("-m" in argv and argv[argv.index("-m") + 1] == "pipeline.composer"
+                    and "--dry-run" not in argv):
+                # Spend $17 (below the hard cap) before crashing for some
+                # unrelated reason -- no cap-crossing side effect.
+                from datetime import datetime, timezone
+                month = datetime.now(timezone.utc).strftime("%Y-%m")
+                with ledger.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
+                                        "usd": 17.0, "purpose": "composer",
+                                        "model": "claude-sonnet-5",
+                                        "agent": "pipeline"}) + "\n")
+                self.calls.append(list(argv))
+                class R: pass
+                r = R(); r.returncode = 1
+                return r
+            return super().__call__(argv, **kw)
+
+    fr = _ComposerCrashInBandRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 1
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "stage_failed"
+    assert status["overall"] == "FAIL"
+    assert status["items"]["failed_stage"] == "pipeline.composer"
+
+
+def test_chain_invalid_before_triage_aborts_with_zero_spend(tmp_path):
+    """A pre-existing invalid chain must abort BEFORE triage (zero metered
+    spend), not merely be caught after the whole cycle has already spent
+    against it."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     # verify_registry.py is invoked WITHOUT "-m" -- FakeRunner keys it by
     # argv[0] (sys.executable), which every "-m" stage call also starts
     # with but is keyed by module name instead, so this uniquely targets
-    # only the verify step.
+    # the (first) verify step.
     fr = FakeRunner(codes={sys.executable: 1})
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 1
+    assert _modules(fr) == []                 # no -m stage ran -- caught before triage
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "chain_invalid"
+    assert status["overall"] == "FAIL"
+    assert "chain_invalid" in status["escalations"]
+
+
+class _FailSecondVerifyRunner(FakeRunner):
+    """The loop calls verify_registry.py TWICE (pre-triage and
+    post-gauntlet), both without "-m" -- FakeRunner's simple keying can't
+    tell them apart by argv alone, so this counts occurrences and fails
+    only the second, letting the whole cycle run first."""
+    def __init__(self, codes=None):
+        super().__init__(codes)
+        self._verify_calls = 0
+
+    def __call__(self, argv, **kw):
+        if "-m" not in argv:
+            self._verify_calls += 1
+            self.calls.append(list(argv))
+            class R: pass
+            r = R()
+            r.returncode = 1 if self._verify_calls == 2 else 0
+            return r
+        return super().__call__(argv, **kw)
+
+
+def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = _FailSecondVerifyRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 1
+    assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
+                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "chain_invalid"
     assert status["overall"] == "FAIL"
@@ -306,6 +417,52 @@ def test_instance_lock_defers_concurrent_run(tmp_path):
     assert rc == 0
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "deferred_instance"
+    assert status["overall"] == "WARN"     # the one deferral that can persist
+
+
+def _write_loop_lock(layer, pid, age_hours=0):
+    """A loop.lock file with a deliberately chosen pid -- ChainLock.acquire()
+    always writes os.getpid(), so a dead/bogus pid must be written directly."""
+    path = layer / "logs" / "loop.lock"
+    path.write_text(json.dumps({"holder": "loop-instance", "pid": pid,
+                                "ts_utc": "2020-01-01T00:00:00+00:00",
+                                "purpose": "manual"}), encoding="utf-8")
+    if age_hours:
+        old = time.time() - age_hours * 3600
+        os.utime(path, (old, old))
+    return path
+
+
+def test_instance_lock_dead_holder_is_broken_and_cycle_proceeds(tmp_path):
+    """A hard kill / reboot / crash orphans loop.lock -- left unbroken, every
+    later fire would defer forever at overall OK, a wedge that reads as
+    healthy. A stale (>2h) lock whose recorded pid is provably not running
+    must be broken on a SINGLE sighting and the cycle must proceed."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    lock_path = _write_loop_lock(layer, pid=4_000_000, age_hours=3)  # >2h, dead pid
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"   # proceeded past the dead lock
+    assert not lock_path.exists()      # released again after our own cycle finished
+
+
+def test_instance_lock_live_holder_defers_even_when_stale(tmp_path):
+    """Age alone is never evidence of death (a slow but legitimate cycle) --
+    a LIVE holder must defer unconditionally, however old the lock is."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    lock_path = _write_loop_lock(layer, pid=os.getpid(), age_hours=3)  # >2h, but alive (us)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert fr.calls == []
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_instance"
+    assert status["overall"] == "WARN"
+    assert lock_path.exists()          # never broken -- a live holder wins regardless of age
 
 
 def test_loop_crashes_are_caught_and_reported(tmp_path):
@@ -353,8 +510,8 @@ def _make_stale_foreign_lock(layer):
     return lock_path
 
 
-def test_stale_foreign_lock_first_sighting_warns_and_defers(tmp_path):
-    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+def test_stale_foreign_lock_first_sighting_warns_and_defers(tmp_path, monkeypatch):
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     lock_path = _make_stale_foreign_lock(layer)
 
@@ -369,11 +526,41 @@ def test_stale_foreign_lock_first_sighting_warns_and_defers(tmp_path):
     assert lock_path.exists()                            # first strike never breaks it
 
     # Second run against the SAME (still-aged) lock file: second strike.
-    rc2 = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    fr2 = FakeRunner()
+    rc2 = loop.run(["--once", "--layer", str(layer)], runner=fr2)
     assert rc2 == 0
     assert not lock_path.exists()                         # broken on the 2nd sighting
     status2 = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status2["items"]["outcome"] == "cycle_complete"  # cycle continued after the break
+    run_id_2 = next(c[c.index("--run-id") + 1] for c in fr2.calls
+                    if "-m" in c and "--run-id" in c and "--dry-run" not in c)
+
+    # A LATER, separately-triggered successful cycle must mint a DIFFERENT
+    # run_id than this one -- proves _make_run_id() is evaluated fresh per
+    # invocation, never cached or reused across cycles.
+    for i in range(25):
+        cid = f"card2_{i:04d}"
+        reg.register_card({"card_id": cid, "claim": f"c2_{i}", "quote": "q",
+                           "topics": [], "tags": {"asset_classes": ["fx"]},
+                           "review": {"status": "pending", "reject_reason": None},
+                           "source": {}, "links": [], "credibility_tier": "practitioner"})
+        reg.review_card(cid, "accepted", "coen")
+    _seed_crypto_caught_up(layer, 55)      # keep crypto caught up, isolate fx again
+    # Force a distinct wall-clock second for this run -- a fast test can
+    # otherwise land both invocations in the SAME real second, which would
+    # make this assertion flaky rather than a genuine seam check.
+    from datetime import datetime as real_datetime
+    class _LaterDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 8, 27, 12, 0, 0, tzinfo=tz)
+    monkeypatch.setattr(loop, "datetime", _LaterDatetime)
+    fr3 = FakeRunner()
+    rc3 = loop.run(["--once", "--layer", str(layer)], runner=fr3)
+    assert rc3 == 0
+    run_id_3 = next(c[c.index("--run-id") + 1] for c in fr3.calls
+                    if "-m" in c and "--run-id" in c and "--dry-run" not in c)
+    assert run_id_2 != run_id_3
 
 
 class _ForeignAcquireOnDryRunRunner(FakeRunner):
@@ -429,6 +616,12 @@ def test_break_stale_race_treated_as_fresh_lock_defer(tmp_path, monkeypatch):
     assert rc1 == 0     # first sighting: unchanged behaviour
 
     def _racy_break_stale(self):
+        # Simulate the actual race: unlink the stale lock and let a NEW
+        # writer acquire it as "intruder" in the exact gap between
+        # is_stale() and break_stale() -- then behave exactly like the real
+        # break_stale() would against that now-fresh lock: refuse.
+        self.path.unlink(missing_ok=True)
+        ChainLock(self.path.parent, holder="intruder", purpose="race").acquire()
         raise ChainLockHeld("refusing to break a fresh chain.lock")
     monkeypatch.setattr(ChainLock, "break_stale", _racy_break_stale)
 
@@ -437,3 +630,28 @@ def test_break_stale_race_treated_as_fresh_lock_defer(tmp_path, monkeypatch):
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "deferred_lock"
     assert status["items"]["lock_stale"] == "false"
+    assert status["items"]["lock_holder"] == "intruder"
+
+
+def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatch):
+    """If the stale lock's holder releases it entirely between our
+    is_stale() read and break_stale() -- so break_stale() still raises, but
+    by the time we re-check, NOTHING is there -- proceed with the cycle;
+    there is no lock left to defer to."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    lock_path = _make_stale_foreign_lock(layer)
+
+    rc1 = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc1 == 0     # first sighting
+
+    def _vanishing_break_stale(self):
+        self.path.unlink(missing_ok=True)     # holder released it entirely
+        raise ChainLockHeld("refusing to break a fresh chain.lock")
+    monkeypatch.setattr(ChainLock, "break_stale", _vanishing_break_stale)
+
+    rc2 = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc2 == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"   # proceeded, nothing to defer to
+    assert not lock_path.exists()

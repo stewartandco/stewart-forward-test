@@ -16,6 +16,7 @@ while they work on the chain. Rules (spec 2026-08-27-pipeline-loop-design):
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import time
@@ -65,6 +66,47 @@ class ChainLock:
     def is_stale(self) -> bool:
         age = self.age_s()
         return age is not None and age > self.stale_after_s
+
+    def holder_alive(self) -> bool:
+        """Whether the recorded holder pid is still a running process.
+
+        Used by loop.py's instance guard to break an orphaned loop.lock (a
+        hard kill, reboot, or acquire-then-crash) without waiting on a
+        two-strike sighting -- a dead pid is decisive, not merely
+        suspicious. Conservative wherever liveness cannot be determined:
+        unknown means ALIVE, so a live holder is never mistaken for dead.
+
+        NEVER use os.kill(pid, 0) for this: on Windows, os.kill with any
+        signal other than CTRL_C_EVENT/CTRL_BREAK_EVENT unconditionally
+        TERMINATES the target process via TerminateProcess -- it is not a
+        liveness probe there, unlike POSIX's signal 0.
+        """
+        info = self.info()
+        if info is None:
+            return False
+        pid = info.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        if os.name != "nt":
+            # No side-effect-free liveness check implemented for POSIX yet.
+            return True
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                          False, pid)
+            if not handle:
+                return False           # no such process
+            try:
+                exit_code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True         # query itself failed -- conservative
+                return exit_code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True                 # platform check failed -- conservative
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

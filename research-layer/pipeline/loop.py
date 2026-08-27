@@ -112,6 +112,70 @@ def _abort_stage_failed(logs_dir: str | Path, state: dict, asset_class: str,
     return 1
 
 
+def _composer_rc_or_park(logs_dir: str | Path, state: dict, asset_class: str,
+                         module_key: str, rc: int) -> int:
+    """After EITHER composer invocation (the --dry-run preflight or the real
+    run) exits nonzero, decide whether this is composer's OWN hard-cap
+    refusal (propose_families's meter.can_spend() check raises SystemExit,
+    which the dry-run preflight hits too -- composer.run() calls the metered
+    propose_families before it ever branches on --dry-run) -- which must map
+    to a budget park, never a stage defect -- or a genuine composer crash.
+
+    Deliberately narrower than the proactive pre-triage/post-triage gates
+    (which use may_start_batch, the 80% batch-stop line, to decide whether
+    to START new work): this is a REACTIVE check explaining why composer
+    itself already failed, and composer's own guard only fires at the true
+    100% hard cap (pipeline_budget.may_spend). A failure in the 80-100% band
+    with no cap-crossing spend is a real defect, not a park."""
+    post_spent = _spent(logs_dir)
+    if not pipeline_budget.may_spend(post_spent):
+        msg = (f"deferred_budget: {module_key} exited nonzero (rc={rc}) with "
+               f"pipeline spend USD {post_spent:.2f} at/above the hard cap "
+               f"-- treating as a budget park, not a stage defect")
+        print(msg, flush=True)
+        _write_status(logs_dir, "deferred_budget", overall="WARN",
+                      extra={"asset_class": asset_class},
+                      spent=post_spent, escalations=_budget_escalations(post_spent),
+                      state=state)
+        return 0
+    return _abort_stage_failed(logs_dir, state, asset_class, module_key, rc)
+
+
+def _acquire_instance_lock_or_break_dead(instance_lock: ChainLock) -> bool:
+    """True if the instance lock is now held by THIS run and the cycle may
+    proceed; False means defer.
+
+    A hard kill (the scheduled task's execution-time-limit), a reboot, or an
+    acquire-then-crash can orphan loop.lock. Left unbroken, deferred_instance
+    would recur forever at overall=OK -- a wedge that reads as healthy
+    indefinitely. A LIVE holder still defers unconditionally however old the
+    lock is: age alone is not evidence of death (a slow but legitimate
+    cycle). Only a holder whose recorded pid is provably not running
+    licenses a break, and a single strike suffices here -- unlike
+    chain.lock's ambiguous holders, a dead pid is decisive, not merely
+    suspicious."""
+    try:
+        instance_lock.acquire()
+        return True
+    except ChainLockHeld:
+        pass
+    if not (instance_lock.is_stale() and not instance_lock.holder_alive()):
+        return False
+    try:
+        instance_lock.break_stale()
+    except ChainLockHeld:
+        print("deferred_instance: loop.lock changed hands during a "
+             "dead-holder break, deferring", flush=True)
+        return False
+    try:
+        instance_lock.acquire()
+        return True
+    except ChainLockHeld:
+        print("deferred_instance: lost the race to reclaim loop.lock after "
+             "breaking a dead holder, deferring", flush=True)
+        return False
+
+
 def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--once", action="store_true", required=True,
@@ -135,9 +199,15 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     except Exception as exc:                        # unattended -- never silent
         traceback.print_exc()
         print(f"loop_crashed: {exc}", flush=True)
-        _write_status(logs_dir, "loop_crashed", overall="FAIL",
-                      extra={"error": str(exc)[:200]},
-                      spent=_spent(logs_dir), escalations=["run_aborted"])
+        try:
+            _write_status(logs_dir, "loop_crashed", overall="FAIL",
+                          extra={"error": str(exc)[:200]},
+                          spent=_spent(logs_dir), escalations=["run_aborted"])
+        except Exception:
+            # A corrupt ledger or an unwritable logs dir must not swallow
+            # the ORIGINAL crash -- its traceback is already on record above
+            # either way.
+            traceback.print_exc()
         return 1
 
 
@@ -154,12 +224,14 @@ def _run_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     instance_lock = ChainLock(logs_dir, holder="loop-instance",
                               purpose=f"run start {_now_utc()}",
                               name="loop.lock", stale_after_s=2 * 3600)
-    try:
-        instance_lock.acquire()
-    except ChainLockHeld:
+    if not _acquire_instance_lock_or_break_dead(instance_lock):
         print("deferred_instance: another loop instance holds loop.lock, deferring",
              flush=True)
-        _write_status(logs_dir, "deferred_instance", spent=_spent(logs_dir), state=state)
+        # ALWAYS WARN, never OK: this is the one deferral that can persist
+        # indefinitely (a live sibling instance is not a transient race like
+        # a chain-write window), so it must never read as healthy.
+        _write_status(logs_dir, "deferred_instance", overall="WARN",
+                      spent=_spent(logs_dir), state=state)
         return 0
     try:
         return _run_locked_cycle(args, runner, layer, logs_dir, registry_path,
@@ -185,24 +257,36 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
             if second_strike:
                 try:
                     probe.break_stale()
+                    broke = True
                 except ChainLockHeld:
-                    # Race: the stale holder released and a NEW writer
-                    # acquired between our is_stale() read and break_stale().
-                    # That lock is fresh, not stale -- defer to it like any
-                    # other fresh lock rather than pretend the break happened.
+                    broke = False
+                if broke:
+                    loop_state.clear_stale_lock(state)
+                    loop_state.save(state_path, state)
+                    # fall through: the cycle proceeds under a now-clear lock
+                else:
+                    # Race: something changed between our is_stale() read and
+                    # break_stale() (which re-checks is_stale() itself).
                     fresh_info = probe.info()
-                    holder = fresh_info.get("holder") if fresh_info else "unknown"
-                    msg = (f"deferred_lock: chain.lock changed hands mid-break "
-                           f"(now held by {holder!r}), deferring")
-                    print(msg, flush=True)
-                    _write_status(logs_dir, "deferred_lock",
-                                  extra={"lock_holder": str(holder),
-                                         "lock_stale": "false"},
-                                  spent=_spent(logs_dir), state=state)
-                    return 0
-                loop_state.clear_stale_lock(state)
-                loop_state.save(state_path, state)
-                # fall through: the cycle proceeds under a now-clear lock
+                    if fresh_info is None:
+                        # The stale holder released it entirely in the gap --
+                        # there is no lock left to defer to; proceed exactly
+                        # as a successful break would have.
+                        print("deferred_lock: stale chain.lock vanished on "
+                             "its own before the break -- proceeding, "
+                             "nothing to defer to", flush=True)
+                        loop_state.clear_stale_lock(state)
+                        loop_state.save(state_path, state)
+                    else:
+                        holder = fresh_info.get("holder")
+                        msg = (f"deferred_lock: chain.lock changed hands "
+                               f"mid-break (now held by {holder!r}), deferring")
+                        print(msg, flush=True)
+                        _write_status(logs_dir, "deferred_lock",
+                                      extra={"lock_holder": str(holder),
+                                             "lock_stale": "false"},
+                                      spent=_spent(logs_dir), state=state)
+                        return 0
             else:
                 msg = (f"deferred_lock: chain.lock STALE (holder="
                        f"{info.get('holder')!r}), first sighting -- WARN, "
@@ -214,6 +298,11 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                               spent=_spent(logs_dir), state=state)
                 return 0
         else:
+            # A fresh foreign lock at CYCLE START is routine (a human
+            # session or the scanner happened to be mid-write when the loop
+            # fired) -- overall stays OK, unlike the mid-cycle case below
+            # where the loop itself unexpectedly loses a lock it believed
+            # was free, which is WARN.
             msg = f"deferred_lock: chain.lock held by {info.get('holder')!r}, deferring"
             print(msg, flush=True)
             _write_status(logs_dir, "deferred_lock",
@@ -266,6 +355,20 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     reg_argv = ["--registry", str(registry_path)]
     data_argv = ["--data-dir", str(layer / "data"),
                 "--artifacts-dir", str(layer / "artifacts")]
+
+    # 4.0 chain verify BEFORE any spend (spec s6): a pre-existing invalid
+    # chain must abort here, at zero metered cost, rather than let triage
+    # and composer spend against a chain the loop is about to reject anyway.
+    verify_argv = [py, str(layer / "verify_registry.py"), str(registry_path)]
+    rc = _stage(runner, verify_argv, layer)
+    if rc != 0:
+        print(f"chain_invalid: verify_registry.py rc={rc} before triage -- "
+             f"aborting, zero spend, watermark NOT advanced", flush=True)
+        _write_status(logs_dir, "chain_invalid", overall="FAIL",
+                      extra={"asset_class": asset_class, "exit_code": str(rc)},
+                      spent=_spent(logs_dir), escalations=["chain_invalid"], state=state)
+        return 1
+
     entries_before = _entry_count(registry_path)
 
     def _lock_and_run(module_key: str, stage_argv: list[str]) -> tuple[int | None, bool]:
@@ -317,12 +420,15 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       spent=spent, escalations=_budget_escalations(spent), state=state)
         return 0
 
-    # 4b. composer --dry-run preflight (no chain write, no lock, no spend)
+    # 4b. composer --dry-run preflight (no chain write, no lock). NOTE:
+    # composer.run() calls the metered propose_families BEFORE it ever
+    # branches on --dry-run, so a hard-cap refusal can surface HERE, not
+    # only on the real run below -- _composer_rc_or_park covers both calls.
     composer_dry_argv = [py, "-m", "pipeline.composer", *reg_argv, "--run-id",
                          run_id, "--asset-class", asset_class, "--dry-run"]
     rc = _stage(runner, composer_dry_argv, layer)
     if rc != 0:
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.composer", rc)
+        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc)
 
     # 4c. composer real run (chain-writing, metered)
     composer_argv = [py, "-m", "pipeline.composer", *reg_argv, "--run-id",
@@ -331,25 +437,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if lock_lost:
         return _defer_midcycle_lock("pipeline.composer")
     if rc != 0:
-        # composer's own budget guard (meter.can_spend(), the hard cap)
-        # raises SystemExit -- a nonzero rc that means "the ledger already
-        # parked this", not "the stage is broken". A fresh ledger read
-        # distinguishes the two: if the cap (or even the softer batch-stop
-        # line) was crossed by the time composer ran -- by this cycle's own
-        # spend or a concurrent writer's -- this is a park, never a defect.
-        post_spent = _spent(logs_dir)
-        if not pipeline_budget.may_start_batch(post_spent):
-            msg = (f"deferred_budget: composer exited nonzero (rc={rc}) with "
-                   f"pipeline spend USD {post_spent:.2f} at/above the "
-                   f"batch-start threshold -- treating as a budget park, "
-                   f"not a stage defect")
-            print(msg, flush=True)
-            _write_status(logs_dir, "deferred_budget", overall="WARN",
-                          extra={"asset_class": asset_class},
-                          spent=post_spent, escalations=_budget_escalations(post_spent),
-                          state=state)
-            return 0
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.composer", rc)
+        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc)
 
     # 4d. screen (chain-writing)
     screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv]
@@ -366,13 +454,12 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return _defer_midcycle_lock("pipeline.gauntlet")
     if rc != 0:
         return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc)
-    entries_after = _entry_count(registry_path)
 
-    # 4f. chain verify (spec s6): a clean gauntlet still ends with an
-    # independent, read-only walk of the whole chain -- the loop's own
-    # writes must satisfy the SAME invariants a human session's would. No
-    # lock: read-only.
-    verify_argv = [py, str(layer / "verify_registry.py"), str(registry_path)]
+    # 4f. chain verify again, post-gauntlet (spec s6): the loop's OWN writes
+    # this cycle must satisfy the same invariants a human session's would.
+    # Distinct from 4.0 above -- this one unambiguously attributes a break
+    # to THIS cycle's stages, not to whatever was on disk before it started.
+    # Read-only: no lock.
     rc = _stage(runner, verify_argv, layer)
     if rc != 0:
         print(f"chain_invalid: verify_registry.py rc={rc} after a clean "
@@ -383,6 +470,12 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # -- 5. success: advance the watermark, report clean -----------------------
+    # chain_growth counts ALL chain growth over the cycle (this cycle's own
+    # writes AND any foreign append that landed in a gap between our own
+    # stage lock windows, which are per-append-window, not whole-cycle) --
+    # it is a chain-health signal, not an attribution of "specs this run
+    # produced".
+    chain_growth = _entry_count(registry_path) - entries_before
     loop_state.record_generation(state, asset_class, run_id=run_id,
                                  routable_count=watermark_after_triage,
                                  ts_utc=_now_utc())
@@ -394,7 +487,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                   extra={"asset_class": asset_class,
                          "watermark": str(watermark_after_triage),
                          "run_id": run_id,
-                         "chain_entries_added": str(entries_after - entries_before)},
+                         "chain_growth": str(chain_growth)},
                   spent=_spent(logs_dir), state=state)
     return 0
 
