@@ -4,6 +4,7 @@ rem Exit code is load-bearing: Ops Sentinel FAILs the digest on nonzero.
 set LAYER=E:\Users\Coen\Claude\stewart-forward-test\research-layer
 set LOG=%LAYER%\logs\pipeline-loop-run.log
 
+if not exist "%LAYER%\logs" mkdir "%LAYER%\logs"
 echo ==== %DATE% %TIME% pipeline loop fire ==== >> "%LOG%"
 cd /d "%LAYER%"
 python -m pipeline.loop --once >> "%LOG%" 2>&1
