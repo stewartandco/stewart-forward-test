@@ -136,8 +136,34 @@ EQUITY_ETF_CLAIMS = [
      "tight range-based stop would otherwise trigger on equity index ETFs.",
      "a percentage stop avoids spurious exits on equity index ETF daily bars"),
 ]
-CLAIMS_BY_CLASS = {"fx": FX_CLAIMS, "equity_etf": EQUITY_ETF_CLAIMS}
-CARD_TAG_BY_CLASS = {"fx": "fx", "equity_etf": "equities"}   # composer.ROUTING's eligible tag
+BOND_ETF_CLAIMS = [
+    ("Treasury and credit ETFs trend on daily bars after sustained "
+     "moving-average separation during rate regimes.",
+     "bond ETF moving-average separation persists across daily sessions "
+     "within a rate regime"),
+    ("Duration ETFs mean-revert toward the slow moving average after "
+     "outsized daily moves.",
+     "outsized daily moves in duration ETFs revert toward the slow moving "
+     "average within days"),
+    ("Credit spread ETFs carry momentum on daily closes following "
+     "risk-regime shifts.",
+     "credit ETF daily closes carry momentum after risk-regime shifts"),
+]
+METAL_ETF_CLAIMS = [
+    ("Gold trust ETFs trend on daily bars after moving-average crossovers "
+     "during macro stress windows.",
+     "gold ETF moving-average crossovers show continuation on daily bars"),
+    ("Silver trust ETFs overshoot then partially revert after multi-sigma "
+     "daily moves.",
+     "multi-sigma daily moves in silver ETFs partially revert within days"),
+    ("Precious-metal ETFs hold moving-average gaps across sessions during "
+     "dollar-weakness phases.",
+     "precious metal ETF moving-average gaps persist across daily sessions"),
+]
+CLAIMS_BY_CLASS = {"fx": FX_CLAIMS, "equity_etf": EQUITY_ETF_CLAIMS,
+                   "bond_etf": BOND_ETF_CLAIMS, "metal_etf": METAL_ETF_CLAIMS}
+CARD_TAG_BY_CLASS = {"fx": "fx", "equity_etf": "equities",
+                     "bond_etf": "rates", "metal_etf": "commodities"}   # composer.ROUTING's eligible tag
 CRYPTO_CLAIM = ("Crypto trend strategies are the incumbent, unrestricted "
                 "card feed and must stay excluded from the class family here.",
                 "the incumbent crypto card feed remains unrestricted")
