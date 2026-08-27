@@ -31,7 +31,9 @@ def test_v5_thresholds():
     assert PBO_MIN_DISTINCT == 4
     assert PBO_PASS_PCTILE == 0.05
     assert PBO_KILL_PCTILE == 0.95
-    assert PBO_NULL_DRAWS == 200
+    # 200 -> 50 was a DECLARED parameter change (perf plan P3, Coen 2026-08-26):
+    # the null is recorded-not-gated, and per-verdict null_draws carries the value.
+    assert PBO_NULL_DRAWS == 50
 
 
 def test_v4s_fixed_pbo_lines_are_withdrawn_not_merely_unused():
