@@ -91,7 +91,14 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
     orphaned - poll_source records 'seen' first, and dedup then blocks
     re-polling forever). 'seen' items are only resumed once they are older
     than stale_minutes so the current cycle's own items aren't double-fed.
-    max_attempts parks persistent failures so nothing can spin the loop."""
+    max_attempts parks persistent failures so nothing can spin the loop.
+    deferred_lock occurrences are excluded from that attempt count: the park
+    mechanism exists to stop pathological ITEMS, and lock contention is
+    environmental, not the item's fault. An item must never be permanently
+    dropped just because the loop happened to be mid-write. Unbounded
+    re-feed on lock contention alone is safe because a stale chain.lock is
+    broken by the loop's two-strike rule within two fires, so the
+    contention is always transient."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     out = []
     for status in statuses:
@@ -104,7 +111,7 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
                 if touched > cutoff:
                     continue  # in flight in this cycle
             attempts = sum(1 for e in seen.events_for(iid)
-                           if e["status"] in statuses)
+                           if e["status"] in statuses and e["status"] != "deferred_lock")
             if attempts >= max_attempts:
                 seen.record(iid, event["source_id"], "deferred_parked",
                             reason=f"parked after {attempts} attempts")
@@ -197,9 +204,9 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
                       watchlist_sources: list[dict], discovery_path,
                       screen_log, actions: ActionLog) -> dict:
     stats = {"items": len(new_items), "screen_keep": 0, "screen_kill": 0,
-             "screen_keep_low": 0, "deferred": 0, "paywalled": 0,
-             "fetch_failed": 0, "thin_content": 0, "extracted": 0,
-             "cards_registered": 0, "honesty_dropped": 0}
+             "screen_keep_low": 0, "deferred": 0, "deferred_lock": 0,
+             "paywalled": 0, "fetch_failed": 0, "thin_content": 0,
+             "extracted": 0, "cards_registered": 0, "honesty_dropped": 0}
     if not new_items:
         return stats
 
@@ -264,6 +271,7 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             seen.record(item["item_id"], item["source_id"], "deferred_lock",
                         reason="chain.lock held by another writer")
             stats["deferred"] += 1
+            stats["deferred_lock"] += 1
             continue
         seen.record(item["item_id"], item["source_id"], "extracted",
                     reason=f"{registered} cards")
@@ -365,12 +373,36 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
                        "credibility_tier": "practitioner"}
         run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-inbox"
         known_claims = {c["claim"] for c in registry.cards().values()}
-        registered = dropped = 0
+
+        # Gather every chunk's claims first (LLM calls only, no chain
+        # writes) so the chain.lock window below covers just the
+        # card-append batch — same pattern as the scanner's own extraction
+        # path (_extract_item), per the spec: the lock is adopted by ALL of
+        # the scanner's registration paths, inbox included.
+        all_claims = []
         for label, chunk in chunk_text(text):
             claims, usage = extract_claims_usage(client, model, label, chunk)
             meter.record_call(model, usage, purpose="inbox_extract",
                               agent="reader")
-            for raw in claims:
+            all_claims.extend(claims)
+
+        registered = dropped = 0
+        logs_dir = Path(registry.log_path).parent / "logs"
+        lock = ChainLock(logs_dir, holder="scanner",
+                         purpose=f"inbox batch {path.name}")
+        try:
+            lock.acquire()
+        except ChainLockHeld:
+            # advisory, non-blocking: never wait on another writer's window.
+            # The inbox has no deferred-status mechanism (unlike seen-store
+            # items), so the simplest safe move is to leave the file and its
+            # sidecar exactly where they are, unprocessed — the next cycle's
+            # process_inbox call retries it from scratch.
+            print(f"  inbox: chain.lock held, deferring {path.name}",
+                  file=sys.stderr)
+            continue
+        try:
+            for raw in all_claims:
                 if not quote_in_source(raw["quote"], text):
                     dropped += 1
                     continue
@@ -379,6 +411,8 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
                 known_claims.add(raw["claim"])
                 registry.register_card(build_card(raw, source_meta, model, run_id))
                 registered += 1
+        finally:
+            lock.release()
         if event is not None:
             seen.record(event["item_id"], event["source_id"], "extracted",
                         reason=f"{registered} cards via inbox")

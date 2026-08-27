@@ -1,8 +1,9 @@
 """Append-only seen-item event store: dedup, funnel state, crash-safe resume.
 
 One JSONL event per status change; on load, an item's latest status wins.
-Statuses: seen, screen_keep, screen_kill, deferred_screen, deferred_budget,
-paywalled, fetch_failed, extracted, extract_failed.
+Statuses: seen, screen_keep, screen_kill, screen_keep_low, deferred_screen,
+deferred_budget, deferred_lock, deferred_parked, paywalled, fetch_failed,
+thin_content, extracted, extract_failed.
 """
 from __future__ import annotations
 
