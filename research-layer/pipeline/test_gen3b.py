@@ -596,6 +596,36 @@ def test_decision_row_shape_and_values_on_entry_day(tmp_path):
     assert r["equity"] == pytest.approx(1.0)
 
 
+def test_quarantine_date_run_holds_lock_while_writing(tmp_path, monkeypatch):
+    """While a decision row is being chained, logs/chain.lock exists and
+    names the quarantine runner; once run() returns it is gone. Regression
+    guard for a future refactor downgrading acquire() to a probe-only
+    check."""
+    reg, spec, data = quarantined(tmp_path)
+    lock_path = reg.log_path.parent / "logs" / "chain.lock"
+
+    orig_record = Registry.record_quarantine_decision
+    seen_during_write = []
+
+    def spy_record(self, payload):
+        seen_during_write.append(lock_path.exists())
+        if lock_path.exists():
+            info = json.loads(lock_path.read_text(encoding="utf-8"))
+            seen_during_write.append(info["holder"])
+        return orig_record(self, payload)
+
+    monkeypatch.setattr(Registry, "record_quarantine_decision", spy_record)
+
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+
+    assert rc == 0
+    assert len(decisions(reg)) == 1
+    # the lock existed (and named the runner) at write time...
+    assert seen_during_write == [True, "quarantine"]
+    # ...and is released once the write phase closes
+    assert not lock_path.exists()
+
+
 def test_quarantine_date_run_defers_when_chain_lock_held(tmp_path, capsys):
     """A held chain.lock defers the daily run with exit 0, a clear line, and
     ZERO chain writes -- the --date backfill covers the gap."""
@@ -611,7 +641,10 @@ def test_quarantine_date_run_defers_when_chain_lock_held(tmp_path, capsys):
     finally:
         other.release()
     assert rc == 0
-    assert "deferred_lock" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "deferred_lock" in out
+    # the actionable backfill hint, not just the token
+    assert "--date 2023-01-22" in out
     assert len(reg.log_path.read_text(encoding="utf-8")
               .splitlines()) == chain_len_before
 

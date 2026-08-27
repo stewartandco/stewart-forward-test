@@ -49,6 +49,11 @@ Conventions:
     day. Re-running a date whose `bars_sha256` no longer matches is REFUSED,
     not recomputed -- while a refresh that merely appends later bars is
     correctly a non-event, which is what keeps backfill working.
+  * A `--date` run whose write phase finds `logs/chain.lock` held by another
+    writer DEFERS politely: exit 0, nothing recorded, no different from a day
+    nobody got around to running. The day is owed and covered the same way as
+    any other missed day -- an explicit `--date` backfill once the lock is
+    free, and `--review` lists it among the dates never recorded.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -617,6 +622,10 @@ def run(argv: list[str] | None = None) -> int:
         try:
             lock.acquire()
         except ChainLockHeld:
+            if lock.is_stale():
+                print("WARN: chain.lock is stale (>3h); if no writer is "
+                      "alive, remove logs/chain.lock or let the loop's "
+                      "two-strike rule break it", file=sys.stderr)
             print(f"deferred_lock: chain.lock held, skipping {args.date}; "
                   f"re-run with --date {args.date} to backfill")
             return 0
