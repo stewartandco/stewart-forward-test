@@ -11,7 +11,7 @@ while they work on the chain. Rules (spec 2026-08-27-pipeline-loop-design):
   block on a gauntlet.
 - The loop DEFERS when the lock is held; it never breaks a fresh lock.
 - A stale lock is surfaced as WARN and only broken on a second sighting
-  (the two-strike rule lives in loop.py, not here).
+  (the two-strike bookkeeping lives in loop_state.py, consumed by loop.py).
 - Read paths never take this lock.
 """
 from __future__ import annotations

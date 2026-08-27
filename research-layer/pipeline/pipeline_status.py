@@ -54,7 +54,8 @@ def build(stage_results: dict, spent: float,
 
 
 def write(path, payload: dict) -> None:
-    """Atomic write (tmp + replace), mirroring scanstatus.write_status."""
+    """Atomic write (tmp + replace); dumps args mirror loop_state.save
+    (sort_keys, default ensure_ascii)."""
     import json
     import os
     from pathlib import Path
