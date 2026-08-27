@@ -5,7 +5,8 @@ Run: python -m pytest pipeline/test_loop_state.py -q
 from __future__ import annotations
 
 import json
-from pathlib import Path
+
+import pytest
 
 from .loop_state import (DEFAULT_THRESHOLD, load, save, pick_class,
                          record_generation, record_stale_lock, clear_stale_lock)
@@ -14,6 +15,13 @@ from .loop_state import (DEFAULT_THRESHOLD, load, save, pick_class,
 def test_load_missing_file_returns_empty_state(tmp_path):
     st = load(tmp_path / "loop_state.json")
     assert st == {"classes": {}, "stale_lock": None}
+
+
+def test_load_corrupt_file_raises_loudly(tmp_path):
+    p = tmp_path / "loop_state.json"
+    p.write_text("{not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        load(p)
 
 
 def test_save_load_roundtrip_atomic(tmp_path):
@@ -53,6 +61,27 @@ def test_pick_class_unknown_class_uses_default_threshold():
     assert DEFAULT_THRESHOLD == 25
     assert pick_class(st, {"fx": 24}) is None
     assert pick_class(st, {"fx": 25}) == "fx"
+
+
+def test_pick_class_ignores_unknown_classes():
+    st = {"classes": {}, "stale_lock": None}
+    assert pick_class(st, {"futures": 999}) is None
+    assert pick_class(st, {"futures": 999, "fx": 25}) == "fx"
+
+
+def test_record_generation_preserves_custom_threshold():
+    st = {"classes": {"fx": {"threshold": 99}}, "stale_lock": None}
+    record_generation(st, "fx", run_id="r", routable_count=50,
+                      ts_utc="2026-08-27T12:00:00+00:00")
+    assert st["classes"]["fx"]["threshold"] == 99
+
+
+def test_stale_lock_string_survives_roundtrip(tmp_path):
+    p = tmp_path / "s.json"
+    st = load(p)
+    record_stale_lock(st, {"holder": "loop", "pid": 1, "ts_utc": "t"})
+    save(p, st)
+    assert load(p)["stale_lock"] == "loop|1|t"
 
 
 def test_stale_lock_two_strike_bookkeeping(tmp_path):

@@ -24,6 +24,11 @@ def load(path: str | Path) -> dict:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        # Only a MISSING file gets the fresh-state default. Corrupt JSON
+        # (json.JSONDecodeError) must raise loudly -- a silent reset here
+        # would zero all watermarks and trigger a spurious generation on
+        # every live class, spending gauntlet trials the loop never meant
+        # to spend.
         return {"classes": {}, "stale_lock": None}
 
 
@@ -37,6 +42,16 @@ def save(path: str | Path, state: dict) -> None:
 
 def record_generation(state: dict, asset_class: str, *, run_id: str,
                       routable_count: int, ts_utc: str) -> None:
+    """Record a completed generation's watermark.
+
+    ts_utc MUST be datetime.now(timezone.utc).isoformat() (the loop's
+    _now_utc) -- pick_class orders entries by a lexical string compare of
+    last_gen_ts_utc, not by parsing. The codebase has two live timestamp
+    formats (strftime "...Z" in registry.py/scanstatus.py vs isoformat
+    "+00:00" in chainlock.py); mixing them within one state file would let
+    format, not age, decide which class fires next. Never mix stamp
+    formats in loop_state.json.
+    """
     entry = state["classes"].setdefault(asset_class, {"threshold": DEFAULT_THRESHOLD})
     entry["watermark"] = routable_count
     entry["last_run_id"] = run_id
@@ -70,7 +85,14 @@ def _lock_key(info: dict) -> str:
 
 def record_stale_lock(state: dict, info: dict) -> bool:
     """Record a stale-lock sighting. True when the SAME lock was already
-    recorded on a previous fire (second strike: the caller may break it)."""
+    recorded on a previous fire (second strike: the caller may break it).
+
+    The sighting is recorded only in the in-memory dict passed in -- the
+    caller MUST save() this state before exiting, or the strike is lost and
+    the next fire starts back at strike one, deferring behind the stale
+    lock forever instead of ever reaching the second strike that permits
+    breaking it.
+    """
     key = _lock_key(info)
     if state.get("stale_lock") == key:
         return True
