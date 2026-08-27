@@ -1287,6 +1287,89 @@ def _persist_drift_record(record: dict, registry_path: Path) -> None:
         f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
 
 
+def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[str, dict], dict]:
+    """Pure selection of accepted cards routable to asset_class.
+
+    Returns (cards, meta) where meta carries routed_card_ids and
+    proxy_routed_card_ids exactly as run() previously computed them for the
+    drift record (None / [] respectively for the unrestricted crypto path).
+    Moved out of run() so pipeline/loop.py watermarks count the SAME set the
+    composer would consume. Chain untouched; no side effects.
+    """
+    # Card routing (spec s4/D2): crypto stays unrestricted (every accepted
+    # card feeds it, unchanged). A non-crypto class only shows the proposer
+    # cards tagged for its ROUTING entry; reader.py:162 defaults an untagged
+    # card's asset_classes to ["cross"], so a card with no tags at all is
+    # defensively treated as ["cross"] here too rather than dropped.
+    routing_info = None
+    routed_card_ids = None
+    proxy_routed_card_ids = None
+    if asset_class == "crypto":
+        propose_input = accepted
+    else:
+        eligible_tags = set(ROUTING[asset_class])
+        propose_input = {
+            cid: c for cid, c in accepted.items()
+            if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & eligible_tags
+        }
+        # Track 2a / spec s10.8: the futures->equity_etf PROXY lane. A
+        # futures-tagged card is not eligible via ROUTING above (futures
+        # cards never carry an "equities" or "cross" tag by definition of
+        # this check), so it can only reach the proposer here, and only when
+        # its topics intersect the declared INDEX_FUTURES_PROXY_TOPICS set.
+        # Additive to propose_input (a dict keyed by card_id, so a card that
+        # somehow matched both paths is never double-counted or duplicated).
+        if asset_class == "equity_etf":
+            proxy_cards = {
+                cid: c for cid, c in accepted.items()
+                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
+                and set((c.get("tags") or {}).get("topics") or []) & INDEX_FUTURES_PROXY_TOPICS
+            }
+            proxy_routed_card_ids = sorted(proxy_cards)
+            propose_input = {**propose_input, **proxy_cards}
+        # Track 2b / addendum "Routing": the futures->metal_etf PROXY lane,
+        # same shape as the futures->equity_etf lane above (a futures-tagged
+        # card is invisible to the native `commodities`/`cross` ROUTING
+        # entry, so it can only reach the proposer here, and only when its
+        # topics intersect METALS_PROXY_TOPICS). METALS_PROXY_TOPICS is
+        # measured EMPTY today (composer.py comment above it), so
+        # proxy_cards is always {} on a real run right now -- the branch
+        # still runs (and still sets proxy_routed_card_ids to [] rather than
+        # leaving it None) so an equity_etf-style "the lane ran and found
+        # none" record is written, not "this run predates the lane".
+        elif asset_class == "metal_etf":
+            proxy_cards = {
+                cid: c for cid, c in accepted.items()
+                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
+                and set((c.get("tags") or {}).get("topics") or []) & METALS_PROXY_TOPICS
+            }
+            proxy_routed_card_ids = sorted(proxy_cards)
+            propose_input = {**propose_input, **proxy_cards}
+        # Track 2b / addendum "Routing": bond_etf's entire rates->bond_etf
+        # lane is declared a PROXY (unlike equity_etf/metal_etf, where only a
+        # topic-matched futures subset is proxy and the rest of ROUTING is
+        # native) -- the parent spec's table calls it that because rates
+        # cards are largely about rate FUTURES/derivatives, not the cash
+        # ETFs themselves. So every card that reached propose_input via the
+        # "rates" tag (BOND_ETF_PROXY_TAGS) is proxy; a card that reached it
+        # only via "cross" (asset-class-agnostic by definition) is native.
+        # No separate topic-matching step is needed here -- unlike the
+        # futures->equity_etf/metal_etf lanes, this is a whole-TAG proxy, not
+        # a whole-CLASS-minus-topic-filter proxy.
+        elif asset_class == "bond_etf":
+            proxy_routed_card_ids = sorted(
+                cid for cid, c in propose_input.items()
+                if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & BOND_ETF_PROXY_TAGS
+            )
+        routed_card_ids = sorted(propose_input)
+        routing_info = {"asset_class": asset_class,
+                        "eligible_tags": sorted(eligible_tags)}
+
+    meta = {"routing": routing_info, "routed_card_ids": routed_card_ids,
+            "proxy_routed_card_ids": proxy_routed_card_ids}
+    return propose_input, meta
+
+
 def run(argv: list[str] | None = None, propose_fn=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--max-families", type=int, default=8)
@@ -1318,74 +1401,14 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
               "never mutate a chained params_schema.")
         return 1
 
-    # Card routing (spec s4/D2): crypto stays unrestricted (every accepted
-    # card feeds it, unchanged). A non-crypto class only shows the proposer
-    # cards tagged for its ROUTING entry; reader.py:162 defaults an untagged
-    # card's asset_classes to ["cross"], so a card with no tags at all is
-    # defensively treated as ["cross"] here too rather than dropped.
-    routing_info = None
-    routed_card_ids = None
-    proxy_routed_card_ids = None
-    if args.asset_class == "crypto":
-        propose_input = accepted
-    else:
-        eligible_tags = set(ROUTING[args.asset_class])
-        propose_input = {
-            cid: c for cid, c in accepted.items()
-            if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & eligible_tags
-        }
-        # Track 2a / spec s10.8: the futures->equity_etf PROXY lane. A
-        # futures-tagged card is not eligible via ROUTING above (futures
-        # cards never carry an "equities" or "cross" tag by definition of
-        # this check), so it can only reach the proposer here, and only when
-        # its topics intersect the declared INDEX_FUTURES_PROXY_TOPICS set.
-        # Additive to propose_input (a dict keyed by card_id, so a card that
-        # somehow matched both paths is never double-counted or duplicated).
-        if args.asset_class == "equity_etf":
-            proxy_cards = {
-                cid: c for cid, c in accepted.items()
-                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
-                and set((c.get("tags") or {}).get("topics") or []) & INDEX_FUTURES_PROXY_TOPICS
-            }
-            proxy_routed_card_ids = sorted(proxy_cards)
-            propose_input = {**propose_input, **proxy_cards}
-        # Track 2b / addendum "Routing": the futures->metal_etf PROXY lane,
-        # same shape as the futures->equity_etf lane above (a futures-tagged
-        # card is invisible to the native `commodities`/`cross` ROUTING
-        # entry, so it can only reach the proposer here, and only when its
-        # topics intersect METALS_PROXY_TOPICS). METALS_PROXY_TOPICS is
-        # measured EMPTY today (composer.py comment above it), so
-        # proxy_cards is always {} on a real run right now -- the branch
-        # still runs (and still sets proxy_routed_card_ids to [] rather than
-        # leaving it None) so an equity_etf-style "the lane ran and found
-        # none" record is written, not "this run predates the lane".
-        elif args.asset_class == "metal_etf":
-            proxy_cards = {
-                cid: c for cid, c in accepted.items()
-                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
-                and set((c.get("tags") or {}).get("topics") or []) & METALS_PROXY_TOPICS
-            }
-            proxy_routed_card_ids = sorted(proxy_cards)
-            propose_input = {**propose_input, **proxy_cards}
-        # Track 2b / addendum "Routing": bond_etf's entire rates->bond_etf
-        # lane is declared a PROXY (unlike equity_etf/metal_etf, where only a
-        # topic-matched futures subset is proxy and the rest of ROUTING is
-        # native) -- the parent spec's table calls it that because rates
-        # cards are largely about rate FUTURES/derivatives, not the cash
-        # ETFs themselves. So every card that reached propose_input via the
-        # "rates" tag (BOND_ETF_PROXY_TAGS) is proxy; a card that reached it
-        # only via "cross" (asset-class-agnostic by definition) is native.
-        # No separate topic-matching step is needed here -- unlike the
-        # futures->equity_etf/metal_etf lanes, this is a whole-TAG proxy, not
-        # a whole-CLASS-minus-topic-filter proxy.
-        elif args.asset_class == "bond_etf":
-            proxy_routed_card_ids = sorted(
-                cid for cid, c in propose_input.items()
-                if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & BOND_ETF_PROXY_TAGS
-            )
-        routed_card_ids = sorted(propose_input)
-        routing_info = {"asset_class": args.asset_class,
-                        "eligible_tags": sorted(eligible_tags)}
+    # Card routing (spec s4/D2): see routable_cards() for the full lane
+    # breakdown (crypto unrestricted; fx/equity_etf/bond_etf/metal_etf
+    # filtered + proxy lanes). Extracted so pipeline/loop.py's watermark can
+    # compute the same routable set without duplicating this logic.
+    propose_input, routing_meta = routable_cards(accepted, args.asset_class)
+    routing_info = routing_meta["routing"]
+    routed_card_ids = routing_meta["routed_card_ids"]
+    proxy_routed_card_ids = routing_meta["proxy_routed_card_ids"]
 
     if propose_fn is None:
         proposals = propose_families(args.model, propose_input, args.max_families,
