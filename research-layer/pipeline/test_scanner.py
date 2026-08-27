@@ -650,8 +650,9 @@ def test_deferred_lock_never_parks_but_deferred_screen_still_does(tmp_path):
     """Park exists to stop pathological ITEMS; lock contention is
     environmental, not the item's fault, so deferred_lock occurrences are
     excluded from the park-attempt count. Unbounded re-feed on lock
-    contention alone is safe because a stale chain.lock is broken by the
-    loop's two-strike rule within two fires."""
+    contention alone is safe because the pre-gather chain.lock probe in
+    _extract_item / process_inbox makes each deferral a cheap check, not a
+    re-paid extraction."""
     from .scanner import refeedable_deferred
     seen = SeenStore(tmp_path / "seen.jsonl")
     for _ in range(5):  # well past MAX_DEFER_ATTEMPTS (3)
@@ -667,6 +668,33 @@ def test_deferred_lock_never_parks_but_deferred_screen_still_does(tmp_path):
     refed2 = refeedable_deferred(seen)
     assert "screenish" not in [i["item_id"] for i in refed2]
     assert seen.status("screenish") == "deferred_parked"
+
+    # mixed: lock-contention noise must not shift the screen-driven park
+    # threshold either way. Production items always carry an initial 'seen'
+    # event (poll_source records it first).
+    seen.record("at-cap", "s1", "seen", title="T", link="https://x/at-cap")
+    for _ in range(2):
+        seen.record("at-cap", "s1", "deferred_screen", reason="api_error",
+                    title="T", link="https://x/at-cap")
+    for _ in range(7):  # heavy lock noise, must not delay the park
+        seen.record("at-cap", "s1", "deferred_lock", reason="chain.lock held",
+                    title="T", link="https://x/at-cap")
+    refed3 = refeedable_deferred(seen)
+    assert "at-cap" not in [i["item_id"] for i in refed3]
+    # 1 seen + 2 deferred_screen = 3 non-lock attempts: parks at the same
+    # point it would with zero deferred_lock events in its history
+    assert seen.status("at-cap") == "deferred_parked"
+
+    seen.record("under-cap", "s1", "seen", title="T", link="https://x/under-cap")
+    seen.record("under-cap", "s1", "deferred_screen", reason="api_error",
+                title="T", link="https://x/under-cap")
+    for _ in range(9):  # even heavier lock noise, still must not park it
+        seen.record("under-cap", "s1", "deferred_lock", reason="chain.lock held",
+                    title="T", link="https://x/under-cap")
+    refed4 = refeedable_deferred(seen)
+    # 1 seen + 1 deferred_screen = 2 non-lock attempts: under the cap of 3
+    assert "under-cap" in [i["item_id"] for i in refed4]
+    assert seen.status("under-cap") == "deferred_lock"  # not parked
 
 
 def test_feed_autodiscovery_from_listing_html():
@@ -1130,7 +1158,8 @@ def test_inbox_takes_chain_lock_for_registration_window(tmp_path, monkeypatch):
 def test_inbox_defers_when_chain_lock_held(tmp_path):
     """The inbox has no deferred-status mechanism of its own: when the lock
     is held, the file is left in place, unregistered, for the next cycle to
-    retry."""
+    retry. The pre-gather probe means this happens BEFORE any LLM call --
+    spend is truly zero, not just registration."""
     from .scanner import process_inbox
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -1143,22 +1172,26 @@ def test_inbox_defers_when_chain_lock_held(tmp_path):
     registry = Registry(tmp_path / "registry_log.jsonl")
     meter = BudgetMeter(tmp_path / "led.jsonl")
     client = StubClient([_inbox_msg()])
+    actions_path = tmp_path / "act.jsonl"
 
     lock = ChainLock(tmp_path / "logs", holder="session", purpose="manual")
     lock.acquire()
     try:
         stats = process_inbox(client=client, model="claude-sonnet-5", meter=meter,
                               seen=seen, registry=registry,
-                              actions=ActionLog(tmp_path / "act.jsonl"),
+                              actions=ActionLog(actions_path),
                               inbox=inbox)
     finally:
         lock.release()
 
     assert stats["files"] == 0
     assert stats["cards_registered"] == 0
+    assert stats["deferred_lock"] == 1
     assert registry.cards() == {}
     assert (inbox / "saved_page.html").exists()  # left for the next cycle
     assert seen.status("p1") == "paywalled"  # untouched
+    assert client.calls == []  # the pre-gather probe means no LLM call at all
+    assert not actions_path.exists()  # no inbox_ingested event was written
 
 
 def test_inbox_sidecar_url_wins_and_unidentified_file_is_left(tmp_path):
@@ -1479,9 +1512,10 @@ def test_extract_item_takes_chain_lock_for_registration_window(tmp_path, monkeyp
 
 
 def test_lock_held_defers_item_zero_registered_and_refeeds(tmp_path):
-    """When chain.lock is held by another writer, extraction still runs
-    (the gather phase happens before the lock is attempted) but nothing is
-    registered: the item lands as deferred_lock and is owed a re-feed."""
+    """When chain.lock is held by another writer, the pre-gather probe
+    defers the item BEFORE the extraction LLM call runs (not just before
+    registration): nothing is spent, nothing is registered, and the item
+    lands as deferred_lock, owed a re-feed."""
     from .scanner import refeedable_deferred
     src = make_source()
     seen = SeenStore(tmp_path / "seen.jsonl")
@@ -1532,6 +1566,10 @@ def test_lock_held_defers_item_zero_registered_and_refeeds(tmp_path):
     assert seen.status(new_items[0]["item_id"]) == "deferred_lock"
     refed_ids = {i["item_id"] for i in refeedable_deferred(seen)}
     assert new_items[0]["item_id"] in refed_ids
+    # only the screening call happened -- the pre-gather probe deferred the
+    # item before extraction, so the stubbed extraction message was never
+    # consumed
+    assert len(client.calls) == 1
 
 
 def test_funnel_at_budget_cap_polls_but_defers(tmp_path):

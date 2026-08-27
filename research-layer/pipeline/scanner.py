@@ -96,9 +96,13 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
     mechanism exists to stop pathological ITEMS, and lock contention is
     environmental, not the item's fault. An item must never be permanently
     dropped just because the loop happened to be mid-write. Unbounded
-    re-feed on lock contention alone is safe because a stale chain.lock is
-    broken by the loop's two-strike rule within two fires, so the
-    contention is always transient."""
+    re-feed on lock contention alone is safe -- NOT because the lock itself
+    clears quickly (a manual session may legitimately hold it for hours,
+    and a stale lock only breaks after 3h STALE_AFTER_S plus the loop's
+    two-strike rule) but because _extract_item / process_inbox probe
+    chain.lock BEFORE the gather phase's LLM spend: a lock-deferred re-feed
+    is a cheap existence check, not a re-paid extraction, so re-feeding it
+    indefinitely costs nothing while the lock is held."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     out = []
     for status in statuses:
@@ -147,6 +151,20 @@ def _extract_item(client, model, item, source, page_text, html, *,
     }
     run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-scanner"
 
+    logs_dir = Path(registry.log_path).parent / "logs"
+    lock = ChainLock(logs_dir, holder="scanner",
+                     purpose=f"extract {item['source_id']}/{item['item_id']}")
+    if lock.info() is not None:
+        # Pre-gather probe: someone else is mid-write. Defer before paying
+        # for the gather phase's LLM calls, not just before the append --
+        # unbounded lock re-feed (RESUME_STATUSES / park exemption below)
+        # would otherwise re-pay this spend every cycle a lock is held. This
+        # is a probe only (.info(), never acquire()): a false positive costs
+        # a free no-op deferral, a false negative just falls through to the
+        # real acquire() below, which still guards the append -- no TOCTOU
+        # exposure either way.
+        return 0, 0, True
+
     # Gather every chunk's claims first (LLM calls only, no chain writes) so
     # the chain.lock window below covers just the card-append batch, not the
     # extraction calls themselves.
@@ -158,9 +176,6 @@ def _extract_item(client, model, item, source, page_text, html, *,
         all_claims.extend(claims)
 
     registered = dropped = 0
-    logs_dir = Path(registry.log_path).parent / "logs"
-    lock = ChainLock(logs_dir, holder="scanner",
-                     purpose=f"extract {item['source_id']}/{item['item_id']}")
     try:
         lock.acquire()
     except ChainLockHeld:
@@ -343,7 +358,7 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
     sidecar URL or a title match to a flagged item; unidentifiable files are
     left in place with a note so Coen can add a sidecar."""
     stats = {"files": 0, "cards_registered": 0, "honesty_dropped": 0,
-             "skipped_no_identity": 0}
+             "skipped_no_identity": 0, "deferred_lock": 0}
     if not inbox.exists():
         return stats
     from .reader import read_source_text
@@ -374,6 +389,24 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
         run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-inbox"
         known_claims = {c["claim"] for c in registry.cards().values()}
 
+        logs_dir = Path(registry.log_path).parent / "logs"
+        lock = ChainLock(logs_dir, holder="scanner",
+                         purpose=f"inbox batch {path.name}")
+        if lock.info() is not None:
+            # Pre-gather probe: someone else is mid-write. Defer before
+            # paying for the gather phase's LLM calls -- the inbox has no
+            # deferred-status mechanism (unlike seen-store items), so the
+            # simplest safe move is to leave the file and its sidecar
+            # exactly where they are, unprocessed; the next process_inbox
+            # call retries it from scratch. Probe only (.info(), never
+            # acquire()): a false positive costs a free no-op deferral, a
+            # false negative falls through to the real acquire() below,
+            # which still guards the append -- no TOCTOU exposure.
+            print(f"  inbox: chain.lock held, deferring {path.name}",
+                  file=sys.stderr)
+            stats["deferred_lock"] += 1
+            continue
+
         # Gather every chunk's claims first (LLM calls only, no chain
         # writes) so the chain.lock window below covers just the
         # card-append batch — same pattern as the scanner's own extraction
@@ -387,19 +420,13 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
             all_claims.extend(claims)
 
         registered = dropped = 0
-        logs_dir = Path(registry.log_path).parent / "logs"
-        lock = ChainLock(logs_dir, holder="scanner",
-                         purpose=f"inbox batch {path.name}")
         try:
             lock.acquire()
         except ChainLockHeld:
             # advisory, non-blocking: never wait on another writer's window.
-            # The inbox has no deferred-status mechanism (unlike seen-store
-            # items), so the simplest safe move is to leave the file and its
-            # sidecar exactly where they are, unprocessed — the next cycle's
-            # process_inbox call retries it from scratch.
             print(f"  inbox: chain.lock held, deferring {path.name}",
                   file=sys.stderr)
+            stats["deferred_lock"] += 1
             continue
         try:
             for raw in all_claims:
@@ -664,7 +691,7 @@ def run(argv: list[str] | None = None) -> int:
                 inbox_stats = process_inbox(
                     client=client, model=args.model, meter=meter, seen=seen,
                     registry=registry, actions=actions)
-                if inbox_stats["files"]:
+                if inbox_stats["files"] or inbox_stats["deferred_lock"]:
                     print(f"inbox: {inbox_stats}")
                 # D27 case 3: single-citation proposals -> prefilter -> source screen -> probation
                 def _screen(domain, titles, about):
