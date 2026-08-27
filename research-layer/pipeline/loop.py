@@ -8,6 +8,14 @@ Exit 0: cycle_complete | no_trigger | deferred_lock | deferred_budget |
         deferred_instance | dry_run_would_fire
         (distinguished in logs/pipeline_status.json items.outcome)
 Exit 1: stage_failed | chain_invalid | loop_crashed -- a real defect.
+
+ACTIVATION: `python -m pipeline.loop --seed-watermarks` initialises every
+LIVE_CLASSES watermark to the current routable-accepted count, so the FIRST
+scheduled fire against a fresh loop_state.json only responds to genuinely
+NEW cards rather than triggering a whole-corpus generation for every live
+class at once. Mutually exclusive with --once (argparse enforcement); read-
+only against the chain, writes only loop_state.json, runs no stages, writes
+no status file, exits 0.
 """
 from __future__ import annotations
 
@@ -262,12 +270,44 @@ def _acquire_instance_lock_or_break_dead(instance_lock: ChainLock) -> bool:
         return False
 
 
+def _seed_watermarks(layer: Path, registry_path: Path, state_path: Path) -> int:
+    """ACTIVATION step (--seed-watermarks): initialise every LIVE_CLASSES
+    watermark to the CURRENT routable-accepted count. Without this, a fresh
+    loop_state.json reads every class's watermark as 0, so the first
+    scheduled fire after activation would treat the entire existing corpus
+    as "new" and trigger a whole-corpus generation for every over-threshold
+    class simultaneously -- this seeds the baseline so only genuinely NEW
+    cards (accepted after activation) ever count toward a trigger.
+
+    Deliberately narrow: a pure read of the registry (no chain.lock -- read
+    paths never take it, chainlock.py's own rule) plus a loop_state.json
+    write. No stage runs, no pipeline_status.json is written, and the run_id
+    recorded is the literal string "seed" so a seeded watermark is always
+    distinguishable from a real generation's run_id in loop_state.json."""
+    registry = Registry(registry_path)
+    counts = _routable_counts(registry)
+    state = loop_state.load(state_path)
+    now = _now_utc()
+    for cls in cells.LIVE_CLASSES:
+        n = counts.get(cls, 0)
+        loop_state.record_generation(state, cls, run_id="seed",
+                                     routable_count=n, ts_utc=now)
+        print(f"seeded {cls} watermark={n}", flush=True)
+    loop_state.save(state_path, state)
+    return 0
+
+
 def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--once", action="store_true", required=True,
-                    help="run a single trigger-check cycle (the only mode "
-                         "implemented; a daemon/scheduling loop is not this "
-                         "module's job -- the OS scheduler owns cadence)")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true",
+                      help="run a single trigger-check cycle (the only mode "
+                           "implemented; a daemon/scheduling loop is not this "
+                           "module's job -- the OS scheduler owns cadence)")
+    mode.add_argument("--seed-watermarks", action="store_true",
+                      help="ACTIVATION: seed every LIVE_CLASSES watermark to "
+                           "the current routable-accepted count instead of "
+                           "running a cycle; see module docstring")
     ap.add_argument("--layer", type=Path, default=LAYER_DEFAULT,
                     help="research-layer root (holds registry_log.jsonl and logs/)")
     ap.add_argument("--dry-run", action="store_true",
@@ -279,6 +319,9 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     registry_path = layer / "registry_log.jsonl"
     state_path = logs_dir / "loop_state.json"
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.seed_watermarks:
+        return _seed_watermarks(layer, registry_path, state_path)
 
     try:
         return _run_cycle(args, runner, layer, logs_dir, registry_path, state_path)

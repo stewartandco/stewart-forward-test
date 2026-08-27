@@ -14,7 +14,7 @@ import pytest
 
 from .chainlock import ChainLock, ChainLockHeld
 from .registry import Registry
-from . import loop, loop_state
+from . import cells, loop, loop_state
 from .test_pipeline import make_strategy, register_example_blocks
 
 
@@ -798,6 +798,49 @@ def test_git_commit_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
     assert "WARNING" in captured.out
     assert "git commit failed" in captured.out
     assert "committed chain delta" not in captured.out   # the failed commit never prints success
+
+
+def test_seed_watermarks_seeds_all_classes_and_prevents_immediate_trigger(tmp_path):
+    """ACTIVATION step: --seed-watermarks must set EVERY LIVE_CLASSES
+    watermark to the current routable-accepted count -- not just the class
+    with cards seeded by the fixture -- and a subsequent --once against the
+    unchanged corpus must then report no_trigger (the whole point: a fresh
+    state file must not fire a whole-corpus generation)."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    registry_path = layer / "registry_log.jsonl"
+    expected = loop._routable_counts(Registry(registry_path))
+    assert set(expected) == set(cells.LIVE_CLASSES)   # sanity: covers all five
+
+    rc = loop.run(["--seed-watermarks", "--layer", str(layer)], runner=FakeRunner())
+    assert rc == 0
+
+    state_path = layer / "logs" / "loop_state.json"
+    st = json.loads(state_path.read_text(encoding="utf-8"))
+    for cls in cells.LIVE_CLASSES:
+        assert st["classes"][cls]["watermark"] == expected[cls]
+        assert st["classes"][cls]["last_run_id"] == "seed"
+
+    # No stage ran and no status file was written by the seed step itself.
+    assert not (layer / "logs" / "pipeline_status.json").exists()
+
+    # A subsequent --once against the SAME, unchanged corpus must not fire
+    # for any class -- every watermark now equals its current count.
+    fr = FakeRunner()
+    rc2 = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc2 == 0
+    assert fr.calls == []
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"
+
+
+def test_seed_watermarks_and_once_together_is_argparse_error(tmp_path):
+    """--seed-watermarks and --once are mutually exclusive, enforced by
+    argparse itself (a mutually exclusive group), not by hand-rolled
+    validation -- both together must exit via SystemExit before either mode
+    ever runs."""
+    with pytest.raises(SystemExit):
+        loop.run(["--once", "--seed-watermarks", "--layer", str(tmp_path)],
+                 runner=FakeRunner())
 
 
 def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatch):
