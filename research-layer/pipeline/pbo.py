@@ -106,12 +106,19 @@ def permute_labels(series: dict[str, list[float]],
 
 
 def permutation_null(perf_by_id: dict[str, list[float]], s: int = 16,
-                     draws: int = 200, seed: int = 0) -> list[float]:
+                     draws: int = 50, seed: int = 0) -> list[float]:
     """The distribution of PBO for THIS family under no persistent skill.
 
     Refuses a family whose siblings are all identical: permuting labels there
     cannot change anything, so the result would be one point pretending to be
     a distribution. Callers get an error rather than a false null.
+
+    SP4 Task P3: this default tracks gauntlet.PBO_NULL_DRAWS (200 -> 50,
+    2026-08-26) so a caller that omits `draws` gets the same declared
+    protocol default gauntlet.py's own CLI now does; gauntlet.py's real
+    call site always passes `draws` explicitly (args.pbo_null_draws), so
+    this default only matters to a caller reaching for it directly (a
+    diagnose_*.py script, a REPL, a future test).
     """
     if distinct_configs(perf_by_id) < 2:
         raise ValueError(

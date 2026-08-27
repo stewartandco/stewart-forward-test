@@ -544,3 +544,354 @@ def test_quarantine_threads_periods_per_year_for_fx_specs():
                                 periods_per_year=365)
     assert direct_365["equity"][-1] != pytest.approx(row["equity"])
     assert cells.SESSION_PERIODS.get(spec["universe"]["session"]) == 261
+
+
+# ---------------- SP4 Task P2: parallel candidate evaluation ----------------
+#
+# gauntlet.py:876's registry-wide clustering loop stays serial (SP4 Task P1
+# already covers its cost with the sim cache); Task P2 parallelises the
+# PER-CANDIDATE gate battery + corroborating metrics (stress re-run,
+# self-perturbation, walkforward, haircut, regime) with a ProcessPoolExecutor.
+# protocol-v6's own founding principle -- every gate reads the strategy ALONE,
+# never a sibling -- is exactly what makes evaluating candidates out of order
+# or in different processes safe: nothing about one candidate's verdict can
+# depend on another's, so nothing is lost by not doing them in registry order
+# in real time (run() still MERGES results back into registry order, so a
+# chained verdict's own content is unaffected either way -- this test proves
+# the content, not just the order, survives the trip).
+
+from . import gauntlet as gauntlet_mod
+
+
+def test_parallel_evaluation_matches_serial(tmp_path, monkeypatch):
+    """The P2 same-answer proof: run() derives max_workers = cpu_count - 2
+    (never below 1) and exposes no CLI override, so the two paths are forced
+    by monkeypatching os.cpu_count() -- 3 gives max_workers=1 (the serial,
+    in-process reference _run_candidates itself falls back to), 4 gives
+    max_workers=2 (the real ProcessPoolExecutor path, Windows 'spawn'
+    included). Two structurally identical tmp registries (the v4-sweep
+    fixture: one real sibling family, 5 candidates, 3 live + 2 dead) are run
+    one each way and every chained verdict's metrics dict is compared key for
+    key -- MC bootstrap, the deflated Sharpe, PBO, self-perturbation and the
+    haircut all included, since every seed here is content-derived
+    (evaluate_spec's own seed=int(sid, 16) % 2**31) and none of it should be
+    able to tell which process did the work."""
+    from .gauntlet import run as gauntlet_run
+    from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF, write_data_dir
+
+    serial_dir, parallel_dir = tmp_path / "serial", tmp_path / "parallel"
+    serial_dir.mkdir()
+    parallel_dir.mkdir()
+    reg1, by_lb1 = v4_sweep_registry(serial_dir)
+    reg2, by_lb2 = v4_sweep_registry(parallel_dir)
+    data1 = write_data_dir(serial_dir, {"BTCUSD": v4_bars()})
+    data2 = write_data_dir(parallel_dir, {"BTCUSD": v4_bars()})
+
+    monkeypatch.setattr(gauntlet_mod.os, "cpu_count", lambda: 3)      # -> 1
+    rc1 = gauntlet_run(["--registry", str(reg1.log_path),
+                       "--data-dir", str(data1),
+                       "--artifacts-dir", str(serial_dir / "art"),
+                       "--cutoff", V4_CUTOFF])
+    assert rc1 == 0
+
+    monkeypatch.setattr(gauntlet_mod.os, "cpu_count", lambda: 4)      # -> 2
+    rc2 = gauntlet_run(["--registry", str(reg2.log_path),
+                       "--data-dir", str(data2),
+                       "--artifacts-dir", str(parallel_dir / "art"),
+                       "--cutoff", V4_CUTOFF])
+    assert rc2 == 0
+
+    def verdicts_by_sid(reg):
+        return {e["payload"]["strategy_id"]: e["payload"]
+                for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+
+    v1, v2 = verdicts_by_sid(reg1), verdicts_by_sid(reg2)
+    assert set(by_lb1.values()) == set(v1)
+    assert set(by_lb2.values()) == set(v2)
+    assert len(v1) == 5
+    for lb, sid1 in by_lb1.items():
+        sid2 = by_lb2[lb]
+        assert v1[sid1]["verdict"] == v2[sid2]["verdict"], lb
+        assert v1[sid1]["metrics"] == v2[sid2]["metrics"], (
+            f"lookback={lb}: max_workers=2 diverged from the serial "
+            f"(max_workers=1) reference")
+
+
+def test_run_candidates_serial_matches_pool_directly(tmp_path):
+    """Same proof at the narrower unit level: call `_run_candidates` itself
+    with max_workers=1 (in-process loop) and max_workers=2 (real pool) on the
+    SAME payload list, bypassing run()'s CLI and cpu_count entirely."""
+    from .gauntlet import (_run_candidates, _evaluate_candidate,
+                           _candidate_payload, daily_returns_with_dates,
+                           _spec_bars)
+    from .engine import run_spec
+    from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF, write_data_dir
+    from .screen import load_cell_data
+    from .cluster import effective_trials
+
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    all_specs = [e["payload"] for e in reg.entries()
+                if e["entry_type"] == "strategy_registered"]
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in all_specs for a in s["universe"]["assets"]})
+    bars_by_cell, data_hashes, data_end = load_cell_data(
+        data, cells_needed, "9999-12-31")
+
+    results = {}
+    returns_by_id = {}
+    for s in all_specs:
+        sid = s["strategy_id"]
+        res = run_spec(s, _spec_bars(bars_by_cell, s))
+        results[sid] = res
+        dated = daily_returns_with_dates(res["equity"])
+        returns_by_id[sid] = [r for _, r in dated]
+    trials_n, _labels, trials_var = effective_trials(returns_by_id)
+
+    payloads = []
+    for s in all_specs:
+        sid = s["strategy_id"]
+        g = s["provenance"]["sibling_group_id"]
+        family = [{"sid": sid2, "axes": {}, "score": 1.0,
+                  "screen_trade_count_fail": False, "gauntlet_passed": False}
+                 for sid2 in by_lb.values()]
+        sibling = next(x for x in family if x["sid"] == sid)
+        payloads.append(_candidate_payload(
+            s, _spec_bars(bars_by_cell, s), results[sid], returns_by_id[sid],
+            5, 5, 1.0, trials_n, trials_var, sibling, family, {},
+            V4_CUTOFF, True, "native", None, 0, 0))
+
+    serial = {p["spec"]["strategy_id"]: _evaluate_candidate(p) for p in payloads}
+    parallel = _run_candidates(payloads, max_workers=2)
+    assert set(serial) == set(parallel) == set(by_lb.values())
+    for sid in serial:
+        assert serial[sid]["passed"] == parallel[sid]["passed"], sid
+        assert serial[sid]["metrics"] == parallel[sid]["metrics"], sid
+        assert serial[sid]["mc_summary"] == parallel[sid]["mc_summary"], sid
+
+
+# ---------------- SP4 Task P3: PBO null gated on live groups ----------------
+
+from .test_gauntlet import COST as _V4_COST
+
+# Same lookback for all five -- the sweep axis here is the TARGET, not the
+# entry, deliberately: v4_sweep_registry's own lookback sweep (20/35/55/75/
+# 100) only produces TWO distinct return series on v4_bars() (20, 35 and 55
+# all catch the identical spikes and post byte-identical trades; 75 and 100
+# catch none and are byte-identical to each other too), which is genuinely
+# below PBO_MIN_DISTINCT and would make this fixture prove nothing about a
+# null that actually RUNS. Every one of these five closes the SAME trades on
+# the SAME dates (same entry/lookback/spike pattern) but at a DIFFERENT
+# r-multiple target price, so the five return series are genuinely distinct
+# while every gate that only cares about trade DATES (not magnitude) still
+# treats them identically.
+LIVE_RS = (0.3, 0.6, 0.9, 1.2, 1.5)
+
+
+def _flat_like(bars: list[dict], price: float = 100.0) -> list[dict]:
+    """Same dates as `bars`, constant OHLC -- channel_breakout_dense can
+    never close ABOVE a rolling max that never moves, so every sibling that
+    sweeps its lookback over this series posts zero trades regardless of
+    which lookback it uses. Built for a WHOLE FAMILY to die on its own
+    evidence (oos_negative), deliberately, to exercise Task P3's dead-group
+    gate."""
+    return [{"date": b["date"], "open": price, "high": price, "low": price,
+             "close": price, "volume": 1.0} for b in bars]
+
+
+def _cb_spec(card_id: str, asset: str, group: str, lookback: int) -> dict:
+    return {
+        "strategy_id": None, "version": 1,
+        "created_utc": "2026-08-26T00:00:00Z",
+        "name": f"p3 dead-group test {asset} lb={lookback}",
+        "family": f"p3_dead_test_{asset}",
+        "universe": {"assets": [asset], "asset_class": "crypto",
+                     "timeframe": "1d", "session": "24x7"},
+        "blocks": [
+            {"role": "entry", "type": "channel_breakout_dense",
+             "params": {"lookback": lookback, "direction": "long"}},
+            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "target", "type": "r_multiple", "params": {"r": 1.0}},
+            {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"card_ids": [card_id], "parent_strategy_id": None,
+                       "sibling_group_id": group, "generation": 0},
+        "generator": {"agent": "composer", "model": "m",
+                      "pipeline_version": "g1.0.0", "run_id": "t"},
+        "cost_model": dict(_V4_COST),
+    }
+
+
+def _r_spec(card_id: str, group: str, r: float) -> dict:
+    """Fixed lookback=20 (one of v4_bars()'s three live lookbacks), r swept
+    instead -- see LIVE_RS's own comment for why."""
+    return {
+        "strategy_id": None, "version": 1,
+        "created_utc": "2026-08-26T00:00:00Z",
+        "name": f"p3 live-group test r={r}", "family": "p3_live_test",
+        "universe": {"assets": ["BTCUSD"], "asset_class": "crypto",
+                     "timeframe": "1d", "session": "24x7"},
+        "blocks": [
+            {"role": "entry", "type": "channel_breakout_dense",
+             "params": {"lookback": 20, "direction": "long"}},
+            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "target", "type": "r_multiple", "params": {"r": r}},
+            {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"card_ids": [card_id], "parent_strategy_id": None,
+                       "sibling_group_id": group, "generation": 0},
+        "generator": {"agent": "composer", "model": "m",
+                      "pipeline_version": "g1.0.0", "run_id": "t"},
+        "cost_model": dict(_V4_COST),
+    }
+
+
+def dead_and_live_family_registry(tmp_path):
+    """One real LIVE sibling family (5 r-multiples on BTCUSD's real spike
+    pattern -- every one of them closes a real, winning trade on the SAME
+    dates, at 5 genuinely DIFFERENT target prices, so every gate that reads
+    trade dates treats them alike while their return series stay distinct)
+    plus a second, wholly DEAD family (5 lookbacks of channel_breakout_dense
+    over ETHUSD's perfectly flat series, so every one of them fails
+    oos_negative on zero trades). One gauntlet pass, two families, only one
+    of which has anything left to test -- exactly the shape Task P3's
+    dead-group gate exists for."""
+    from .test_gauntlet import V4_LOOKBACKS
+    from .common import content_id as _content_id
+
+    reg, card_id = _fresh_registry_with_card(tmp_path)
+    reg.append("note", {"text": "screen-protocol-v1: test anchor"})
+
+    live_group = "p3-live-test-group"
+    live_sids = {}
+    for r in LIVE_RS:
+        spec = _r_spec(card_id, live_group, r)
+        spec["strategy_id"] = _content_id(spec, "strategy_id")
+        reg.register_strategy(spec)
+        _advance_to_gauntlet(reg, spec)
+        live_sids[r] = spec["strategy_id"]
+
+    dead_group = "p3-dead-test-group"
+    dead_sids = {}
+    for lb in V4_LOOKBACKS:
+        spec = _cb_spec(card_id, "ETHUSD", dead_group, lb)
+        spec["strategy_id"] = _content_id(spec, "strategy_id")
+        reg.register_strategy(spec)
+        _advance_to_gauntlet(reg, spec)
+        dead_sids[lb] = spec["strategy_id"]
+
+    chain_gauntlet_note(reg)
+    return reg, live_sids, dead_sids, live_group, dead_group
+
+
+def test_pbo_dead_group_gets_new_label_live_group_still_gets_a_null(
+        tmp_path, capsys):
+    """The Task P3 assertion in one test: a group with zero gate-passing
+    candidates this pass never has a null built for it (null_draws stays 0,
+    the printed verdict is the new 'not_measured_dead_group' label, and
+    'underpowered' -- which means something ELSE, a null that WAS attempted
+    or considered -- never appears for it), while a real live group in the
+    SAME run still gets one (null_draws == args.pbo_null_draws, a real
+    pass/fail/kill verdict)."""
+    from .gauntlet import run as gauntlet_run
+    from .test_gauntlet import v4_bars, V4_CUTOFF, write_data_dir
+
+    reg, live_sids, dead_sids, live_group, dead_group = \
+        dead_and_live_family_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
+                                     "ETHUSD": _flat_like(v4_bars())})
+    art = tmp_path / "art"
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF,
+                       "--pbo-null-draws", "8"])
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+                for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+
+    # every ETHUSD sibling died on its OWN evidence (oos_negative, zero
+    # trades) -- confirms this really is a dead family, not a vacuous test.
+    dead_reasons = {e["payload"]["strategy_id"]: e["payload"]["reason"]
+                    for e in reg.entries() if e["entry_type"] == "state_change"
+                    and e["payload"]["to"] == "graveyard"}
+    for sid in dead_sids.values():
+        assert dead_reasons[sid] == "oos_negative"
+        m = verdicts[sid]["metrics"]
+        assert m["pbo_null_draws"] == 0
+        assert m["pbo_percentile"] is None
+        assert m["pbo_family_kill"] is False
+
+    dead_line = next(l for l in out.splitlines() if l.strip().startswith(
+        f"PBO {dead_group}:"))
+    assert dead_line.rstrip().endswith("-> not_measured_dead_group")
+    assert "underpowered" not in dead_line
+
+    # the live family: at least one r-multiple actually cleared every gate
+    # (confirming this really is a LIVE group, not a vacuous test either),
+    # and its PBO line ran the real permutation null, never the dead label.
+    live_line = next(l for l in out.splitlines() if l.strip().startswith(
+        f"PBO {live_group}:"))
+    assert live_line.rstrip().split("-> ")[-1] in {"pass", "fail", "kill"}
+    assert "not_measured_dead_group" not in live_line
+    assert "underpowered" not in live_line
+
+    passed_any = False
+    for sid in live_sids.values():
+        m = verdicts[sid]["metrics"]
+        assert m["pbo_null_draws"] == 8, (
+            "the live group's null must actually run at the requested "
+            "--pbo-null-draws count")
+        passed_any = passed_any or verdicts[sid]["verdict"] == "pass"
+    assert passed_any, "fixture bug: the live group has no gate-passer"
+
+
+# ---------------- SP4 Task P5: per-stage progress output --------------------
+
+def test_progress_lines_appear_for_every_stage(tmp_path, capsys):
+    """A smoke test, not a numbers test: every stage P5 names must print AT
+    LEAST one '[gauntlet] ...' line, unbuffered (flush=True at every call
+    site -- not directly observable through capsys, but every print() in the
+    new code paths passes it, so a hang mid-run would still show partial
+    output rather than none)."""
+    from .gauntlet import run as gauntlet_run
+    from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF, write_data_dir
+
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art"),
+                       "--cutoff", V4_CUTOFF])
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    assert "[gauntlet] clustering done in" in out
+    assert "cache " in out and "hits /" in out and "misses)" in out
+    assert "[gauntlet] candidate evaluation done in" in out
+    assert "[gauntlet] pbo group" in out
+    assert "[gauntlet] stage timings:" in out
+    assert "clustering" in out and "candidate eval" in out
+    assert "pbo " in out and "artifacts" in out and "total" in out
+
+
+def test_progress_lines_appear_in_dry_run_too(tmp_path, capsys):
+    """--dry-run still evaluates every candidate (it only skips the chain
+    write), so the same progress + timing lines must still appear."""
+    from .gauntlet import run as gauntlet_run
+    from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF, write_data_dir
+
+    reg, by_lb = v4_sweep_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars()})
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art"),
+                       "--cutoff", V4_CUTOFF, "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "[gauntlet] clustering done in" in out
+    assert "[gauntlet] candidate evaluation done in" in out
+    assert "[gauntlet] stage timings:" in out

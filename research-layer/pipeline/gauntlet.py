@@ -30,7 +30,7 @@ registry entry 2511, the protocol at 2512.
 Usage:
     python -m pipeline.gauntlet [--registry registry_log.jsonl]
         [--data-dir data] [--artifacts-dir artifacts]
-        [--cutoff 2023-12-31] [--pbo-null-draws 200] [--no-perturb]
+        [--cutoff 2023-12-31] [--pbo-null-draws 50] [--no-perturb]
         [--dry-run]
 
 Real runs HARD-REFUSE unless a note starting with PROTOCOL is chained.
@@ -45,12 +45,15 @@ has not been true since protocol-v3.
 """
 from __future__ import annotations
 
+import os
 import sys
 import math
 import json
+import time
 import hashlib
 import argparse
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from . import cells
 from . import simcache
@@ -99,7 +102,13 @@ SR_FLOOR = 0.4
 PBO_MIN_DISTINCT = 4     # below this the gate cannot see; it FAILS, never passes
 PBO_PASS_PCTILE = 0.05   # <= this percentile of its own null passes
 PBO_KILL_PCTILE = 0.95   # >= this kills the whole sibling group
-PBO_NULL_DRAWS = 200
+# SP4 Task P3: 200 -> 50. The null is a RECORDED-NOT-GATED statistic (chain
+# entries 2513-2515: v6 kept it as evidence, not a decision), and 200 draws of
+# CSCV per sibling group was measured at ~10h at eq-gen1 scale -- the single
+# largest remaining cost after P1/P2/P4. 50 draws is still enough resolution
+# for the 5%/95% percentile bands this reads (PBO_PASS_PCTILE/PBO_KILL_PCTILE)
+# and a deliberate deep run can still ask for 200 via --pbo-null-draws.
+PBO_NULL_DRAWS = 50
 CSCV_SPLITS = 16
 PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 
@@ -161,6 +170,25 @@ def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> floa
         vols.append(math.sqrt(sum((r - m) ** 2 for r in rets) / len(rets))
                     * math.sqrt(365))
     return sum(vols) / len(vols) if vols else 0.0
+
+
+def _pbo_metrics_fields(pbo_status: dict | None) -> dict:
+    """The six verdict-metrics keys derived from a PBO group status dict.
+
+    Factored out (SP4 Task P2/P3) so evaluate_spec's inline computation and
+    run()'s post-hoc patch (candidates are evaluated in a worker process
+    BEFORE this pass's own gate-passing groups are known -- see the P3
+    dead-group note at the PBO loop below) read the SAME six keys from the
+    SAME dict shape and can never drift apart. `None` (no status supplied,
+    or a bare `{}`) records every field as None, exactly as evaluate_spec
+    always has for a caller that omits pbo_status."""
+    s = pbo_status or {}
+    return {"pbo": s.get("pbo"),
+            "pbo_n_distinct": s.get("n_distinct"),
+            "pbo_percentile": s.get("percentile"),
+            "pbo_null_p05": s.get("null_p05"),
+            "pbo_null_p95": s.get("null_p95"),
+            "pbo_null_draws": s.get("null_draws")}
 
 
 def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
@@ -242,12 +270,7 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
         # reader to recompute one. Both are None when the caller did not
         # supply them.
         "train_sharpe": train_sharpe,
-        "pbo": (pbo_status or {}).get("pbo"),
-        "pbo_n_distinct": (pbo_status or {}).get("n_distinct"),
-        "pbo_percentile": (pbo_status or {}).get("percentile"),
-        "pbo_null_p05": (pbo_status or {}).get("null_p05"),
-        "pbo_null_p95": (pbo_status or {}).get("null_p95"),
-        "pbo_null_draws": (pbo_status or {}).get("null_draws"),
+        **_pbo_metrics_fields(pbo_status),
         # protocol-v6: neighbourhood qualification is still computed and still
         # recorded; it stopped gating and stopped selecting. Kept because the
         # next protocol argument will need the evidence, and a verdict that
@@ -513,6 +536,177 @@ def stressed(spec: dict) -> dict:
     return s
 
 
+def _candidate_payload(s: dict, spec_bars: dict, res: dict,
+                       rets: list[float], group_n_val: int, registered_n: int,
+                       train_sharpe_val: float | None, trials_n: int,
+                       trials_var: float, sibling: dict, family: list[dict],
+                       grids: dict, cutoff: str, perturb: bool,
+                       trials_alignment: str, trials_common_days: int | None,
+                       sim_cache_hits: int, sim_cache_misses: int) -> dict:
+    """Build ONE candidate's worker payload: everything `_evaluate_candidate`
+    needs, and nothing it does not (Registry, Path, open file handles never
+    belong here -- see that function's own docstring on why).
+
+    `res` is this candidate's OWN already-simulated (trades, equity) --
+    computed once, serially, in run()'s registry-wide clustering pass (SP4
+    Task P1) -- passed through rather than re-run inside the worker, so P2
+    does not pay for the base simulation twice. `spec_bars` (this spec's own
+    cell's bars) is still needed in the worker regardless, for the stress
+    re-run and for perturbation's re-runs of nudged neighbours."""
+    sid = s["strategy_id"]
+    return {
+        "spec": s, "spec_bars": spec_bars,
+        "res_trades": res["trades"], "res_equity": res["equity"],
+        "rets": rets, "group_n": group_n_val, "registered_n": registered_n,
+        "train_sharpe": train_sharpe_val, "trials_n": trials_n,
+        "trials_var": trials_var, "seed": int(sid, 16) % (2 ** 31),
+        "sibling": sibling, "family": family, "grids": grids,
+        "cutoff": cutoff, "perturb": perturb,
+        "trials_alignment": trials_alignment,
+        "trials_common_days": trials_common_days,
+        "sim_cache_hits": sim_cache_hits, "sim_cache_misses": sim_cache_misses,
+    }
+
+
+def _evaluate_candidate(payload: dict) -> dict:
+    """Evaluate ONE candidate's full gate battery + every corroborating
+    metric, standalone (protocol-v6's own founding principle -- see the
+    module docstring -- made this split possible: nothing here reads a
+    sibling, a group, or another candidate).
+
+    SP4 Task P2: this is the ProcessPoolExecutor worker. Windows uses
+    'spawn', which re-imports this module fresh in every worker process and
+    pickles the CALL rather than sharing memory, so this function must be a
+    plain module-level callable taking only picklable plain data (dicts,
+    lists, str, float, int -- exactly what `_candidate_payload` builds) and
+    returning the same. No Registry, no Path-backed file handle, no closure
+    over run()'s locals crosses that boundary.
+
+    PBO is deliberately NOT threaded through here. Task P3 gates the
+    (expensive) permutation null on whether at least one candidate in a
+    sibling group passed ITS OWN gate battery, which is only knowable once
+    every candidate's base verdict exists -- a fact this function, evaluating
+    one candidate in isolation, cannot see. It therefore always evaluates
+    with `pbo_status=None` (every pbo_* metric records None, exactly as
+    evaluate_spec already does for any caller that omits it), and run()
+    patches the real pbo_status and the pbo_family_kill override into the
+    returned metrics dict afterwards, once every candidate's base result is
+    in and the live/dead groups are known. See run()'s PBO section.
+
+    Self-perturbation (`sensitivity`) needs a `score_fn` closure over this
+    candidate's OWN `spec_bars` and `cutoff` -- for a pre-P2 in-process loop
+    that closure lived in run() itself; here it is defined and consumed
+    entirely INSIDE this one worker call, so it never has to be pickled.
+    """
+    s = payload["spec"]
+    spec_bars = payload["spec_bars"]
+    cutoff = payload["cutoff"]
+    sid = s["strategy_id"]
+    g = s["provenance"]["sibling_group_id"]
+
+    stress_res = run_spec(stressed(s), spec_bars)
+    is_t, oos_t = split_trades(payload["res_trades"], cutoff)
+    _, stress_oos = split_trades(stress_res["trades"], cutoff)
+    assets = s["universe"]["assets"]
+    is_vol = window_vol(spec_bars, assets, "", cutoff)
+    oos_vol = window_vol(spec_bars, assets, cutoff, "9999-12-31")
+    ok_plateau, _reason = qualifies(payload["sibling"], payload["family"],
+                                    payload["grids"])
+    passed, reason, metrics, mc_summary = evaluate_spec(
+        is_t, oos_t, stress_oos, payload["rets"], is_vol, oos_vol,
+        payload["trials_n"], payload["trials_var"], seed=payload["seed"],
+        group_n=payload["group_n"], registered_n=payload["registered_n"],
+        train_sharpe=payload["train_sharpe"],
+        pbo_status=None,      # patched by run() after the whole pool returns
+        plateau_ok=ok_plateau)
+
+    # Clustering alignment + sim-cache counters (spec s10.6 / SP4 Task P1):
+    # run-level facts, identical for every candidate of this pass, computed
+    # once in run() before the pool was even submitted.
+    metrics["trials_alignment"] = payload["trials_alignment"]
+    metrics["trials_common_days"] = payload["trials_common_days"]
+    metrics["sim_cache"] = {"hits": payload["sim_cache_hits"],
+                            "misses": payload["sim_cache_misses"]}
+
+    spec_class = s["universe"].get("asset_class", "crypto")
+    eras = cells.CLASSES.get(spec_class, {}).get("eras", ())
+    if eras:
+        metrics["era_summary"] = era_summary(payload["res_trades"], eras)
+
+    train_dates = [d for d, _ in payload["res_equity"] if d <= cutoff]
+    metrics["haircut"] = dict(
+        harvey_liu_haircut(payload["train_sharpe"] or 0.0,
+                           t_years=len(train_dates) / 365.0,
+                           n_trials=payload["trials_n"]),
+        window="train")
+    metrics["walkforward"] = dict(
+        walkforward_report(
+            [t for t in payload["res_trades"] if t["entry_date"] <= cutoff],
+            train_dates, n_folds=3, purge_bars=PURGE_BARS),
+        window="train")
+
+    if payload["perturb"]:
+        def _perturbed_score(pspec):
+            r = run_spec(pspec, spec_bars)
+            return annualized_sharpe([(d, v) for d, v in r["equity"]
+                                      if d <= cutoff])
+        metrics["perturbation"] = sensitivity(
+            s, payload["train_sharpe"], _perturbed_score, dense_only=True)
+    else:
+        metrics["perturbation"] = None
+
+    btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
+    metrics["regime"] = {"window": "oos",
+                         "buckets": regime_split(oos_t, regime_by_date(btc))}
+
+    return {"sid": sid, "group": g, "passed": passed, "reason": reason,
+            "metrics": metrics, "mc_summary": mc_summary, "oos_trades": oos_t}
+
+
+def _run_candidates(payloads: list[dict], max_workers: int,
+                    progress_every: int = 25) -> dict[str, dict]:
+    """Evaluate every candidate (SP4 Task P2), returning {sid: result}.
+
+    Each candidate is evaluated STANDALONE, so nothing here depends on the
+    order payloads are submitted in or the order results complete in --- but
+    that also means the CALLER, not this function, owns merge order: run()
+    always walks its own `candidates` list (registry order) and looks results
+    up here by sid, never iterates this dict directly, so a chained verdict's
+    position never depends on which worker happened to finish first.
+
+    max_workers <= 1 (or a single candidate) runs every payload in THIS
+    process, in list order -- the serial reference path P2's same-answer
+    test compares the pool path against. Above that, ProcessPoolExecutor
+    spawns worker processes (Windows: 'spawn', re-importing this module in
+    each) and `_evaluate_candidate` is the only thing sent across that
+    boundary, by design (see its own docstring).
+    """
+    n = len(payloads)
+    results: dict[str, dict] = {}
+    done = 0
+
+    def _tick():
+        nonlocal done
+        done += 1
+        if done % progress_every == 0 or done == n:
+            print(f"[gauntlet] evaluated {done}/{n} candidates", flush=True)
+
+    if max_workers <= 1 or n <= 1:
+        for p in payloads:
+            r = _evaluate_candidate(p)
+            results[r["sid"]] = r
+            _tick()
+        return results
+
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_evaluate_candidate, p) for p in payloads]
+        for fut in as_completed(futures):
+            r = fut.result()
+            results[r["sid"]] = r
+            _tick()
+    return results
+
+
 def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
                              mc_summary: dict, metrics: dict, cutoff: str,
                              data_hashes: dict, data_end: dict,
@@ -543,6 +737,8 @@ def run(argv: list[str] | None = None) -> int:
     import hashlib
     from .screen import assert_cells_comparable, bundle_hash, load_cell_data
 
+    t_run0 = time.time()          # SP4 Task P5: final stage-timings summary
+
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path,
                     default=Path(__file__).resolve().parent.parent / "registry_log.jsonl")
@@ -557,8 +753,9 @@ def run(argv: list[str] | None = None) -> int:
     # in research-layer/simcache/ (gitignored) exactly as the plan names it.
     ap.add_argument("--simcache-dir", type=Path, default=None)
     ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
-    # protocol-v5's per-family null. Exposed so tests can run a cheap one;
-    # a real run uses the declared 200 and the verdict records what it used.
+    # protocol-v5's per-family null. SP4 Task P3 lowered the default 200 -> 50
+    # (see PBO_NULL_DRAWS); a real run's verdict records whatever draw count
+    # it actually used, and a deliberate deep run can still pass 200 here.
     ap.add_argument("--pbo-null-draws", type=int, default=PBO_NULL_DRAWS)
     # Self-perturbation costs two extra backtests per dense axis per strategy.
     # On by default because a metric nobody computes is a metric nobody has;
@@ -651,6 +848,7 @@ def run(argv: list[str] | None = None) -> int:
                 for s in all_specs}
     candidate_sids = {s["strategy_id"] for s in candidates}
     cache = simcache.SimCache(simcache_dir)
+    t_cluster0 = time.time()      # SP4 Task P5: covers sim-cache + clustering
     full_results: dict[str, dict] = {}          # candidates only (need trades)
     dated_returns_by_sid: dict[str, list[tuple[str, float]]] = {}
     equity_len_by_sid: dict[str, int] = {}
@@ -745,6 +943,10 @@ def run(argv: list[str] | None = None) -> int:
     trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
     print(f"effective trials: {trials_n} clusters over {registered_n} "
           f"registered strategies")
+    t_cluster = time.time() - t_cluster0
+    print(f"[gauntlet] clustering done in {t_cluster:.1f}s "
+          f"(cache {sim_cache_hits} hits / {sim_cache_misses} misses)",
+          flush=True)
 
     # protocol-v4: plateau selection needs every sibling's train-window score,
     # its dense-axis coordinates, and whether it died at the screen on
@@ -800,6 +1002,40 @@ def run(argv: list[str] | None = None) -> int:
         for s in fam:
             s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
 
+    # SP4 Task P2: evaluate every candidate's gate battery + corroborating
+    # metrics in a worker pool, standalone (protocol-v6's own founding
+    # principle -- see the module docstring -- is exactly what makes this
+    # legal: nothing a candidate's verdict depends on reads a sibling, so
+    # nothing is lost by evaluating siblings out of order or in different
+    # processes). PBO is threaded through AFTERWARDS, once every candidate's
+    # base result exists -- see the PBO section immediately below for why.
+    #
+    # Workers = cpu_count - 2, never fewer than 1: this machine also runs
+    # Morpheus (hub :8100), gbp-dashboard (:8000/:5173) and the SDCA dash
+    # (:8050) at the same time (workspace CLAUDE.md's standing hazard), so a
+    # gauntlet pass must always leave two cores free for them rather than
+    # claiming the whole box.
+    n_cpu = os.cpu_count() or 3
+    max_workers = max(1, n_cpu - 2)
+    payloads = [
+        _candidate_payload(
+            s, _spec_bars(bars_by_cell, s), full_results[s["strategy_id"]],
+            returns_by_id[s["strategy_id"]], group_n[group_of[s["strategy_id"]]],
+            registered_n, train_sharpe[s["strategy_id"]], trials_n, trials_var,
+            next(x for x in family_by_group[group_of[s["strategy_id"]]]
+                if x["sid"] == s["strategy_id"]),
+            family_by_group[group_of[s["strategy_id"]]],
+            grids_by_group.get(group_of[s["strategy_id"]], {}),
+            args.cutoff, args.perturb, trials_alignment, trials_common_days,
+            sim_cache_hits, sim_cache_misses)
+        for s in candidates]
+    t_eval0 = time.time()
+    results_by_sid = _run_candidates(payloads, max_workers)
+    t_eval = time.time() - t_eval0
+    print(f"[gauntlet] candidate evaluation done in {t_eval:.1f}s "
+          f"({len(candidates)} candidates, {max_workers} worker(s))",
+          flush=True)
+
     # PBO over the TRAIN window only — the 2024+ holdout has been consumed
     # three times already and protocol-v5 does not consume it a fourth. The
     # matrix includes EVERY sibling, screen deaths included; computing it over
@@ -808,8 +1044,25 @@ def run(argv: list[str] | None = None) -> int:
     # protocol-v5 judges the observed value against a null built for THAT
     # family rather than against a fixed line, and refuses to judge a family
     # with too few DISTINCT configurations at all.
+    #
+    # SP4 Task P3: the (expensive) permutation null is now built ONLY for a
+    # group with >=1 candidate that passed its OWN gate battery THIS PASS
+    # (before any PBO override -- see below). Everything else -- a group with
+    # no candidate in it this run at all (already fully resolved, or not yet
+    # advanced past screen), or one where every candidate died on its own
+    # evidence -- gets the honest "not_measured_dead_group" label instead of
+    # spending a null on a family with nothing left to test. This is distinct
+    # from "underpowered" (which means the null WAS attempted or would have
+    # been, but the family itself cannot support one): a dead group is never
+    # even asked the question. live_groups is necessarily a subset of what
+    # v5 would have computed a null for, so this can only ever REMOVE a null,
+    # never add a "kill" or "pass"/"fail" that v5 would not also have reached.
+    t_pbo0 = time.time()
+    live_groups = {group_of[s["strategy_id"]] for s in candidates
+                  if results_by_sid[s["strategy_id"]]["passed"]}
     pbo_by_group = {}
-    for g, fam in family_by_group.items():
+    n_groups = len(family_by_group)
+    for gi, (g, fam) in enumerate(family_by_group.items(), start=1):
         series = {s["sid"]: train_returns(s["sid"]) for s in fam}
         res = cscv_pbo(series, s=CSCV_SPLITS)
         n_distinct = distinct_configs(series)
@@ -817,7 +1070,9 @@ def run(argv: list[str] | None = None) -> int:
         res["null_draws"] = 0
         res["percentile"] = res["null_p05"] = res["null_p95"] = None
         res["member_pass"] = False        # fail closed until measured
-        if res["pbo"] is None:
+        if g not in live_groups:
+            res["verdict"] = "not_measured_dead_group"
+        elif res["pbo"] is None:
             res["verdict"] = "underpowered"
         elif n_distinct < PBO_MIN_DISTINCT:
             # Not a lenient default: the swept axis did not bind, so there is
@@ -835,6 +1090,8 @@ def run(argv: list[str] | None = None) -> int:
                 res["verdict"] = "underpowered"
                 pbo_by_group[g] = res
                 print(f"  PBO {g}: null was uncomputable -> underpowered")
+                if gi % 25 == 0 or gi == n_groups:
+                    print(f"[gauntlet] pbo group {gi}/{n_groups}", flush=True)
                 continue
             res["percentile"] = percentile_of(null, res["pbo"])
             res["null_p05"] = percentile(sorted(null), PBO_PASS_PCTILE)
@@ -860,36 +1117,25 @@ def run(argv: list[str] | None = None) -> int:
               + ("" if pct is None else
                  f"  pctile={pct:.0%} of {res['null_draws']} draws")
               + f"  -> {res['verdict']}")
+        if gi % 25 == 0 or gi == n_groups:
+            print(f"[gauntlet] pbo group {gi}/{n_groups}", flush=True)
     killed_groups = {g for g, r in pbo_by_group.items()
                      if r["verdict"] == "kill"}
     for g in sorted(killed_groups):
         print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f}, "
               f"the {pbo_by_group[g]['percentile']:.0%} percentile of its own "
               f"no-skill null (kill at {PBO_KILL_PCTILE:.0%})")
+    t_pbo = time.time() - t_pbo0
 
-    rows, payloads = [], []
+    # Patch each candidate's worker-computed metrics with the pbo status that
+    # was only knowable AFTER the whole pool returned (see the P2/P3 comments
+    # above), and apply the same family-kill override run() always has.
+    rows, payloads_out = [], []
     for s in candidates:
         sid = s["strategy_id"]
-        res = full_results[sid]
-        spec_bars = _spec_bars(bars_by_cell, s)
-        stress_res = run_spec(stressed(s), spec_bars)
-        is_t, oos_t = split_trades(res["trades"], args.cutoff)
-        _, stress_oos = split_trades(stress_res["trades"], args.cutoff)
-        rets = returns_by_id[sid]
-        g = group_of[sid]
-        assets = s["universe"]["assets"]
-        is_vol = window_vol(spec_bars, assets, "", args.cutoff)
-        oos_vol = window_vol(spec_bars, assets, args.cutoff, "9999-12-31")
-        ok_plateau, _reason = qualifies(
-            next(x for x in family_by_group[g] if x["sid"] == sid),
-            family_by_group[g], grids_by_group.get(g, {}))
-        passed, reason, metrics, mc_summary = evaluate_spec(
-            is_t, oos_t, stress_oos, rets, is_vol, oos_vol,
-            trials_n, trials_var, seed=int(sid, 16) % (2 ** 31),
-            group_n=group_n[g], registered_n=registered_n,
-            train_sharpe=train_sharpe[sid],
-            pbo_status=pbo_by_group[g],
-            plateau_ok=ok_plateau)
+        r = results_by_sid[sid]
+        g, passed, reason, metrics = r["group"], r["passed"], r["reason"], r["metrics"]
+        metrics.update(_pbo_metrics_fields(pbo_by_group[g]))
         # A PBO family kill is recorded on EVERY member of the group, but it
         # only becomes the fail REASON for a strategy that had nothing else
         # wrong. Six gates precede 'pbo' in FAIL_ORDER, so overwriting `reason`
@@ -899,74 +1145,10 @@ def run(argv: list[str] | None = None) -> int:
         metrics["pbo_family_kill"] = g in killed_groups
         if metrics["pbo_family_kill"] and passed:
             passed, reason = False, "pbo_family_kill"
-
-        # Clustering alignment (spec s10.6), recorded so a reader of the
-        # verdict never has to infer which calendar `trials_n` was computed
-        # over. "native" (single-class, the crypto-only path today) carries
-        # no common-day count -- there was no intersection to take.
-        metrics["trials_alignment"] = trials_alignment
-        metrics["trials_common_days"] = trials_common_days
-
-        # SP4 Task P1: recorded, additive. The same value on every verdict of
-        # this run -- the registry-wide re-simulation set is computed ONCE
-        # per run, shared by every candidate's clustering/train_sharpe/PBO
-        # inputs, not per-candidate -- so there is exactly one hit/miss count
-        # to record, not one per strategy.
-        metrics["sim_cache"] = {"hits": sim_cache_hits,
-                                "misses": sim_cache_misses}
-
-        # Era summaries (spec §6): recorded, never gated -- protocol-v6 has
-        # no era gate, and FAIL_ORDER is unchanged. Only classes that declare
-        # non-empty eras (fx first) get the key at all; a crypto verdict
-        # carries no era_summary, matching cells.CLASSES["crypto"]["eras"] ==
-        # () exactly.
-        spec_class = s["universe"].get("asset_class", "crypto")
-        eras = cells.CLASSES.get(spec_class, {}).get("eras", ())
-        if eras:
-            metrics["era_summary"] = era_summary(res["trades"], eras)
-
-        # Corroborating numbers: RECORDED, never gating. Each carries the
-        # WINDOW it was computed over, because a verdict is a public
-        # append-only record and a reader must not have to infer that.
-        train_dates = [d for d, _ in full_results[sid]["equity"]
-                       if d <= args.cutoff]
-        metrics["haircut"] = dict(
-            harvey_liu_haircut(train_sharpe[sid] or 0.0,
-                               t_years=len(train_dates) / 365.0,
-                               n_trials=trials_n),
-            window="train")
-        metrics["walkforward"] = dict(
-            walkforward_report(
-                [t for t in res["trades"] if t["entry_date"] <= args.cutoff],
-                train_dates, n_folds=3, purge_bars=PURGE_BARS),
-            window="train")
-        # protocol-v6 retired the plateau gate; this replaces the CONCERN it
-        # was built on -- a lone peak surrounded by cliffs -- in a form that is
-        # standalone. It nudges the strategy's OWN parameters one step along
-        # their own grids and re-runs IT, consulting no sibling and requiring
-        # no neighbouring grid point to have been registered. RECORDED, NOT
-        # GATED: nothing is known yet about what real strategies show here, and
-        # gating an unmeasured threshold is the mistake v4 and v5 both made.
-        if args.perturb:
-            def _perturbed_score(pspec):
-                r = run_spec(pspec, spec_bars)
-                return annualized_sharpe([(d, v) for d, v in r["equity"]
-                                          if d <= args.cutoff])
-            metrics["perturbation"] = sensitivity(
-                s, train_sharpe[sid], _perturbed_score, dense_only=True)
-        else:
-            metrics["perturbation"] = None
-
-        btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
-        # `buckets` is nested rather than flattened alongside `window`:
-        # regime.BUCKETS is a closed vocabulary and the map's values are all
-        # per-bucket stat dicts, so a bare string sibling would break anyone
-        # iterating it.
-        metrics["regime"] = {"window": "oos",
-                             "buckets": regime_split(oos_t, regime_by_date(btc))}
         rows.append({"sid": sid, "group": g, "passed": passed,
                      "dsr": metrics["deflated_sharpe"]})
-        payloads.append((s, oos_t, passed, reason, metrics, mc_summary))
+        payloads_out.append((s, r["oos_trades"], passed, reason, metrics,
+                             r["mc_summary"]))
         d = metrics["edge_decay_pct"]
         print(f"{sid}  {'PASS' if passed else 'fail':<4} "
               f"oos_edge={metrics['oos_edge_per_trade']:+.5f}  "
@@ -976,6 +1158,7 @@ def run(argv: list[str] | None = None) -> int:
               f"[info dsr={metrics['deflated_sharpe']:.3f}]  "
               f"stress={metrics['cost_stress_net_pnl']:+.4f}"
               + (f"  [{reason}]" if reason else ""))
+    payloads = payloads_out
 
     passed_by_sid = {r["sid"]: r["passed"] for r in rows}
     for fam in family_by_group.values():
@@ -988,9 +1171,14 @@ def run(argv: list[str] | None = None) -> int:
         print(f"\nDRY RUN — {len(rows)} evaluated, {n_pass} pass; "
               f"{len(quarantine)} would quarantine, "
               f"{len(rows) - n_pass} gate-fail; nothing written.")
+        print(f"[gauntlet] stage timings: clustering {t_cluster:.1f}s, "
+              f"candidate eval {t_eval:.1f}s ({max_workers} worker(s)), "
+              f"pbo {t_pbo:.1f}s, total {time.time() - t_run0:.1f}s",
+              flush=True)
         return 0
 
     n_written = 0
+    t_artifacts0 = time.time()
     try:
         # phase 1: all verdicts
         for s, oos_t, passed, reason, metrics, mc_summary in payloads:
@@ -1037,8 +1225,13 @@ def run(argv: list[str] | None = None) -> int:
               f"diagnostics.", file=sys.stderr)
         raise
 
+    t_artifacts = time.time() - t_artifacts0
     print(f"\n{len(rows)} evaluated: {len(quarantine)} -> quarantine, "
           f"{len(rows) - n_pass} gate-fail -> graveyard.")
+    print(f"[gauntlet] stage timings: clustering {t_cluster:.1f}s, "
+          f"candidate eval {t_eval:.1f}s ({max_workers} worker(s)), "
+          f"pbo {t_pbo:.1f}s, artifacts {t_artifacts:.1f}s, "
+          f"total {time.time() - t_run0:.1f}s", flush=True)
     return 0
 
 
