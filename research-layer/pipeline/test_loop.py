@@ -15,6 +15,7 @@ import pytest
 from .chainlock import ChainLock, ChainLockHeld
 from .registry import Registry
 from . import loop, loop_state
+from .test_pipeline import make_strategy, register_example_blocks
 
 
 def _mk_layer(tmp_path, accepted_fx=0):
@@ -34,13 +35,18 @@ def _mk_layer(tmp_path, accepted_fx=0):
 
 class FakeRunner:
     """Records invocations; returns preset exit codes per python -m module.
-    Non-python argv (e.g. git) returns 0 unless a code is set for argv[0]."""
+    Non-python argv (e.g. git) returns 0 unless a code is set for argv[0].
+    call_kwargs parallels calls (same index) so a test can check e.g. cwd
+    without disturbing every existing assertion that treats fr.calls as a
+    plain list of argv lists."""
     def __init__(self, codes=None):
         self.calls = []
+        self.call_kwargs = []
         self.codes = codes or {}
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
+        self.call_kwargs.append(dict(kw))
         if "-m" in argv:
             key = argv[argv.index("-m") + 1]
         else:
@@ -51,7 +57,11 @@ class FakeRunner:
 
 
 def _modules(fr):
-    return [c[c.index("-m") + 1] for c in fr.calls if "-m" in c]
+    # argv[0] == sys.executable narrows this to `python -m ...` stage calls --
+    # `git commit -q -m "..."` also contains the literal token "-m" and must
+    # not be mistaken for a python module invocation.
+    return [c[c.index("-m") + 1] for c in fr.calls
+           if "-m" in c and c and c[0] == sys.executable]
 
 
 def _seed_crypto_caught_up(layer, count):
@@ -631,6 +641,76 @@ def test_break_stale_race_treated_as_fresh_lock_defer(tmp_path, monkeypatch):
     assert status["items"]["outcome"] == "deferred_lock"
     assert status["items"]["lock_stale"] == "false"
     assert status["items"]["lock_holder"] == "intruder"
+
+
+def test_collect_commit_paths_scoped(tmp_path):
+    """The registry always comes along; artifacts/<sid> only for a strategy
+    registered AFTER start_line whose bundle actually exists on disk."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=2)
+    register_example_blocks(reg)
+    start_line = loop._entry_count(layer / "registry_log.jsonl")
+
+    spec1 = make_strategy(["card0000"])
+    spec2 = make_strategy(["card0001"])
+    reg.register_strategy(spec1)
+    reg.register_strategy(spec2)
+    sid1, sid2 = spec1["strategy_id"], spec2["strategy_id"]
+    assert sid1 != sid2
+    (layer / "artifacts" / sid1).mkdir(parents=True)
+    # sid2 deliberately gets no artifacts dir -- its bundle never landed.
+
+    paths = loop.collect_commit_paths(layer, start_line)
+    assert paths == ["research-layer/registry_log.jsonl",
+                     f"research-layer/artifacts/{sid1}"]
+    assert f"research-layer/artifacts/{sid2}" not in paths
+
+
+def test_cycle_complete_commits_scoped(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+
+    git_idx = [i for i, c in enumerate(fr.calls) if c and c[0] == "git"]
+    assert len(git_idx) == 2
+    i_add, i_commit = git_idx
+    assert i_add < i_commit                    # add before commit, in order
+    add_call, commit_call = fr.calls[i_add], fr.calls[i_commit]
+    assert "add" in add_call and "commit" in commit_call
+    assert "research-layer/registry_log.jsonl" in add_call
+    assert not any("-A" in c for c in (add_call, commit_call))   # never -A
+
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    run_id = status["items"]["run_id"]
+    assert any(run_id in a for a in commit_call)
+
+    assert fr.call_kwargs[i_add].get("cwd") == str(layer.parent)
+    assert fr.call_kwargs[i_commit].get("cwd") == str(layer.parent)
+
+
+def test_stage_failure_does_not_commit(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner(codes={"pipeline.screen": 1})
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 1
+    assert not any(c and c[0] == "git" for c in fr.calls)
+
+
+def test_git_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner(codes={"git": 1})
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0                              # a git failure never fails the cycle
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+    git_calls = [c for c in fr.calls if c and c[0] == "git"]
+    assert len(git_calls) == 1                  # commit never attempted after add fails
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "git add failed" in captured.out
 
 
 def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatch):

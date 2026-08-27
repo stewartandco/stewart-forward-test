@@ -12,6 +12,7 @@ Exit 1: stage_failed | chain_invalid | loop_crashed -- a real defect.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import traceback
@@ -56,6 +57,48 @@ def _entry_count(registry_path: Path) -> int:
         return 0
     with registry_path.open("r", encoding="utf-8") as f:
         return sum(1 for line in f if line.strip())
+
+
+def collect_commit_paths(layer: Path, start_line: int) -> list[str]:
+    """Repo-relative paths for this cycle's chain delta: the registry plus
+    artifacts/<sid> for every strategy_registered entry appended after
+    start_line whose bundle exists on disk. start_line is the chain-line
+    count taken by the SAME helper (_entry_count) that also measures
+    chain_growth -- one counting rule, not two."""
+    rel_root = "research-layer"
+    paths = [f"{rel_root}/registry_log.jsonl"]
+    registry_path = layer / "registry_log.jsonl"
+    with registry_path.open("r", encoding="utf-8") as f:
+        lines = [ln for ln in f if ln.strip()]
+    for ln in lines[start_line:]:
+        try:
+            entry = json.loads(ln)
+        except json.JSONDecodeError:
+            continue                # partial concurrent line; tail rules apply
+        if entry.get("entry_type") != "strategy_registered":
+            continue
+        sid = entry.get("payload", {}).get("strategy_id")
+        if sid and (layer / "artifacts" / sid).is_dir():
+            paths.append(f"{rel_root}/artifacts/{sid}")
+    return paths
+
+
+def commit_cycle(layer: Path, start_line: int, run_id: str, runner: Runner) -> None:
+    """Scoped commit of this cycle's chain delta (registry_log.jsonl plus the
+    artifact bundles registered this cycle). Best-effort: a git failure is
+    LOUD (printed) but never fails the cycle -- the chain itself is the
+    trust asset, this commit is bookkeeping. Never `git add -A`, never
+    push."""
+    repo = layer.parent
+    paths = collect_commit_paths(layer, start_line)
+    add = runner(["git", "add", "--"] + paths, cwd=str(repo))
+    if add.returncode != 0:
+        print("loop: WARNING git add failed; chain delta left uncommitted", flush=True)
+        return
+    cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta"],
+               cwd=str(repo))
+    if cm.returncode != 0:
+        print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
 
 
 def _spent(logs_dir: str | Path) -> float:
@@ -495,6 +538,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                          "run_id": run_id,
                          "chain_growth": str(chain_growth)},
                   spent=_spent(logs_dir), state=state)
+
+    # -- 6. scoped chain commit -- bookkeeping, never a cycle-failure cause --
+    # Runs only after a clean cycle, only after the watermark and final
+    # status are already on disk: a commit failure must never look like it
+    # cost this cycle its success.
+    commit_cycle(layer, entries_before, run_id, runner)
+
     return 0
 
 
