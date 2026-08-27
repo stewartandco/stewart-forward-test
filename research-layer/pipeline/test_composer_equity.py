@@ -485,13 +485,17 @@ def test_equity_specs_validate_against_schema(tmp_path):
 
 def test_strategy_schema_enum_is_additive_not_a_replacement():
     """The 8 pre-existing card-taxonomy values are all still present; the
-    schema change for this task only ADDED "equity_etf", never removed or
-    renamed anything a crypto/fx spec already relies on."""
+    schema change for THIS task only ADDED "equity_etf", never removed or
+    renamed anything a crypto/fx spec already relies on. Track 2b (later)
+    additively adds "bond_etf"/"metal_etf" on top -- pinned as a superset
+    check here, and exactly by test_composer_2b.py's own additive test, so
+    a Track 2b regression is caught in two places rather than only replacing
+    this assertion's exact set."""
     schema = json.loads(
         (LAYER / "schemas" / "strategy_spec.schema.json").read_text(encoding="utf-8"))
     enum = schema["properties"]["universe"]["properties"]["asset_class"]["enum"]
-    assert set(enum) == {"futures", "equities", "crypto", "fx", "options",
-                         "rates", "commodities", "cross", "equity_etf"}
+    assert {"futures", "equities", "crypto", "fx", "options",
+            "rates", "commodities", "cross", "equity_etf"} <= set(enum)
 
 
 # ---------------- Track 2a: per-class proposer brief (equity_etf) -----------
@@ -528,6 +532,9 @@ def test_equity_schema_assets_enum_is_the_equity_universe():
 
 
 def test_unknown_asset_class_still_raises():
+    # bond_etf/metal_etf are now declared (Track 2b) and have their own
+    # proposer briefs, so they no longer serve as the "unknown class" probe
+    # here -- "commodity_future" is not declared by any class.
     import pytest
     with pytest.raises(ValueError, match="no proposer brief"):
-        composer.system_prompt_for("bond_etf")
+        composer.system_prompt_for("commodity_future")

@@ -61,7 +61,35 @@ COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 # `cross` cards) wired here. The futures proxy lane (below) is additive to
 # this table, not a member of it -- a futures card is never tagged
 # `equities`, so it can only reach equity_etf via INDEX_FUTURES_PROXY_TOPICS.
-ROUTING = {"crypto": ("crypto",), "fx": ("fx", "cross"), "equity_etf": ("equities", "cross")}
+#
+# Track 2b addendum (docs/2026-08-27-sp4-track2b-addendum.md, "Routing"):
+# bond_etf routes on `rates` + `cross` per the parent spec's table -- but the
+# parent table calls rates->bond_etf a PROXY (rates cards are largely about
+# rate FUTURES/derivatives, not the ETFs themselves), so every family citing
+# a rates-tagged card records routed_via/proxy_card_ids exactly like the
+# futures->equity_etf lane (see BOND_ETF_PROXY_TAGS below and run()'s
+# bond_etf branch). metal_etf routes on `commodities` + `cross` NATIVELY --
+# DEVIATION from the parent table (which omitted commodities entirely),
+# declared here: commodities cards about gold/silver are the closest native
+# population for a metals-only class. metal_etf's own proxy lane
+# (METALS_PROXY_TOPICS, below) is additive on top of this native routing,
+# the same shape as the futures->equity_etf lane.
+ROUTING = {"crypto": ("crypto",), "fx": ("fx", "cross"),
+          "equity_etf": ("equities", "cross"),
+          "bond_etf": ("rates", "cross"), "metal_etf": ("commodities", "cross")}
+
+# bond_etf's ROUTING tags are ALL proxy (unlike equity_etf, where "equities"
+# is native and only the futures lane is proxy): the parent spec's table
+# calls the whole rates->bond_etf lane a proxy, because rates cards are
+# overwhelmingly about rate futures/derivatives, not the cash ETFs. "cross"
+# cards are asset-class-agnostic by definition, so they are NOT proxy either
+# -- only cards actually tagged "rates" are. Declared as a set rather than
+# inlined in run() so expand_family_for_class's proxy_card_ids parameter
+# (built for the futures->equity_etf lane) can be reused verbatim: a bond_etf
+# run computes its proxy set as "every routed card tagged rates", exactly
+# analogous to equity_etf computing its proxy set as "every routed futures
+# card matching INDEX_FUTURES_PROXY_TOPICS".
+BOND_ETF_PROXY_TAGS = frozenset({"rates"})
 
 # spec s3/s10.7: fx cells carry single-fix daily bars (open=high=low=close),
 # so any block whose semantics require a real intrabar range distinct from
@@ -119,6 +147,49 @@ INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
 })
+
+# Track 2b addendum ("Routing"): the futures->metal_etf PROXY lane, same
+# shape as INDEX_FUTURES_PROXY_TOPICS above (a futures-tagged card routes to
+# metal_etf only when its topics intersect this declared set). MEASURED
+# against the live registry (research-layer/registry_log.jsonl, read-only
+# scan, 2026-08-27) using the SAME method as the index-futures measurement:
+# first find the futures-tagged cards whose claim/quote text actually NAMES
+# a specific gold/silver/precious-metals futures instrument (COMEX gold,
+# GC=F, XAU, XAG, silver futures, etc. -- not just the generic word "metal"
+# or "gold" used idiomatically), then compare THEIR topic tags against the
+# rest of the futures corpus to find topics that are genuinely discriminating
+# for metals content.
+#
+# Of the full futures-tagged corpus -- 342 cards in ANY review state (216
+# accepted, 42 rejected, 84 pending; same 342/216/42/84 split the index-
+# futures measurement used) -- searching claim+quote text for
+# gold|silver|precious metal|comex|xau|xag found exactly ONE hit, and it is
+# NOT a real instrument reference: card 80def723ae88331b's quote is "The gold
+# standard for weights is bootstrap/MC" -- an idiom about portfolio-weight
+# estimation methods, not a metals claim; its topics (portfolio optimization,
+# bootstrapping, monte carlo, computational speed) confirm this. A second
+# card (e92073341e7fd1e2) mentions "metals" once, generically, as one line
+# item inside a futures-PCA factor-loading claim ("long ... metals and other
+# commodities") with topics (PCA, USD factor, commodities, trade-related
+# risk) that are about the PCA factor structure, not about any metals
+# instrument specifically. Neither card names gold, silver, or any specific
+# metals product. Scanning every topic tag across all 342 cards for
+# gold/silver/metal/precious/comex/xau/xag also found ZERO matching topics.
+#
+# Unlike the index-futures case (20 real index-named cards existed to derive
+# discriminating topics FROM), there is no raw candidate set here at all: the
+# corpus this pipeline has ingested so far simply contains no futures-tagged
+# card that is actually about a metals futures product. METALS_PROXY_TOPICS
+# is therefore declared EMPTY -- an honest record of what was measured, not
+# an omission (see this project's "honest zero is the product claim"
+# convention) -- so a real --asset-class metal_etf composer run today
+# proxy-routes NOTHING via this lane; metal_etf's native `commodities`/
+# `cross` ROUTING entry above is unaffected. test_composer_2b.py exercises
+# the routing MECHANISM with a monkeypatched, non-empty topic set (fixture-
+# injected, per the build brief's "fixture-injected routing tests either
+# way"), because the live constant being empty means no real card can ever
+# demonstrate a positive match today.
+METALS_PROXY_TOPICS = frozenset()
 
 
 def composition_fingerprint(spec: dict) -> str:
@@ -652,11 +723,24 @@ def system_prompt_for(asset_class: str) -> str:
     returns with dividends excluded, and a survivorship-alive-in-2026
     universe (spec "Honesty limits" #1-2) -- both named explicitly so a
     family never claims an edge this data cannot see.
+
+    "bond_etf" and "metal_etf" (track 2b) follow the same pattern again, each
+    with its OWN honest wording (addendum build delta #2): bond's brief
+    states plainly that price returns exclude dividends AND coupon
+    distributions -- coupon is most of a bond ETF's total return, so a long
+    bond_etf edge is understated far more severely than equity_etf's dividend
+    gap. metal's brief states that GLD/SLV track spot gold/silver via a
+    physically-backed TRUST structure, not a futures roll, so there is no
+    roll-yield honesty limit to name (unlike a futures-based metals product).
     """
     if asset_class == "crypto":
         return SYSTEM_PROMPT
     if asset_class == "equity_etf":
         return _equity_etf_system_prompt()
+    if asset_class == "bond_etf":
+        return _bond_etf_system_prompt()
+    if asset_class == "metal_etf":
+        return _metal_etf_system_prompt()
     if asset_class != "fx":
         raise ValueError(f"no proposer brief declared for asset_class {asset_class!r}")
     cls_spec = cells.CLASSES["fx"]
@@ -765,6 +849,159 @@ a sound family can honestly claim:
 - Strategies must be implementable from daily OHLCV alone.
 
 This is the first generation proposed for this class: there is no equity_etf
+generation history yet to report.
+
+Rules:
+- Use ONLY the block types and parameter grid values given in the grammar.
+- Every family must cite the card_ids that motivate it. Cite only cards that
+  genuinely inform the composition; do not decorate with irrelevant citations.
+- Exactly one entry block; at least one stop and one risk block per family.
+- Every family must state a regime_hypothesis: which market conditions it
+  expects to work in, and why it is not merely levered exposure to an upward
+  drift. A family whose edge disappears when drift and volatility fall should
+  say so plainly.
+- Short-capable types exist: trend_scan_ds and ma_cross_ds take a direction
+  parameter (long, short, both), and regime_ma_short permits entries below a
+  moving average. channel_breakout and zscore_reversion already accept
+  direction: both.
+- regime_ma and regime_ma_short cannot appear in the same family: their
+  filters are mutually exclusive and the spec would never trade. Express
+  "long in one regime, short in the other" as two separate families.
+- Choose sweep axes ONLY where the cited research motivates exploring the
+  parameter, and sweep them on a DENSE block type (the *_dense variants).
+  Coarse types may be USED at fixed values but may NOT be swept.
+- Every swept axis must declare at least THREE values that are CONTIGUOUS on
+  that parameter's declared grid, e.g. [35, 55, 75], never [20, 55, 100].
+  Selection requires a registered sibling one step BELOW and one step ABOVE a
+  candidate on every swept axis, so a two-value sweep and a gapped sweep can
+  never produce a survivor and will be rejected.
+- Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
+  axes at three: five values leave three eligible candidates, three leave one.
+- Propose fewer, better-grounded families over many weak ones. If the cards
+  support only two good families, propose two."""
+
+
+def _bond_etf_system_prompt() -> str:
+    """Track 2b's mission-statement + honesty-limits brief, split out like
+    the equity_etf branch. bond's honesty limit is stronger than equity_etf's:
+    coupon distributions are most of a bond ETF's total return (unlike a
+    dividend, which is a minority of most equity total returns), so the
+    understatement here is named plainly rather than left implicit.
+    """
+    cls_spec = cells.CLASSES["bond_etf"]
+    assets = ", ".join(cls_spec["assets"])
+    n_assets = len(cls_spec["assets"])
+    cost = cls_spec["cost_model"]
+    commission = f"{cost['commission_per_side']:.5f}"
+    slippage = f"{cost['slippage_ticks']:.5f}"
+    financing = f"{cost['short_financing_per_year']:.1%}"
+    return f"""\
+You are the Composer agent in Stewart & Co.'s research pipeline. You design
+candidate trading strategies for the bond ETF universe ({n_assets} daily
+OHLCV series tracking US Treasury, TIPS, investment-grade, high-yield and
+emerging-market debt: {assets}) as compositions of typed blocks, grounded in
+accepted research cards.
+
+The bond_etf universe, stated plainly because one honesty limit shapes what a
+sound family can honestly claim, more severely than for equities:
+- Returns are split-adjusted PRICE returns; dividends AND coupon
+  distributions are excluded from every series. Coupon income is most of a
+  bond ETF's total return -- far more than a dividend is of most equity
+  total returns -- so a long-only bond_etf strategy's edge here is
+  MATERIALLY UNDERSTATED relative to a total-return holder, worse than the
+  equivalent gap for equity_etf. A family must not claim an edge that
+  depends on coupon income this data cannot see.
+- Each bar is a REAL daily OHLC bar (Tiingo daily bars), like equity_etf and
+  unlike fx's single-fix bars: range-based block types are eligible here,
+  and none are excluded for this class.
+- The calendar is a weekday calendar (each fund's own trading days), not
+  crypto's 24x7 grid: there is no Saturday or Sunday bar and no synthetic
+  filling of holiday holes.
+- The declared cost model charges {commission} commission per side plus
+  {slippage} slippage per side, and accrues a short financing cost of
+  {financing} per year on every bar a position is held short.
+- Strategies must be implementable from daily OHLCV alone.
+
+This is the first generation proposed for this class: there is no bond_etf
+generation history yet to report.
+
+Rules:
+- Use ONLY the block types and parameter grid values given in the grammar.
+- Every family must cite the card_ids that motivate it. Cite only cards that
+  genuinely inform the composition; do not decorate with irrelevant citations.
+- Exactly one entry block; at least one stop and one risk block per family.
+- Every family must state a regime_hypothesis: which market conditions it
+  expects to work in, and why it is not merely levered exposure to an upward
+  drift. A family whose edge disappears when drift and volatility fall should
+  say so plainly.
+- Short-capable types exist: trend_scan_ds and ma_cross_ds take a direction
+  parameter (long, short, both), and regime_ma_short permits entries below a
+  moving average. channel_breakout and zscore_reversion already accept
+  direction: both.
+- regime_ma and regime_ma_short cannot appear in the same family: their
+  filters are mutually exclusive and the spec would never trade. Express
+  "long in one regime, short in the other" as two separate families.
+- Choose sweep axes ONLY where the cited research motivates exploring the
+  parameter, and sweep them on a DENSE block type (the *_dense variants).
+  Coarse types may be USED at fixed values but may NOT be swept.
+- Every swept axis must declare at least THREE values that are CONTIGUOUS on
+  that parameter's declared grid, e.g. [35, 55, 75], never [20, 55, 100].
+  Selection requires a registered sibling one step BELOW and one step ABOVE a
+  candidate on every swept axis, so a two-value sweep and a gapped sweep can
+  never produce a survivor and will be rejected.
+- Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
+  axes at three: five values leave three eligible candidates, three leave one.
+- Propose fewer, better-grounded families over many weak ones. If the cards
+  support only two good families, propose two."""
+
+
+def _metal_etf_system_prompt() -> str:
+    """Track 2b's mission-statement + honesty-limits brief for metal_etf.
+    Unlike bond/equity, there is no dividend/coupon gap to name: GLD/SLV are
+    physically-backed trusts, and this data is price-only for every class in
+    this table anyway. What DOES need naming, honestly, is that GLD/SLV do
+    not equal owning the metal directly -- they track spot via a trust
+    structure, so a family reasoning about physical delivery, storage cost,
+    or futures roll yield is reasoning about a product this universe is not.
+    """
+    cls_spec = cells.CLASSES["metal_etf"]
+    assets = ", ".join(cls_spec["assets"])
+    n_assets = len(cls_spec["assets"])
+    cost = cls_spec["cost_model"]
+    commission = f"{cost['commission_per_side']:.5f}"
+    slippage = f"{cost['slippage_ticks']:.5f}"
+    financing = f"{cost['short_financing_per_year']:.1%}"
+    return f"""\
+You are the Composer agent in Stewart & Co.'s research pipeline. You design
+candidate trading strategies for the metal ETF universe ({n_assets} daily
+OHLCV series tracking gold and silver: {assets}) as compositions of typed
+blocks, grounded in accepted research cards.
+
+The metal_etf universe, stated plainly because one honesty limit shapes what
+a sound family can honestly claim:
+- Returns are split-adjusted PRICE returns. GLD/SLV track spot gold/silver
+  via a PHYSICALLY-BACKED TRUST structure, not a futures roll and not direct
+  physical ownership: there is no roll yield to collect or lose, and no
+  storage or insurance cost borne by the strategy, but also no delivery
+  option. A family reasoning about futures roll yield, contango/backwardation
+  carry, or physical delivery is reasoning about a product this universe
+  does not represent.
+- Each bar is a REAL daily OHLC bar (Tiingo daily bars), like equity_etf and
+  bond_etf and unlike fx's single-fix bars: range-based block types are
+  eligible here, and none are excluded for this class.
+- The calendar is a weekday calendar (each fund's own trading days), not
+  crypto's 24x7 grid: there is no Saturday or Sunday bar and no synthetic
+  filling of holiday holes.
+- The declared cost model charges {commission} commission per side plus
+  {slippage} slippage per side, and accrues a short financing cost of
+  {financing} per year on every bar a position is held short -- higher than
+  bond_etf's, reflecting metals' higher borrow cost (Phase C table).
+- Strategies must be implementable from daily OHLCV alone.
+- Only 2 assets are declared for this class (GLD, SLV): a family's cited
+  research should motivate gold and/or silver specifically, not a generic
+  "commodities" thesis borrowed from a different instrument.
+
+This is the first generation proposed for this class: there is no metal_etf
 generation history yet to report.
 
 Rules:
@@ -1112,6 +1349,40 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             }
             proxy_routed_card_ids = sorted(proxy_cards)
             propose_input = {**propose_input, **proxy_cards}
+        # Track 2b / addendum "Routing": the futures->metal_etf PROXY lane,
+        # same shape as the futures->equity_etf lane above (a futures-tagged
+        # card is invisible to the native `commodities`/`cross` ROUTING
+        # entry, so it can only reach the proposer here, and only when its
+        # topics intersect METALS_PROXY_TOPICS). METALS_PROXY_TOPICS is
+        # measured EMPTY today (composer.py comment above it), so
+        # proxy_cards is always {} on a real run right now -- the branch
+        # still runs (and still sets proxy_routed_card_ids to [] rather than
+        # leaving it None) so an equity_etf-style "the lane ran and found
+        # none" record is written, not "this run predates the lane".
+        elif args.asset_class == "metal_etf":
+            proxy_cards = {
+                cid: c for cid, c in accepted.items()
+                if "futures" in ((c.get("tags") or {}).get("asset_classes") or [])
+                and set((c.get("tags") or {}).get("topics") or []) & METALS_PROXY_TOPICS
+            }
+            proxy_routed_card_ids = sorted(proxy_cards)
+            propose_input = {**propose_input, **proxy_cards}
+        # Track 2b / addendum "Routing": bond_etf's entire rates->bond_etf
+        # lane is declared a PROXY (unlike equity_etf/metal_etf, where only a
+        # topic-matched futures subset is proxy and the rest of ROUTING is
+        # native) -- the parent spec's table calls it that because rates
+        # cards are largely about rate FUTURES/derivatives, not the cash
+        # ETFs themselves. So every card that reached propose_input via the
+        # "rates" tag (BOND_ETF_PROXY_TAGS) is proxy; a card that reached it
+        # only via "cross" (asset-class-agnostic by definition) is native.
+        # No separate topic-matching step is needed here -- unlike the
+        # futures->equity_etf/metal_etf lanes, this is a whole-TAG proxy, not
+        # a whole-CLASS-minus-topic-filter proxy.
+        elif args.asset_class == "bond_etf":
+            proxy_routed_card_ids = sorted(
+                cid for cid, c in propose_input.items()
+                if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & BOND_ETF_PROXY_TAGS
+            )
         routed_card_ids = sorted(propose_input)
         routing_info = {"asset_class": args.asset_class,
                         "eligible_tags": sorted(eligible_tags)}
