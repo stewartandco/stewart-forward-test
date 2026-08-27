@@ -58,3 +58,25 @@ card routes to equity_etf only when its topics match a declared index-futures to
 Identical to §8: snapshot pin-verified → tests (crypto AND fx byte-identical this time) →
 dry-run generation on equity_etf cells → Coen's go → activation (`LIVE_CLASSES` gains
 `equity_etf`) → first real generation → Track 2b.
+
+
+## Pre-registration: benchmark-relative control (B1, Coen 2026-08-26)
+
+Declared BEFORE implementation (this commit) per v6's record-don't-gate discipline:
+
+- New class field `benchmark`: `"self"` for equity_etf (and bond/metal at 2b), `None` for
+  crypto and fx. Declared in `cells.CLASSES`, consumed by the gauntlet.
+- Every gauntlet verdict on a cell whose class declares `benchmark: "self"` RECORDS
+  `metrics["benchmark_relative"]`: `{"window": "oos", "strategy_net", "buy_hold_net"
+  (same-window buy-and-hold of the cell's own asset, one round trip of the class cost
+  model), "excess" (strategy minus buy-hold), "basis": "price returns, dividends excluded
+  on both sides"}`. Classes with `benchmark: None` carry NO key (absence = not applicable,
+  never a null placeholder).
+- RECORDED, NOT GATED. Any future gate on `excess` requires its own pre-registration.
+- Motivation (eq-gen1, 2026-08-26): 96/96 quarantine passes were LONG index-ETF entries in
+  14 sibling groups -- an absolute Sharpe floor cannot distinguish edge from 30 years of
+  equity drift. The control makes the comparison a chain row instead of a caveat.
+- One-off report (NOT chain data): `tools_benchmark_backfill_report.py` recomputes the
+  same quantity for the 96 existing eq-gen1 quarantine occupants from committed artifacts
+  and writes `docs/runs/2026-08-26-eq-gen1-benchmark-report.md`. The chain itself gains
+  `benchmark_relative` only on verdicts written after this feature ships.
