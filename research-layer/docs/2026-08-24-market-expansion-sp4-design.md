@@ -173,3 +173,15 @@ are expected to be small addenda + activation.
 
 10. **vol_percentile window on fx (accepted deviation, T3 review):** `engine.percentile_rank(vol, i, 365)` uses a 365-BAR trailing window; on fx_5d bars that is ~17 calendar months, not one year. The percentile is scale-invariant (the inner annualisation is a no-op) and the window is declared in bars by design; accepted for Track 1 and recorded here rather than threaded per class.
 11. **Quarantine threading (T3 review):** `quarantine.py`'s forward simulation gains the same `periods_per_year` derivation as `run_spec` (plan Task 5 Step 2b) so fx specs cannot silently diverge at the funnel's endpoint.
+
+12. **D4 refinement: pinned-prefix verification (2026-08-27, found by the guard itself).** The
+manifest's per-series sha256 is a FIRST-PIN snapshot (pin_universe never rewrites an existing
+manifest) while the producer's parquets append bars daily -- so full-series sha comparison only
+passes for data unchanged since the pin (fx and equity snapshots passed on borrowed time: the
+H.10 weekly cadence and a 429-cache day respectively). The adapter therefore verifies the
+PINNED PREFIX: the first `rows` (from the manifest row) of the (date,close) canon must hash
+exactly to the manifest sha -- proving the declared history was never rewritten -- while
+appended rows beyond the pin are covered by the producer's daily integrity verdict (already
+consulted, fail-closed). The snapshot manifest records `sha256_verified: "pinned_prefix"` and
+`rows_beyond_pin`. A prefix mismatch remains a hard refusal: rewritten history is the fraud
+the pin exists to catch.
