@@ -91,8 +91,9 @@ def run(argv=None, runner=subprocess.run) -> int:
                        f"{info.get('holder')!r}), first sighting -- WARN, "
                        f"deferring; will break on next stale sighting")
                 print(msg, flush=True)
-                _write_status(logs_dir, "deferred_lock",
-                              extra={"lock_holder": str(info.get("holder"))})
+                _write_status(logs_dir, "deferred_lock", overall="WARN",
+                              extra={"lock_holder": str(info.get("holder")),
+                                     "lock_stale": "true"})
                 return 0
         else:
             msg = f"deferred_lock: chain.lock held by {info.get('holder')!r}, deferring"
@@ -113,7 +114,9 @@ def run(argv=None, runner=subprocess.run) -> int:
     asset_class = loop_state.pick_class(state, routable_counts)
     if asset_class is None:
         print("no_trigger: no live class is over threshold", flush=True)
-        _write_status(logs_dir, "no_trigger")
+        _write_status(logs_dir, "no_trigger",
+                      extra={f"routable_{c}": str(n)
+                             for c, n in routable_counts.items()})
         return 0
 
     # -- 3. budget gate (checked before ANY metered stage may start) -------
@@ -168,7 +171,7 @@ def run(argv=None, runner=subprocess.run) -> int:
                 print(msg, flush=True)
                 _write_status(logs_dir, "deferred_lock",
                               extra={"asset_class": asset_class,
-                                     "blocked_stage": module_key},
+                                     "at_stage": module_key},
                               spent=spent)
                 return 0
             try:
