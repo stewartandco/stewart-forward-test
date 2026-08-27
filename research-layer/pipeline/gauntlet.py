@@ -53,8 +53,9 @@ import argparse
 from pathlib import Path
 
 from . import cells
+from . import simcache
 from .registry import Registry
-from .engine import run_spec
+from .engine import run_spec, ENGINE_REV
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
                     bootstrap_paths, harvey_liu_haircut)
 from .cluster import effective_trials
@@ -62,7 +63,7 @@ from .pbo import (cscv_pbo, distinct_configs, permutation_null,
                    percentile_of)
 # select_survivor is deliberately NOT imported: protocol-v6 retired
 # selection, and `qualifies` is kept only to RECORD the outcome.
-from .plateau import annualized_sharpe, qualifies
+from .plateau import annualized_sharpe, qualifies, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
@@ -352,6 +353,36 @@ def daily_returns_with_dates(equity: list[tuple[str, float]]
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
 
+def _annualized_sharpe_from_returns(rets: list[float]) -> float | None:
+    """Same math as plateau.annualized_sharpe (sample mean / sample stdev,
+    annualized by TRADING_DAYS), taking an already-computed return series
+    instead of an equity curve.
+
+    SP4 Task P1: this lets train_sharpe and the PBO family matrix be derived
+    straight from a spec's dated-returns series -- real or served from
+    simcache -- without ever needing that spec's equity curve. When `rets`
+    is exactly the per-step series plateau.annualized_sharpe would itself
+    derive from an equity curve (as daily_returns_with_dates/
+    daily_returns_from_curve already do throughout this file), the output is
+    identical. The one behavioural nuance: callers here always slice the
+    DATE-NORMALISED series (daily_returns_with_dates strips any time suffix
+    to date-only -- see its docstring), so a source date carrying a time
+    suffix now compares against `cutoff` the same way the clustering
+    intersection already does elsewhere in this module, rather than by raw
+    string. Production crypto data is bare-dated (spec s10.9) and every
+    pinned fixture's cutoff falls outside its data range, so this is a
+    no-op in every case this repo currently exercises; it would only differ
+    from the pre-P1 behaviour for a time-suffixed source with a bar landing
+    exactly on the cutoff date."""
+    if len(rets) < 30:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    if var <= 0:
+        return None
+    return mean / math.sqrt(var) * math.sqrt(TRADING_DAYS)
+
+
 def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
                       ) -> tuple[dict[str, list[float]], list[str]]:
     """Align every series onto the dates common to ALL of them, sorted.
@@ -519,6 +550,12 @@ def run(argv: list[str] | None = None) -> int:
                     default=Path(__file__).resolve().parent.parent / "data")
     ap.add_argument("--artifacts-dir", type=Path,
                     default=Path(__file__).resolve().parent.parent / "artifacts")
+    # SP4 Task P1. Default derived from --registry (not a fixed path) so
+    # every tmp-registry test gets its own isolated cache directory for
+    # free, the same way it already gets its own artifacts dir -- a real
+    # run's default registry lives in research-layer/, so its cache lands
+    # in research-layer/simcache/ (gitignored) exactly as the plan names it.
+    ap.add_argument("--simcache-dir", type=Path, default=None)
     ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
     # protocol-v5's per-family null. Exposed so tests can run a cheap one;
     # a real run uses the declared 200 and the verdict records what it used.
@@ -529,6 +566,8 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-perturb", dest="perturb", action="store_false")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+    simcache_dir = args.simcache_dir or (
+        args.registry.resolve().parent / "simcache")
 
     registry = Registry(args.registry)
     states = registry.strategy_states()
@@ -597,12 +636,52 @@ def run(argv: list[str] | None = None) -> int:
     # to 3 calendar days apart without refusing the run.
     assert_cells_comparable(data_end, class_of=class_of)
 
-    # clustering needs every sibling's full-run curve (incl. graveyarded)
+    # clustering needs every sibling's full-run curve (incl. graveyarded).
+    # SP4 Task P1: that registry-wide re-simulation set only grows with the
+    # chain, and only its DATED RETURNS SERIES is ever consumed downstream
+    # (clustering, train_sharpe, the PBO family matrix) -- never its trades.
+    # A spec that is NOT one of this pass's own candidates is therefore
+    # served from the content-addressed simcache when available, skipping
+    # run_spec entirely; a cache miss falls back to a fresh simulation and
+    # populates the entry for next time. Candidates are NEVER cache reads --
+    # their full trades are needed regardless (below), so they gain nothing
+    # from the cache and always run fresh, matching this pass's own
+    # evaluation of them exactly.
     group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
                 for s in all_specs}
-    full_results: dict[str, dict] = {}
+    candidate_sids = {s["strategy_id"] for s in candidates}
+    cache = simcache.SimCache(simcache_dir)
+    full_results: dict[str, dict] = {}          # candidates only (need trades)
+    dated_returns_by_sid: dict[str, list[tuple[str, float]]] = {}
+    equity_len_by_sid: dict[str, int] = {}
+    sim_cache_hits = sim_cache_misses = 0
     for s in all_specs:
-        full_results[s["strategy_id"]] = run_spec(s, _spec_bars(bars_by_cell, s))
+        sid = s["strategy_id"]
+        if sid in candidate_sids:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            full_results[sid] = res
+            dated_returns_by_sid[sid] = daily_returns_with_dates(res["equity"])
+            equity_len_by_sid[sid] = len(res["equity"])
+            continue
+        tf = s["universe"].get("timeframe", "1d")
+        data_shas = {a: data_hashes[cells.cell_id(a, tf)]
+                    for a in s["universe"]["assets"]}
+        key = simcache.cache_key(sid, data_shas, ENGINE_REV)
+        hit = cache.get(key)
+        if hit is not None:
+            dated_returns_by_sid[sid] = hit["series"]
+            equity_len_by_sid[sid] = hit["equity_len"]
+            sim_cache_hits += 1
+        else:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            series = daily_returns_with_dates(res["equity"])
+            dated_returns_by_sid[sid] = series
+            equity_len_by_sid[sid] = len(res["equity"])
+            cache.put(key, series, len(res["equity"]))
+            sim_cache_misses += 1
+    print(f"sim cache: {sim_cache_hits} hit(s), {sim_cache_misses} miss(es) "
+          f"over {len(all_specs) - len(candidate_sids)} non-candidate "
+          f"registered strategies")
 
     # A run whose registered specs are ALREADY on one shared calendar (today:
     # every real crypto chain, which has only ever registered the legacy
@@ -632,18 +711,25 @@ def run(argv: list[str] | None = None) -> int:
     # this fix, check_aligned simply refused the whole run.
     classes_present = {s["universe"].get("asset_class", "crypto")
                        for s in all_specs}
-    raw_lengths = {sid: len(res["equity"]) for sid, res in full_results.items()}
+    # equity_len_by_sid carries the ORIGINAL equity curve length for every
+    # sid regardless of source (fresh run or simcache hit -- simcache.put
+    # records it alongside the returns series precisely so this check does
+    # not need the equity itself), so the ragged/not-ragged decision is
+    # unaffected by which specs happened to be cached this pass.
+    raw_lengths = equity_len_by_sid
     ragged = len(set(raw_lengths.values())) > 1
     if len(classes_present) > 1 or ragged:
-        dated_by_id = {sid: daily_returns_with_dates(res["equity"])
-                       for sid, res in full_results.items()}
+        dated_by_id = dated_returns_by_sid
         returns_by_id, common_dates = intersect_returns(dated_by_id)
         trials_alignment, trials_common_days = "intersection", len(common_dates)
         if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
             _raise_too_short_intersection(dated_by_id, common_dates)
     else:
-        returns_by_id = {sid: daily_returns_from_curve(res["equity"])
-                         for sid, res in full_results.items()}
+        # Same values daily_returns_from_curve(equity) would give: stripping
+        # the (already date-normalised) date off each entry of the exact
+        # series that function's own formula produces.
+        returns_by_id = {sid: [r for _, r in series]
+                         for sid, series in dated_returns_by_sid.items()}
         trials_alignment, trials_common_days = "native", None
     group_n: dict[str, int] = {}
     for g in group_of.values():
@@ -672,12 +758,16 @@ def run(argv: list[str] | None = None) -> int:
         and e["payload"].get("to") == "graveyard"
         and e["payload"].get("reason") == "trade_count"}
 
-    def train_curve(sid):
-        return [(d, v) for d, v in full_results[sid]["equity"]
-                if d <= args.cutoff]
+    def train_returns(sid):
+        """Train-window (date <= cutoff) daily returns, sliced from the
+        per-spec dated-returns series -- real or simcache-served -- rather
+        than from an equity curve a non-candidate spec may not have this
+        pass. See _annualized_sharpe_from_returns for the exact equivalence
+        to the pre-P1 equity-curve computation."""
+        return [r for d, r in dated_returns_by_sid[sid] if d <= args.cutoff]
 
-    train_sharpe = {s["strategy_id"]: annualized_sharpe(
-        train_curve(s["strategy_id"])) for s in all_specs}
+    train_sharpe = {s["strategy_id"]: _annualized_sharpe_from_returns(
+        train_returns(s["strategy_id"])) for s in all_specs}
 
     from .composer import SWEEPABLE_TYPES
     from .blocks import BLOCK_TYPES
@@ -720,8 +810,7 @@ def run(argv: list[str] | None = None) -> int:
     # with too few DISTINCT configurations at all.
     pbo_by_group = {}
     for g, fam in family_by_group.items():
-        series = {s["sid"]: daily_returns_from_curve(train_curve(s["sid"]))
-                  for s in fam}
+        series = {s["sid"]: train_returns(s["sid"]) for s in fam}
         res = cscv_pbo(series, s=CSCV_SPLITS)
         n_distinct = distinct_configs(series)
         res["n_distinct"] = n_distinct
@@ -817,6 +906,14 @@ def run(argv: list[str] | None = None) -> int:
         # no common-day count -- there was no intersection to take.
         metrics["trials_alignment"] = trials_alignment
         metrics["trials_common_days"] = trials_common_days
+
+        # SP4 Task P1: recorded, additive. The same value on every verdict of
+        # this run -- the registry-wide re-simulation set is computed ONCE
+        # per run, shared by every candidate's clustering/train_sharpe/PBO
+        # inputs, not per-candidate -- so there is exactly one hit/miss count
+        # to record, not one per strategy.
+        metrics["sim_cache"] = {"hits": sim_cache_hits,
+                                "misses": sim_cache_misses}
 
         # Era summaries (spec §6): recorded, never gated -- protocol-v6 has
         # no era gate, and FAIL_ORDER is unchanged. Only classes that declare

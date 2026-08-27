@@ -12,3 +12,9 @@ __pycache__/
 # ignores only untracked files, so they are unaffected. Use `git add -f` if a
 # file here ever genuinely belongs in history.
 data/*.csv
+
+# SP4 Task P1: content-addressed sim cache for gauntlet's registry-wide
+# clustering re-simulations (pipeline/simcache.py). Purely derived -- every
+# entry is reproducible from the registry, the pinned data and engine.py's
+# ENGINE_REV -- and it grows with every gauntlet run, so it is not the record.
+simcache/
