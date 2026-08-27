@@ -38,6 +38,7 @@ from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
 from .reader import build_card, chunk_text, extract_claims_usage
+from .chainlock import ChainLock, ChainLockHeld
 
 LAYER = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "claude-sonnet-5"  # D23 throughput-first: Sonnet for screen AND bulk extraction
@@ -78,7 +79,7 @@ def poll_source(source: dict, seen: SeenStore, fetch=fetch_url) -> list[dict]:
     return fresh
 
 
-RESUME_STATUSES = ("deferred_screen", "deferred_budget", "seen")
+RESUME_STATUSES = ("deferred_screen", "deferred_budget", "deferred_lock", "seen")
 RESUME_STALE_MINUTES = 20
 
 
@@ -127,7 +128,10 @@ def _extract_item(client, model, item, source, page_text, html, *,
                   meter, registry, known_claims, discovery_path,
                   watchlist_sources):
     """Stage 2 for one kept item: extraction, honesty guard, registration,
-    discovery queueing. Returns (cards_registered, honesty_dropped)."""
+    discovery queueing. Returns (cards_registered, honesty_dropped,
+    deferred_lock). deferred_lock=True means chain.lock was held by another
+    writer: nothing in this item was registered and the caller must leave
+    the item re-feedable rather than marking it extracted."""
     source_meta = {
         "type": CLASS_TO_SOURCE_TYPE[source["class"]],
         "title": item["title"], "authors": [], "year": None,
@@ -135,12 +139,30 @@ def _extract_item(client, model, item, source, page_text, html, *,
         "credibility_tier": "practitioner",
     }
     run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-scanner"
-    registered = dropped = 0
+
+    # Gather every chunk's claims first (LLM calls only, no chain writes) so
+    # the chain.lock window below covers just the card-append batch, not the
+    # extraction calls themselves.
+    all_claims = []
     for label, chunk in chunk_text(page_text):
         claims, usage = extract_claims_usage(client, model, label, chunk)
         meter.record_call(model, usage, purpose="extract",
                           agent="reader")
-        for raw in claims:
+        all_claims.extend(claims)
+
+    registered = dropped = 0
+    logs_dir = Path(registry.log_path).parent / "logs"
+    lock = ChainLock(logs_dir, holder="scanner",
+                     purpose=f"extract {item['source_id']}/{item['item_id']}")
+    try:
+        lock.acquire()
+    except ChainLockHeld:
+        # advisory, non-blocking: never wait on another writer's window.
+        # Nothing for this item is registered this cycle; it stays
+        # re-feedable via RESUME_STATUSES / refeedable_deferred.
+        return 0, 0, True
+    try:
+        for raw in all_claims:
             if not quote_in_source(raw["quote"], page_text):
                 dropped += 1
                 continue
@@ -150,6 +172,9 @@ def _extract_item(client, model, item, source, page_text, html, *,
             card = build_card(raw, source_meta, model, run_id)
             registry.register_card(card)
             registered += 1
+    finally:
+        lock.release()
+
     # off-list references become Tier 3 proposals for Coen — never fetched
     domains = _watchlist_domains(watchlist_sources)
     queued = 0
@@ -164,7 +189,7 @@ def _extract_item(client, model, item, source, page_text, html, *,
                            found_in=f"{item['source_id']}/{item['item_id']}",
                            reason="referenced by ingested item"):
             queued += 1
-    return registered, dropped
+    return registered, dropped, False
 
 
 def process_new_items(new_items: list[dict], *, client, model: str, meter,
@@ -225,7 +250,7 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             stats["thin_content"] += 1
             continue
         try:
-            registered, dropped = _extract_item(
+            registered, dropped, deferred_lock = _extract_item(
                 client, model, item, src_by_id[item["source_id"]], page_text,
                 html, meter=meter, registry=registry, known_claims=known_claims,
                 discovery_path=discovery_path,
@@ -234,6 +259,11 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             seen.record(item["item_id"], item["source_id"], "extract_failed",
                         reason=f"{type(exc).__name__}: {exc}"[:200])
             print(f"  extract failed for {item['link']}: {exc}", file=sys.stderr)
+            continue
+        if deferred_lock:
+            seen.record(item["item_id"], item["source_id"], "deferred_lock",
+                        reason="chain.lock held by another writer")
+            stats["deferred"] += 1
             continue
         seen.record(item["item_id"], item["source_id"], "extracted",
                     reason=f"{registered} cards")

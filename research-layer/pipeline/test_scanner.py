@@ -29,6 +29,7 @@ from .scanstatus import ActionLog, verify_chain, write_status, write_digest
 from .scanner import poll_source, process_new_items, pending_tier3_count
 from .registry import Registry
 from .reader import extract_claims_usage
+from .chainlock import ChainLock
 
 HERE = Path(__file__).resolve().parent
 LAYER = HERE.parent
@@ -1299,6 +1300,69 @@ def test_full_funnel_registers_pending_card_and_flags_paywall(tmp_path):
     disc = load_discovery(tmp_path / "discovery.jsonl")
     assert any("citedblog.example" in d["url"] for d in disc)
     assert verify_chain(tmp_path / "actions.jsonl")
+
+
+def test_extract_item_takes_chain_lock_for_registration_window(tmp_path, monkeypatch):
+    """While cards are being registered, logs/chain.lock exists and names the
+    scanner; after extraction it is gone."""
+    src = make_source()
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    fetch = _fetch_factory({src["feed"]: (200, RSS_XML)})
+    new_items = poll_source(src, seen, fetch)
+
+    filler = ("<p>We test the effect across a long sample of daily bars and "
+              "report the resulting risk-adjusted performance in detail.</p>" * 12)
+    article = ("<html><body><p>We find that momentum persists in crypto for "
+               "20 days after formation.</p>" + filler + "</body></html>")
+    claims = [{"claim": "Crypto momentum persists for 20 days after formation.",
+               "quote": "momentum persists in crypto for 20 days after formation",
+               "locator": "full document", "asset_classes": ["crypto"],
+               "topics": ["momentum"], "horizon": "daily",
+               "testability_score": 0.8, "data_required": ["daily OHLCV"],
+               "notes": None}]
+    client = StubClient([
+        # only the momo item is kept; the course item is screen_kill so no
+        # second fetch/extraction is needed
+        _screen_msg([{"id": new_items[0]["item_id"], "keep": True, "reason": "edge"},
+                     {"id": new_items[1]["item_id"], "keep": False, "reason": "marketing"}]),
+        SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text",
+                                     text=json.dumps({"claims": claims}))],
+            usage=SimpleNamespace(input_tokens=800, output_tokens=80,
+                                  cache_read_input_tokens=0,
+                                  cache_creation_input_tokens=0)),
+    ])
+    registry = Registry(tmp_path / "registry_log.jsonl")
+    meter = BudgetMeter(tmp_path / "ledger.jsonl")
+    lock_path = tmp_path / "logs" / "chain.lock"
+
+    orig_register = Registry.register_card
+    seen_during_append = []
+
+    def spy_register(self, card):
+        seen_during_append.append(lock_path.exists())
+        if lock_path.exists():
+            info = json.loads(lock_path.read_text(encoding="utf-8"))
+            seen_during_append.append(info["holder"])
+        return orig_register(self, card)
+
+    monkeypatch.setattr(Registry, "register_card", spy_register)
+
+    stats = process_new_items(
+        new_items, client=client, model="claude-sonnet-5", meter=meter,
+        seen=seen, registry=registry,
+        fetch=_fetch_factory({"https://example.org/momo?utm_source=rss":
+                              (200, article)}),
+        watchlist_sources=[src], discovery_path=tmp_path / "discovery.jsonl",
+        screen_log=tmp_path / "screen_log.jsonl",
+        actions=ActionLog(tmp_path / "actions.jsonl"))
+
+    assert stats["cards_registered"] == 1
+    # the lock existed (and named the scanner) at append time...
+    assert seen_during_append == [True, "scanner"]
+    # ...and is released once the registration window closes
+    assert not lock_path.exists()
 
 
 def test_funnel_at_budget_cap_polls_but_defers(tmp_path):
