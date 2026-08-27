@@ -65,3 +65,31 @@ def test_context_manager_releases_on_exception(tmp_path):
         with ChainLock(tmp_path, holder="loop", purpose="x"):
             raise RuntimeError("boom")
     assert not (tmp_path / "chain.lock").exists()
+
+
+def test_release_swallows_oserror_and_clears_flag(tmp_path, monkeypatch):
+    """A transient Windows PermissionError on unlink must not mask the
+    caller's real exception, and the acquired flag must clear first."""
+    lk = ChainLock(tmp_path, holder="loop", purpose="x")
+    lk.acquire()
+    original_unlink = Path.unlink
+    def failing_unlink(self, *a, **kw):
+        raise PermissionError("WinError 32: held open by a reader")
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    lk.release()                      # must not raise
+    assert lk._acquired is False
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    (tmp_path / "chain.lock").unlink()
+    lk2 = ChainLock(tmp_path, holder="loop", purpose="y")
+    with pytest.raises(ValueError):   # real error propagates, not PermissionError
+        with lk2:
+            raise ValueError("real stage failure")
+
+
+def test_acquire_creates_missing_logs_dir(tmp_path):
+    lk = ChainLock(tmp_path / "logs", holder="loop", purpose="x")
+    lk.acquire()
+    try:
+        assert (tmp_path / "logs" / "chain.lock").exists()
+    finally:
+        lk.release()

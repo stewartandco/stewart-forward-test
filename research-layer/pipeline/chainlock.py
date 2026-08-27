@@ -80,12 +80,19 @@ class ChainLock:
         caller's responsibility."""
         if not self.is_stale():
             raise ChainLockHeld("refusing to break a fresh chain.lock")
-        self.path.unlink(missing_ok=True)
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
 
     def release(self) -> None:
-        if self._acquired:
-            self.path.unlink(missing_ok=True)
-            self._acquired = False
+        if not self._acquired:
+            return
+        self._acquired = False
+        try:
+            self.path.unlink()
+        except OSError:
+            pass  # already gone, or transiently held open by a reader (Windows)
 
     def __enter__(self) -> "ChainLock":
         self.acquire()
