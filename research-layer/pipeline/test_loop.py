@@ -115,6 +115,9 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     assert rc == 0
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
                             "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+    triage_call = next(c for c in fr.calls
+                       if "-m" in c and c[c.index("-m") + 1] == "pipeline.triage_batch")
+    assert "--limit" in triage_call and triage_call[triage_call.index("--limit") + 1] == "200"
     # composer appears twice: --dry-run preflight then the real run.
     # Narrowed to python calls (argv[0] == sys.executable) -- a plain "-m"
     # in c would also catch `git commit -q -m ...`, and picking this by
@@ -522,6 +525,56 @@ def _make_stale_foreign_lock(layer):
     old = time.time() - (4 * 3600)   # 4h > STALE_AFTER_S's 3h
     os.utime(lock_path, (old, old))
     return lock_path
+
+
+def _make_stale_dead_pid_chain_lock(layer, pid=4_000_000):
+    """A stale (>3h) chain.lock whose recorded holder pid does NOT exist --
+    unlike _make_stale_foreign_lock (which uses ChainLock.acquire() and so
+    always records our OWN, alive, pid), this must be written directly."""
+    lock_path = layer / "logs" / "chain.lock"
+    lock_path.write_text(json.dumps({"holder": "session", "pid": pid,
+                                     "ts_utc": "2020-01-01T00:00:00+00:00",
+                                     "purpose": "manual"}), encoding="utf-8")
+    old = time.time() - (4 * 3600)   # 4h > STALE_AFTER_S's 3h
+    os.utime(lock_path, (old, old))
+    return lock_path
+
+
+def test_stale_dead_pid_chain_lock_breaks_on_first_sighting_and_proceeds(tmp_path):
+    """The dead-pid fast path: a hard-killed loop or crashed writer orphans
+    chain.lock with a provably-dead pid. Unlike an ambiguous stale holder,
+    that must break on the FIRST sighting (not wait for two-strike), or
+    scanner + quarantine + the loop itself stay frozen for up to 3h plus two
+    scheduled fires."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    lock_path = _make_stale_dead_pid_chain_lock(layer)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert not lock_path.exists()          # broken on the FIRST sighting
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"   # proceeded, never deferred
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st.get("stale_lock") is None    # fast path never records a strike
+
+
+def test_stale_alive_pid_chain_lock_still_first_sighting_defers(tmp_path):
+    """A stale chain.lock whose holder pid IS alive (our own, here) must
+    stay on the existing, more cautious two-strike rule -- age alone is
+    never evidence of death for an ambiguous holder."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    lock_path = _make_stale_foreign_lock(layer)   # writes os.getpid() -- alive
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert fr.calls == []
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_lock"
+    assert status["items"]["lock_stale"] == "true"
+    assert status["overall"] == "WARN"
+    assert lock_path.exists()              # first sighting never breaks an alive holder
 
 
 def test_stale_foreign_lock_first_sighting_warns_and_defers(tmp_path, monkeypatch):

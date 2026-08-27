@@ -270,6 +270,46 @@ def _acquire_instance_lock_or_break_dead(instance_lock: ChainLock) -> bool:
         return False
 
 
+def _break_stale_chain_lock_or_defer(probe: ChainLock, state: dict, state_path: Path,
+                                     logs_dir: Path) -> bool:
+    """Attempt to break a chain.lock the caller has already confirmed
+    is_stale(), and clear the two-strike bookkeeping. Returns True when the
+    cycle may proceed (broken cleanly, or vanished on its own); False means
+    the caller must return 0 -- a race left a FRESH lock in its place
+    (write_status is done here so every break-attempting caller, dead-pid
+    fast path and two-strike alike, gets identical race handling)."""
+    try:
+        probe.break_stale()
+        broke = True
+    except ChainLockHeld:
+        broke = False
+    if broke:
+        loop_state.clear_stale_lock(state)
+        loop_state.save(state_path, state)
+        return True
+    # Race: something changed between our is_stale() read and break_stale()
+    # (which re-checks is_stale() itself).
+    fresh_info = probe.info()
+    if fresh_info is None:
+        # The stale holder released it entirely in the gap -- there is no
+        # lock left to defer to; proceed exactly as a successful break
+        # would have. NOT prefixed "deferred_lock:" -- this path does not
+        # defer, and the greppable-token convention would miscount it.
+        print("stale_lock_vanished: chain.lock vanished on its own before "
+             "the break -- proceeding", flush=True)
+        loop_state.clear_stale_lock(state)
+        loop_state.save(state_path, state)
+        return True
+    holder = fresh_info.get("holder")
+    msg = (f"deferred_lock: chain.lock changed hands mid-break "
+           f"(now held by {holder!r}), deferring")
+    print(msg, flush=True)
+    _write_status(logs_dir, "deferred_lock",
+                  extra={"lock_holder": str(holder), "lock_stale": "false"},
+                  spent=_spent(logs_dir), state=state)
+    return False
+
+
 def _seed_watermarks(layer: Path, registry_path: Path, state_path: Path) -> int:
     """ACTIVATION step (--seed-watermarks): initialise every LIVE_CLASSES
     watermark to the CURRENT routable-accepted count. Without this, a fresh
@@ -383,53 +423,41 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     info = probe.info()
     if info is not None:
         if probe.is_stale():
-            second_strike = loop_state.record_stale_lock(state, info)
-            loop_state.save(state_path, state)
-            if second_strike:
-                try:
-                    probe.break_stale()
-                    broke = True
-                except ChainLockHeld:
-                    broke = False
-                if broke:
-                    loop_state.clear_stale_lock(state)
-                    loop_state.save(state_path, state)
+            if not probe.holder_alive():
+                # Dead-pid fast path (mirrors loop.lock's
+                # _acquire_instance_lock_or_break_dead): a hard-killed loop
+                # (the scheduled task's PT2H limit), a reboot, or a crashed
+                # writer orphans chain.lock with a provably-dead pid. Left to
+                # the ordinary two-strike rule, that freezes scanner card
+                # registration, quarantine's daily write phase, AND the
+                # loop's own chain writes for up to 3h (STALE_AFTER_S) plus
+                # two scheduled fires before anyone breaks it. A dead pid is
+                # decisive, not merely suspicious -- break it on the FIRST
+                # sighting instead, exactly like the loop.lock guard.
+                if not _break_stale_chain_lock_or_defer(probe, state, state_path, logs_dir):
+                    return 0
+                # fall through: the cycle proceeds under a now-clear lock
+            else:
+                # Holder is alive (or liveness is unknown/unreadable) --
+                # keep the existing, more cautious two-strike rule: a stale-
+                # but-plausibly-legitimate writer only loses its lock after a
+                # SECOND sighting, never the first.
+                second_strike = loop_state.record_stale_lock(state, info)
+                loop_state.save(state_path, state)
+                if second_strike:
+                    if not _break_stale_chain_lock_or_defer(probe, state, state_path, logs_dir):
+                        return 0
                     # fall through: the cycle proceeds under a now-clear lock
                 else:
-                    # Race: something changed between our is_stale() read and
-                    # break_stale() (which re-checks is_stale() itself).
-                    fresh_info = probe.info()
-                    if fresh_info is None:
-                        # The stale holder released it entirely in the gap --
-                        # there is no lock left to defer to; proceed exactly
-                        # as a successful break would have. NOT prefixed
-                        # "deferred_lock:" -- this path does not defer, and
-                        # the greppable-token convention would miscount it.
-                        print("stale_lock_vanished: chain.lock vanished on "
-                             "its own before the break -- proceeding",
-                             flush=True)
-                        loop_state.clear_stale_lock(state)
-                        loop_state.save(state_path, state)
-                    else:
-                        holder = fresh_info.get("holder")
-                        msg = (f"deferred_lock: chain.lock changed hands "
-                               f"mid-break (now held by {holder!r}), deferring")
-                        print(msg, flush=True)
-                        _write_status(logs_dir, "deferred_lock",
-                                      extra={"lock_holder": str(holder),
-                                             "lock_stale": "false"},
-                                      spent=_spent(logs_dir), state=state)
-                        return 0
-            else:
-                msg = (f"deferred_lock: chain.lock STALE (holder="
-                       f"{info.get('holder')!r}), first sighting -- WARN, "
-                       f"deferring; will break on next stale sighting")
-                print(msg, flush=True)
-                _write_status(logs_dir, "deferred_lock", overall="WARN",
-                              extra={"lock_holder": str(info.get("holder")),
-                                     "lock_stale": "true"},
-                              spent=_spent(logs_dir), state=state)
-                return 0
+                    msg = (f"deferred_lock: chain.lock STALE (holder="
+                           f"{info.get('holder')!r}), first sighting -- WARN, "
+                           f"deferring; will break on next stale sighting")
+                    print(msg, flush=True)
+                    _write_status(logs_dir, "deferred_lock", overall="WARN",
+                                  extra={"lock_holder": str(info.get("holder")),
+                                         "lock_stale": "true"},
+                                  spent=_spent(logs_dir), state=state)
+                    return 0
         else:
             # A fresh foreign lock at CYCLE START is routine (a human
             # session or the scanner happened to be mid-write when the loop
@@ -525,8 +553,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       spent=_spent(logs_dir), state=state)
         return 0
 
-    # 4a. triage --apply (chain-writing, metered)
-    triage_argv = [py, "-m", "pipeline.triage_batch", *reg_argv, "--apply"]
+    # 4a. triage --apply (chain-writing, metered). --limit 200 bounds
+    # worst-case stage spend (~$3) against an unbounded pending backlog --
+    # unlimited, a single stage could carry spend from just under the cap to
+    # the $20 hard cap in one go; overflow just waits for the next fire
+    # (3x daily).
+    triage_argv = [py, "-m", "pipeline.triage_batch", *reg_argv, "--apply",
+                   "--limit", "200"]
     rc, lock_lost = _lock_and_run("pipeline.triage_batch", triage_argv)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.triage_batch")

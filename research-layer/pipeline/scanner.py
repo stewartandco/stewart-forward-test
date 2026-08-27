@@ -101,8 +101,9 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
     and a stale lock only breaks after 3h STALE_AFTER_S plus the loop's
     two-strike rule) but because _extract_item / process_inbox probe
     chain.lock BEFORE the gather phase's LLM spend: a lock-deferred re-feed
-    is a cheap existence check, not a re-paid extraction, so re-feeding it
-    indefinitely costs nothing while the lock is held."""
+    costs only the batched screen call and a re-fetch (~$0.001/item/cycle),
+    never a re-paid extraction, so re-feeding it indefinitely while the lock
+    is held stays cheap."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     out = []
     for status in statuses:
