@@ -81,9 +81,16 @@ def test_release_swallows_oserror_and_clears_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", original_unlink)
     (tmp_path / "chain.lock").unlink()
     lk2 = ChainLock(tmp_path, holder="loop", purpose="y")
-    with pytest.raises(ValueError):   # real error propagates, not PermissionError
-        with lk2:
-            raise ValueError("real stage failure")
+    fh = None
+    try:
+        with pytest.raises(ValueError):   # real error propagates, not PermissionError
+            with lk2:
+                fh = (tmp_path / "chain.lock").open("r")
+                raise ValueError("real stage failure")
+    finally:
+        if fh:
+            fh.close()
+        (tmp_path / "chain.lock").unlink(missing_ok=True)
 
 
 def test_acquire_creates_missing_logs_dir(tmp_path):
