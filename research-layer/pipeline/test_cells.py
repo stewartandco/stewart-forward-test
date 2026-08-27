@@ -76,9 +76,9 @@ def test_live_classes_gates_activation():
     # activation is the denominator event for a class's cells. bond_etf/
     # metal_etf are declared at Track 2b but NOT activated -- Coen's call is
     # still pending the dry-run ship-bar step.
-    assert cells.LIVE_CLASSES == ("crypto", "fx", "equity_etf")
+    assert cells.LIVE_CLASSES == ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")
     assert "bond_etf" not in cells.LIVE_CLASSES
-    assert "metal_etf" not in cells.LIVE_CLASSES
+    assert "metal_etf" in cells.LIVE_CLASSES
 
 
 def test_validate_cell_class_aware():
@@ -234,7 +234,7 @@ def test_bond_and_metal_etf_declared_not_active():
     # exactly as it was for fx and equity_etf before them.
     assert "bond_etf" in cells.CLASSES and "metal_etf" in cells.CLASSES
     assert "bond_etf" not in cells.LIVE_CLASSES
-    assert "metal_etf" not in cells.LIVE_CLASSES
+    assert "metal_etf" in cells.LIVE_CLASSES
 
 
 def test_bond_and_metal_etf_disjoint_from_every_other_class():
