@@ -1290,9 +1290,20 @@ def _persist_drift_record(record: dict, registry_path: Path) -> None:
 def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[str, dict], dict]:
     """Pure selection of accepted cards routable to asset_class.
 
-    Returns (cards, meta) where meta carries routed_card_ids and
-    proxy_routed_card_ids exactly as run() previously computed them for the
-    drift record (None / [] respectively for the unrestricted crypto path).
+    Returns (cards, meta) where meta has keys "routing", "routed_card_ids",
+    "proxy_routed_card_ids", carrying exactly what run() previously computed
+    for the drift record:
+      - crypto: all three are None -- no routing applied at all.
+      - every non-crypto class: "routing" and "routed_card_ids" are
+        populated (a dict and a sorted list respectively).
+      - fx: "proxy_routed_card_ids" stays None -- fx has no proxy lane, so
+        None here means "the lane never ran", never "ran and found none".
+      - equity_etf / metal_etf / bond_etf: "proxy_routed_card_ids" is
+        always a list (possibly empty) -- these classes' proxy lanes always
+        run, so an empty list means "ran and found none".
+    The returned cards mapping may alias `accepted` itself (the crypto path
+    returns it directly, unfiltered) -- callers must not mutate it.
+
     Moved out of run() so pipeline/loop.py watermarks count the SAME set the
     composer would consume. Chain untouched; no side effects.
     """

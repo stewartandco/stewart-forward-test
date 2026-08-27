@@ -149,13 +149,11 @@ CLASSES = {
                  "excluded_block_types": frozenset(), "benchmark": "self"},
 }
 LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08-24, equity_etf 08-25, bond+metal 08-27 (Coen each time)
-# bond_etf/metal_etf are DECLARED here (Track 2b) but deliberately NOT in
-# LIVE_CLASSES: activation is Coen's call, after the dry-run ship-bar step
-# (spec s8), exactly as it was for fx and equity_etf before them -- see the
-# CLASSES/LIVE_CLASSES docstring above.
-# equity_etf is DECLARED here (Track 2a) but deliberately NOT in LIVE_CLASSES:
-# activation is Coen's call, after the dry-run ship-bar step (spec s8), same
-# as fx before it -- see the CLASSES/LIVE_CLASSES docstring above.
+# All five classes are LIVE as of 2026-08-27: crypto+fx from SP4 track 1,
+# equity_etf activated Track 2a (2026-08-25), bond_etf+metal_etf activated
+# Track 2b (2026-08-27) -- each activation was Coen's call, made after that
+# class's dry-run ship-bar step (spec s8), per the CLASSES/LIVE_CLASSES
+# docstring above.
 
 SESSION_PERIODS = {"24x7": 365, "fx_5d": 261, "us_equity_5d": 252}
 

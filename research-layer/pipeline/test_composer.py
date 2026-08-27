@@ -622,9 +622,10 @@ def _card(cid, asset_classes=None, topics=None):
     # same place asset_classes lives (see composer.py's INDEX_FUTURES_PROXY_
     # TOPICS/METALS_PROXY_TOPICS matching, and test_composer_equity.py's own
     # fixture cards) -- not a top-level "topics" key. A top-level key, as
-    # the plan's draft had it, is silently invisible to the proxy-lane match
-    # and would make the equity-proxy test pass for the wrong reason (or, as
-    # first written, fail outright).
+    # the plan's draft had it, is silently invisible to the proxy-lane match:
+    # the "fut" card then reaches neither propose_input nor the proxy set,
+    # so test_routable_cards_equity_proxy_lane_recorded's
+    # `assert "fut" in cards` fails outright.
     tags = {}
     if asset_classes is not None:
         tags["asset_classes"] = asset_classes
@@ -644,6 +645,9 @@ def test_routable_cards_crypto_is_unrestricted():
     cards, meta = routable_cards(accepted, "crypto")
     assert set(cards) == {"a", "b"}
     assert meta["routed_card_ids"] is None      # unrestricted: no routing applied
+    # crypto is the fully-unrestricted path -- ALL THREE meta values are
+    # None, not just routed_card_ids (pins the corrected docstring).
+    assert meta["proxy_routed_card_ids"] is None and meta["routing"] is None
 
 
 def test_routable_cards_fx_filters_on_tags():
