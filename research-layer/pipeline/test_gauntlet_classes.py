@@ -139,6 +139,67 @@ def test_date_key_normalisation_fixes_the_real_run_mismatch():
     assert len(common) == 5             # not 0 -- the pre-fix result
 
 
+# ---------------- batch review rider: date-only cutoff comparison ----------
+#
+# Reviewer finding: split_trades/window_vol/_benchmark_relative compared
+# `entry_date`/`date` to `cutoff` as RAW strings, while train_returns and the
+# PBO family matrix (both slicing daily_returns_with_dates' already
+# date-normalised series) effectively compared date-only. A time-suffixed bar
+# (`YYYY-MM-DD HH:MM:SS`, what the fx snapshot adapter and the modern ...USDT
+# grid write) landing exactly on the cutoff date therefore sorted OOS in some
+# consumers and IS in others -- inconsistent, and specifically wrong for a
+# boundary bar that should be train-side everywhere. No REGISTERED data hits
+# this today (crypto is bare-dated; fx/equity have no 2023-12-31 bar), but the
+# declared USDT-grid CSVs are suffixed AND do carry one.
+
+from .gauntlet import _date_le, split_trades, window_vol
+
+
+def test_date_le_matches_raw_compare_for_bare_dates():
+    """Pinned equivalence: for any bare `YYYY-MM-DD` string (every real
+    registered crypto date, spec s10.9), date-only comparison is
+    byte-identical to the pre-rider raw string comparison -- this rider
+    changes NO recorded number for data shaped like today's real chain."""
+    for a, b in [("2023-12-31", "2023-12-31"), ("2023-12-30", "2023-12-31"),
+                ("2024-01-01", "2023-12-31")]:
+        assert _date_le(a, b) == (a <= b)
+
+
+def test_date_le_ignores_time_suffix_on_the_boundary():
+    cutoff = "2023-12-31"
+    assert _date_le("2023-12-31 00:00:00", cutoff) is True   # ON cutoff -> IS
+    assert _date_le("2023-12-31 23:59:59", cutoff) is True
+    assert _date_le("2024-01-01 00:00:00", cutoff) is False  # day after -> OOS
+    # the pre-rider raw compare got the boundary case backwards: the
+    # timestamped string sorts AFTER the bare one.
+    assert ("2023-12-31 00:00:00" <= cutoff) is False
+
+
+def test_split_trades_suffixed_bar_on_cutoff_lands_train_side():
+    trades = [{"entry_date": "2023-12-31 00:00:00", "return_net": 0.01,
+              "notional_frac": 1.0},
+             {"entry_date": "2024-01-01 00:00:00", "return_net": 0.02,
+              "notional_frac": 1.0}]
+    is_t, oos_t = split_trades(trades, "2023-12-31")
+    assert [t["entry_date"] for t in is_t] == ["2023-12-31 00:00:00"]
+    assert [t["entry_date"] for t in oos_t] == ["2024-01-01 00:00:00"]
+
+
+def test_window_vol_suffixed_bar_on_cutoff_counts_train_side():
+    """Rigged so the boundary bar is the THIRD is-window close -- window_vol
+    needs >= 3 closes to compute anything at all. Before this rider, the raw
+    compare sorted "2023-12-31 00:00:00" AFTER the bare "2023-12-31", so the
+    boundary bar fell OOS, the IS side had only 2 closes, and window_vol
+    silently returned 0.0 (a stale zero, never a loud failure) instead of a
+    real number."""
+    bars = [{"date": "2023-12-29 00:00:00", "close": 100.0},
+           {"date": "2023-12-30 00:00:00", "close": 101.0},
+           {"date": "2023-12-31 00:00:00", "close": 102.0},   # ON the cutoff
+           {"date": "2024-01-02 00:00:00", "close": 103.0}]   # OOS
+    is_vol = window_vol({"X": bars}, ["X"], "", "2023-12-31")
+    assert is_vol > 0.0
+
+
 # ---------------- Step 3: fx era summaries ----------------------------------
 
 def trade(entry_date, ret, frac=1.0):
@@ -825,6 +886,8 @@ def test_pbo_dead_group_gets_new_label_live_group_still_gets_a_null(
         assert m["pbo_null_draws"] == 0
         assert m["pbo_percentile"] is None
         assert m["pbo_family_kill"] is False
+        # batch review rider: the label chains too, not just the printed line
+        assert m["pbo_verdict"] == "not_measured_dead_group"
 
     dead_line = next(l for l in out.splitlines() if l.strip().startswith(
         f"PBO {dead_group}:"))
@@ -846,6 +909,10 @@ def test_pbo_dead_group_gets_new_label_live_group_still_gets_a_null(
         assert m["pbo_null_draws"] == 8, (
             "the live group's null must actually run at the requested "
             "--pbo-null-draws count")
+        # batch review rider: the chained label matches the printed one, and
+        # is never the dead-group label a live group can never earn.
+        assert m["pbo_verdict"] in {"pass", "fail", "kill"}
+        assert live_line.rstrip().endswith(f"-> {m['pbo_verdict']}")
         passed_any = passed_any or verdicts[sid]["verdict"] == "pass"
     assert passed_any, "fixture bug: the live group has no gate-passer"
 
@@ -955,6 +1022,31 @@ def test_benchmark_relative_absent_for_none_classes():
     fx_spec = {"strategy_id": "x",
                "universe": {"assets": ["EUR"], "asset_class": "fx"}}
     assert _benchmark_relative(fx_spec, fx_bars, 0.01, "2023-12-31") is None
+
+
+def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
+    """Batch review rider: a time-suffixed bar dated exactly on the cutoff
+    (the declared USDT-grid CSVs are suffixed AND carry a 2023-12-31 bar)
+    must land TRAIN-side, the same rule split_trades/window_vol now apply --
+    never misread as the first OOS bar because a raw string compare sorted
+    the timestamped boundary string after the bare cutoff."""
+    cutoff = "2023-12-31"
+    bars = {"SPY": [
+        {"date": "2023-12-31 00:00:00", "open": 999.0, "high": 999.0,
+         "low": 999.0, "close": 999.0, "volume": 1.0},   # ON cutoff -> IS
+        {"date": "2024-01-01 00:00:00", "open": 100.0, "high": 100.0,
+         "low": 100.0, "close": 100.0, "volume": 1.0},    # first OOS bar
+        {"date": "2024-06-01 00:00:00", "open": 105.0, "high": 112.0,
+         "low": 104.0, "close": 110.0, "volume": 1.0},     # last OOS bar
+    ]}
+    spec = {"strategy_id": "x",
+            "universe": {"assets": ["SPY"], "asset_class": "equity_etf"}}
+
+    result = _benchmark_relative(spec, bars, strategy_net=0.02, cutoff=cutoff)
+
+    per_side = 0.00010 + 0.00010
+    expected_buy_hold = (110.0 / 100.0 - 1) - 2 * per_side
+    assert result["buy_hold_net"] == pytest.approx(expected_buy_hold, abs=1e-12)
 
 
 def test_crypto_and_fx_verdicts_carry_no_benchmark_key(tmp_path):

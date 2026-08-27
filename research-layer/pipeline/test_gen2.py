@@ -406,6 +406,9 @@ def test_metrics_carry_raw_and_normalized():
         # reader of the chain never has to recompute one to interpret a kill.
         "pbo_n_distinct", "pbo_percentile", "pbo_null_p05", "pbo_null_p95",
         "pbo_null_draws",
+        # batch review rider: the verdict label is chained too, not just the
+        # numbers it was derived from.
+        "pbo_verdict",
         # protocol-v6: the plateau outcome is recorded too, now that it no
         # longer gates and no longer selects.
         "plateau_ok"}

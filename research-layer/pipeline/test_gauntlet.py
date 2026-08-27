@@ -208,6 +208,10 @@ def test_all_gates_pass():
                             # observed value; see test_gen5.py
                             "pbo_n_distinct", "pbo_percentile",
                             "pbo_null_p05", "pbo_null_p95", "pbo_null_draws",
+                            # batch review rider: the PBO verdict label is now
+                            # chained too, not just printed (see test_gen5's
+                            # test_the_verdict_records_the_null_it_was_judged_against)
+                            "pbo_verdict",
                             # protocol-v6 records the plateau outcome too
                             "plateau_ok"}
     assert metrics["sibling_group_n"] == 4

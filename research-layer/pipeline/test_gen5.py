@@ -70,6 +70,9 @@ def test_the_verdict_records_the_null_it_was_judged_against():
     assert metrics["pbo_null_p05"] == 0.21
     assert metrics["pbo_null_p95"] == 0.94
     assert metrics["pbo_null_draws"] == 200
+    # batch review rider: the verdict label chains too, not just the numbers
+    # it was derived from.
+    assert metrics["pbo_verdict"] == "fail"
 
 
 def test_the_null_is_seeded_off_the_group_so_a_rerun_reproduces_it(

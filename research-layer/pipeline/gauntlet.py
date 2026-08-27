@@ -138,9 +138,29 @@ FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
               "p_ruin", "cost_stress")
 
 
+def _date_le(a: str, b: str) -> bool:
+    """Date-only `a <= b`, ignoring any time-of-day suffix either string may
+    carry (`YYYY-MM-DD HH:MM:SS` vs bare `YYYY-MM-DD` -- see
+    daily_returns_with_dates' own docstring on why this repo's CSVs disagree
+    on format: legacy crypto is bare-dated, the fx snapshot adapter and the
+    modern ...USDT grid are timestamped).
+
+    Batch review rider (SP4): every cutoff-boundary comparison in this module
+    now goes through this ONE helper, so a suffixed bar compares the same way
+    everywhere instead of date-only in some call sites (train_returns, the
+    PBO family matrix -- both slice from daily_returns_with_dates' already-
+    normalised series) and raw-string in others (split_trades, window_vol,
+    _benchmark_relative used to compare `entry_date`/`date` to `cutoff`
+    directly). A bare-dated string is unaffected by the `[:10]` slice, so
+    every production crypto comparison this repo has ever recorded a verdict
+    against is byte-identical before and after; only a time-suffixed bar
+    landing exactly on the cutoff date can change side."""
+    return a[:10] <= b[:10]
+
+
 def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
-    is_t = [t for t in trades if t["entry_date"] <= cutoff]
-    oos_t = [t for t in trades if t["entry_date"] > cutoff]
+    is_t = [t for t in trades if _date_le(t["entry_date"], cutoff)]
+    oos_t = [t for t in trades if not _date_le(t["entry_date"], cutoff)]
     return is_t, oos_t
 
 
@@ -161,7 +181,8 @@ def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> floa
     bars with lo < date <= hi. Returns 0.0 when no window has enough bars."""
     vols = []
     for a in assets:
-        closes = [b["close"] for b in bars_by_asset[a] if lo < b["date"] <= hi]
+        closes = [b["close"] for b in bars_by_asset[a]
+                  if not _date_le(b["date"], lo) and _date_le(b["date"], hi)]
         if len(closes) < 3:
             continue
         rets = [math.log(closes[i] / closes[i - 1])
@@ -173,22 +194,34 @@ def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> floa
 
 
 def _pbo_metrics_fields(pbo_status: dict | None) -> dict:
-    """The six verdict-metrics keys derived from a PBO group status dict.
+    """The seven verdict-metrics keys derived from a PBO group status dict.
 
     Factored out (SP4 Task P2/P3) so evaluate_spec's inline computation and
     run()'s post-hoc patch (candidates are evaluated in a worker process
     BEFORE this pass's own gate-passing groups are known -- see the P3
-    dead-group note at the PBO loop below) read the SAME six keys from the
+    dead-group note at the PBO loop below) read the SAME seven keys from the
     SAME dict shape and can never drift apart. `None` (no status supplied,
     or a bare `{}`) records every field as None, exactly as evaluate_spec
-    always has for a caller that omits pbo_status."""
+    always has for a caller that omits pbo_status.
+
+    Batch review rider (SP4): `pbo_verdict` (one of "not_measured_dead_group",
+    "underpowered", "kill", "pass", "fail") used to exist ONLY in the printed
+    PBO line -- a chained verdict recorded every number the label was derived
+    from but never the label itself, so a reader of the chain alone (not the
+    run's own stdout) could not tell "not_measured_dead_group" from
+    "underpowered" even though they mean different things (see run()'s own
+    comment at the PBO loop: one means the family was never even asked the
+    question, the other means the null was attempted or considered but the
+    family cannot support one). Adding it here is additive-only -- every
+    existing consumer of this dict's other six keys is unaffected."""
     s = pbo_status or {}
     return {"pbo": s.get("pbo"),
             "pbo_n_distinct": s.get("n_distinct"),
             "pbo_percentile": s.get("percentile"),
             "pbo_null_p05": s.get("null_p05"),
             "pbo_null_p95": s.get("null_p95"),
-            "pbo_null_draws": s.get("null_draws")}
+            "pbo_null_draws": s.get("null_draws"),
+            "pbo_verdict": s.get("verdict")}
 
 
 def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
@@ -571,7 +604,7 @@ def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
             f"exactly one asset per cell for class {asset_class!r} "
             f"(benchmark: 'self'), got {assets!r}")
     bars = spec_bars[assets[0]]
-    oos_bars = [b for b in bars if b["date"] > cutoff]
+    oos_bars = [b for b in bars if not _date_le(b["date"], cutoff)]
     if not oos_bars:
         raise ValueError(
             f"{spec['strategy_id']}: no OOS bars for {assets[0]!r} after "
@@ -696,7 +729,7 @@ def _evaluate_candidate(payload: dict) -> dict:
     if benchmark_relative is not None:
         metrics["benchmark_relative"] = benchmark_relative
 
-    train_dates = [d for d, _ in payload["res_equity"] if d <= cutoff]
+    train_dates = [d for d, _ in payload["res_equity"] if _date_le(d, cutoff)]
     metrics["haircut"] = dict(
         harvey_liu_haircut(payload["train_sharpe"] or 0.0,
                            t_years=len(train_dates) / 365.0,
@@ -704,7 +737,7 @@ def _evaluate_candidate(payload: dict) -> dict:
         window="train")
     metrics["walkforward"] = dict(
         walkforward_report(
-            [t for t in payload["res_trades"] if t["entry_date"] <= cutoff],
+            [t for t in payload["res_trades"] if _date_le(t["entry_date"], cutoff)],
             train_dates, n_folds=3, purge_bars=PURGE_BARS),
         window="train")
 
@@ -712,7 +745,7 @@ def _evaluate_candidate(payload: dict) -> dict:
         def _perturbed_score(pspec):
             r = run_spec(pspec, spec_bars)
             return annualized_sharpe([(d, v) for d, v in r["equity"]
-                                      if d <= cutoff])
+                                      if _date_le(d, cutoff)])
         metrics["perturbation"] = sensitivity(
             s, payload["train_sharpe"], _perturbed_score, dense_only=True)
     else:
@@ -927,7 +960,15 @@ def run(argv: list[str] | None = None) -> int:
         tf = s["universe"].get("timeframe", "1d")
         data_shas = {a: data_hashes[cells.cell_id(a, tf)]
                     for a in s["universe"]["assets"]}
-        key = simcache.cache_key(sid, data_shas, ENGINE_REV)
+        # SP4 batch review rider: the cached series also depends on the
+        # RESOLVED periods_per_year (engine.run_spec derives it the same way
+        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
+        # vol_target's realized-vol sizing), so it must be part of the key or
+        # a SESSION_PERIODS edit would silently serve a stale series instead
+        # of missing. See simcache.cache_key's own docstring.
+        periods_per_year = cells.SESSION_PERIODS.get(
+            s["universe"].get("session"), 365)
+        key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
         hit = cache.get(key)
         if hit is not None:
             dated_returns_by_sid[sid] = hit["series"]
@@ -1029,7 +1070,8 @@ def run(argv: list[str] | None = None) -> int:
         than from an equity curve a non-candidate spec may not have this
         pass. See _annualized_sharpe_from_returns for the exact equivalence
         to the pre-P1 equity-curve computation."""
-        return [r for d, r in dated_returns_by_sid[sid] if d <= args.cutoff]
+        return [r for d, r in dated_returns_by_sid[sid]
+               if _date_le(d, args.cutoff)]
 
     train_sharpe = {s["strategy_id"]: _annualized_sharpe_from_returns(
         train_returns(s["strategy_id"])) for s in all_specs}

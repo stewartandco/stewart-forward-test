@@ -27,19 +27,19 @@ SERIES = [("2024-01-01", 0.01), ("2024-01-02", -0.005), ("2024-01-03", 0.02)]
 # ---------------- cache_key ----------------
 
 def test_cache_key_ignores_dict_insertion_order():
-    a = cache_key("sid1", {"BTCUSD": "aaa", "ETHUSD": "bbb"}, "e2")
-    b = cache_key("sid1", {"ETHUSD": "bbb", "BTCUSD": "aaa"}, "e2")
+    a = cache_key("sid1", {"BTCUSD": "aaa", "ETHUSD": "bbb"}, "e2", 365)
+    b = cache_key("sid1", {"ETHUSD": "bbb", "BTCUSD": "aaa"}, "e2", 365)
     assert a == b
 
 
 def test_cache_key_changes_with_sid():
-    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e2")
-           != cache_key("sid2", {"BTCUSD": "aaa"}, "e2"))
+    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 365)
+           != cache_key("sid2", {"BTCUSD": "aaa"}, "e2", 365))
 
 
 def test_cache_key_changes_with_data_sha():
-    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e2")
-           != cache_key("sid1", {"BTCUSD": "zzz"}, "e2"))
+    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 365)
+           != cache_key("sid1", {"BTCUSD": "zzz"}, "e2", 365))
 
 
 def test_cache_key_changes_with_engine_rev():
@@ -47,21 +47,34 @@ def test_cache_key_changes_with_engine_rev():
     the engine revision produces a completely different key, so an entry
     cached under a prior revision is never looked up under the new one --
     it is not detected-and-rejected, it is simply a different, absent key."""
-    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e1")
-           != cache_key("sid1", {"BTCUSD": "aaa"}, "e2"))
+    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e1", 365)
+           != cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 365))
+
+
+def test_cache_key_changes_with_periods_per_year():
+    """Batch review rider (latent staleness): a cached series depends on the
+    RESOLVED periods_per_year too -- it feeds vol_target's realized-vol
+    sizing (cells.SESSION_PERIODS -> engine.realized_ann_vol), a mapping that
+    lives outside sid/data/engine_rev entirely. Same sid, same data, same
+    engine revision, different periods_per_year (e.g. a fx spec at 261 vs a
+    crypto spec's 365, or the SAME session's mapping edited) must be a
+    DIFFERENT key -- never the same one silently serving a series simulated
+    under a different annualization."""
+    assert (cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 365)
+           != cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 261))
 
 
 # ---------------- SimCache: miss / hit / poison ----------------
 
 def test_miss_on_empty_cache(tmp_path):
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     assert cache.get(key) is None
 
 
 def test_put_then_get_round_trips(tmp_path):
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     cache.put(key, SERIES, equity_len=len(SERIES) + 1)
 
     hit = cache.get(key)
@@ -74,7 +87,7 @@ def test_get_is_atomic_write_safe_tmp_file_left_behind_is_ignored(tmp_path):
     """put() writes tmp-then-rename; a stray .tmp file (e.g. from a crash
     mid-write) must never be read as if it were the real entry."""
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     cache.put(key, SERIES, equity_len=4)
     stray = cache._path(key).with_name(cache._path(key).name + ".tmp")
     stray.write_text("not json at all", encoding="utf-8")
@@ -89,7 +102,7 @@ def test_poisoned_entry_is_a_miss_and_self_heals(tmp_path):
     deleted so the very next put() starts clean rather than the poison
     persisting forever."""
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     cache.put(key, SERIES, equity_len=4)
     path = cache._path(key)
     assert path.exists()
@@ -109,7 +122,7 @@ def test_poisoned_entry_is_a_miss_and_self_heals(tmp_path):
 
 def test_malformed_json_is_also_a_miss_and_self_heals(tmp_path):
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     path = cache._path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not valid json", encoding="utf-8")
@@ -120,7 +133,7 @@ def test_malformed_json_is_also_a_miss_and_self_heals(tmp_path):
 
 def test_missing_expected_field_is_also_a_miss(tmp_path):
     cache = SimCache(tmp_path / "simcache")
-    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV)
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     path = cache._path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"series": SERIES}), encoding="utf-8")  # no sha
@@ -135,10 +148,10 @@ def test_engine_rev_bump_invalidates_through_the_cache(tmp_path):
     though it is still sitting on disk (nothing proactively sweeps stale
     revisions -- they are simply never looked up again)."""
     cache = SimCache(tmp_path / "simcache")
-    old_key = cache_key("sid1", {"BTCUSD": "aaa"}, "e1")
+    old_key = cache_key("sid1", {"BTCUSD": "aaa"}, "e1", 365)
     cache.put(old_key, SERIES, equity_len=4)
 
-    new_key = cache_key("sid1", {"BTCUSD": "aaa"}, "e2")
+    new_key = cache_key("sid1", {"BTCUSD": "aaa"}, "e2", 365)
     assert cache.get(new_key) is None
     assert cache.get(old_key) is not None      # the old entry is untouched
 

@@ -17,14 +17,22 @@ family matrix need, and it is small.
 Cache identity: a strategy's simulated output is pure and deterministic given
 (1) its own spec content -- represented here by its content-addressed
 `strategy_id`, since two different specs never share one, (2) the exact bytes
-of every asset's price data it reads, and (3) the engine's own numeric
-behaviour. `engine.ENGINE_REV` is the hand-bumped contract for (3): bumped on
-ANY engine change that can alter a simulated number, so a cache entry built
-under a prior revision is a guaranteed miss under a new one rather than a
-silently stale hit -- see engine.py's own comment on the constant. (2) is the
-per-asset data sha256 the caller already has from `screen.load_cell_data`;
-this module does not read data files itself. (1) plus (2) plus (3), hashed
-together, is the cache key.
+of every asset's price data it reads, (3) the engine's own numeric behaviour,
+and (4) the RESOLVED `periods_per_year` the engine annualizes with. `engine.
+ENGINE_REV` is the hand-bumped contract for (3): bumped on ANY engine change
+that can alter a simulated number, so a cache entry built under a prior
+revision is a guaranteed miss under a new one rather than a silently stale
+hit -- see engine.py's own comment on the constant. (2) is the per-asset data
+sha256 the caller already has from `screen.load_cell_data`; this module does
+not read data files itself. (4) is needed because `periods_per_year` is NOT
+implied by (1)-(3): it comes from `cells.SESSION_PERIODS[universe.session]`
+(engine.py's `run_spec`), a mapping that lives outside the spec, outside the
+per-asset data, and outside ENGINE_REV, yet feeds vol_target's realized-vol
+sizing (engine.py's `realized_ann_vol`) and therefore the simulated return
+series itself. Without it, a SESSION_PERIODS edit (e.g. correcting fx's
+trading-day count) would silently keep serving every cached fx series computed
+under the OLD mapping instead of missing and re-simulating. (1) plus (2) plus
+(3) plus (4), hashed together, is the cache key.
 
 CANDIDATES (this pass's own evaluations) are never served from here -- see
 gauntlet.py's own comment at the call site. Only a spec NOT being evaluated
@@ -49,18 +57,27 @@ from pathlib import Path
 _DUMPS_KW = dict(sort_keys=True, separators=(",", ":"))
 
 
-def cache_key(sid: str, data_shas: dict[str, str], engine_rev: str) -> str:
+def cache_key(sid: str, data_shas: dict[str, str], engine_rev: str,
+             periods_per_year: int) -> str:
     """sha256 hex digest identifying one strategy's registry-wide
-    re-simulation, over (sid, {asset: data_sha256}, engine_rev).
+    re-simulation, over (sid, {asset: data_sha256}, engine_rev,
+    periods_per_year).
 
     `data_shas` should be the per-asset data_sha256 values the caller already
     computed for THIS spec's own universe (`screen.load_cell_data`'s
     `data_hashes`, looked up per (asset, timeframe) cell) -- not recomputed
     here. Any change to the spec's own content changes `sid` itself (it is
     content-addressed), so the key needs nothing else about the spec.
+
+    `periods_per_year` must be the RESOLVED value run_spec itself would use
+    (`cells.SESSION_PERIODS.get(spec["universe"]["session"], 365)`) -- not
+    recomputed here, same discipline as `data_shas`. See this module's
+    docstring for why it is a fourth, independent key component rather than
+    implied by the other three.
     """
     canonical = json.dumps(
-        {"sid": sid, "data": data_shas, "engine": engine_rev}, **_DUMPS_KW)
+        {"sid": sid, "data": data_shas, "engine": engine_rev,
+         "periods_per_year": periods_per_year}, **_DUMPS_KW)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
