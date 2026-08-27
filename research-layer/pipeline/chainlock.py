@@ -32,8 +32,15 @@ class ChainLockHeld(RuntimeError):
 
 class ChainLock:
     def __init__(self, logs_dir: str | Path, holder: str, purpose: str,
-                 stale_after_s: float = STALE_AFTER_S) -> None:
-        self.path = Path(logs_dir) / "chain.lock"
+                 stale_after_s: float = STALE_AFTER_S,
+                 name: str = "chain.lock") -> None:
+        """`name` generalises the lockfile's basename (default "chain.lock",
+        every existing caller's exact prior behaviour). loop.py uses a
+        second, distinctly-named instance ("loop.lock") to guard a whole
+        `loop.run()` cycle against a concurrent second instance -- a
+        separate concern from chain-write coordination, so it needs its own
+        file rather than contending with chain.lock's holders."""
+        self.path = Path(logs_dir) / name
         self.holder = holder
         self.purpose = purpose
         self.stale_after_s = stale_after_s

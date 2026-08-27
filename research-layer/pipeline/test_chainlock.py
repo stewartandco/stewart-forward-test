@@ -100,3 +100,25 @@ def test_acquire_creates_missing_logs_dir(tmp_path):
         assert (tmp_path / "logs" / "chain.lock").exists()
     finally:
         lk.release()
+
+
+def test_custom_lock_name_is_independent_of_chain_lock(tmp_path):
+    """loop.py's instance guard uses name="loop.lock" -- a second, distinct
+    lockfile that must neither collide with nor block on chain.lock."""
+    chain = ChainLock(tmp_path, holder="loop", purpose="chain write")
+    instance = ChainLock(tmp_path, holder="loop-instance", purpose="run start",
+                         name="loop.lock")
+    chain.acquire()
+    try:
+        instance.acquire()          # must NOT raise ChainLockHeld
+        try:
+            assert (tmp_path / "chain.lock").exists()
+            assert (tmp_path / "loop.lock").exists()
+            info = json.loads((tmp_path / "loop.lock").read_text(encoding="utf-8"))
+            assert info["holder"] == "loop-instance"
+        finally:
+            instance.release()
+        assert not (tmp_path / "loop.lock").exists()
+        assert (tmp_path / "chain.lock").exists()   # untouched by instance.release()
+    finally:
+        chain.release()
