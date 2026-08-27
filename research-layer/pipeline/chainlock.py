@@ -76,10 +76,11 @@ class ChainLock:
         suspicious. Conservative wherever liveness cannot be determined:
         unknown means ALIVE, so a live holder is never mistaken for dead.
 
-        NEVER use os.kill(pid, 0) for this: on Windows, os.kill with any
-        signal other than CTRL_C_EVENT/CTRL_BREAK_EVENT unconditionally
+        On Windows, NEVER use os.kill(pid, 0) for this: os.kill there, with
+        any signal other than CTRL_C_EVENT/CTRL_BREAK_EVENT, unconditionally
         TERMINATES the target process via TerminateProcess -- it is not a
-        liveness probe there, unlike POSIX's signal 0.
+        liveness probe on that platform, unlike POSIX's signal 0 (which IS
+        the correct probe there, and is what the POSIX branch below uses).
         """
         info = self.info()
         if info is None:
@@ -88,16 +89,29 @@ class ChainLock:
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             return False
         if os.name != "nt":
-            # No side-effect-free liveness check implemented for POSIX yet.
-            return True
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True             # exists, owned by someone else -- alive
+            except Exception:
+                return True             # platform check failed -- conservative
         try:
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = ctypes.c_void_p   # win64 HANDLE hygiene
             handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
                                           False, pid)
             if not handle:
-                return False           # no such process
+                # NULL is ALSO returned for ERROR_ACCESS_DENIED (5) -- the
+                # scheduled-task-vs-supervised-shell cross-account case this
+                # guard exists for, where the process very much EXISTS. Only
+                # ERROR_INVALID_PARAMETER (87) means the pid is truly gone;
+                # anything else (access denied included) means alive.
+                return ctypes.get_last_error() != 87
             try:
                 exit_code = ctypes.c_ulong()
                 if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):

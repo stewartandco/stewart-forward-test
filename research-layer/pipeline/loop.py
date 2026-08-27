@@ -160,6 +160,8 @@ def _acquire_instance_lock_or_break_dead(instance_lock: ChainLock) -> bool:
     except ChainLockHeld:
         pass
     if not (instance_lock.is_stale() and not instance_lock.holder_alive()):
+        print("deferred_instance: another loop instance holds loop.lock, deferring",
+             flush=True)
         return False
     try:
         instance_lock.break_stale()
@@ -225,8 +227,10 @@ def _run_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                               purpose=f"run start {_now_utc()}",
                               name="loop.lock", stale_after_s=2 * 3600)
     if not _acquire_instance_lock_or_break_dead(instance_lock):
-        print("deferred_instance: another loop instance holds loop.lock, deferring",
-             flush=True)
+        # _acquire_instance_lock_or_break_dead is the single printer for
+        # every sub-case (live holder, race-during-break, lost-reacquire) so
+        # each defer logs once with its actual cause, not a generic line
+        # here on top of it.
         # ALWAYS WARN, never OK: this is the one deferral that can persist
         # indefinitely (a live sibling instance is not a transient race like
         # a chain-write window), so it must never read as healthy.
@@ -271,10 +275,12 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                     if fresh_info is None:
                         # The stale holder released it entirely in the gap --
                         # there is no lock left to defer to; proceed exactly
-                        # as a successful break would have.
-                        print("deferred_lock: stale chain.lock vanished on "
-                             "its own before the break -- proceeding, "
-                             "nothing to defer to", flush=True)
+                        # as a successful break would have. NOT prefixed
+                        # "deferred_lock:" -- this path does not defer, and
+                        # the greppable-token convention would miscount it.
+                        print("stale_lock_vanished: chain.lock vanished on "
+                             "its own before the break -- proceeding",
+                             flush=True)
                         loop_state.clear_stale_lock(state)
                         loop_state.save(state_path, state)
                     else:

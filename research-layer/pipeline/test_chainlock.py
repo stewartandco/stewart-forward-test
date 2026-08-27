@@ -140,3 +140,20 @@ def test_holder_alive_false_for_bogus_pid(tmp_path):
         encoding="utf-8")
     lk = ChainLock(tmp_path, holder="loop-instance", purpose="y")
     assert lk.holder_alive() is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only: OpenProcess ACCESS_DENIED case")
+def test_holder_alive_true_for_access_denied_pid(tmp_path):
+    """pid 4 is the Windows System process: it EXISTS but OpenProcess on it
+    (even with PROCESS_QUERY_LIMITED_INFORMATION) can return NULL with
+    ERROR_ACCESS_DENIED (5), not ERROR_INVALID_PARAMETER (87) -- the same
+    NULL a truly-gone pid produces. Conflating the two would make the
+    instance guard break a LIVE holder's lock in exactly the
+    scheduled-task-vs-supervised-shell cross-account configuration it
+    exists to protect."""
+    (tmp_path / "chain.lock").write_text(
+        json.dumps({"holder": "loop-instance", "pid": 4,
+                   "ts_utc": "2020-01-01T00:00:00+00:00", "purpose": "x"}),
+        encoding="utf-8")
+    lk = ChainLock(tmp_path, holder="loop-instance", purpose="y")
+    assert lk.holder_alive() is True
