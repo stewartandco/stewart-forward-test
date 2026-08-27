@@ -34,10 +34,15 @@ def _mk_source(tmp_path, closes, sha=None, verdict="ok", write_verdict=True):
                        "close": [c for _, c in closes], "volume": float("nan")}, index=idx)
     df.index.name = "date"
     df.to_parquet(root / "data" / "tradfi" / "free_fx_EUR_1d.parquet")
-    real_sha = sha or _canon_sha([(d, c) for d, c in closes if c == c])
+    clean = [(d, c) for d, c in closes if c == c]
+    real_sha = sha or _canon_sha(clean)
+    # "rows" pins the length of the NaN-dropped canon (what the pinned-prefix
+    # check actually hashes), not the raw row count -- see the D4 refinement
+    # (s10.12): a manifest "rows" that counted NaN rows would make an
+    # untouched fixture look like it shrank.
     manifest = {"snapshot_utc": "2026-08-23", "label": "CTA-lite: financials + metals (free lane)",
                 "selected": [{"id": "EUR", "lane": "fx", "sha256": real_sha,
-                              "history_start": closes[0][0], "rows": len(closes)}],
+                              "history_start": closes[0][0], "rows": len(clean)}],
                 "excluded": []}
     (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     if write_verdict:
@@ -61,7 +66,8 @@ def test_snapshot_writes_filled_csv_and_manifest(tmp_path):
     man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
     assert man["source_snapshot_utc"] == "2026-08-23"
     assert man["series"]["EUR"]["bar_kind"] == "single_fix"
-    assert man["series"]["EUR"]["sha256_verified"] is True
+    assert man["series"]["EUR"]["sha256_verified"] == "pinned_prefix"
+    assert man["series"]["EUR"]["rows_beyond_pin"] == 0    # on-disk canon is exactly the pinned length
     assert man["series"]["EUR"]["verdict"] == "ok"
 
 
@@ -135,9 +141,10 @@ def test_snapshot_manifest_merges_across_subset_reruns(tmp_path):
     gbp_closes = [("2026-08-18", 0.8501), ("2026-08-19", 0.8512)]
     eur_sha = _write_asset("EUR", eur_closes)
     gbp_sha = _write_asset("GBP", gbp_closes)
+    eur_clean_rows = len([c for _, c in eur_closes if c == c])   # NaN-dropped canon length == the pin
 
     manifest = {"snapshot_utc": "2026-08-23", "selected": [
-        {"id": "EUR", "lane": "fx", "sha256": eur_sha, "history_start": eur_closes[0][0], "rows": len(eur_closes)},
+        {"id": "EUR", "lane": "fx", "sha256": eur_sha, "history_start": eur_closes[0][0], "rows": eur_clean_rows},
         {"id": "GBP", "lane": "fx", "sha256": gbp_sha, "history_start": gbp_closes[0][0], "rows": len(gbp_closes)},
     ], "excluded": []}
     (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -157,6 +164,72 @@ def test_snapshot_manifest_merges_across_subset_reruns(tmp_path):
     assert man2["series"]["GBP"] == gbp_entry_v1            # carried forward, byte-identical
     assert man2["series"]["EUR"]["rows_written"] == 3
     assert man2["previous_snapshot_utc"] == man1["snapshot_utc"]
+
+
+def _mk_pin_source(tmp_path, pinned_closes, disk_closes, pin_sha=None):
+    """A trading-systems tree where the manifest pins `pinned_closes` (its
+    sha256, its row count) but the parquet on disk actually holds
+    `disk_closes` -- lets D4 refinement tests drive the pin vs. the live
+    parquet independently (appended rows, rewritten rows, shrunk rows)."""
+    root = tmp_path / "ts"
+    (root / "data" / "tradfi").mkdir(parents=True)
+    (root / "results" / "tradfi").mkdir(parents=True)
+    idx = pd.to_datetime([d for d, _ in disk_closes])
+    df = pd.DataFrame({"open": float("nan"), "high": float("nan"), "low": float("nan"),
+                       "close": [c for _, c in disk_closes], "volume": float("nan")}, index=idx)
+    df.index.name = "date"
+    df.to_parquet(root / "data" / "tradfi" / "free_fx_EUR_1d.parquet")
+    sha = pin_sha or _canon_sha(pinned_closes)
+    manifest = {"snapshot_utc": "2026-08-23",
+                "selected": [{"id": "EUR", "lane": "fx", "sha256": sha,
+                              "history_start": pinned_closes[0][0], "rows": len(pinned_closes)}],
+                "excluded": []}
+    (root / "results" / "tradfi" / "free_universe_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (root / "data" / "tradfi" / "verdict_EUR.json").write_text(json.dumps({"verdict": "ok"}), encoding="utf-8")
+    return root
+
+
+PINNED = [("2026-08-18", 1.1701), ("2026-08-19", 1.1712), ("2026-08-20", 1.1698)]
+
+
+def test_snapshot_accepts_appended_rows_beyond_pin(tmp_path):
+    """The producer's parquet has grown past the pin (daily append). Only the
+    pinned PREFIX needs to hash to the manifest sha256; the appended rows are
+    accepted -- they're covered by the producer's daily integrity verdict,
+    already consulted fail-closed -- and counted as rows_beyond_pin."""
+    appended = [("2026-08-21", 1.1725), ("2026-08-22", 1.1730)]
+    root = _mk_pin_source(tmp_path, PINNED, PINNED + appended)
+    out = tmp_path / "layer"
+    written = td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert written == ["EUR"]
+    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert man["series"]["EUR"]["sha256_verified"] == "pinned_prefix"
+    assert man["series"]["EUR"]["rows_beyond_pin"] == 2
+    # the CSV carries the appended rows too -- they are real, verdict-covered data
+    lines = (out / "data" / "EUR_1d.csv").read_text().splitlines()
+    assert len(lines) == 1 + len(PINNED) + len(appended)
+
+
+def test_snapshot_refuses_rewritten_history_inside_prefix(tmp_path):
+    """One close INSIDE the pinned prefix changed on disk since the pin --
+    exactly the rewritten-history fraud the pin exists to catch."""
+    rewritten = [("2026-08-18", 1.1701), ("2026-08-19", 9.9999), ("2026-08-20", 1.1698)]
+    root = _mk_pin_source(tmp_path, PINNED, rewritten)
+    out = tmp_path / "layer"
+    with pytest.raises(td.SnapshotRefused, match="EUR"):
+        td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert not (out / "data" / "EUR_1d.csv").exists()
+
+
+def test_snapshot_refuses_shrunken_series(tmp_path):
+    """Fewer canon rows on disk than the pin declares: the history shrank,
+    which can only mean it was rewritten -- refuse, never silently accept a
+    shorter prefix."""
+    root = _mk_pin_source(tmp_path, PINNED, PINNED[:2])
+    out = tmp_path / "layer"
+    with pytest.raises(td.SnapshotRefused, match="EUR"):
+        td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert not (out / "data" / "EUR_1d.csv").exists()
 
 
 def test_snapshot_refuses_sha_mismatch_and_writes_nothing(tmp_path):

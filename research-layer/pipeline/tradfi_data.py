@@ -12,6 +12,21 @@ Task 2 Step 4 pins this reimplementation against the live manifest: both the
 real EUR and JPY series must reproduce the manifest's recorded sha256 exactly,
 or the canon is wrong and must not be adjusted until it does.
 
+D4 refinement (spec s10.12, found by this guard itself on the bond/metal
+pins): the manifest's sha256 is a FIRST-PIN snapshot -- `pin_universe` never
+rewrites an existing manifest -- while the producer's parquets append bars
+daily. A full-series hash comparison therefore only passes for a series
+unchanged since the pin; fx and equities passed Task 2's parity check on
+borrowed time (H.10 weekly cadence, a quiet cache day), not because the
+comparison was actually well-formed. `snapshot()` now verifies the PINNED
+PREFIX instead: the first `row["rows"]` canon lines must hash exactly to the
+manifest sha256, proving the declared history was never rewritten, while any
+canon lines beyond that prefix are accepted (they are still covered by the
+producer's daily integrity verdict, already consulted fail-closed above) and
+counted into the snapshot manifest as `rows_beyond_pin`. Fewer canon rows on
+disk than the pin declares is refused outright -- a shrunk series means the
+producer's history was rewritten, exactly the fraud the pin exists to catch.
+
 The producer's `free_fetch.load` guarantees are preserved on this side of the
 copy, not re-derived from scratch: a `fail` integrity verdict refuses the
 series, an unreadable verdict file refuses (fail-closed), and a MISSING
@@ -76,18 +91,41 @@ def _closes(df: pd.DataFrame) -> pd.Series:
     return close.sort_index()
 
 
+def _canon_lines(df: pd.DataFrame) -> list[str]:
+    """`"YYYY-MM-DD,{close:.6f}"` lines, NaN closes dropped, date-sorted --
+    the shared canonicalisation both the full-series hash and the D4
+    pinned-prefix hash build on."""
+    import pandas as pd
+
+    close = _closes(df).dropna()
+    return [f"{pd.Timestamp(d).date()},{c:.6f}" for d, c in close.items()]
+
+
 def series_sha256_canon(df: pd.DataFrame) -> str:
-    """Reimplementation of `tradfi/free_integrity.py:series_sha256`.
+    """Full-series reimplementation of `tradfi/free_integrity.py:series_sha256`.
 
     sha256 over `"YYYY-MM-DD,{close:.6f}"` lines, NaN closes dropped,
     date-sorted, newline-joined, no trailing newline. Kept importable (not
     underscore-private) so Task 2 Step 4's parity script and this module's
-    own tests can both call it directly.
+    own tests can both call it directly. Only matches the manifest sha256 for
+    a series unchanged since its first pin (see the D4 refinement note above,
+    and `_pinned_prefix_sha256` for what `snapshot()` actually verifies).
     """
-    import pandas as pd
+    canon = "\n".join(_canon_lines(df))
+    return hashlib.sha256(canon.encode()).hexdigest()
 
-    close = _closes(df).dropna()
-    canon = "\n".join(f"{pd.Timestamp(d).date()},{c:.6f}" for d, c in close.items())
+
+def _pinned_prefix_sha256(df: pd.DataFrame, rows: int) -> str:
+    """sha256 over just the first `rows` canon lines (D4 refinement, s10.12).
+
+    This is what a still-pinned manifest sha256 actually proves once the
+    producer's parquet has appended bars past the pin: the DECLARED history
+    (the first `rows` entries) was never rewritten. Rows beyond `rows` are
+    deliberately excluded from this hash -- they are new data, verified by
+    the producer's own daily integrity verdict instead (already consulted,
+    fail-closed, before this is ever called).
+    """
+    canon = "\n".join(_canon_lines(df)[:rows])
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
@@ -150,10 +188,11 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     """Copy the requested classes' assets from a trading-systems tree into
     `layer_root/data/`, verified against `results/tradfi/free_universe_manifest.json`.
 
-    Two-phase: every requested id is verified (pinned, verdict clear, sha
-    match, and -- when --assets was given explicitly -- a declared member of
-    the requested class) before anything is written. Any refusal aborts the
-    whole call with every refusal named; nothing partial is ever written.
+    Two-phase: every requested id is verified (pinned, verdict clear, pinned
+    prefix sha match -- see the D4 refinement note above -- and, when
+    --assets was given explicitly, a declared member of the requested class)
+    before anything is written. Any refusal aborts the whole call with every
+    refusal named; nothing partial is ever written.
 
     A subset re-run (e.g. `--assets EUR` after a full-class snapshot) merges
     into any existing `tradfi_snapshot_manifest.json` in layer_root/data
@@ -189,7 +228,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
                 continue
             requested.append((cls, asset_id))
 
-    verified: dict[str, tuple[pd.DataFrame, dict, str, str]] = {}
+    verified: dict[str, tuple[pd.DataFrame, dict, str, str, int]] = {}
     for cls, asset_id in requested:
         row = pinned.get(asset_id)
         if row is None:
@@ -208,13 +247,25 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
             continue
         df = pd.read_parquet(parquet_path)
 
-        actual_sha = series_sha256_canon(df)
-        if actual_sha != row["sha256"]:
+        # D4 refinement (s10.12): the manifest sha is a first-pin snapshot,
+        # not a live hash of the current parquet, so only the PINNED PREFIX
+        # is checked against it -- see _pinned_prefix_sha256's docstring.
+        pin_rows = row["rows"]
+        total_rows = len(_canon_lines(df))
+        if total_rows < pin_rows:
             refusals.append(
-                f"{asset_id}: sha256 mismatch (manifest {row['sha256']}, computed {actual_sha})")
+                f"{asset_id}: history shrank ({total_rows} rows on disk, {pin_rows} pinned) -- rewritten history")
             continue
 
-        verified[asset_id] = (df, row, cls, verdict_value)
+        prefix_sha = _pinned_prefix_sha256(df, pin_rows)
+        if prefix_sha != row["sha256"]:
+            refusals.append(
+                f"{asset_id}: pinned-prefix sha256 mismatch over the first {pin_rows} rows "
+                f"(manifest {row['sha256']}, computed {prefix_sha})")
+            continue
+
+        rows_beyond_pin = total_rows - pin_rows
+        verified[asset_id] = (df, row, cls, verdict_value, rows_beyond_pin)
 
     if refusals:
         raise SnapshotRefused("; ".join(refusals))
@@ -224,13 +275,13 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
 
     written: list[str] = []
     series_manifest: dict[str, dict] = {}
-    for asset_id, (df, row, cls, verdict_value) in verified.items():
+    for asset_id, (df, row, cls, verdict_value, rows_beyond_pin) in verified.items():
         bar_kind = cells._class_spec(cls)["bar_kind"]
         rows_written = _write_series_csv(out_data_dir, asset_id, df, bar_kind)
         written.append(asset_id)
         series_manifest[asset_id] = {**row, "bar_kind": bar_kind,
-                                      "sha256_verified": True, "rows_written": rows_written,
-                                      "verdict": verdict_value}
+                                      "sha256_verified": "pinned_prefix", "rows_written": rows_written,
+                                      "rows_beyond_pin": rows_beyond_pin, "verdict": verdict_value}
 
     manifest_out_path = out_data_dir / "tradfi_snapshot_manifest.json"
     previous_manifest: dict | None = None
