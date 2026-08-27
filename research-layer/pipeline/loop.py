@@ -59,15 +59,33 @@ def _entry_count(registry_path: Path) -> int:
         return sum(1 for line in f if line.strip())
 
 
-def collect_commit_paths(layer: Path, start_line: int) -> list[str]:
+def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
     """Repo-relative paths for this cycle's chain delta: the registry plus
     artifacts/<sid> for every strategy_registered entry appended after
     start_line whose bundle exists on disk. start_line is the chain-line
     count taken by the SAME helper (_entry_count) that also measures
-    chain_growth -- one counting rule, not two."""
+    chain_growth -- one counting rule, not two.
+
+    Layout assumption: registry_path's parent is the research-layer root, a
+    top-level directory of the git repo -- the "research-layer/..." prefix
+    below is that hardcoded pathspec convention (mirrors run_quarantine.bat),
+    not derived from the directory's actual name.
+
+    Honesty note (mirrors chain_growth's): the registry line is included
+    unconditionally and may carry foreign rows appended by another writer
+    after start_line, not just this cycle's own stages. Committing them
+    still commits a VALID chain state -- verify_registry.py already gated
+    on that before this ever runs -- and per-row attribution lives in each
+    entry's own run_id, not in the git commit boundary.
+
+    Known best-effort gap: an artifact bundle that finishes landing on disk
+    in the window between this scan and the `git add` below is simply
+    missed this cycle. It is NOT picked up on a later cycle either -- the
+    next cycle's start_line has already moved past its strategy_registered
+    entry."""
+    layer = registry_path.parent
     rel_root = "research-layer"
     paths = [f"{rel_root}/registry_log.jsonl"]
-    registry_path = layer / "registry_log.jsonl"
     with registry_path.open("r", encoding="utf-8") as f:
         lines = [ln for ln in f if ln.strip()]
     for ln in lines[start_line:]:
@@ -83,22 +101,45 @@ def collect_commit_paths(layer: Path, start_line: int) -> list[str]:
     return paths
 
 
-def commit_cycle(layer: Path, start_line: int, run_id: str, runner: Runner) -> None:
+def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runner) -> None:
     """Scoped commit of this cycle's chain delta (registry_log.jsonl plus the
     artifact bundles registered this cycle). Best-effort: a git failure is
     LOUD (printed) but never fails the cycle -- the chain itself is the
-    trust asset, this commit is bookkeeping. Never `git add -A`, never
-    push."""
+    trust asset, this commit is bookkeeping. Takes registry_path (not layer)
+    so the caller's already-computed Path is reused rather than
+    recomputed -- see collect_commit_paths for the research-layer/repo-
+    layout assumption this implies.
+
+    Two safety properties, both load-bearing on a shared working tree:
+    - Preflight, run_quarantine.bat's exact pattern: `git diff --quiet`
+      exits 1 when there ARE tracked changes -- that is the commit signal,
+      NOT an error. A clean tracked diff AND no new (untracked) artifact
+      dirs means nothing changed this cycle; skip silently -- no commit,
+      no WARNING.
+    - Both `git add` and `git commit` are pathspec-scoped to exactly this
+      cycle's delta. A bare `git commit -q -m msg` commits the ENTIRE
+      index, which would sweep a concurrent session's separately-staged
+      work into this commit -- never do that.
+    """
+    layer = registry_path.parent
     repo = layer.parent
-    paths = collect_commit_paths(layer, start_line)
+    paths = collect_commit_paths(registry_path, start_line)
+    has_new_artifacts = len(paths) > 1   # more than just the registry line
+
+    diff = runner(["git", "diff", "--quiet", "--"] + paths, cwd=str(repo))
+    if diff.returncode == 0 and not has_new_artifacts:
+        return                            # nothing changed this cycle -- silent, no commit
+
     add = runner(["git", "add", "--"] + paths, cwd=str(repo))
     if add.returncode != 0:
         print("loop: WARNING git add failed; chain delta left uncommitted", flush=True)
         return
-    cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta"],
+    cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta", "--"] + paths,
                cwd=str(repo))
     if cm.returncode != 0:
         print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
+        return
+    print(f"loop: committed chain delta ({len(paths) - 1} artifact bundle(s))", flush=True)
 
 
 def _spent(logs_dir: str | Path) -> float:
@@ -543,7 +584,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # Runs only after a clean cycle, only after the watermark and final
     # status are already on disk: a commit failure must never look like it
     # cost this cycle its success.
-    commit_cycle(layer, entries_before, run_id, runner)
+    commit_cycle(registry_path, entries_before, run_id, runner)
 
     return 0
 

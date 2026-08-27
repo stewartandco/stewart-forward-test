@@ -34,8 +34,12 @@ def _mk_layer(tmp_path, accepted_fx=0):
 
 
 class FakeRunner:
-    """Records invocations; returns preset exit codes per python -m module.
-    Non-python argv (e.g. git) returns 0 unless a code is set for argv[0].
+    """Records invocations; returns preset exit codes per python -m module,
+    or per argv[0] for anything else (e.g. every git subcommand keys as
+    "git"). argv[0] == sys.executable is checked FIRST: only a python
+    invocation's "-m" is a module flag -- `git commit -q -m "..."` also
+    contains the literal token "-m", but it means something else entirely,
+    and must never be mistaken for a module invocation.
     call_kwargs parallels calls (same index) so a test can check e.g. cwd
     without disturbing every existing assertion that treats fr.calls as a
     plain list of argv lists."""
@@ -47,7 +51,7 @@ class FakeRunner:
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         self.call_kwargs.append(dict(kw))
-        if "-m" in argv:
+        if argv[0] == sys.executable and "-m" in argv:
             key = argv[argv.index("-m") + 1]
         else:
             key = argv[0]
@@ -57,11 +61,7 @@ class FakeRunner:
 
 
 def _modules(fr):
-    # argv[0] == sys.executable narrows this to `python -m ...` stage calls --
-    # `git commit -q -m "..."` also contains the literal token "-m" and must
-    # not be mistaken for a python module invocation.
-    return [c[c.index("-m") + 1] for c in fr.calls
-           if "-m" in c and c and c[0] == sys.executable]
+    return [c[c.index("-m") + 1] for c in fr.calls if c[0] == sys.executable and "-m" in c]
 
 
 def _seed_crypto_caught_up(layer, count):
@@ -115,8 +115,12 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     assert rc == 0
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
                             "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
-    # composer appears twice: --dry-run preflight then the real run
-    dry = [c for c in fr.calls if "-m" in c][1]; real = [c for c in fr.calls if "-m" in c][2]
+    # composer appears twice: --dry-run preflight then the real run.
+    # Narrowed to python calls (argv[0] == sys.executable) -- a plain "-m"
+    # in c would also catch `git commit -q -m ...`, and picking this by
+    # fixed index would silently break if a git call ever moved earlier.
+    py_calls = [c for c in fr.calls if c[0] == sys.executable and "-m" in c]
+    dry = py_calls[1]; real = py_calls[2]
     assert "--dry-run" in dry and "--dry-run" not in real
     assert "--asset-class" in real and real[real.index("--asset-class") + 1] == "fx"
     screen_call = next(c for c in fr.calls
@@ -648,7 +652,8 @@ def test_collect_commit_paths_scoped(tmp_path):
     registered AFTER start_line whose bundle actually exists on disk."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=2)
     register_example_blocks(reg)
-    start_line = loop._entry_count(layer / "registry_log.jsonl")
+    registry_path = layer / "registry_log.jsonl"
+    start_line = loop._entry_count(registry_path)
 
     spec1 = make_strategy(["card0000"])
     spec2 = make_strategy(["card0001"])
@@ -659,34 +664,82 @@ def test_collect_commit_paths_scoped(tmp_path):
     (layer / "artifacts" / sid1).mkdir(parents=True)
     # sid2 deliberately gets no artifacts dir -- its bundle never landed.
 
-    paths = loop.collect_commit_paths(layer, start_line)
+    paths = loop.collect_commit_paths(registry_path, start_line)
     assert paths == ["research-layer/registry_log.jsonl",
                      f"research-layer/artifacts/{sid1}"]
     assert f"research-layer/artifacts/{sid2}" not in paths
 
 
+class _ComposerRegistersStrategyRunner(FakeRunner):
+    """Simulates composer's real run actually registering a strategy and
+    writing its artifact bundle. FakeRunner otherwise never touches the
+    registry at all, so a zero-delta cycle is the ONLY thing a plain
+    FakeRunner can produce -- and the restored preflight correctly makes NO
+    commit for that case. This subclass exercises the real-delta path."""
+    def __init__(self, reg, layer, codes=None):
+        super().__init__(codes)
+        self.reg = reg
+        self.layer = layer
+        self.sid = None
+
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if ("-m" in argv and argv[argv.index("-m") + 1] == "pipeline.composer"
+                and "--dry-run" not in argv):
+            spec = make_strategy(["card0000"])
+            self.reg.register_strategy(spec)
+            self.sid = spec["strategy_id"]
+            (self.layer / "artifacts" / self.sid).mkdir(parents=True)
+        return r
+
+
 def test_cycle_complete_commits_scoped(tmp_path):
-    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    fr = FakeRunner()
+    register_example_blocks(reg)
+    fr = _ComposerRegistersStrategyRunner(reg, layer)
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
+    assert fr.sid is not None
 
     git_idx = [i for i, c in enumerate(fr.calls) if c and c[0] == "git"]
-    assert len(git_idx) == 2
-    i_add, i_commit = git_idx
-    assert i_add < i_commit                    # add before commit, in order
-    add_call, commit_call = fr.calls[i_add], fr.calls[i_commit]
+    assert len(git_idx) == 3                    # diff (preflight), add, commit
+    i_diff, i_add, i_commit = git_idx
+    assert i_diff < i_add < i_commit             # in order
+    diff_call, add_call, commit_call = (fr.calls[i_diff], fr.calls[i_add],
+                                        fr.calls[i_commit])
+    assert "diff" in diff_call and "--quiet" in diff_call
     assert "add" in add_call and "commit" in commit_call
-    assert "research-layer/registry_log.jsonl" in add_call
-    assert not any("-A" in c for c in (add_call, commit_call))   # never -A
+    reg_path = "research-layer/registry_log.jsonl"
+    art_path = f"research-layer/artifacts/{fr.sid}"
+    assert reg_path in add_call and art_path in add_call
+    assert reg_path in commit_call and art_path in commit_call  # commit is scoped too
+    assert not any("-A" in c for c in (diff_call, add_call, commit_call))   # never -A
 
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     run_id = status["items"]["run_id"]
     assert any(run_id in a for a in commit_call)
 
-    assert fr.call_kwargs[i_add].get("cwd") == str(layer.parent)
-    assert fr.call_kwargs[i_commit].get("cwd") == str(layer.parent)
+    for i in (i_diff, i_add, i_commit):
+        assert fr.call_kwargs[i].get("cwd") == str(layer.parent)
+
+
+def test_zero_delta_cycle_makes_no_commit_and_no_warning(tmp_path, capsys):
+    """A plain FakeRunner never touches the registry, so nothing changed
+    this cycle: the diff preflight must be clean AND no new artifact dirs
+    exist, which must skip the commit entirely -- no add, no commit, and no
+    spurious WARNING (a git failure warns; "nothing to do" must not)."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    git_calls = [c for c in fr.calls if c and c[0] == "git"]
+    assert len(git_calls) == 1                  # only the diff preflight ran
+    assert git_calls[0][1] == "diff"
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.out
+    assert "committed chain delta" not in captured.out
 
 
 def test_stage_failure_does_not_commit(tmp_path):
@@ -698,7 +751,10 @@ def test_stage_failure_does_not_commit(tmp_path):
     assert not any(c and c[0] == "git" for c in fr.calls)
 
 
-def test_git_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
+def test_git_add_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
+    """codes={"git": 1} hits every git subcommand: diff -> 1 (read as "there
+    ARE changes", not an error -- proceeds to add), then add -> 1, a real
+    failure. Commit is never reached."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner(codes={"git": 1})
@@ -707,10 +763,41 @@ def test_git_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
     git_calls = [c for c in fr.calls if c and c[0] == "git"]
-    assert len(git_calls) == 1                  # commit never attempted after add fails
+    assert len(git_calls) == 2                  # diff, add -- commit never attempted
     captured = capsys.readouterr()
     assert "WARNING" in captured.out
     assert "git add failed" in captured.out
+
+
+def test_git_commit_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
+    """The OTHER git-failure branch: add succeeds, the final `git commit`
+    itself fails. Needs a delta (an artifact bundle) so the preflight does
+    not just skip the whole thing first."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    register_example_blocks(reg)
+
+    class _CommitFailsRunner(_ComposerRegistersStrategyRunner):
+        def __call__(self, argv, **kw):
+            if argv and argv[0] == "git" and argv[1] == "commit":
+                self.calls.append(list(argv))
+                self.call_kwargs.append(dict(kw))
+                class R: pass
+                r = R(); r.returncode = 1
+                return r
+            return super().__call__(argv, **kw)
+
+    fr = _CommitFailsRunner(reg, layer)
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0                              # a git failure never fails the cycle
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+    git_calls = [c for c in fr.calls if c and c[0] == "git"]
+    assert len(git_calls) == 3                  # diff, add (succeeded), commit (failed)
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "git commit failed" in captured.out
+    assert "committed chain delta" not in captured.out   # the failed commit never prints success
 
 
 def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatch):
