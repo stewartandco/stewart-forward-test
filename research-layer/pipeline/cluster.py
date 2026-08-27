@@ -11,10 +11,19 @@ returns and reports the effective trial count. Everything here is
 DETERMINISTIC and ORDER-INDEPENDENT: no randomness, no initialization, ties
 broken lexicographically. An auditor re-implementing it must get identical
 output, or the gate is not reproducible.
+
+A numpy fast path (SP4 clustering-perf, 2026-08-28) mirrors the reference
+implementation exactly: `effective_trials` dispatches to it for rectangular
+input and falls back to the hand-written functions otherwise. The reference
+functions below are the CONTRACT; test_cluster_np.py holds the two paths
+identical, and the tie-break key round(d, 12) is what absorbs BLAS-vs-loop
+float summation differences.
 """
 from __future__ import annotations
 
 import math
+
+import numpy as np
 
 
 def correlation(a: list[float], b: list[float]) -> float:
@@ -56,6 +65,44 @@ def distance_matrix(returns_by_id: dict[str, list[float]]) -> dict:
             dmat[(a, b)] = d
             dmat[(b, a)] = d
     return dmat
+
+
+def _returns_matrix(returns_by_id: dict[str, list[float]]):
+    """(sorted ids, n x L float64 matrix), or (ids, None) when the series
+    lengths differ. The fast path needs rectangular input; gauntlet's
+    check_aligned guarantees it in production, and ragged direct callers
+    fall back to the reference implementation."""
+    ids = sorted(returns_by_id)
+    if not ids:
+        return ids, None
+    lengths = {len(returns_by_id[i]) for i in ids}
+    if len(lengths) != 1:
+        return ids, None
+    return ids, np.asarray([returns_by_id[i] for i in ids], dtype=np.float64)
+
+
+def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
+    """Correlation-distance matrix over the rows of X, numpy form of
+    distance_matrix(). Semantics matched to correlation()/distance():
+    zero-variance rows correlate 0.0 with everything (distance sqrt(0.5)),
+    rho clamped to [-1, 1], diagonal forced to 0.0, result exactly
+    symmetric (the reference assigns (i, j) and (j, i) from one number;
+    BLAS output is mirrored from the upper triangle to match)."""
+    n, L = X.shape
+    if L < 2:
+        R = np.zeros((n, n))
+    else:
+        M = X - X.mean(axis=1, keepdims=True)
+        ss = np.einsum("ij,ij->i", M, M)
+        good = ss > 0.0
+        with np.errstate(invalid="ignore", divide="ignore"):
+            R = (M @ M.T) / np.sqrt(np.outer(ss, ss))
+        R[~good, :] = 0.0
+        R[:, ~good] = 0.0
+    np.clip(R, -1.0, 1.0, out=R)
+    D = np.sqrt(0.5 * (1.0 - R))
+    D = np.triu(D, 1)
+    return D + D.T
 
 
 def agglomerate(ids: list[str], dmat: dict) -> list[tuple]:
