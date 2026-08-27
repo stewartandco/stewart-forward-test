@@ -60,3 +60,14 @@ def test_escalations_are_reported_with_their_trigger_named():
 
 def test_no_escalation_means_no_push():
     assert ps.build(stage_results={"screen": "OK"}, spent=0.0)["push"] is False
+
+
+def test_write_is_atomic_and_roundtrips(tmp_path):
+    import json
+    payload = ps.build({"trigger": "OK"}, spent=1.23)
+    p = tmp_path / "status.json"
+    ps.write(p, payload)
+    assert not (tmp_path / "status.json.tmp").exists()
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert on_disk["agent"] == "pipeline"
+    assert on_disk == payload
