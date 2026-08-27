@@ -148,7 +148,7 @@ CLASSES = {
                  "max_end_lag_days": 4,
                  "excluded_block_types": frozenset(), "benchmark": "self"},
 }
-LIVE_CLASSES = ("crypto", "fx", "equity_etf")   # fx ACTIVATED 2026-08-24; equity_etf ACTIVATED 2026-08-25 (Coen)
+LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08-24, equity_etf 08-25, bond+metal 08-27 (Coen each time)
 # bond_etf/metal_etf are DECLARED here (Track 2b) but deliberately NOT in
 # LIVE_CLASSES: activation is Coen's call, after the dry-run ship-bar step
 # (spec s8), exactly as it was for fx and equity_etf before them -- see the
