@@ -71,14 +71,29 @@ def _returns_matrix(returns_by_id: dict[str, list[float]]):
     """(sorted ids, n x L float64 matrix), or (ids, None) when the series
     lengths differ. The fast path needs rectangular input; gauntlet's
     check_aligned guarantees it in production, and ragged direct callers
-    fall back to the reference implementation."""
+    fall back to the reference implementation.
+
+    Constant NONZERO rows also force the reference path: whether their
+    variance rounds to exactly zero depends on summation order, so the two
+    paths can classify them differently. Exact-zero rows are safe (mean and
+    residuals are exactly 0.0 either way) and stay on the fast path. The
+    check only applies when L >= 2: below that neither path computes a
+    variance (correlation is 0.0 by the n < 2 early return), so no
+    divergence is possible."""
     ids = sorted(returns_by_id)
     if not ids:
         return ids, None
     lengths = {len(returns_by_id[i]) for i in ids}
     if len(lengths) != 1:
         return ids, None
-    return ids, np.asarray([returns_by_id[i] for i in ids], dtype=np.float64)
+    X = np.asarray([returns_by_id[i] for i in ids], dtype=np.float64)
+    if X.shape[1] >= 2:
+        row_max = X.max(axis=1)
+        row_min = X.min(axis=1)
+        constant = row_max == row_min
+        if np.any(constant & (row_max != 0.0)):
+            return ids, None
+    return ids, X
 
 
 def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":

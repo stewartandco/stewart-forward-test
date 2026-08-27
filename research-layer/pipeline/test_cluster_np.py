@@ -60,6 +60,17 @@ def test_returns_matrix_empty():
     assert ids == [] and X is None
 
 
+def test_returns_matrix_constant_nonzero_row_returns_none():
+    # constant nonzero rows make zero-variance classification depend on
+    # summation order, so they must force the reference path
+    series = {"a" * 16: [0.1] * 7,
+              "b" * 16: [0.01, -0.02, 0.03, 0.0, 0.01, -0.01, 0.02],
+              "c" * 16: [-0.01, 0.02, -0.03, 0.0, -0.01, 0.01, -0.02]}
+    ids, X = _returns_matrix(series)
+    assert ids == sorted(series)
+    assert X is None
+
+
 # ---------------- _distance_matrix_np ----------------
 
 def _assert_matrix_matches_reference(series):
@@ -90,6 +101,8 @@ def test_distance_matrix_np_zero_variance_series():
               "c" * 16: [-0.01, 0.02, -0.03, 0.0]}
     _assert_matrix_matches_reference(series)
     _, X = _returns_matrix(series)
+    # an all-exact-zero row is safe on the fast path: no fallback
+    assert X is not None
     D = _distance_matrix_np(X)
     # zero-variance row: rho 0 vs everything -> distance sqrt(0.5); diag 0
     assert D[1, 0] == pytest.approx(0.5 ** 0.5)
@@ -107,9 +120,48 @@ def test_distance_matrix_np_identical_and_inverted():
 
 
 def test_distance_matrix_np_clamps_overshoot():
-    # near-identical series can push BLAS rho a few ulp past 1.0; the clamp
-    # plus the forced-zero diagonal must keep sqrt() finite and real
+    # correlated single-group data (max off-diag rho well below 1): checks
+    # the output is finite and non-negative on structured input. The actual
+    # clamp exercise (rho overshooting 1.0 by ulps) is
+    # test_distance_matrix_np_bit_identical_rows_exact_zero below.
     series = seeded_series(6, 50, groups=1)
     _, X = _returns_matrix(series)
     D = _distance_matrix_np(X)
     assert np.all(np.isfinite(D)) and np.all(D >= 0.0)
+
+
+def test_distance_matrix_np_bit_identical_rows_exact_zero():
+    # bit-identical NON-trivial rows over a long series: BLAS rho can
+    # overshoot 1.0 by a few ulp, and the clamp must bring the distance to
+    # exactly 0.0 (sqrt of a negative would raise a warning / go nan)
+    vals = next(iter(seeded_series(1, 500).values()))
+    series = {"a" * 16: vals,
+              "b" * 16: list(vals),
+              "c" * 16: [-v for v in vals]}
+    _, X = _returns_matrix(series)
+    D = _distance_matrix_np(X)
+    assert D[0, 1] == 0.0
+    assert D[0, 2] == pytest.approx(1.0, abs=1e-12)
+    assert np.all(np.isfinite(D)) and np.all(D >= 0.0)
+
+
+def test_distance_matrix_np_short_series():
+    # L < 2: correlation() returns 0.0, so every off-diagonal distance is
+    # sqrt(0.5) and the diagonal stays 0
+    series = {"a" * 16: [0.01], "b" * 16: [0.02], "c" * 16: [0.0]}
+    _assert_matrix_matches_reference(series)
+    _, X = _returns_matrix(series)
+    D = _distance_matrix_np(X)
+    for i in range(3):
+        for j in range(3):
+            expected = 0.0 if i == j else 0.5 ** 0.5
+            assert D[i, j] == pytest.approx(expected)
+
+
+def test_distance_matrix_np_single_series():
+    series = {"a" * 16: [0.01, 0.02, -0.01]}
+    _assert_matrix_matches_reference(series)
+    _, X = _returns_matrix(series)
+    D = _distance_matrix_np(X)
+    assert D.shape == (1, 1)
+    assert D[0, 0] == 0.0
