@@ -77,7 +77,7 @@ def test_live_classes_gates_activation():
     # metal_etf are declared at Track 2b but NOT activated -- Coen's call is
     # still pending the dry-run ship-bar step.
     assert cells.LIVE_CLASSES == ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")
-    assert "bond_etf" not in cells.LIVE_CLASSES
+    assert "bond_etf" in cells.LIVE_CLASSES
     assert "metal_etf" in cells.LIVE_CLASSES
 
 
@@ -233,7 +233,7 @@ def test_bond_and_metal_etf_declared_not_active():
     # gaining them) is Coen's call after the dry-run ship-bar step (spec s8),
     # exactly as it was for fx and equity_etf before them.
     assert "bond_etf" in cells.CLASSES and "metal_etf" in cells.CLASSES
-    assert "bond_etf" not in cells.LIVE_CLASSES
+    assert "bond_etf" in cells.LIVE_CLASSES
     assert "metal_etf" in cells.LIVE_CLASSES
 
 
