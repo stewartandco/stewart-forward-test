@@ -462,6 +462,12 @@ def v4_sweep_registry(tmp_path):
     for key in BLOCK_TYPES:
         reg.register_block_type(block_type_payload(*key))
     card = make_card()
+    # Pin: fixture identity must not depend on the clock. card_id hashes
+    # created_utc at 1s resolution, so two registries built across a second
+    # boundary would get different sids and different clustering tie-breaks
+    # (the 2026-08-27 "parallel flake" -- it was this, not the pool).
+    card["created_utc"] = "2026-08-17T00:00:00Z"
+    card["card_id"] = content_id(card, "card_id")
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
     specs = []
