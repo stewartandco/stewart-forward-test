@@ -536,6 +536,57 @@ def stressed(spec: dict) -> dict:
     return s
 
 
+def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
+                        cutoff: str) -> dict | None:
+    """B1 (SP4 Track 2a addendum, pre-registered 2026-08-26,
+    `docs/2026-08-24-sp4-track2a-addendum.md`): RECORDED, NOT GATED
+    same-OOS-window buy-and-hold control against the cell's own asset, for
+    every class whose CLASSES entry declares `benchmark: "self"`. Returns
+    None (no key written at all) for every other class -- absence means
+    not applicable, never a null placeholder, per the addendum's own
+    no-null-placeholder convention.
+
+    `strategy_net` is the candidate's OOS net exactly as evaluate_spec's
+    own `oos_net` (compound(contributions(oos_trades))) -- the caller must
+    pass the SAME figure the oos_negative gate read, computed the same way,
+    never recomputed by a different formula here.
+
+    The control buys the cell's own single asset at the first OOS bar's
+    open and sells at the last OOS bar's close -- the same `date > cutoff`
+    fence split_trades applies to trades -- net of ONE round trip of the
+    class's own cost model: `per_side = commission_per_side + slippage_ticks`
+    charged on both sides, the exact formula engine.simulate_asset applies
+    to every real trade (engine.py's `net = gross - 2 * per_side`). No
+    financing: short_financing_per_year only ever accrues on a SHORT
+    position, and a buy-and-hold control is definitionally long.
+    """
+    asset_class = spec["universe"].get("asset_class", "crypto")
+    class_spec = cells.CLASSES.get(asset_class, {})
+    if class_spec.get("benchmark") != "self":
+        return None
+    assets = spec["universe"]["assets"]
+    if len(assets) != 1:
+        raise ValueError(
+            f"{spec['strategy_id']}: benchmark-relative control needs "
+            f"exactly one asset per cell for class {asset_class!r} "
+            f"(benchmark: 'self'), got {assets!r}")
+    bars = spec_bars[assets[0]]
+    oos_bars = [b for b in bars if b["date"] > cutoff]
+    if not oos_bars:
+        raise ValueError(
+            f"{spec['strategy_id']}: no OOS bars for {assets[0]!r} after "
+            f"cutoff {cutoff} -- cannot compute the benchmark-relative "
+            f"control")
+    entry_px, exit_px = oos_bars[0]["open"], oos_bars[-1]["close"]
+    cost_model = class_spec["cost_model"]
+    per_side = cost_model["commission_per_side"] + cost_model["slippage_ticks"]
+    buy_hold_net = (exit_px / entry_px - 1) - 2 * per_side
+    return {"window": "oos", "strategy_net": strategy_net,
+            "buy_hold_net": buy_hold_net,
+            "excess": strategy_net - buy_hold_net,
+            "basis": "price returns, dividends excluded on both sides"}
+
+
 def _candidate_payload(s: dict, spec_bars: dict, res: dict,
                        rets: list[float], group_n_val: int, registered_n: int,
                        train_sharpe_val: float | None, trials_n: int,
@@ -632,6 +683,18 @@ def _evaluate_candidate(payload: dict) -> dict:
     eras = cells.CLASSES.get(spec_class, {}).get("eras", ())
     if eras:
         metrics["era_summary"] = era_summary(payload["res_trades"], eras)
+
+    # B1: RECORDED, NOT GATED (see _benchmark_relative's own docstring and
+    # the addendum's pre-registration). strategy_net is the SAME figure the
+    # oos_negative gate above just read -- evaluate_spec computes it as
+    # compound(contributions(oos_trades)) and never returns it, so it is
+    # reproduced here with the exact same two functions on the exact same
+    # oos_t list, never a different formula. None (a class that does not
+    # declare benchmark: "self") writes no key at all.
+    benchmark_relative = _benchmark_relative(
+        s, spec_bars, compound(contributions(oos_t)), cutoff)
+    if benchmark_relative is not None:
+        metrics["benchmark_relative"] = benchmark_relative
 
     train_dates = [d for d, _ in payload["res_equity"] if d <= cutoff]
     metrics["haircut"] = dict(

@@ -71,17 +71,27 @@ EQUITY_ETF_ERAS = (("dotcom_gfc", "1993-01-01", "2008-12-31"), ("qe_bull", "2009
 # value. screen.assert_cells_comparable's cross-class allowance derives from
 # this field; it must never be widened to paper over a real gap without
 # updating the declaration here first.
+# B1 (SP4 Track 2a addendum, pre-registered 2026-08-26): `benchmark` declares
+# whether the gauntlet records a same-OOS-window buy-and-hold control against
+# the cell's own asset. `"self"` for a class whose cells are single-name
+# assets with an honest long buy-and-hold (equity_etf; bond/metal declare
+# their own value at 2b, not inherited from here). `None` for crypto and fx:
+# crypto's cells are the ...USDT grid (a "buy and hold BTC" comparison is a
+# different, not-yet-declared question) and fx has no long-only drift to
+# separate from skill in the first place. RECORDED, NOT GATED -- see
+# gauntlet.py's benchmark_relative computation and the addendum's
+# pre-registration for the exact shape.
 CLASSES = {
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
                "cost_model": None,      # crypto cost stays composer.COST_MODEL (unchanged path)
                "eras": (), "max_end_lag_days": 0,
-               "excluded_block_types": frozenset()},
+               "excluded_block_types": frozenset(), "benchmark": None},
     "fx": {"assets": FX_ASSETS, "timeframes": ("1d",), "session": "fx_5d",
            "periods_per_year": 261, "bar_kind": "single_fix",
            "cost_model": FX_COST_MODEL, "eras": FX_ERAS,
            "max_end_lag_days": 10,
-           "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES},
+           "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES, "benchmark": None},
     # Track 2a: declared, NOT in LIVE_CLASSES. bar_kind "ohlcv" (real Tiingo
     # daily OHLC), so no block type is excluded on range grounds -- unlike fx.
     # max_end_lag_days 4 VERIFIED (track 2a review, 2026-08-25) against the
@@ -96,7 +106,7 @@ CLASSES = {
                    "periods_per_year": 252, "bar_kind": "ohlcv",
                    "cost_model": EQUITY_ETF_COST_MODEL, "eras": EQUITY_ETF_ERAS,
                    "max_end_lag_days": 4,
-                   "excluded_block_types": frozenset()},
+                   "excluded_block_types": frozenset(), "benchmark": "self"},
 }
 LIVE_CLASSES = ("crypto", "fx", "equity_etf")   # fx ACTIVATED 2026-08-24; equity_etf ACTIVATED 2026-08-25 (Coen)
 # equity_etf is DECLARED here (Track 2a) but deliberately NOT in LIVE_CLASSES:
@@ -131,7 +141,13 @@ for _cls, _spec in CLASSES.items():
         raise AssertionError(
             f"CLASSES[{_cls!r}]['excluded_block_types'] must be a declared "
             f"frozenset of block-type strings, got {_excl!r}")
-del _cls, _spec, _asset, _lag, _excl
+for _cls, _spec in CLASSES.items():
+    _bench = _spec.get("benchmark")
+    if _bench not in (None, "self"):
+        raise AssertionError(
+            f"CLASSES[{_cls!r}]['benchmark'] must be declared as None or "
+            f"'self' (B1 addendum), got {_bench!r}")
+del _cls, _spec, _asset, _lag, _excl, _bench
 
 
 def all_cells() -> list[tuple[str, str]]:

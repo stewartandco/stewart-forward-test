@@ -895,3 +895,212 @@ def test_progress_lines_appear_in_dry_run_too(tmp_path, capsys):
     assert "[gauntlet] clustering done in" in out
     assert "[gauntlet] candidate evaluation done in" in out
     assert "[gauntlet] stage timings:" in out
+
+
+# ---------------- SP4 Task B1: benchmark-relative control -------------------
+#
+# Pre-registered docs/2026-08-24-sp4-track2a-addendum.md ("Pre-registration:
+# benchmark-relative control (B1, Coen 2026-08-26)"): a class whose CLASSES
+# entry declares `benchmark: "self"` (equity_etf, today) gets a
+# `metrics["benchmark_relative"]` block on every gauntlet verdict -- a
+# same-OOS-window buy-and-hold of the cell's own asset, RECORDED, NOT GATED.
+# Classes with `benchmark: None` (crypto, fx) carry no key at all.
+
+from .gauntlet import _benchmark_relative, _candidate_payload, _evaluate_candidate
+
+
+def test_benchmark_relative_analytic_fixture():
+    """Hand-computed against a two-bar OOS window: entry at the first OOS
+    bar's OPEN, exit at the last OOS bar's CLOSE, net of one round trip
+    (2 sides) of equity_etf's declared cost_model -- 0.00010 commission +
+    0.00010 slippage per side (docs/2026-08-24-sp4-track2a-addendum.md).
+    An IS-dated bar is included and must be ignored entirely (only the
+    `date > cutoff` fence -- the same one split_trades applies to trades --
+    decides what counts as the OOS window)."""
+    cutoff = "2023-12-31"
+    bars = {"SPY": [
+        {"date": "2023-06-01", "open": 999.0, "high": 999.0, "low": 999.0,
+         "close": 999.0, "volume": 1.0},          # IS bar: must be ignored
+        {"date": "2024-01-01", "open": 100.0, "high": 100.0, "low": 100.0,
+         "close": 100.0, "volume": 1.0},           # first OOS bar
+        {"date": "2024-06-01", "open": 105.0, "high": 112.0, "low": 104.0,
+         "close": 110.0, "volume": 1.0},            # last OOS bar
+    ]}
+    spec = {"strategy_id": "x",
+            "universe": {"assets": ["SPY"], "asset_class": "equity_etf"}}
+
+    result = _benchmark_relative(spec, bars, strategy_net=0.02, cutoff=cutoff)
+
+    per_side = 0.00010 + 0.00010     # equity_etf cost_model, ONE side
+    expected_buy_hold = (110.0 / 100.0 - 1) - 2 * per_side   # 0.10 - 0.0004
+    expected_excess = 0.02 - expected_buy_hold
+    assert result == {
+        "window": "oos", "strategy_net": 0.02,
+        "buy_hold_net": pytest.approx(expected_buy_hold, abs=1e-12),
+        "excess": pytest.approx(expected_excess, abs=1e-12),
+        "basis": "price returns, dividends excluded on both sides"}
+
+
+def test_benchmark_relative_absent_for_none_classes():
+    """crypto and fx declare `benchmark: None` -- absence of the key, never
+    a null placeholder (the addendum's own convention)."""
+    bars = {"BTCUSDT": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
+                         "low": 1.0, "close": 1.0, "volume": 1.0}]}
+    crypto_spec = {"strategy_id": "x",
+                   "universe": {"assets": ["BTCUSDT"], "asset_class": "crypto"}}
+    assert _benchmark_relative(crypto_spec, bars, 0.01, "2023-12-31") is None
+
+    fx_bars = {"EUR": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
+                       "low": 1.0, "close": 1.0, "volume": 1.0}]}
+    fx_spec = {"strategy_id": "x",
+               "universe": {"assets": ["EUR"], "asset_class": "fx"}}
+    assert _benchmark_relative(fx_spec, fx_bars, 0.01, "2023-12-31") is None
+
+
+def test_crypto_and_fx_verdicts_carry_no_benchmark_key(tmp_path):
+    """End to end through gauntlet.run(): the mixed crypto+fx registry
+    already exercised elsewhere in this file (era summaries, intersection
+    alignment) proves the negative here for free -- neither class declares
+    `benchmark: "self"`, so neither verdict's metrics dict gets the key."""
+    from .gauntlet import run as gauntlet_run
+
+    reg, crypto_spec, gbp_spec, eur_spec = mixed_class_gauntlet_registry(tmp_path)
+    data = write_data_dir(tmp_path, {
+        "BTCUSD": _daily_bars(datetime.date(2020, 1, 1), datetime.date(2020, 12, 31)),
+        "GBP": _weekday_bars(datetime.date(2015, 1, 1), datetime.date(2020, 12, 31)),
+        "EUR": _weekday_bars(datetime.date(2020, 1, 1), datetime.date(2020, 12, 31)),
+    })
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+               for e in reg.entries() if e["entry_type"] == "verdict"
+               and e["payload"]["stage"] == "gauntlet"}
+    assert len(verdicts) == 3
+    for spec in (crypto_spec, gbp_spec, eur_spec):
+        assert "benchmark_relative" not in verdicts[spec["strategy_id"]]["metrics"]
+
+
+# ---- a real equity_etf candidate, through the worker path -----------------
+#
+# A staircase price series: each cycle breaks out +10% from the current
+# base, the strategy's r_multiple=1.0 target against a 5% stop closes the
+# trade at +5% (a real, small, POSITION-SIZED win -- fixed_fraction f=0.01
+# against a 5% stop distance sizes the trade at notional_frac=0.2, so the
+# portfolio-level contribution is ~0.99% per trade), while the underlying
+# asset keeps climbing to a NEW base 10% above the old one every cycle --
+# the strategy takes its profit and the market keeps going. Two cycles
+# land in-sample, two land out-of-sample, so IS and OOS edge are identical
+# by construction (edge_decay passes trivially) while a same-window
+# buy-and-hold captures the WHOLE OOS climb no strategy trade discipline
+# ever gets: this is the ordinary, expected shape of "excess < 0 but the
+# strategy still passes" (position sizing alone makes it common), not a
+# contrived corner case.
+
+def _staircase_bars(n_cycles: int, start: datetime.date, base0: float,
+                    growth: float = 1.10, flat_len: int = 60) -> tuple[list[dict], datetime.date, float]:
+    bars: list[dict] = []
+    base = base0
+    d = start
+    def add(o, h, l, c):
+        nonlocal d
+        bars.append({"date": d.isoformat(), "open": o, "high": h, "low": l,
+                    "close": c, "volume": 1.0})
+        d += datetime.timedelta(days=1)
+    for _ in range(n_cycles):
+        for _ in range(flat_len):
+            add(base, base, base, base)
+        entry_px = base * 1.10
+        add(base, entry_px, base, entry_px)            # breakout signal bar
+        add(entry_px, entry_px, entry_px, entry_px)    # entry fires next open
+        new_base = base * growth                       # market keeps climbing
+        spike_high = max(new_base, entry_px * 1.06) + 1.0
+        add(entry_px, spike_high, entry_px, new_base)   # target hit, new base
+        base = new_base
+    for _ in range(flat_len):
+        add(base, base, base, base)
+    return bars, d, base
+
+
+_B1_CUTOFF = "2023-12-31"
+_B1_SID = "b1" + "0" * 62
+
+
+def _equity_benchmark_candidate():
+    """One equity_etf candidate: 2 IS + 2 OOS winning trades, staircase
+    underlying. Returns (spec, spec_bars)."""
+    cutoff_dt = datetime.datetime.strptime(_B1_CUTOFF, "%Y-%m-%d").date()
+    is_bars, _, base_after_is = _staircase_bars(
+        2, cutoff_dt - datetime.timedelta(days=400), base0=100.0)
+    is_bars = [b for b in is_bars if b["date"] <= _B1_CUTOFF]
+    oos_bars, _, _ = _staircase_bars(
+        2, cutoff_dt + datetime.timedelta(days=1), base0=base_after_is)
+    bars = sorted(is_bars + oos_bars, key=lambda b: b["date"])
+
+    spec = {
+        "strategy_id": _B1_SID, "version": 1,
+        "created_utc": "2026-08-26T00:00:00Z",
+        "name": "b1 benchmark test", "family": "b1_benchmark_test",
+        "universe": {"assets": ["SPY"], "asset_class": "equity_etf",
+                    "timeframe": "1d", "session": "us_equity_5d"},
+        "blocks": [
+            {"role": "entry", "type": "channel_breakout_dense",
+             "params": {"lookback": 20, "direction": "long"}},
+            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "target", "type": "r_multiple", "params": {"r": 1.0}},
+            {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"card_ids": ["c1"], "parent_strategy_id": None,
+                       "sibling_group_id": "b1-benchmark-group", "generation": 0},
+        "generator": {"agent": "composer", "model": "m",
+                      "pipeline_version": "g1.0.0", "run_id": "t"},
+        "cost_model": dict(cells.CLASSES["equity_etf"]["cost_model"]),
+    }
+    return spec, {"SPY": bars}
+
+
+def _evaluate_equity_benchmark_candidate():
+    from .engine import run_spec
+    spec, spec_bars = _equity_benchmark_candidate()
+    res = run_spec(spec, spec_bars)
+    rets = [r for _, r in daily_returns_with_dates(res["equity"])]
+    trials_n, _labels, trials_var = effective_trials({_B1_SID: rets})
+    family = [{"sid": _B1_SID, "axes": {}, "score": 1.0,
+              "screen_trade_count_fail": False, "gauntlet_passed": False}]
+    payload = _candidate_payload(
+        spec, spec_bars, res, rets, 1, 1, None, trials_n, trials_var,
+        family[0], family, {}, _B1_CUTOFF, False, "native", None, 0, 0)
+    return _evaluate_candidate(payload)
+
+
+def test_equity_verdict_carries_the_full_benchmark_block():
+    result = _evaluate_equity_benchmark_candidate()
+    m = result["metrics"]
+    assert set(m["benchmark_relative"]) == {
+        "window", "strategy_net", "buy_hold_net", "excess", "basis"}
+    assert m["benchmark_relative"]["window"] == "oos"
+    assert m["benchmark_relative"]["basis"] == (
+        "price returns, dividends excluded on both sides")
+    # strategy_net is the SAME figure the oos_negative gate read (2 winning
+    # OOS trades, ~0.99% portfolio contribution each, compounded to ~2%) --
+    # small and positive, dwarfed by the asset's own ~21% OOS climb.
+    assert 0 < m["benchmark_relative"]["strategy_net"] < 0.05
+    assert m["benchmark_relative"]["buy_hold_net"] > 0.15
+    assert m["benchmark_relative"]["excess"] == pytest.approx(
+        m["benchmark_relative"]["strategy_net"]
+        - m["benchmark_relative"]["buy_hold_net"], abs=1e-12)
+
+
+def test_benchmark_relative_recorded_not_gated():
+    """The exact case B1 exists to record: a real candidate whose OOS trades
+    clear all six gates on their own evidence (protocol-v6) while its
+    buy-and-hold excess is NEGATIVE -- the strategy's own gate battery never
+    reads `benchmark_relative`, so a negative excess must not change the
+    verdict at all."""
+    result = _evaluate_equity_benchmark_candidate()
+    assert result["passed"] is True
+    assert result["reason"] is None
+    assert result["metrics"]["benchmark_relative"]["excess"] < 0

@@ -153,3 +153,15 @@ def test_excluded_block_types_declared_per_class():
     assert cells.CLASSES["equity_etf"]["excluded_block_types"] == frozenset()
     for cls, spec in cells.CLASSES.items():
         assert isinstance(spec["excluded_block_types"], frozenset), cls
+
+
+def test_benchmark_declared_per_class():
+    # B1 (SP4 Track 2a addendum, pre-registered 2026-08-26): equity_etf is
+    # single-name, long-only-honest, and declares "self"; crypto and fx
+    # declare None (no key is ever written on their verdicts). bond/metal
+    # declare their own value at 2b, never inherited from equity_etf's here.
+    assert cells.CLASSES["crypto"]["benchmark"] is None
+    assert cells.CLASSES["fx"]["benchmark"] is None
+    assert cells.CLASSES["equity_etf"]["benchmark"] == "self"
+    for cls, spec in cells.CLASSES.items():
+        assert spec.get("benchmark") in (None, "self"), cls
