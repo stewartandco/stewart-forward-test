@@ -153,6 +153,97 @@ def agglomerate(ids: list[str], dmat: dict) -> list[tuple]:
     return history
 
 
+def _agglomerate_np(ids: list[str], D: "np.ndarray") -> list[tuple]:
+    """Average-linkage merge history on a numpy distance matrix; numpy form
+    of agglomerate() with the identical (round(d, 12), lo, hi) tie-break.
+
+    Slot invariant: a cluster lives at the slot of its smallest member's
+    sorted-id index, so `keep` below is always the smaller-min-id side.
+    _effective_trials_np replays history under the same invariant.
+
+    Pair order inside a history step is not part of the reference contract
+    (labels_for_k unions the pair either way); steps here list the cluster
+    containing the smaller min id first.
+    """
+    ids = sorted(ids)
+    n = len(ids)
+    if n <= 1:
+        return []
+    S = D.astype(np.float64, copy=True)
+    sizes = np.ones(n, dtype=np.float64)
+    active = np.ones(n, dtype=bool)
+    members: list = [frozenset([i]) for i in ids]
+    min_id: list = list(ids)
+    INF = float("inf")
+
+    def row_best(i: int):
+        """Best merge partner for slot i under the reference key, as
+        (key, j). None when no active partner exists."""
+        avg = S[i] / (sizes[i] * sizes)
+        avg[~active] = INF
+        avg[i] = INF
+        raw = avg.min()
+        if raw == INF:
+            return None
+        best = None
+        for j in np.flatnonzero(avg <= raw + 2e-12):
+            d = round(float(avg[j]), 12)
+            lo, hi = sorted((min_id[i], min_id[int(j)]))
+            key = (d, lo, hi)
+            if best is None or key < best[0]:
+                best = (key, int(j))
+        return best
+
+    cache: list = [None] * n
+    for i in range(n):
+        cache[i] = row_best(i)
+
+    history = []
+    for _ in range(n - 1):
+        gx, gbest = None, None
+        for i in range(n):
+            if active[i] and cache[i] is not None:
+                if gbest is None or cache[i][0] < gbest[0]:
+                    gx, gbest = i, cache[i]
+        x, y = gx, gbest[1]
+        # keep = the slot whose cluster holds the smaller min id
+        keep, drop = (x, y) if min_id[x] < min_id[y] else (y, x)
+        history.append((members[keep], members[drop]))
+        new_size = sizes[keep] + sizes[drop]
+        S[keep, :] += S[drop, :]
+        S[:, keep] += S[:, drop]
+        sizes[keep] = new_size
+        active[drop] = False
+        members[keep] = members[keep] | members[drop]
+        members[drop] = None
+        min_id[drop] = None
+        cache[drop] = None
+        if not active.any() or active.sum() == 1:
+            break
+        # invalidate: the merged row, and any row whose cached partner was
+        # one of the merged pair
+        stale = {keep}
+        for i in range(n):
+            if active[i] and i != keep and cache[i] is not None \
+                    and cache[i][1] in (keep, drop):
+                stale.add(i)
+        # ties: the merged cluster cannot BEAT any surviving cached key on
+        # distance (average linkage is reducible), but it can tie on the
+        # rounded distance and win on (lo, hi); re-key those rows too
+        avg_new = S[keep] / (sizes[keep] * sizes)
+        avg_new[~active] = INF
+        avg_new[keep] = INF
+        for i in np.flatnonzero(np.isfinite(avg_new)):
+            i = int(i)
+            if i in stale or cache[i] is None:
+                continue
+            if abs(avg_new[i] - cache[i][0][0]) <= 2e-12:
+                stale.add(i)
+        for i in stale:
+            cache[i] = row_best(i)
+    return history
+
+
 def labels_for_k(history: list[tuple], ids: list[str], k: int) -> dict[str, int]:
     """Cluster assignment {id: index} after replaying the merge history until
     exactly k clusters remain. Cluster indices are assigned by the sorted

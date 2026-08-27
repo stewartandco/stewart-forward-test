@@ -165,3 +165,74 @@ def test_distance_matrix_np_single_series():
     D = _distance_matrix_np(X)
     assert D.shape == (1, 1)
     assert D[0, 0] == 0.0
+
+
+# ---------------- _agglomerate_np ----------------
+
+from .cluster import _agglomerate_np
+
+
+def _hist_as_sets(history):
+    return [frozenset({ca, cb}) for ca, cb in history]
+
+
+def _assert_agglomerate_matches_reference(ids, dmat):
+    ref = agglomerate(ids, dmat)
+    new = _agglomerate_np(sorted(ids), dmat_to_array(sorted(ids), dmat))
+    assert _hist_as_sets(new) == _hist_as_sets(ref)
+
+
+def test_agglomerate_np_two_groups():
+    series = two_group_series()
+    _assert_agglomerate_matches_reference(sorted(series), distance_matrix(series))
+
+
+def test_agglomerate_np_seeded_40():
+    series = seeded_series(40, 120)
+    _assert_agglomerate_matches_reference(sorted(series), distance_matrix(series))
+
+
+def test_agglomerate_np_exact_tie_first_round():
+    # mirrors test_tie_break_is_deterministic_and_lexicographic
+    ids = ["a" * 16, "b" * 16, "c" * 16]
+    s = [0.01, -0.02, 0.03, 0.01]
+    series = {i: list(s) for i in ids}
+    _assert_agglomerate_matches_reference(ids, distance_matrix(series))
+    new = _agglomerate_np(ids, dmat_to_array(ids, distance_matrix(series)))
+    assert new[0] == (frozenset({ids[0]}), frozenset({ids[1]}))
+
+
+def test_agglomerate_np_exact_tie_later_round():
+    # mirrors test_tie_break_is_canonical_in_later_rounds: a tie AFTER a
+    # merge must resolve by smallest member id
+    a, b, c, d, e = (ch * 16 for ch in "abcde")
+    ids = [a, b, c, d, e]
+    D = {}
+    for i in ids:
+        D[(i, i)] = 0.0
+
+    def put(x, y, v):
+        D[(x, y)] = v
+        D[(y, x)] = v
+
+    put(a, b, 0.10)
+    put(c, d, 0.41)
+    put(a, e, 0.41)
+    put(b, e, 0.41)
+    for x, y in ((a, c), (a, d), (b, c), (b, d), (c, e), (d, e)):
+        put(x, y, 0.90)
+    _assert_agglomerate_matches_reference(ids, D)
+
+
+def test_agglomerate_np_deterministic():
+    series = seeded_series(30, 80)
+    ids = sorted(series)
+    D = dmat_to_array(ids, distance_matrix(series))
+    first = _agglomerate_np(ids, D)
+    for _ in range(3):
+        assert _agglomerate_np(ids, D) == first
+
+
+def test_agglomerate_np_trivial_sizes():
+    assert _agglomerate_np([], np.zeros((0, 0))) == []
+    assert _agglomerate_np(["a" * 16], np.zeros((1, 1))) == []
