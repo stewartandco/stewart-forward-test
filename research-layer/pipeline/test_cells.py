@@ -73,8 +73,12 @@ def test_fx_class_declared():
 
 def test_live_classes_gates_activation():
     # fx activated 2026-08-24, equity_etf 2026-08-25 (Coen's go each time):
-    # activation is the denominator event for a class's cells.
+    # activation is the denominator event for a class's cells. bond_etf/
+    # metal_etf are declared at Track 2b but NOT activated -- Coen's call is
+    # still pending the dry-run ship-bar step.
     assert cells.LIVE_CLASSES == ("crypto", "fx", "equity_etf")
+    assert "bond_etf" not in cells.LIVE_CLASSES
+    assert "metal_etf" not in cells.LIVE_CLASSES
 
 
 def test_validate_cell_class_aware():
@@ -95,17 +99,24 @@ def test_class_of_asset():
     # SPY is now a declared equity_etf asset (Track 2a) -- no longer usable as
     # the "undeclared" probe below; QQQ covers the equity_etf membership case.
     assert cells.class_of_asset("SPY") == "equity_etf"
+    # TLT is now a declared bond_etf asset (Track 2b) -- no longer usable as
+    # the "undeclared" probe either; GLD covers the metal_etf membership case.
+    assert cells.class_of_asset("TLT") == "bond_etf"
+    assert cells.class_of_asset("GLD") == "metal_etf"
     import pytest
     with pytest.raises(ValueError):
-        cells.class_of_asset("TLT")   # bond ETF lane, not declared until Track 2b
+        cells.class_of_asset("USO")   # commodity futures ETF lane, not declared by any class
 
 
 def test_unknown_class_and_session_sync():
     import pytest
+    # "commodity_future" is not declared by any class -- bond_etf/metal_etf
+    # (Track 2b) are now declared, so they no longer serve as the "unknown
+    # class" probe here.
     with pytest.raises(ValueError, match="not a declared class"):
-        cells.class_cells("bond_etf")
+        cells.class_cells("commodity_future")
     with pytest.raises(ValueError, match="not a declared class"):
-        cells.validate_cell("EUR", "1d", asset_class="bond_etf")
+        cells.validate_cell("EUR", "1d", asset_class="commodity_future")
     for cls, spec in cells.CLASSES.items():
         assert cells.SESSION_PERIODS[spec["session"]] == spec["periods_per_year"], cls
 
@@ -163,5 +174,81 @@ def test_benchmark_declared_per_class():
     assert cells.CLASSES["crypto"]["benchmark"] is None
     assert cells.CLASSES["fx"]["benchmark"] is None
     assert cells.CLASSES["equity_etf"]["benchmark"] == "self"
+    assert cells.CLASSES["bond_etf"]["benchmark"] == "self"
+    assert cells.CLASSES["metal_etf"]["benchmark"] == "self"
     for cls, spec in cells.CLASSES.items():
         assert spec.get("benchmark") in (None, "self"), cls
+
+
+# ---------------- Track 2b: bond_etf + metal_etf classes (declared, not active) ----------------
+
+def test_bond_etf_class_declared():
+    c = cells.CLASSES["bond_etf"]
+    assert c["assets"] == ("SHY", "IEF", "TLT", "TIP", "LQD", "HYG", "EMB", "BND")
+    assert len(c["assets"]) == 8
+    assert c["timeframes"] == ("1d",) and c["session"] == "us_equity_5d"
+    assert c["periods_per_year"] == 252 and c["bar_kind"] == "ohlcv"
+    assert c["cost_model"] == {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                               "short_financing_per_year": -0.005}
+    assert [e[0] for e in c["eras"]] == ["pre_gfc", "zirp", "hike_cut_cycle", "post_2022"]
+    assert c["eras"] == (
+        ("pre_gfc", "2002-07-26", "2008-12-31"),
+        ("zirp", "2009-01-01", "2015-12-31"),
+        ("hike_cut_cycle", "2016-01-01", "2021-12-31"),
+        ("post_2022", "2022-01-01", "9999-12-31"))
+    assert c["max_end_lag_days"] == 4
+    assert isinstance(c["max_end_lag_days"], int) and c["max_end_lag_days"] >= 0
+    assert c["excluded_block_types"] == frozenset()
+    assert c["benchmark"] == "self"
+    assert cells.class_cells("bond_etf") == [(a, "1d") for a in c["assets"]]
+
+
+def test_metal_etf_class_declared():
+    c = cells.CLASSES["metal_etf"]
+    assert c["assets"] == ("GLD", "SLV")
+    assert len(c["assets"]) == 2
+    assert c["timeframes"] == ("1d",) and c["session"] == "us_equity_5d"
+    assert c["periods_per_year"] == 252 and c["bar_kind"] == "ohlcv"
+    # Only the short_financing_per_year differs from bond_etf (Phase C table).
+    assert c["cost_model"] == {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                               "short_financing_per_year": -0.0075}
+    assert [e[0] for e in c["eras"]] == ["pre_gfc", "zirp", "hike_cut_cycle", "post_2022"]
+    assert c["eras"] == (
+        ("pre_gfc", "2004-11-18", "2008-12-31"),
+        ("zirp", "2009-01-01", "2015-12-31"),
+        ("hike_cut_cycle", "2016-01-01", "2021-12-31"),
+        ("post_2022", "2022-01-01", "9999-12-31"))
+    # The same three post-pre_gfc cuts as bond_etf, verbatim (addendum: "then
+    # the same three cuts").
+    assert c["eras"][1:] == cells.CLASSES["bond_etf"]["eras"][1:]
+    assert c["max_end_lag_days"] == 4
+    assert isinstance(c["max_end_lag_days"], int) and c["max_end_lag_days"] >= 0
+    assert c["excluded_block_types"] == frozenset()
+    assert c["benchmark"] == "self"
+    assert cells.class_cells("metal_etf") == [(a, "1d") for a in c["assets"]]
+
+
+def test_bond_and_metal_etf_declared_not_active():
+    # Track 2b ships the two class declarations; activation (LIVE_CLASSES
+    # gaining them) is Coen's call after the dry-run ship-bar step (spec s8),
+    # exactly as it was for fx and equity_etf before them.
+    assert "bond_etf" in cells.CLASSES and "metal_etf" in cells.CLASSES
+    assert "bond_etf" not in cells.LIVE_CLASSES
+    assert "metal_etf" not in cells.LIVE_CLASSES
+
+
+def test_bond_and_metal_etf_disjoint_from_every_other_class():
+    # The module-level disjointness assertion already ran at import time (it
+    # would have raised AssertionError on import if TLT/GLD/etc. collided
+    # with an existing class's assets); this test pins the same invariant
+    # from the test side so a future edit that reintroduces a collision is
+    # caught here too, not only by a hard-to-diagnose import-time crash.
+    seen: dict[str, str] = {}
+    for cls, spec in cells.CLASSES.items():
+        for asset in spec["assets"]:
+            assert asset not in seen, f"{asset} declared in both {seen.get(asset)} and {cls}"
+            seen[asset] = cls
+    for a in cells.CLASSES["bond_etf"]["assets"]:
+        assert cells.class_of_asset(a) == "bond_etf"
+    for a in cells.CLASSES["metal_etf"]["assets"]:
+        assert cells.class_of_asset(a) == "metal_etf"

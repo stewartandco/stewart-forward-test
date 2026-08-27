@@ -57,6 +57,23 @@ EQUITY_ETF_COST_MODEL = {"commission_per_side": 0.00010, "slippage_ticks": 0.000
 EQUITY_ETF_ERAS = (("dotcom_gfc", "1993-01-01", "2008-12-31"), ("qe_bull", "2009-01-01", "2019-12-31"),
                    ("covid_cycle", "2020-01-01", "2021-12-31"), ("post_2022", "2022-01-01", "9999-12-31"))
 
+# Track 2b (SP4 addendum docs/2026-08-27-sp4-track2b-addendum.md): the third
+# and fourth non-crypto classes, declared but NOT activated (see LIVE_CLASSES
+# below). Assets are the manifest's bond-ETF lane, in manifest order.
+BOND_ETF_ASSETS = ("SHY", "IEF", "TLT", "TIP", "LQD", "HYG", "EMB", "BND")
+BOND_ETF_COST_MODEL = {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                       "short_financing_per_year": -0.005}   # Phase C table: 2.0 bps/side, -0.5%/yr short financing
+# 2022 named deliberately (addendum): the bond bear is the era that would
+# expose long-bias here, unlike equity_etf's covid_cycle carve-out.
+BOND_ETF_ERAS = (("pre_gfc", "2002-07-26", "2008-12-31"), ("zirp", "2009-01-01", "2015-12-31"),
+                 ("hike_cut_cycle", "2016-01-01", "2021-12-31"), ("post_2022", "2022-01-01", "9999-12-31"))
+
+METAL_ETF_ASSETS = ("GLD", "SLV")
+METAL_ETF_COST_MODEL = {"commission_per_side": 0.00010, "slippage_ticks": 0.00010,
+                        "short_financing_per_year": -0.0075}   # Phase C table: metals short financing -0.75%/yr
+METAL_ETF_ERAS = (("pre_gfc", "2004-11-18", "2008-12-31"), ("zirp", "2009-01-01", "2015-12-31"),
+                  ("hike_cut_cycle", "2016-01-01", "2021-12-31"), ("post_2022", "2022-01-01", "9999-12-31"))
+
 # The authoritative class registry. Declaring a class here does NOT activate it:
 # LIVE_CLASSES gates what generations may sweep (spec s2: activation moves the
 # trial denominator, declaration never does).
@@ -107,8 +124,35 @@ CLASSES = {
                    "cost_model": EQUITY_ETF_COST_MODEL, "eras": EQUITY_ETF_ERAS,
                    "max_end_lag_days": 4,
                    "excluded_block_types": frozenset(), "benchmark": "self"},
+    # Track 2b: declared, NOT in LIVE_CLASSES. bar_kind "ohlcv" (real Tiingo
+    # daily OHLC via the same free_bond_etf_*/free_metal_etf_* lanes as
+    # equity_etf's free_equity_etf_* lane), so no block type is excluded on
+    # range grounds -- same reasoning as equity_etf, unlike fx.
+    # max_end_lag_days 4 RE-VERIFIED (track 2b build, 2026-08-27) against the
+    # real trading-systems parquets, not carried from the addendum draft
+    # unverified: all 8 bond_etf parquets (SHY IEF TLT TIP LQD HYG EMB BND)
+    # and both metal_etf parquets (GLD SLV) end 2026-08-26 (Wed), fetched_utc
+    # 2026-08-27T00:51:24Z-00:51:54Z -- observed lag 1 calendar day (a fetch
+    # run just after midnight UTC picking up the same day's Tiingo publish).
+    # 4 is declared as the ceiling with 3 days of headroom over that
+    # observation (covers a run against a holiday weekend), not the exact
+    # observed value -- same convention as fx/equity_etf's max_end_lag_days.
+    "bond_etf": {"assets": BOND_ETF_ASSETS, "timeframes": ("1d",), "session": "us_equity_5d",
+                "periods_per_year": 252, "bar_kind": "ohlcv",
+                "cost_model": BOND_ETF_COST_MODEL, "eras": BOND_ETF_ERAS,
+                "max_end_lag_days": 4,
+                "excluded_block_types": frozenset(), "benchmark": "self"},
+    "metal_etf": {"assets": METAL_ETF_ASSETS, "timeframes": ("1d",), "session": "us_equity_5d",
+                 "periods_per_year": 252, "bar_kind": "ohlcv",
+                 "cost_model": METAL_ETF_COST_MODEL, "eras": METAL_ETF_ERAS,
+                 "max_end_lag_days": 4,
+                 "excluded_block_types": frozenset(), "benchmark": "self"},
 }
 LIVE_CLASSES = ("crypto", "fx", "equity_etf")   # fx ACTIVATED 2026-08-24; equity_etf ACTIVATED 2026-08-25 (Coen)
+# bond_etf/metal_etf are DECLARED here (Track 2b) but deliberately NOT in
+# LIVE_CLASSES: activation is Coen's call, after the dry-run ship-bar step
+# (spec s8), exactly as it was for fx and equity_etf before them -- see the
+# CLASSES/LIVE_CLASSES docstring above.
 # equity_etf is DECLARED here (Track 2a) but deliberately NOT in LIVE_CLASSES:
 # activation is Coen's call, after the dry-run ship-bar step (spec s8), same
 # as fx before it -- see the CLASSES/LIVE_CLASSES docstring above.
