@@ -467,3 +467,22 @@ class Registry:
                 raise clash
             return self._append_locked(
                 "quarantine_data_snapshot_supplement", row)
+
+
+def edge_numbers(entries):
+    """D11 (SP5, docs/2026-08-28-market-data-universe-design.md s7b): the
+    chain's append-only order defines a stable sequential number per
+    strategy; renumbering is impossible by construction. Display-layer
+    only - never part of identity, provenance, or N accounting."""
+    numbers = {}
+    n = 0
+    for entry in entries:
+        if entry.get("entry_type") == "strategy_registered":
+            n += 1
+            numbers[entry["payload"]["strategy_id"]] = n
+    return numbers
+
+
+def edge_label(n):
+    """Render an edge number as a display label, e.g. 7 -> '#0007'."""
+    return f"#{n:04d}"
