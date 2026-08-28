@@ -380,9 +380,15 @@ def test_mixed_registry_e2e_unequal_history_intersects_before_check_aligned(tmp_
         "EUR": _weekday_bars(datetime.date(2020, 1, 1), datetime.date(2020, 12, 31)),
     })
     art = tmp_path / "art"
+    # --cutoff inside every fixture calendar (SP5 D3): fx now declares
+    # benchmark "self", so its verdicts need OOS bars for the buy-and-hold
+    # control -- the default cutoff (2023-12-31), which this test previously
+    # rode on, sits past every fixture bar (they end 2020-12-31), and
+    # _benchmark_relative loudly refuses a zero-bar OOS window.
     rc = gauntlet_run(["--registry", str(reg.log_path),
                        "--data-dir", str(data),
-                       "--artifacts-dir", str(art)])
+                       "--artifacts-dir", str(art),
+                       "--cutoff", "2020-06-30"])
     assert rc == 0          # would have raised "cannot cluster ragged return
                             # series" pre-fix -- completing at all is the point
 
@@ -395,7 +401,9 @@ def test_mixed_registry_e2e_unequal_history_intersects_before_check_aligned(tmp_
     # GBP's and BTCUSD's calendars, so the intersection is exactly EUR's own
     # return-dated series: 261 weekdays (2020-01-02..2020-12-31, EUR's own
     # first bar dropped by daily_returns_with_dates) -- computed independently
-    # in the review response, not hand-typed here as a magic number.
+    # in the review response, not hand-typed here as a magic number. The
+    # clustering alignment runs on the FULL series, so the explicit --cutoff
+    # above does not move this number.
     expected_common = len(_weekday_bars(
         datetime.date(2020, 1, 1), datetime.date(2020, 12, 31))) - 1
 
@@ -446,9 +454,12 @@ def test_mixed_registry_e2e_divergent_date_key_formats_still_intersect(tmp_path)
             datetime.date(2020, 1, 1), datetime.date(2020, 12, 31))),
     })
     art = tmp_path / "art"
+    # --cutoff inside every fixture calendar -- same SP5 D3 reason as the
+    # unequal-history e2e above (fx benchmark "self" needs OOS bars).
     rc = gauntlet_run(["--registry", str(reg.log_path),
                        "--data-dir", str(data),
-                       "--artifacts-dir", str(art)])
+                       "--artifacts-dir", str(art),
+                       "--cutoff", "2020-06-30"])
     assert rc == 0          # pre-fix: ValueError, "intersection ... is only
                             # 0 day(s)" -- completing at all is the point
 
@@ -971,9 +982,12 @@ def test_progress_lines_appear_in_dry_run_too(tmp_path, capsys):
 # entry declares `benchmark: "self"` (equity_etf, today) gets a
 # `metrics["benchmark_relative"]` block on every gauntlet verdict -- a
 # same-OOS-window buy-and-hold of the cell's own asset, RECORDED, NOT GATED.
-# Classes with `benchmark: None` (crypto, fx) carry no key at all.
+# Classes with `benchmark: None` carry no key at all. SP5 D3
+# (docs/2026-08-28-market-data-universe-design.md s7): fx flipped to "self"
+# with a per-class-honest basis string; crypto stays None until Phase 3.
 
-from .gauntlet import _benchmark_relative, _candidate_payload, _evaluate_candidate
+from .gauntlet import (BENCHMARK_BASIS, _benchmark_relative,
+                       _candidate_payload, _evaluate_candidate)
 
 
 def test_benchmark_relative_analytic_fixture():
@@ -1009,19 +1023,14 @@ def test_benchmark_relative_analytic_fixture():
 
 
 def test_benchmark_relative_absent_for_none_classes():
-    """crypto and fx declare `benchmark: None` -- absence of the key, never
-    a null placeholder (the addendum's own convention)."""
+    """crypto (the one remaining `benchmark: None` class -- fx flipped under
+    SP5 D3) -- absence of the key, never a null placeholder (the addendum's
+    own convention)."""
     bars = {"BTCUSDT": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
                          "low": 1.0, "close": 1.0, "volume": 1.0}]}
     crypto_spec = {"strategy_id": "x",
                    "universe": {"assets": ["BTCUSDT"], "asset_class": "crypto"}}
     assert _benchmark_relative(crypto_spec, bars, 0.01, "2023-12-31") is None
-
-    fx_bars = {"EUR": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
-                       "low": 1.0, "close": 1.0, "volume": 1.0}]}
-    fx_spec = {"strategy_id": "x",
-               "universe": {"assets": ["EUR"], "asset_class": "fx"}}
-    assert _benchmark_relative(fx_spec, fx_bars, 0.01, "2023-12-31") is None
 
 
 def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
@@ -1049,11 +1058,17 @@ def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
     assert result["buy_hold_net"] == pytest.approx(expected_buy_hold, abs=1e-12)
 
 
-def test_crypto_and_fx_verdicts_carry_no_benchmark_key(tmp_path):
+def test_crypto_verdicts_carry_no_benchmark_key(tmp_path):
     """End to end through gauntlet.run(): the mixed crypto+fx registry
     already exercised elsewhere in this file (era summaries, intersection
-    alignment) proves the negative here for free -- neither class declares
-    `benchmark: "self"`, so neither verdict's metrics dict gets the key."""
+    alignment) proves the negative here for free -- crypto (the one
+    remaining `benchmark: None` class since SP5 D3 flipped fx) never gets
+    the key on its verdict's metrics dict. The fx verdicts of the SAME run
+    DO carry it now, with the carry-excluded basis -- asserted here so the
+    flip is pinned end to end, not only at the worker level. The explicit
+    --cutoff sits INSIDE every fixture calendar (all three end 2020-12-31);
+    the pre-flip default (2023-12-31) would leave fx with zero OOS bars,
+    which _benchmark_relative loudly refuses."""
     from .gauntlet import run as gauntlet_run
 
     reg, crypto_spec, gbp_spec, eur_spec = mixed_class_gauntlet_registry(tmp_path)
@@ -1064,15 +1079,18 @@ def test_crypto_and_fx_verdicts_carry_no_benchmark_key(tmp_path):
     })
     rc = gauntlet_run(["--registry", str(reg.log_path),
                        "--data-dir", str(data),
-                       "--artifacts-dir", str(tmp_path / "art")])
+                       "--artifacts-dir", str(tmp_path / "art"),
+                       "--cutoff", "2020-06-30"])
     assert rc == 0
 
     verdicts = {e["payload"]["strategy_id"]: e["payload"]
                for e in reg.entries() if e["entry_type"] == "verdict"
                and e["payload"]["stage"] == "gauntlet"}
     assert len(verdicts) == 3
-    for spec in (crypto_spec, gbp_spec, eur_spec):
-        assert "benchmark_relative" not in verdicts[spec["strategy_id"]]["metrics"]
+    assert "benchmark_relative" not in verdicts[crypto_spec["strategy_id"]]["metrics"]
+    for fx_spec in (gbp_spec, eur_spec):
+        b = verdicts[fx_spec["strategy_id"]]["metrics"]["benchmark_relative"]
+        assert b["basis"] == "price returns, carry excluded on both sides"
 
 
 # ---- a real equity_etf candidate, through the worker path -----------------
@@ -1196,3 +1214,113 @@ def test_benchmark_relative_recorded_not_gated():
     assert result["passed"] is True
     assert result["reason"] is None
     assert result["metrics"]["benchmark_relative"]["excess"] < 0
+
+
+# ---- SP5 D3: fx benchmark flip -- recorded, with a carry-honest basis -----
+
+_FX_B_SID = "fb" + "0" * 62
+
+
+def _fx_benchmark_candidate():
+    """One fx candidate on single-fix bars (open==high==low==close, the
+    bar_kind fx declares -- tradfi_data.py's FRED H.10 fixes), weekdays
+    spanning both sides of the cutoff. A triangle-wave price so ma_cross
+    genuinely crosses (real trades, nonzero window vol) instead of the flat
+    fixtures the mixed e2e tests use for calendar shape alone. Returns
+    (spec, spec_bars)."""
+    bars = []
+    d, i = datetime.date(2022, 1, 3), 0
+    while d <= datetime.date(2024, 12, 31):
+        if d.weekday() < 5:
+            j = i % 20
+            px = round(1.10 + 0.004 * (j if j < 10 else 20 - j), 6)
+            bars.append({"date": d.isoformat(), "open": px, "high": px,
+                        "low": px, "close": px, "volume": 0.0})
+            i += 1
+        d += datetime.timedelta(days=1)
+    spec = _fx_spec("EUR", "c1", "fx-benchmark-basis-group")
+    spec["strategy_id"] = _FX_B_SID
+    return spec, {"EUR": bars}
+
+
+def test_fx_benchmark_recorded_with_carry_basis():
+    """SP5 D3 (docs/2026-08-28-market-data-universe-design.md s7): fx
+    declares benchmark "self", so a real fx candidate evaluated through the
+    same worker path as the equity B1 tests above gets the full
+    benchmark_relative block -- and its basis string declares the fx-specific
+    limitation (a USD-per-foreign hold's true driver is carry, which a
+    price-only control cannot see), not the ETF dividends wording.
+
+    single_fix note: open==close==the daily fix on every fx bar, so the
+    control here is fix-to-fix by construction -- the entry-open/exit-close
+    endpoint choice is exercised where the endpoints actually differ, by the
+    equity OHLC fixtures above."""
+    from .engine import run_spec
+
+    spec, spec_bars = _fx_benchmark_candidate()
+    res = run_spec(spec, spec_bars)
+    # the fixture must stay a REAL candidate: if the triangle wave ever stops
+    # producing ma_cross trades, this test would silently stop exercising the
+    # strategy_net side of the block.
+    assert res["trades"], "fixture degraded: fx benchmark candidate has no trades"
+    rets = [r for _, r in daily_returns_with_dates(res["equity"])]
+    trials_n, _labels, trials_var = effective_trials({_FX_B_SID: rets})
+    family = [{"sid": _FX_B_SID, "axes": {}, "score": 1.0,
+              "screen_trade_count_fail": False, "gauntlet_passed": False}]
+    payload = _candidate_payload(
+        spec, spec_bars, res, rets, 1, 1, None, trials_n, trials_var,
+        family[0], family, {}, _B1_CUTOFF, False, "native", None, 0, 0)
+    result = _evaluate_candidate(payload)
+
+    b = result["metrics"]["benchmark_relative"]
+    assert set(b) == {"window", "strategy_net", "buy_hold_net", "excess",
+                      "basis"}
+    assert b["window"] == "oos"
+    assert b["basis"] == "price returns, carry excluded on both sides"
+    assert b["excess"] == pytest.approx(
+        b["strategy_net"] - b["buy_hold_net"], abs=1e-12)
+    # buy_hold_net independently: first OOS bar's open to last OOS bar's
+    # close, net of ONE round trip of fx's own cost model.
+    oos = [x for x in spec_bars["EUR"] if x["date"] > _B1_CUTOFF]
+    per_side = (cells.FX_COST_MODEL["commission_per_side"]
+                + cells.FX_COST_MODEL["slippage_ticks"])
+    assert b["buy_hold_net"] == pytest.approx(
+        (oos[-1]["close"] / oos[0]["open"] - 1) - 2 * per_side, abs=1e-12)
+
+
+def test_benchmark_basis_is_per_class():
+    """The fx flip must not touch anyone else's wording: an equity_etf block
+    still carries the dividends-excluded basis (bond/metal share that same
+    default -- only fx, and later crypto, get their own entry)."""
+    bars = {"SPY": [
+        {"date": "2024-01-01", "open": 100.0, "high": 100.0, "low": 100.0,
+         "close": 100.0, "volume": 1.0},
+        {"date": "2024-06-01", "open": 110.0, "high": 110.0, "low": 110.0,
+         "close": 110.0, "volume": 1.0}]}
+    spec = {"strategy_id": "x",
+            "universe": {"assets": ["SPY"], "asset_class": "equity_etf"}}
+    result = _benchmark_relative(spec, bars, 0.02, "2023-12-31")
+    assert result["basis"] == "price returns, dividends excluded on both sides"
+
+
+# The classes that DELIBERATELY ride _DEFAULT_BASIS's dividends wording --
+# pinned here, not inferred, so falling through to the default is a decision
+# with a name on it, never an accident.
+_DEFAULT_BASIS_CLASSES = frozenset({"equity_etf", "bond_etf", "metal_etf"})
+
+
+def test_every_self_benchmark_class_made_a_basis_decision():
+    """Completeness guard (rules-as-pipeline-stages: a convention that lives
+    only in prose is not a guard): every class declaring `benchmark: "self"`
+    must either carry its own BENCHMARK_BASIS entry or be a pinned member of
+    _DEFAULT_BASIS_CLASSES above. A NEW class flipping to "self" therefore
+    fails HERE, loudly, until its author makes a deliberate basis decision --
+    in a test, never a runtime raise, because recorded-not-gated must never
+    abort a live gauntlet pass."""
+    for cls, spec in cells.CLASSES.items():
+        if spec.get("benchmark") != "self":
+            continue
+        assert cls in BENCHMARK_BASIS or cls in _DEFAULT_BASIS_CLASSES, (
+            f"class {cls!r} declares benchmark 'self' but has neither its own "
+            f"BENCHMARK_BASIS entry nor a pinned seat in "
+            f"_DEFAULT_BASIS_CLASSES -- decide its basis wording deliberately")

@@ -569,6 +569,15 @@ def stressed(spec: dict) -> dict:
     return s
 
 
+BENCHMARK_BASIS = {
+    "fx": "price returns, carry excluded on both sides",
+    # crypto is DORMANT until SP5 Phase 3 flips CLASSES["crypto"]["benchmark"];
+    # declared now so the flip is a one-line cells.py change later.
+    "crypto": "price returns, staking/funding yield excluded on both sides",
+}
+_DEFAULT_BASIS = "price returns, dividends excluded on both sides"
+
+
 def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
                         cutoff: str) -> dict | None:
     """B1 (SP4 Track 2a addendum, pre-registered 2026-08-26,
@@ -592,6 +601,10 @@ def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
     to every real trade (engine.py's `net = gross - 2 * per_side`). No
     financing: short_financing_per_year only ever accrues on a SHORT
     position, and a buy-and-hold control is definitionally long.
+
+    SP5 D3: the recorded `basis` string is per-class (BENCHMARK_BASIS) --
+    it names exactly what a price-only control cannot see for that class
+    (dividends for the ETF classes, carry for fx), on every verdict.
     """
     asset_class = spec["universe"].get("asset_class", "crypto")
     class_spec = cells.CLASSES.get(asset_class, {})
@@ -617,7 +630,7 @@ def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
     return {"window": "oos", "strategy_net": strategy_net,
             "buy_hold_net": buy_hold_net,
             "excess": strategy_net - buy_hold_net,
-            "basis": "price returns, dividends excluded on both sides"}
+            "basis": BENCHMARK_BASIS.get(asset_class, _DEFAULT_BASIS)}
 
 
 def _candidate_payload(s: dict, spec_bars: dict, res: dict,
