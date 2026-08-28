@@ -474,8 +474,9 @@ def effective_trials(returns_by_id: dict[str, list[float]]):
     protocol-v2 used and what over-deflated the gate.
 
     Dispatch: rectangular input with n >= 3 takes the numpy fast path
-    (identical output, held by test_cluster_np.py); ragged input and the
-    n <= 2 special cases take the reference path.
+    (identical output, held by test_cluster_np.py); ragged input, input
+    containing a constant NONZERO series (see _returns_matrix on why), and
+    the n <= 2 special cases take the reference path.
     """
     ids = sorted(returns_by_id)
     n = len(ids)
