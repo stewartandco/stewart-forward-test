@@ -178,7 +178,10 @@ def write_manifest(manifest, path):
 # Real-network path below. Run supervised, once. Tests never touch this.
 # --------------------------------------------------------------------------
 
-_UA = {"User-Agent": "stewart-research-layer/1.0 (universe selection, one-shot)"}
+# Bare product/version ONLY: Binance's WAF 403s a UA carrying a parenthesized
+# comment (reproduced deterministically 2026-08-28: with "(...)" -> 403,
+# without -> 200, same URL, seconds apart). CoinGecko accepts either.
+_UA = {"User-Agent": "stewart-research-layer/1.0"}
 _COINGECKO_URL = ("https://api.coingecko.com/api/v3/coins/markets"
                   "?vs_currency=usd&order=market_cap_desc&per_page=250&page=%d")
 _BINANCE_URL = ("https://api.binance.com/api/v3/klines"
