@@ -319,3 +319,63 @@ def test_agglomerate_np_sub_rounding_ties():
     new = _agglomerate_np(ids, dmat_to_array(ids, dmat))
     assert _hist_as_sets(new) == _hist_as_sets(ref)
     assert new[0] == (frozenset({c}), frozenset({d}))
+
+
+# ---------------- _effective_trials_np ----------------
+
+from .cluster import _effective_trials_np, _effective_trials_ref, _reps_variance
+
+
+def _assert_effective_trials_identical(series):
+    ref_k, ref_labels, ref_var = _effective_trials_ref(series)
+    ids, X = _returns_matrix(series)
+    new_k, new_labels, new_var = _effective_trials_np(series, ids, X)
+    assert new_k == ref_k
+    assert new_labels == ref_labels
+    assert new_var == pytest.approx(ref_var, abs=1e-9)
+    # shared reps code + identical labels should be bit-identical
+    assert new_var == ref_var
+
+
+def test_effective_trials_np_two_groups():
+    _assert_effective_trials_identical(two_group_series())
+
+
+def test_effective_trials_np_seeded_structured():
+    _assert_effective_trials_identical(seeded_series(40, 120))
+    _assert_effective_trials_identical(seeded_series(80, 300))
+
+
+def test_effective_trials_np_identical_siblings():
+    s = [0.01, -0.02, 0.03, 0.01, -0.015, 0.02]
+    series = {chr(ord("a") + i) * 16: list(s) for i in range(5)}
+    _assert_effective_trials_identical(series)
+
+
+def test_effective_trials_np_with_zero_variance_member():
+    series = seeded_series(10, 60)
+    series["zzzz" + "z" * 12] = [0.0] * 60
+    _assert_effective_trials_identical(series)
+
+
+def test_effective_trials_np_smallest_n():
+    _assert_effective_trials_identical(seeded_series(3, 40))
+    _assert_effective_trials_identical(seeded_series(4, 40))
+
+
+def test_effective_trials_dispatcher_agrees_with_reference():
+    # the public entry point must give the numpy result for rectangular
+    # input and the reference result for ragged input
+    series = seeded_series(12, 60)
+    assert effective_trials(series) == _effective_trials_ref(series)
+    ragged = {"a" * 16: [0.01, -0.02, 0.03, 0.01],
+              "b" * 16: [0.02, 0.01, -0.01],
+              "c" * 16: [-0.01, 0.02]}
+    assert effective_trials(ragged) == _effective_trials_ref(ragged)
+
+
+def test_effective_trials_np_deterministic():
+    series = seeded_series(25, 80)
+    ids, X = _returns_matrix(series)
+    assert (_effective_trials_np(series, ids, X)
+            == _effective_trials_np(series, ids, X))

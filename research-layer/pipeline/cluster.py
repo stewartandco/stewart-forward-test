@@ -297,18 +297,22 @@ def _sample_variance(xs: list[float]) -> float:
     return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
 
 
-def effective_trials(returns_by_id: dict[str, list[float]]):
-    """(k, labels, cross_cluster_sharpe_variance).
+def _reps_variance(returns_by_id: dict[str, list[float]], ids: list[str],
+                   labels: dict[str, int]) -> float:
+    """Sample variance across cluster representatives (mean member daily
+    Sharpe). Pure Python on purpose: both the reference and numpy paths call
+    THIS, so identical labels give a bit-identical recorded float."""
+    groups: dict[int, list[str]] = {}
+    for i in ids:
+        groups.setdefault(labels[i], []).append(i)
+    reps = [sum(_sharpe(returns_by_id[i]) for i in g) / len(g)
+            for g in groups.values()]
+    return _sample_variance(reps)
 
-    k is the number of effectively independent trials: the cluster count
-    maximising the silhouette QUALITY score mean(S)/stdev(S) over
-    k in [2, n-1] (card L6's criterion). k=n is excluded because every
-    silhouette is 0 when all clusters are singletons.
 
-    The variance returned is the sample variance across CLUSTER
-    representatives, each representative being the mean daily Sharpe of its
-    members — not the variance across all strategies, which is what
-    protocol-v2 used and what over-deflated the gate."""
+def _effective_trials_ref(returns_by_id: dict[str, list[float]]):
+    """The original pure-Python implementation, kept verbatim as the
+    comparison oracle and the ragged-input fallback."""
     ids = sorted(returns_by_id)
     n = len(ids)
     if n == 0:
@@ -342,10 +346,112 @@ def effective_trials(returns_by_id: dict[str, list[float]]):
             if best is None or key > best[0]:
                 best = (key, k, labels)
     _, k, labels = best
+    return k, labels, _reps_variance(returns_by_id, ids, labels)
 
-    groups: dict[int, list[str]] = {}
-    for i in ids:
-        groups.setdefault(labels[i], []).append(i)
-    reps = [sum(_sharpe(returns_by_id[i]) for i in g) / len(g)
-            for g in groups.values()]
-    return k, labels, _sample_variance(reps)
+
+def _effective_trials_np(returns_by_id: dict[str, list[float]],
+                         ids: list[str], X: "np.ndarray"):
+    """Numpy fast path for effective_trials: one merge-history replay with
+    incremental silhouette sums instead of n-2 from-scratch sweeps. Output
+    is identical to _effective_trials_ref (see test_cluster_np.py); the
+    recorded variance goes through the same _reps_variance code."""
+    n = len(ids)
+    D = _distance_matrix_np(X)
+    history = _agglomerate_np(ids, D)
+    idx_of = {i: j for j, i in enumerate(ids)}
+
+    T = D.copy()                     # T[i, c] = sum dist from point i to slot c
+    sizes = np.ones(n)
+    active = np.ones(n, dtype=bool)
+    own = np.arange(n)               # point -> cluster slot
+    rows = np.arange(n)
+    bmin_val = np.full(n, np.inf)
+    bmin_idx = np.full(n, -1)
+
+    def rescan(subset):
+        """Fresh masked b-min for the given point rows."""
+        if len(subset) == 0:
+            return
+        cols = np.flatnonzero(active)
+        Q = T[np.ix_(subset, cols)] / sizes[cols]
+        Q[cols[None, :] == own[subset][:, None]] = np.inf
+        pos = Q.argmin(axis=1)
+        bmin_val[subset] = Q[np.arange(len(subset)), pos]
+        bmin_idx[subset] = cols[pos]
+
+    rescan(rows)
+
+    best_q = None                    # ((quality, mean_s, -k), own, active)
+    best_m = None                    # ((mean_s, -k), own, active)
+    for t, (ca, cb) in enumerate(history):
+        keep = idx_of[min(min(ca), min(cb))]
+        drop = idx_of[max(min(ca), min(cb))]
+        T[:, keep] += T[:, drop]
+        sizes[keep] += sizes[drop]
+        active[drop] = False
+        own[own == drop] = keep
+        k = n - 1 - t
+        if k < 2:
+            break
+        # b-min cache maintenance: only rows whose cached column was one of
+        # the merged pair need a fresh scan (reducibility; the merged
+        # column's ratio is a weighted mean of the two old columns, so it
+        # cannot undercut a min cached elsewhere)
+        stale = np.flatnonzero((bmin_idx == keep) | (bmin_idx == drop))
+        rescan(stale)
+
+        own_sizes = sizes[own]
+        multi = own_sizes > 1
+        a = np.zeros(n)
+        a[multi] = T[rows, own][multi] / (own_sizes[multi] - 1)
+        b = bmin_val
+        sil = np.zeros(n)
+        mx = np.maximum(a, b)
+        nz = multi & (mx > 0)
+        sil[nz] = (b[nz] - a[nz]) / mx[nz]
+
+        mean_s = float(sil.sum() / n)
+        var = float(((sil - mean_s) ** 2).sum() / (n - 1)) if n > 1 else 0.0
+        sd = math.sqrt(var)
+        quality = mean_s / sd if sd > 0 else float("-inf")
+        key_q = (quality, mean_s, -k)
+        if best_q is None or key_q > best_q[0]:
+            best_q = (key_q, own.copy(), active.copy())
+        key_m = (mean_s, -k)
+        if best_m is None or key_m > best_m[0]:
+            best_m = (key_m, own.copy(), active.copy())
+
+    chosen = best_m if best_q[0][0] == float("-inf") else best_q
+    _, won, wactive = chosen
+    slots = sorted(int(s) for s in np.flatnonzero(wactive))
+    rank = {s: r for r, s in enumerate(slots)}
+    labels = {ids[i]: rank[int(won[i])] for i in range(n)}
+    k = len(slots)
+    return k, labels, _reps_variance(returns_by_id, ids, labels)
+
+
+def effective_trials(returns_by_id: dict[str, list[float]]):
+    """(k, labels, cross_cluster_sharpe_variance).
+
+    k is the number of effectively independent trials: the cluster count
+    maximising the silhouette QUALITY score mean(S)/stdev(S) over
+    k in [2, n-1] (card L6's criterion). k=n is excluded because every
+    silhouette is 0 when all clusters are singletons.
+
+    The variance returned is the sample variance across CLUSTER
+    representatives, each representative being the mean daily Sharpe of its
+    members — not the variance across all strategies, which is what
+    protocol-v2 used and what over-deflated the gate.
+
+    Dispatch: rectangular input with n >= 3 takes the numpy fast path
+    (identical output, held by test_cluster_np.py); ragged input and the
+    n <= 2 special cases take the reference path.
+    """
+    ids = sorted(returns_by_id)
+    n = len(ids)
+    if n <= 2:
+        return _effective_trials_ref(returns_by_id)
+    ids2, X = _returns_matrix(returns_by_id)
+    if X is None:
+        return _effective_trials_ref(returns_by_id)
+    return _effective_trials_np(returns_by_id, ids2, X)

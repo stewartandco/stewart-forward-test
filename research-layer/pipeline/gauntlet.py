@@ -1044,7 +1044,10 @@ def run(argv: list[str] | None = None) -> int:
     # structurally different families put real edge dispersion into a term
     # meant to hold sampling noise.
     check_aligned(returns_by_id)
+    t_et0 = time.time()
     trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
+    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
+          f"(pure clustering, inside the clustering stage)", flush=True)
     print(f"effective trials: {trials_n} clusters over {registered_n} "
           f"registered strategies")
     t_cluster = time.time() - t_cluster0
