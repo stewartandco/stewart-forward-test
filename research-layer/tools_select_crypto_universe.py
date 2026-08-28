@@ -21,6 +21,7 @@ WRAPPED_MARKERS = ("wrapped","staked","bridged","restaked","wbeth","wsteth",
     "tbtc","solvbtc")
 PEG_BAND = 0.02
 
+LAYER_ROOT = Path(__file__).resolve().parent
 HISTORY_DAYS = 730
 TARGET_SIZE = 100
 INCUMBENTS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT")
@@ -72,25 +73,41 @@ def _parse_utc(stamp):
     return dt.astimezone(timezone.utc)
 
 
-def build_manifest(coins, binance_meta, now_utc):
-    """Walk coins by ascending market_cap_rank, applying the declared rule,
-    until TARGET_SIZE assets are admitted. Only coins actually walked appear
-    in the manifest. Pure function: no network, no filesystem."""
-    cutoff = _parse_utc(now_utc) - timedelta(days=HISTORY_DAYS)
+def _admission_walk(coins, binance_meta, cutoff):
+    """The single admission walk both build_manifest and main()'s page-2
+    decision use: ascending market_cap_rank, stop once TARGET_SIZE assets are
+    admitted. Returns (admitted, excluded). Raises RuntimeError LOUDLY on a
+    duplicate coin id or duplicate Binance symbol among survivors - silent
+    dedupe would change the declared rule. Pure: no network, no filesystem."""
     admitted = []
     excluded = []
+    seen_ids = set()
+    seen_binance_symbols = set()
     for coin in sorted(coins, key=lambda c: c["market_cap_rank"]):
         if len(admitted) >= TARGET_SIZE:
             break
         rank = coin["market_cap_rank"]
         cid = coin["id"]
         sym = str(coin["symbol"])
+        if cid in seen_ids:
+            raise RuntimeError(
+                "duplicate coin id %r in the candidate list (rank %s) - "
+                "page drift or a source defect; investigate before pinning "
+                "anything" % (cid, rank))
+        seen_ids.add(cid)
         reason = classify_exclusion(coin)
         if reason is not None:
             excluded.append({"rank": rank, "id": cid, "symbol": sym,
                              "reason": reason})
             continue
         binance_symbol = sym.upper() + "USDT"
+        if binance_symbol in seen_binance_symbols:
+            raise RuntimeError(
+                "duplicate Binance symbol %s (coin id %r, rank %s) - two "
+                "distinct coins share a ticker and would map to the same "
+                "USDT pair; investigate before pinning anything"
+                % (binance_symbol, cid, rank))
+        seen_binance_symbols.add(binance_symbol)
         first_1d = binance_meta.get(binance_symbol)
         if first_1d is None:
             excluded.append({"rank": rank, "id": cid, "symbol": sym,
@@ -107,6 +124,22 @@ def build_manifest(coins, binance_meta, now_utc):
                          "binance_symbol": binance_symbol,
                          "market_cap": coin.get("market_cap"),
                          "first_1d_utc": first_1d})
+    return admitted, excluded
+
+
+def build_manifest(coins, binance_meta, now_utc):
+    """Walk coins by ascending market_cap_rank, applying the declared rule,
+    until TARGET_SIZE assets are admitted. Only coins actually walked appear
+    in the manifest. Pure function: no network, no filesystem."""
+    cutoff = _parse_utc(now_utc) - timedelta(days=HISTORY_DAYS)
+    admitted, excluded = _admission_walk(coins, binance_meta, cutoff)
+    if len(admitted) < TARGET_SIZE:
+        raise RuntimeError(
+            "under-full universe: only %d of %d admitted (short %d) - a "
+            "manifest claiming a top-%d rule must not pin short; investigate "
+            "before pinning anything"
+            % (len(admitted), TARGET_SIZE, TARGET_SIZE - len(admitted),
+               TARGET_SIZE))
     admitted_symbols = {a["binance_symbol"] for a in admitted}
     missing = [s for s in INCUMBENTS if s not in admitted_symbols]
     if missing:
@@ -128,14 +161,17 @@ def write_manifest(manifest, path):
     """Write the pinned manifest. Refuses to overwrite: a re-selection is a
     new declared event, never a silent refresh."""
     path = Path(path)
-    if path.exists():
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Exclusive create: the existence check and the write are one atomic
+        # operation, so a concurrent writer cannot slip between them.
+        with path.open("x", encoding="utf-8") as fh:
+            fh.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    except FileExistsError:
         raise PinnedManifestError(
             "%s already exists - the universe manifest is PINNED. Re-selection "
             "is a new declared event: write a new manifest, do not overwrite "
-            "this one." % path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8")
+            "this one." % path) from None
 
 
 # --------------------------------------------------------------------------
@@ -172,7 +208,7 @@ def _fetch_first_1d_utc(binance_symbol):
 
 
 def main():
-    out_path = Path("data") / "crypto_universe_manifest.json"
+    out_path = LAYER_ROOT / "data" / "crypto_universe_manifest.json"
     if out_path.exists():
         raise PinnedManifestError(
             "%s already exists - refusing before any network call. "
@@ -194,20 +230,12 @@ def main():
             time.sleep(0.25)
 
     def _admitted_count():
-        """Count admissions without the incumbent assert (pages may be
-        incomplete mid-run)."""
+        """Count admissions via the SAME walk build_manifest uses (shared
+        helper, so the two can never drift), without the shortfall/incumbent
+        asserts - pages may be incomplete mid-run."""
         cutoff = _parse_utc(now_utc) - timedelta(days=HISTORY_DAYS)
-        n = 0
-        for coin in sorted(coins, key=lambda c: c["market_cap_rank"]):
-            if n >= TARGET_SIZE:
-                break
-            if classify_exclusion(coin) is not None:
-                continue
-            first_1d = binance_meta.get(str(coin["symbol"]).upper() + "USDT")
-            if first_1d is None or _parse_utc(first_1d) > cutoff:
-                continue
-            n += 1
-        return n
+        admitted, _ = _admission_walk(coins, binance_meta, cutoff)
+        return len(admitted)
 
     print("fetching CoinGecko page 1 ...")
     batch = _get_json(_COINGECKO_URL % 1)
@@ -230,6 +258,7 @@ def main():
     print("excluded: %d" % len(manifest["excluded"]))
     for reason in sorted(by_reason):
         print("  %-40s %d" % (reason, by_reason[reason]))
+    return 0
 
 
 if __name__ == "__main__":
