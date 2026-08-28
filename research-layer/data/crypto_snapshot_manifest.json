@@ -111,13 +111,6 @@
     "rows": 3298,
     "sha256": "eb3cbadedd93bc872f462258516af6c4649eef34b5df4837440e0842c1269970"
   },
-  "BTTUSDT_1d": {
-    "fetched_utc": "2026-08-28T14:53:10.554316+00:00",
-    "first_date": "2019-01-31 00:00:00",
-    "last_date": "2022-01-17 00:00:00",
-    "rows": 1083,
-    "sha256": "28ab3434ad24387f9d21937e9ab4d6fffcbc44a5d37ace6c919fc685ba7a3ac4"
-  },
   "CAKEUSDT_1d": {
     "fetched_utc": "2026-08-28T15:26:07.009092+00:00",
     "first_date": "2021-02-19 00:00:00",
@@ -159,13 +152,6 @@
     "last_date": "2026-08-27 00:00:00",
     "rows": 1709,
     "sha256": "e5b599887ef72a16c6d4c7e38efa69fbcd793524219d22cc8aff3e3504e1ee21"
-  },
-  "DAIUSDT_1d": {
-    "fetched_utc": "2026-08-28T14:53:10.554316+00:00",
-    "first_date": "2020-07-23 00:00:00",
-    "last_date": "2020-08-12 00:00:00",
-    "rows": 21,
-    "sha256": "4b94f1fdc70a4d982c9ddffe9bb86bf94f93b97554efd49a2dd5ab11fde5464b"
   },
   "DASHUSDT_1d": {
     "fetched_utc": "2026-08-28T15:26:07.009092+00:00",
@@ -383,13 +369,6 @@
     "last_date": "2026-08-27 00:00:00",
     "rows": 2781,
     "sha256": "29b5e1d0ccbd7ee8a827d5d1aa8a44f85b040af92c569282709ebe0b4b14041b"
-  },
-  "LITUSDT_1d": {
-    "fetched_utc": "2026-08-28T14:53:10.554316+00:00",
-    "first_date": "2021-02-04 00:00:00",
-    "last_date": "2025-02-10 00:00:00",
-    "rows": 1468,
-    "sha256": "df47966cb66a4351fc964aabf92568fb275e0aa97e8b0f6e4bb9340e4a5e3287"
   },
   "LTCUSDT_1d": {
     "fetched_utc": "2026-08-28T15:26:07.009092+00:00",
@@ -670,13 +649,6 @@
     "last_date": "2026-08-27 00:00:00",
     "rows": 3011,
     "sha256": "51a397cee4c8ae4ce1a1179dab9ca34b2387dd11bd19cf70767f25b3e600faf2"
-  },
-  "XMRUSDT_1d": {
-    "fetched_utc": "2026-08-28T14:53:10.554316+00:00",
-    "first_date": "2019-03-15 00:00:00",
-    "last_date": "2024-02-20 00:00:00",
-    "rows": 1804,
-    "sha256": "0754ea3905735e15c614bc1a42f65f79b14d2b2cf7abceb7c5e4bb255f9432ce"
   },
   "XRPUSDT_1d": {
     "fetched_utc": "2026-08-28T15:26:07.009092+00:00",
