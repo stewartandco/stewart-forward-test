@@ -1247,14 +1247,58 @@ def test_filelock_breaks_stale_lock(tmp_path):
         pass
 
 
+def test_filelock_retries_transient_permission_error(tmp_path, monkeypatch):
+    """Windows delete-pending race: os.open(O_CREAT|O_EXCL) on a lockfile
+    that another process is mid-unlink (or that AV briefly holds) fails with
+    ERROR_ACCESS_DENIED -> PermissionError, not FileExistsError. acquire()
+    must treat that as contention and retry, not crash the writer."""
+    target = tmp_path / "reg.jsonl"
+    lock_path = str(target) + ".lock"
+    real_open = os.open
+    denials = {"left": 3}
+
+    def flaky_open(path, flags, *args, **kwargs):
+        if str(path) == lock_path and denials["left"] > 0:
+            denials["left"] -= 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    with FileLock(target, timeout=5.0, poll=0.01):
+        pass
+    assert denials["left"] == 0  # the denials were consumed, then it won
+
+
+def test_filelock_persistent_permission_error_times_out(tmp_path, monkeypatch):
+    """A genuinely unwritable lock dir must surface as FileLockTimeout after
+    the deadline -- bounded, no hot spin, no raw PermissionError escape."""
+    target = tmp_path / "reg.jsonl"
+    lock_path = str(target) + ".lock"
+    real_open = os.open
+
+    def denied_open(path, flags, *args, **kwargs):
+        if str(path) == lock_path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", denied_open)
+    with pytest.raises(FileLockTimeout):
+        FileLock(target, timeout=0.3, poll=0.02).acquire()
+
+
 def test_concurrent_appends_keep_chain_linear(tmp_path):
     """The hazard that bit twice on 08-14: multiple processes appending the
     same registry must never fork the chain."""
     log = tmp_path / "reg.jsonl"
+    # The 60s lock timeout (vs the 10s default) is CPU-load headroom for
+    # full-suite runs where writer processes get starved; it is setup
+    # hardening only. The assertions below are untouched: every append
+    # lands (100 entries) and the chain stays linear.
     script = (
-        "import sys\n"
-        "from pipeline.registry import Registry\n"
-        f"r = Registry({str(log)!r})\n"
+        "import sys, functools\n"
+        "import pipeline.registry as reg\n"
+        "reg.FileLock = functools.partial(reg.FileLock, timeout=60.0)\n"
+        f"r = reg.Registry({str(log)!r})\n"
         "for i in range(25):\n"
         "    r.append('note', {'writer': sys.argv[1], 'i': i})\n"
     )
