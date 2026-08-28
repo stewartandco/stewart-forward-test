@@ -73,21 +73,39 @@ def write_bars(data_dir, asset, bars):
 
 
 def write_fixture_data(data_dir):
-    """One pre-cutoff bar each, then the hand-pinned three-bar OOS window:
-    btc closes [100, 110, 99] entered at open 100, eth closes
-    [200, 210, 231] entered at open 200."""
+    """One pre-cutoff bar each, then a three-bar OOS window with OVERNIGHT
+    GAPS (every open != the prior close), so entry-at-first-OPEN and
+    CLOSE-to-close day returns are actually pinned: an open-to-close or
+    entry-at-close mutant computes different numbers on these bars."""
     write_bars(data_dir, "BTCUSD", [
         (CUTOFF, 90, 95),
-        ("2026-01-02", 100, 100),
-        ("2026-01-03", 100, 110),
-        ("2026-01-04", 110, 99),
+        ("2026-01-02", 100, 104),
+        ("2026-01-03", 106, 110),
+        ("2026-01-04", 108, 99),
     ])
     write_bars(data_dir, "ETHUSD", [
         (CUTOFF, 190, 195),
-        ("2026-01-02", 200, 200),
-        ("2026-01-03", 200, 210),
-        ("2026-01-04", 210, 231),
+        ("2026-01-02", 200, 205),
+        ("2026-01-03", 208, 210),
+        ("2026-01-04", 214, 231),
     ])
+
+
+# Hand-derived control pins for write_fixture_data, straight from the
+# documented definitions (never from the tool's own code path):
+#   btc_hold gross = last OOS close / first OOS open - 1 = 99/100 - 1
+#   eth_hold gross = 231/200 - 1
+#   basket day returns (mean of per-asset day returns; day 1 =
+#   close_1/open_1 - 1, thereafter close_t/close_{t-1} - 1):
+#     d1 = ((104/100 - 1) + (205/200 - 1)) / 2 = (0.04 + 0.025) / 2
+#     d2 = ((110/104 - 1) + (210/205 - 1)) / 2
+#     d3 = ((99/110 - 1) + (231/210 - 1)) / 2 = (-0.10 + 0.10) / 2 = 0.0
+#   gross = (1 + d1) * (1 + d2) * (1 + d3) - 1 ~= +0.074875117260788
+BTC_HOLD_GROSS = 99 / 100 - 1
+ETH_HOLD_GROSS = 231 / 200 - 1
+BASKET_GROSS = ((1 + ((104 / 100 - 1) + (205 / 200 - 1)) / 2)
+                * (1 + ((110 / 104 - 1) + (210 / 205 - 1)) / 2)
+                * (1 + ((99 / 110 - 1) + (231 / 210 - 1)) / 2) - 1)
 
 
 def build_happy(tmp_path, sids=("sid-aaa", "sid-bbb")):
@@ -107,9 +125,10 @@ def build_happy(tmp_path, sids=("sid-aaa", "sid-bbb")):
     return registry_path, artifacts, data_dir, out
 
 
-def run_main(registry_path, artifacts, data_dir, out):
+def run_main(registry_path, artifacts, data_dir, out,
+             artifacts_flag="--artifacts-dir"):
     return tool.main(["--registry", str(registry_path),
-                      "--artifacts", str(artifacts),
+                      artifacts_flag, str(artifacts),
                       "--data-dir", str(data_dir),
                       "--out", str(out)])
 
@@ -128,9 +147,14 @@ def test_cohort_last_state_and_class_filter(tmp_path):
     register(reg, "out-was-quarantine")
     change_state(reg, "out-was-quarantine", "quarantine")
     change_state(reg, "out-was-quarantine", "graveyard")
+    # Reverse direction: last state wins BOTH ways -- a sid whose chain
+    # history ends graveyard -> quarantine is IN.
+    register(reg, "in-revived")
+    change_state(reg, "in-revived", "graveyard")
+    change_state(reg, "in-revived", "quarantine")
 
     cohort = tool.find_crypto_quarantine_cohort(reg)
-    assert sorted(cohort) == ["in-crypto"]
+    assert sorted(cohort) == ["in-crypto", "in-revived"]
 
 
 def test_cohort_hard_asserts_pooled_universe(tmp_path):
@@ -153,7 +177,8 @@ def test_refuses_on_count_mismatch_and_writes_nothing(tmp_path, capsys):
     assert not out.exists()
     assert not out.parent.exists()  # not even the parent dir was created
     err = capsys.readouterr().err
-    assert "20" in err and "2" in err  # actual vs expected in the message
+    assert "expected exactly 20" in err   # expected count in the message
+    assert "found 2." in err              # actual count in the message
 
 
 # -- 3. completeness refusal ----------------------------------------------
@@ -192,19 +217,22 @@ def _one_row(tmp_path):
 
 
 def test_basket_hold_pin_hand_computed(tmp_path):
-    # r_btc = [0.0, +0.10, -0.10], r_eth = [0.0, +0.05, +0.10]
-    # basket day returns [0.0, +0.075, 0.0]; gross = 1.075 - 1 = 0.075
+    # Gapped bars: see the hand derivation above BASKET_GROSS. An
+    # open-to-close mutant (using each day's own open) or an
+    # entry-at-close mutant (day 1 from close_1 instead of open_1) lands
+    # on different numbers because every open gaps away from the prior
+    # close in this fixture.
     row = _one_row(tmp_path)
     assert row["basket_hold"] == pytest.approx(
-        0.075 - 2 * PER_SIDE, abs=1e-12)
+        BASKET_GROSS - 2 * PER_SIDE, abs=1e-12)
 
 
 def test_per_asset_hold_pins(tmp_path):
     row = _one_row(tmp_path)
     assert row["btc_hold"] == pytest.approx(
-        (99 / 100 - 1) - 2 * PER_SIDE, abs=1e-12)
+        BTC_HOLD_GROSS - 2 * PER_SIDE, abs=1e-12)
     assert row["eth_hold"] == pytest.approx(
-        (231 / 200 - 1) - 2 * PER_SIDE, abs=1e-12)
+        ETH_HOLD_GROSS - 2 * PER_SIDE, abs=1e-12)
 
 
 def test_strategy_net_and_excess(tmp_path):
@@ -232,6 +260,13 @@ def test_time_suffixed_cutoff_bar_is_not_oos(tmp_path):
     assert [b["date"] for b in oos] == ["2026-08-02 00:00:00"]
 
 
+def test_basket_refuses_disjoint_oos_calendars():
+    btc = [{"date": "2026-01-02", "open": 100.0, "close": 101.0}]
+    eth = [{"date": "2026-01-03", "open": 200.0, "close": 201.0}]
+    with pytest.raises(ValueError, match="shared OOS calendar"):
+        tool._basket_net(btc, eth, PER_SIDE, "sid-x")
+
+
 # -- 7. edge numbers in the report ----------------------------------------
 
 def test_edge_labels_and_columns_in_report(tmp_path, monkeypatch):
@@ -245,6 +280,11 @@ def test_edge_labels_and_columns_in_report(tmp_path, monkeypatch):
     assert "READ ONLY" in text
     for col in ("btc_hold", "eth_hold", "basket_hold"):
         assert col in text
+    # Review riders: shared-cutoff framing sits with the numbers, and the
+    # honesty notes call out the control-cost asymmetry.
+    assert "share one committed cutoff" in text
+    assert "cost asymmetry" in text
+    assert "notional_frac" in text
 
 
 # -- 8. read-only ----------------------------------------------------------
@@ -255,7 +295,9 @@ def test_read_only_registry_untouched_only_report_written(
     monkeypatch.setattr(tool, "EXPECTED_N", 2)
     registry_bytes = registry_path.read_bytes()
     before = {p for p in tmp_path.rglob("*") if p.is_file()}
-    assert run_main(registry_path, artifacts, data_dir, out) == 0
+    # Exercised via the eq-sibling-compat "--artifacts" alias.
+    assert run_main(registry_path, artifacts, data_dir, out,
+                    artifacts_flag="--artifacts") == 0
     after = {p for p in tmp_path.rglob("*") if p.is_file()}
     assert registry_path.read_bytes() == registry_bytes
     assert after - before == {out}

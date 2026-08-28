@@ -228,6 +228,7 @@ def benchmark_row(sid: str, spec: dict, artifacts_dir: Path,
     basket_hold = _basket_net(btc_oos, eth_oos, per_side, sid)
 
     return {"sid": sid,
+            "cutoff": cutoff,
             "sibling_group_id": spec["provenance"]["sibling_group_id"],
             "strategy_net": strategy_net,
             "btc_hold": btc_hold, "eth_hold": eth_hold,
@@ -239,7 +240,18 @@ def benchmark_row(sid: str, spec: dict, artifacts_dir: Path,
 
 def render_report(rows: list[dict], numbers: dict[str, int],
                   generated_utc: datetime) -> str:
-    rows_sorted = sorted(rows, key=lambda r: numbers.get(r["sid"], 0))
+    rows_sorted = sorted(rows, key=lambda r: numbers[r["sid"]])
+    cutoffs = sorted({r["cutoff"] for r in rows})
+    if len(cutoffs) == 1:
+        cutoff_note = (
+            f"All {len(rows)} strategies share one committed cutoff "
+            f"({cutoffs[0]}), so the three control values are constant "
+            f"across rows; each excess column compares {len(rows)} "
+            f"strategy returns to a single control value.")
+    else:
+        cutoff_note = (
+            f"Committed cutoffs differ across strategies "
+            f"({', '.join(cutoffs)}), so control values vary by row.")
 
     def summary(key: str) -> tuple[int, float]:
         n_pos = sum(1 for r in rows if r[key] > 0)
@@ -272,6 +284,8 @@ def render_report(rows: list[dict], numbers: dict[str, int],
         "",
         "OOS window: bars with date strictly after the committed "
         "config.json cutoff, compared via [:10] date slices only.",
+        "",
+        cutoff_note,
         "",
         f"Generated {generated_utc:%Y-%m-%d} UTC, {len(rows)} strategies.",
         "",
@@ -309,6 +323,14 @@ def render_report(rows: list[dict], numbers: dict[str, int],
         "buy-and-hold -- an absolute gate passing beta. If all 20 crypto "
         "strategies sit below all three controls here, that is the same "
         "finding, and it is the finding.",
+        "- Control-cost asymmetry: strategy_net embeds per-trade costs on "
+        "every committed trade, while the controls pay ONE round trip and "
+        "the daily-rebalanced basket is charged no rebalancing costs -- "
+        "control costs are understated, so negative excess is partly cost "
+        "asymmetry at the margin; positive excess is the stronger signal. "
+        "strategy_net is also at the strategy's actual notional_frac "
+        "exposure vs a 100%-invested control (the same convention as the "
+        "live oos_negative gate).",
         "- RECORDED, NOT GATED: nothing here changes any strategy's "
         "quarantine state. This is a report, not chain data.",
         "- Edge numbers are D11 display labels (chain registration order), "
@@ -322,8 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--registry", type=Path,
                     default=LAYER_ROOT / "registry_log.jsonl")
-    ap.add_argument("--artifacts", type=Path,
-                    default=LAYER_ROOT / "artifacts")
+    ap.add_argument("--artifacts-dir", "--artifacts", dest="artifacts_dir",
+                    type=Path, default=LAYER_ROOT / "artifacts")
     ap.add_argument("--data-dir", type=Path, default=LAYER_ROOT / "data")
     ap.add_argument("--out", type=Path, default=LAYER_ROOT / "docs" / "runs"
                     / "2026-08-28-crypto-pooled-benchmark-report.md")
@@ -339,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  found: {sid}", file=sys.stderr)
         raise SystemExit(2)
 
-    problems = check_complete(cohort, args.artifacts, args.data_dir)
+    problems = check_complete(cohort, args.artifacts_dir, args.data_dir)
     if problems:
         print(f"REFUSED: {len(problems)} problem(s) across the "
               f"{EXPECTED_N}-strategy cohort. Nothing written.",
@@ -349,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(2)
 
     numbers = edge_numbers(registry.entries())
-    rows = [benchmark_row(sid, spec, args.artifacts, args.data_dir)
+    rows = [benchmark_row(sid, spec, args.artifacts_dir, args.data_dir)
             for sid, spec in cohort.items()]
     report = render_report(rows, numbers, datetime.now(timezone.utc))
     args.out.parent.mkdir(parents=True, exist_ok=True)
