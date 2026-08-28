@@ -45,13 +45,28 @@ FIELDS = ("date", "open", "high", "low", "close", "volume")
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 UNIVERSE_TOOL = "tools_select_crypto_universe.py"
 
+# Clock-skew margin on the still-open-bar drop: resume never re-serves a bar,
+# so a skew-admitted partial bar would be PERMANENT in a byte-deterministic
+# corpus. The margin only costs admitting a genuinely-closed bar one run
+# later; a partial bar admitted once would poison every downstream read of
+# full history forever.
+SKEW_MARGIN_MS = 60_000
+
 
 class RateLimited(Exception):
-    """HTTP 429: the server told us how long to back off."""
+    """HTTP 429: the server told us how long to back off.
 
-    def __init__(self, retry_after: float):
+    `retry_ok=False` marks a Retry-After beyond the 120s cap: the server is
+    telling us to go away, so `_get_with_retry` never retries it -- it goes
+    straight to main's abort path, exactly like a ban. The stored retry_after
+    is capped at 120s because the cap bounds how long a LEGITIMATE wait can
+    be; it is never a license to sleep less and retry early.
+    """
+
+    def __init__(self, retry_after: float, retry_ok: bool = True):
         super().__init__(f"rate limited, retry after {retry_after}s")
         self.retry_after = retry_after
+        self.retry_ok = retry_ok
 
 
 class BinanceBanned(Exception):
@@ -73,10 +88,10 @@ def _http_get_json(url: str):
     except urllib.error.HTTPError as e:
         if e.code == 429:
             try:
-                retry_after = min(float(e.headers.get("Retry-After", 10)), 120.0)
+                raw = float(e.headers.get("Retry-After", 10))
             except (TypeError, ValueError):
-                retry_after = 10.0
-            raise RateLimited(retry_after) from e
+                raw = 10.0
+            raise RateLimited(min(raw, 120.0), retry_ok=raw <= 120.0) from e
         if e.code == 418:
             raise BinanceBanned(
                 "HTTP 418 from Binance: this IP is BANNED (exchange-wide, shared by "
@@ -88,7 +103,9 @@ def _http_get_json(url: str):
 def _get_with_retry(url: str, tries: int = 3):
     """RateLimited sleeps its own retry_after (counts as a try); other
     transient errors back off 2*attempt seconds. BinanceBanned is NEVER
-    retried -- see the class docstring. Exhausted tries raise the last error.
+    retried -- see the class docstring -- and neither is a RateLimited whose
+    Retry-After exceeded the 120s cap (`retry_ok=False`): both go straight
+    up to main's abort path. Exhausted tries raise the last error.
     """
     for attempt in range(1, tries + 1):
         try:
@@ -96,7 +113,7 @@ def _get_with_retry(url: str, tries: int = 3):
         except BinanceBanned:
             raise
         except RateLimited as e:
-            if attempt == tries:
+            if not e.retry_ok or attempt == tries:
                 raise
             time.sleep(e.retry_after)
         except (urllib.error.URLError, TimeoutError) as e:
@@ -116,11 +133,25 @@ def _ms_to_date(open_ms: int) -> str:
 
 def _read_existing(path: Path) -> dict[str, tuple]:
     """Existing rows keyed by date, field strings kept verbatim so an
-    unchanged row round-trips byte-identically."""
+    unchanged row round-trips byte-identically.
+
+    A file this module cannot parse (missing columns, malformed last date,
+    bad encoding) refuses LOUDLY rather than resuming from garbage: the
+    resume start time comes from the last row, so a silently-misparsed file
+    would refetch from the wrong offset or merge junk rows into a
+    byte-deterministic corpus.
+    """
     rows: dict[str, tuple] = {}
-    with path.open("r", encoding="utf-8", newline="") as f:
-        for row in csv.DictReader(f):
-            rows[row["date"]] = tuple(row[k] for k in FIELDS)
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                rows[row["date"]] = tuple(row[k] for k in FIELDS)
+        if rows:
+            _date_to_ms(next(reversed(rows)))   # resume anchor must parse
+    except (KeyError, TypeError, ValueError, csv.Error, UnicodeDecodeError) as e:
+        raise RuntimeError(
+            f"{path} is not a readable fetch CSV ({e!r}) - "
+            "delete it to refetch from scratch") from e
     return rows
 
 
@@ -139,6 +170,16 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
 
     The write is atomic (`.tmp` + os.replace): a failure mid-write leaves the
     original file untouched and no `.tmp` masquerading as data.
+
+    RAM profile: the whole merged series is held in memory and written once
+    at the end -- there is no intra-cell checkpoint. An intraday backfill
+    (e.g. 15m from genesis, ~200k+ klines) that dies mid-cell writes nothing
+    and restarts from its previous file on the next run.
+
+    Resume trusts the file's own ordering: the LAST row is the newest bar.
+    Historical gaps inside an existing file are never backfilled -- the fetch
+    only ever asks the exchange for bars after the last row. A file with a
+    hole stays holed until it is deleted and refetched from scratch.
     """
     if tf not in cells.TIMEFRAMES:
         raise ValueError(
@@ -162,7 +203,12 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
         if not batch:
             break
         for k in batch:
-            if k[6] >= now_ms:           # still-open bar: fabricated OHLCV, drop
+            # Still-open bar: fabricated OHLCV, drop. The SKEW_MARGIN_MS
+            # widens the drop window because resume never re-serves a bar: a
+            # clock-skew-admitted partial bar would be PERMANENT in this
+            # byte-deterministic corpus, while the margin only costs
+            # admitting a genuinely-closed bar one run later.
+            if k[6] >= now_ms - SKEW_MARGIN_MS:
                 continue
             merged[_ms_to_date(k[0])] = (
                 _ms_to_date(k[0]), str(float(k[1])), str(float(k[2])),
@@ -204,8 +250,11 @@ def update_snapshot_manifest(data_dir: Path, results: dict[str, dict]) -> Path:
     if out.exists():
         try:
             previous = json.loads(out.read_text(encoding="utf-8"))
-        except Exception:
-            previous = {}   # a corrupt prior manifest is not this run's problem to fix
+        except Exception as e:
+            # A corrupt prior manifest is not this run's problem to fix, but
+            # silently discarding provenance history is not acceptable either.
+            print(f"WARN: corrupt snapshot manifest {out} reset to {{}} ({e!r})")
+            previous = {}
 
     fetched_utc = datetime.now(timezone.utc).isoformat()
     merged = dict(previous)
@@ -264,17 +313,32 @@ def main(argv: list[str] | None = None) -> int:
         universe = json.loads(manifest_path.read_text(encoding="utf-8"))
         assets = [row["binance_symbol"] for row in universe["admitted"]]
 
+    cells_todo = [(symbol, tf) for symbol in assets for tf in timeframes]
     results: dict[str, dict] = {}
     failures: list[str] = []
-    banned: BinanceBanned | None = None
-    for symbol in assets:
-        for tf in timeframes:
+    abort_msg: str | None = None
+    try:
+        for i, (symbol, tf) in enumerate(cells_todo):
+            if i:
+                time.sleep(0.2)          # pacing between cells too: the IP budget
+                                         # is shared with every Binance consumer here
             key = f"{symbol}_{tf}"
             prior = _csv_row_count(data_dir / f"{key}.csv")
             try:
                 res = fetch_symbol(symbol, tf, data_dir)
             except BinanceBanned as e:
-                banned = e
+                abort_msg = str(e)
+                break
+            except RateLimited as e:
+                # Retries exhausted (or Retry-After beyond the cap): the
+                # server is saturated or telling us to go away. Continuing to
+                # the next cell would keep hammering the shared IP, so this
+                # aborts the WHOLE run -- and sleeps the final retry_after
+                # first, so the abort itself respects the back-off.
+                time.sleep(e.retry_after)
+                abort_msg = (f"rate-limit exhaustion on {key} "
+                             f"(retry_after {e.retry_after}s): aborting to protect "
+                             f"the shared IP - wait out the back-off before re-running")
                 break
             except Exception as e:       # one broken cell must not strand the rest
                 failures.append(key)
@@ -282,17 +346,17 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             results[key] = res
             print(f"{key}: {res['rows']} rows ({res['rows'] - prior} new)")
-        if banned is not None:
-            break
+    finally:
+        # Cells completed before a ban, an abort, a crash, or a Ctrl+C hold
+        # valid, already-replaced files; record their provenance no matter
+        # how the run ends, or the manifest would carry stale-wrong sha256s
+        # for CSVs that were in fact rewritten.
+        if results:
+            update_snapshot_manifest(data_dir, results)
 
-    # Cells completed before a ban (or a per-cell failure) hold valid files;
-    # record their provenance regardless of how the run ends.
-    if results:
-        update_snapshot_manifest(data_dir, results)
-
-    if banned is not None:
-        print(f"ABORTED: {banned}")
-        print(f"summary: {len(results)} cell(s) completed before the ban; "
+    if abort_msg is not None:
+        print(f"ABORTED: {abort_msg}")
+        print(f"summary: {len(results)} cell(s) completed before the abort; "
               f"manifest updated for those only")
         return 1
     print(f"summary: {len(results)} cell(s) fetched, {len(failures)} failed")
