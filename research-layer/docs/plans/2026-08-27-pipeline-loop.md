@@ -1275,10 +1275,11 @@ chain.lock; a stale one (>3h) is broken by the loop on its second sighting.
 
 - [ ] **Step 6 (COEN-GATED - do not execute without Task 0 complete): activation sequence**, in session with Coen:
 
-1. Supervised run: `python -m pipeline.loop --once --dry-run` then, if it would fire and Coen agrees, `python -m pipeline.loop --once` watched end to end; verify chain `python verify_registry.py registry_log.jsonl` = VALID after.
-2. Register: `schtasks /Create /TN "StewartCo\25_PipelineLoop" /XML "E:\Users\Coen\Claude\quant\tasks\xml\25_PipelineLoop.xml" /F`
-3. Elevated: `powershell -ExecutionPolicy Bypass -File E:\Users\Coen\Claude\quant\tasks\apply_retry_settings.ps1 -Task 25_PipelineLoop` (from an admin shell; un-elevated reaches only user-created tasks).
-4. After 3 clean scheduled days: pin in `E:\Users\Coen\Claude\sc-ops-sentinel\manifest.json` (daily class - deliberately, per the standing rule) AND `E:\Users\Coen\Claude\morpheus-hub\backend\app\connectors\fleet\tasks.py` in the SAME pass, then restart the hub and verify `/api/threepio/fleet` shows 25 pinned with `extra: []`.
+0. `python -m pipeline.loop --seed-watermarks` (MANDATORY FIRST -- an unseeded state file fires a whole-corpus crypto generation; verified: 624 routable crypto cards would trigger). Run the supervised `--once` from a SHELL, not the scheduled task (no PT2H limit), and check the gauntlet-state backlog size first (303 strategies currently pending gauntlet from bond-gen1).
+2. Supervised run: `python -m pipeline.loop --once --dry-run` then, if it would fire and Coen agrees, `python -m pipeline.loop --once` watched end to end; verify chain `python verify_registry.py registry_log.jsonl` = VALID after.
+3. Register: `schtasks /Create /TN "StewartCo\25_PipelineLoop" /XML "E:\Users\Coen\Claude\quant\tasks\xml\25_PipelineLoop.xml" /F`
+4. Elevated: `powershell -ExecutionPolicy Bypass -File E:\Users\Coen\Claude\quant\tasks\apply_retry_settings.ps1 -Task 25_PipelineLoop` (from an admin shell; un-elevated reaches only user-created tasks).
+5. After 3 clean scheduled days: pin in `E:\Users\Coen\Claude\sc-ops-sentinel\manifest.json` (daily class - deliberately, per the standing rule) AND `E:\Users\Coen\Claude\morpheus-hub\backend\app\connectors\fleet\tasks.py` in the SAME pass, then restart the hub and verify `/api/threepio/fleet` shows 25 pinned with `extra: []`.
 
 - [ ] **Step 7: Commit the buildable pieces**
 

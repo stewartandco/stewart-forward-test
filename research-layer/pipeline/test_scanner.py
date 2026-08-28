@@ -29,6 +29,7 @@ from .scanstatus import ActionLog, verify_chain, write_status, write_digest
 from .scanner import poll_source, process_new_items, pending_tier3_count
 from .registry import Registry
 from .reader import extract_claims_usage
+from .chainlock import ChainLock
 
 HERE = Path(__file__).resolve().parent
 LAYER = HERE.parent
@@ -693,6 +694,57 @@ def test_resume_respects_the_retry_cap(tmp_path):
     assert seen.status("cursed") == "deferred_parked"
 
 
+def test_deferred_lock_never_parks_but_deferred_screen_still_does(tmp_path):
+    """Park exists to stop pathological ITEMS; lock contention is
+    environmental, not the item's fault, so deferred_lock occurrences are
+    excluded from the park-attempt count. Unbounded re-feed on lock
+    contention alone is safe because the pre-gather chain.lock probe in
+    _extract_item / process_inbox makes each deferral a cheap check, not a
+    re-paid extraction."""
+    from .scanner import refeedable_deferred
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    for _ in range(5):  # well past MAX_DEFER_ATTEMPTS (3)
+        seen.record("lockish", "s1", "deferred_lock", reason="chain.lock held",
+                    title="T", link="https://x/lockish")
+    refed = refeedable_deferred(seen)
+    assert "lockish" in [i["item_id"] for i in refed]
+    assert seen.status("lockish") == "deferred_lock"  # never parked
+
+    for _ in range(3):
+        seen.record("screenish", "s1", "deferred_screen", reason="api_error",
+                    title="T", link="https://x/screenish")
+    refed2 = refeedable_deferred(seen)
+    assert "screenish" not in [i["item_id"] for i in refed2]
+    assert seen.status("screenish") == "deferred_parked"
+
+    # mixed: lock-contention noise must not shift the screen-driven park
+    # threshold either way. Production items always carry an initial 'seen'
+    # event (poll_source records it first).
+    seen.record("at-cap", "s1", "seen", title="T", link="https://x/at-cap")
+    for _ in range(2):
+        seen.record("at-cap", "s1", "deferred_screen", reason="api_error",
+                    title="T", link="https://x/at-cap")
+    for _ in range(7):  # heavy lock noise, must not delay the park
+        seen.record("at-cap", "s1", "deferred_lock", reason="chain.lock held",
+                    title="T", link="https://x/at-cap")
+    refed3 = refeedable_deferred(seen)
+    assert "at-cap" not in [i["item_id"] for i in refed3]
+    # 1 seen + 2 deferred_screen = 3 non-lock attempts: parks at the same
+    # point it would with zero deferred_lock events in its history
+    assert seen.status("at-cap") == "deferred_parked"
+
+    seen.record("under-cap", "s1", "seen", title="T", link="https://x/under-cap")
+    seen.record("under-cap", "s1", "deferred_screen", reason="api_error",
+                title="T", link="https://x/under-cap")
+    for _ in range(9):  # even heavier lock noise, still must not park it
+        seen.record("under-cap", "s1", "deferred_lock", reason="chain.lock held",
+                    title="T", link="https://x/under-cap")
+    refed4 = refeedable_deferred(seen)
+    # 1 seen + 1 deferred_screen = 2 non-lock attempts: under the cap of 3
+    assert "under-cap" in [i["item_id"] for i in refed4]
+    assert seen.status("under-cap") == "deferred_lock"  # not parked
+
+
 def test_feed_autodiscovery_from_listing_html():
     from .feeds import discover_feed
     html = ('<html><head><link rel="alternate" type="application/rss+xml" '
@@ -1113,6 +1165,86 @@ def test_inbox_ingests_dropped_html_and_resolves_flagged_item(tmp_path):
     assert verify_chain(tmp_path / "act.jsonl")
 
 
+def test_inbox_takes_chain_lock_for_registration_window(tmp_path, monkeypatch):
+    """The inbox path registers cards through the same registry as the
+    scanner's own extraction path, so per the spec (chain lock 'adopted by
+    ALL of the scanner's registration paths') it must take the same
+    chain.lock window."""
+    from .scanner import process_inbox
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "saved_page.html").write_text(ARTICLE_HTML, encoding="utf-8")
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    seen.record("p1", "alpha-architect", "paywalled",
+                title="VIX Trend Following Out of Sample",
+                link="https://alphaarchitect.com/vix-trend-following-out-of-sample/",
+                reason="http 403")
+    registry = Registry(tmp_path / "registry_log.jsonl")
+    meter = BudgetMeter(tmp_path / "led.jsonl")
+    client = StubClient([_inbox_msg()])
+    lock_path = tmp_path / "logs" / "chain.lock"
+
+    orig_register = Registry.register_card
+    seen_during_append = []
+
+    def spy_register(self, card):
+        seen_during_append.append(lock_path.exists())
+        if lock_path.exists():
+            info = json.loads(lock_path.read_text(encoding="utf-8"))
+            seen_during_append.append(info["holder"])
+        return orig_register(self, card)
+
+    monkeypatch.setattr(Registry, "register_card", spy_register)
+
+    stats = process_inbox(client=client, model="claude-sonnet-5", meter=meter,
+                          seen=seen, registry=registry,
+                          actions=ActionLog(tmp_path / "act.jsonl"),
+                          inbox=inbox)
+
+    assert stats["files"] == 1 and stats["cards_registered"] == 1
+    assert seen_during_append == [True, "scanner"]
+    assert not lock_path.exists()
+
+
+def test_inbox_defers_when_chain_lock_held(tmp_path):
+    """The inbox has no deferred-status mechanism of its own: when the lock
+    is held, the file is left in place, unregistered, for the next cycle to
+    retry. The pre-gather probe means this happens BEFORE any LLM call --
+    spend is truly zero, not just registration."""
+    from .scanner import process_inbox
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "saved_page.html").write_text(ARTICLE_HTML, encoding="utf-8")
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    seen.record("p1", "alpha-architect", "paywalled",
+                title="VIX Trend Following Out of Sample",
+                link="https://alphaarchitect.com/vix-trend-following-out-of-sample/",
+                reason="http 403")
+    registry = Registry(tmp_path / "registry_log.jsonl")
+    meter = BudgetMeter(tmp_path / "led.jsonl")
+    client = StubClient([_inbox_msg()])
+    actions_path = tmp_path / "act.jsonl"
+
+    lock = ChainLock(tmp_path / "logs", holder="session", purpose="manual")
+    lock.acquire()
+    try:
+        stats = process_inbox(client=client, model="claude-sonnet-5", meter=meter,
+                              seen=seen, registry=registry,
+                              actions=ActionLog(actions_path),
+                              inbox=inbox)
+    finally:
+        lock.release()
+
+    assert stats["files"] == 0
+    assert stats["cards_registered"] == 0
+    assert stats["deferred_lock"] == 1
+    assert registry.cards() == {}
+    assert (inbox / "saved_page.html").exists()  # left for the next cycle
+    assert seen.status("p1") == "paywalled"  # untouched
+    assert client.calls == []  # the pre-gather probe means no LLM call at all
+    assert not actions_path.exists()  # no inbox_ingested event was written
+
+
 def test_inbox_sidecar_url_wins_and_unidentified_file_is_left(tmp_path):
     from .scanner import process_inbox
     inbox = tmp_path / "inbox"
@@ -1394,6 +1526,145 @@ def test_full_funnel_registers_pending_card_and_flags_paywall(tmp_path):
     disc = load_discovery(tmp_path / "discovery.jsonl")
     assert any("citedblog.example" in d["url"] for d in disc)
     assert verify_chain(tmp_path / "actions.jsonl")
+
+
+def test_extract_item_takes_chain_lock_for_registration_window(tmp_path, monkeypatch):
+    """While cards are being registered, logs/chain.lock exists and names the
+    scanner; after extraction it is gone."""
+    src = make_source()
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    fetch = _fetch_factory({src["feed"]: (200, RSS_XML)})
+    new_items = poll_source(src, seen, fetch)
+
+    filler = ("<p>We test the effect across a long sample of daily bars and "
+              "report the resulting risk-adjusted performance in detail.</p>" * 12)
+    article = ("<html><body><p>We find that momentum persists in crypto for "
+               "20 days after formation.</p>" + filler + "</body></html>")
+    claims = [{"claim": "Crypto momentum persists for 20 days after formation.",
+               "quote": "momentum persists in crypto for 20 days after formation",
+               "locator": "full document", "asset_classes": ["crypto"],
+               "topics": ["momentum"], "horizon": "daily",
+               "testability_score": 0.8, "data_required": ["daily OHLCV"],
+               "notes": None}]
+    client = StubClient([
+        # only the momo item is kept; the course item is screen_kill so no
+        # second fetch/extraction is needed
+        _screen_msg([{"id": new_items[0]["item_id"], "keep": True, "reason": "edge"},
+                     {"id": new_items[1]["item_id"], "keep": False, "reason": "marketing"}]),
+        SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text",
+                                     text=json.dumps({"claims": claims}))],
+            usage=SimpleNamespace(input_tokens=800, output_tokens=80,
+                                  cache_read_input_tokens=0,
+                                  cache_creation_input_tokens=0)),
+    ])
+    registry = Registry(tmp_path / "registry_log.jsonl")
+    meter = BudgetMeter(tmp_path / "ledger.jsonl")
+    lock_path = tmp_path / "logs" / "chain.lock"
+
+    orig_register = Registry.register_card
+    seen_during_append = []
+
+    def spy_register(self, card):
+        seen_during_append.append(lock_path.exists())
+        if lock_path.exists():
+            info = json.loads(lock_path.read_text(encoding="utf-8"))
+            seen_during_append.append(info["holder"])
+        return orig_register(self, card)
+
+    monkeypatch.setattr(Registry, "register_card", spy_register)
+
+    # regression guard for the invariant Task 5 exists for: the lock must
+    # cover only the append batch, never the (much slower) LLM call that
+    # gathers claims — a future refactor sliding acquire() above the gather
+    # loop would hold the lock for the extraction call too.
+    orig_stream = client.messages.stream
+    lock_absent_during_extract = []
+
+    def spy_stream(**kw):
+        lock_absent_during_extract.append(not lock_path.exists())
+        return orig_stream(**kw)
+
+    monkeypatch.setattr(client.messages, "stream", spy_stream)
+
+    stats = process_new_items(
+        new_items, client=client, model="claude-sonnet-5", meter=meter,
+        seen=seen, registry=registry,
+        fetch=_fetch_factory({"https://example.org/momo?utm_source=rss":
+                              (200, article)}),
+        watchlist_sources=[src], discovery_path=tmp_path / "discovery.jsonl",
+        screen_log=tmp_path / "screen_log.jsonl",
+        actions=ActionLog(tmp_path / "actions.jsonl"))
+
+    assert stats["cards_registered"] == 1
+    # the lock existed (and named the scanner) at append time...
+    assert seen_during_append == [True, "scanner"]
+    # ...but was absent during the extraction call itself...
+    assert lock_absent_during_extract == [True]
+    # ...and is released once the registration window closes
+    assert not lock_path.exists()
+
+
+def test_lock_held_defers_item_zero_registered_and_refeeds(tmp_path):
+    """When chain.lock is held by another writer, the pre-gather probe
+    defers the item BEFORE the extraction LLM call runs (not just before
+    registration): nothing is spent, nothing is registered, and the item
+    lands as deferred_lock, owed a re-feed."""
+    from .scanner import refeedable_deferred
+    src = make_source()
+    seen = SeenStore(tmp_path / "seen.jsonl")
+    fetch = _fetch_factory({src["feed"]: (200, RSS_XML)})
+    new_items = poll_source(src, seen, fetch)
+
+    filler = ("<p>We test the effect across a long sample of daily bars and "
+              "report the resulting risk-adjusted performance in detail.</p>" * 12)
+    article = ("<html><body><p>We find that momentum persists in crypto for "
+               "20 days after formation.</p>" + filler + "</body></html>")
+    claims = [{"claim": "Crypto momentum persists for 20 days after formation.",
+               "quote": "momentum persists in crypto for 20 days after formation",
+               "locator": "full document", "asset_classes": ["crypto"],
+               "topics": ["momentum"], "horizon": "daily",
+               "testability_score": 0.8, "data_required": ["daily OHLCV"],
+               "notes": None}]
+    client = StubClient([
+        _screen_msg([{"id": new_items[0]["item_id"], "keep": True, "reason": "edge"},
+                     {"id": new_items[1]["item_id"], "keep": False, "reason": "marketing"}]),
+        SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text",
+                                     text=json.dumps({"claims": claims}))],
+            usage=SimpleNamespace(input_tokens=800, output_tokens=80,
+                                  cache_read_input_tokens=0,
+                                  cache_creation_input_tokens=0)),
+    ])
+    registry = Registry(tmp_path / "registry_log.jsonl")
+    meter = BudgetMeter(tmp_path / "ledger.jsonl")
+
+    lock = ChainLock(tmp_path / "logs", holder="session", purpose="manual")
+    lock.acquire()
+    try:
+        stats = process_new_items(
+            new_items, client=client, model="claude-sonnet-5", meter=meter,
+            seen=seen, registry=registry,
+            fetch=_fetch_factory({"https://example.org/momo?utm_source=rss":
+                                  (200, article)}),
+            watchlist_sources=[src], discovery_path=tmp_path / "discovery.jsonl",
+            screen_log=tmp_path / "screen_log.jsonl",
+            actions=ActionLog(tmp_path / "actions.jsonl"))
+    finally:
+        lock.release()
+
+    assert stats["cards_registered"] == 0
+    assert stats["deferred_lock"] == 1
+    assert registry.cards() == {}
+    assert seen.status(new_items[0]["item_id"]) == "deferred_lock"
+    refed_ids = {i["item_id"] for i in refeedable_deferred(seen)}
+    assert new_items[0]["item_id"] in refed_ids
+    # only the screening call happened -- the pre-gather probe deferred the
+    # item before extraction, so the stubbed extraction message was never
+    # consumed
+    assert len(client.calls) == 1
 
 
 def test_funnel_at_budget_cap_polls_but_defers(tmp_path):

@@ -51,3 +51,17 @@ def build(stage_results: dict, spent: float,
         "escalations": escalations,
         "push": any(e in PUSH_TRIGGERS for e in escalations),
     }
+
+
+def write(path, payload: dict) -> None:
+    """Atomic write (tmp + replace); dumps args mirror loop_state.save
+    (sort_keys, default ensure_ascii)."""
+    import json
+    import os
+    from pathlib import Path
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(p) + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, p)

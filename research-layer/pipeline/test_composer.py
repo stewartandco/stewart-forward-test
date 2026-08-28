@@ -612,3 +612,72 @@ def test_expansion_without_provenance_is_left_alone():
     base.pop("provenance", None)
     out = composer.expand_universe(base, [("ETHUSDT", "15m")])
     assert "sibling_group_id" not in out[0].get("provenance", {})
+
+
+# --- routable_cards extraction (loop plan Task 2) ---
+
+def _card(cid, asset_classes=None, topics=None):
+    # NOTE (adjusted from the plan's draft): composer.py reads topics from
+    # (card.get("tags") or {}).get("topics") -- nested under "tags", the
+    # same place asset_classes lives (see composer.py's INDEX_FUTURES_PROXY_
+    # TOPICS/METALS_PROXY_TOPICS matching, and test_composer_equity.py's own
+    # fixture cards) -- not a top-level "topics" key. A top-level key, as
+    # the plan's draft had it, is silently invisible to the proxy-lane match:
+    # the "fut" card then reaches neither propose_input nor the proxy set,
+    # so test_routable_cards_equity_proxy_lane_recorded's
+    # `assert "fut" in cards` fails outright.
+    tags = {}
+    if asset_classes is not None:
+        tags["asset_classes"] = asset_classes
+    if topics is not None:
+        tags["topics"] = topics
+    return {
+        "card_id": cid,
+        "claim": f"claim {cid}",
+        "tags": tags,
+        "review": {"status": "accepted", "reject_reason": None},
+    }
+
+
+def test_routable_cards_crypto_is_unrestricted():
+    from .composer import routable_cards
+    accepted = {"a": _card("a", ["equities"]), "b": _card("b", None)}
+    cards, meta = routable_cards(accepted, "crypto")
+    assert set(cards) == {"a", "b"}
+    assert meta["routed_card_ids"] is None      # unrestricted: no routing applied
+    # crypto is the fully-unrestricted path -- ALL THREE meta values are
+    # None, not just routed_card_ids (pins the corrected docstring).
+    assert meta["proxy_routed_card_ids"] is None and meta["routing"] is None
+
+
+def test_routable_cards_fx_filters_on_tags():
+    from .composer import routable_cards
+    accepted = {
+        "fx1": _card("fx1", ["fx"]),
+        "crs": _card("crs", None),              # missing tags -> ["cross"] default
+        "eq1": _card("eq1", ["equities"]),
+    }
+    cards, meta = routable_cards(accepted, "fx")
+    assert set(cards) == {"fx1", "crs"}
+    assert set(meta["routed_card_ids"]) == {"fx1", "crs"}
+    # NOTE (adjusted from the plan's draft): the fx branch never reaches any
+    # of the equity_etf/metal_etf/bond_etf elif arms in the real run()
+    # code, so proxy_routed_card_ids is never assigned away from its None
+    # initializer for fx -- it stays None, not []. drift_record() relies on
+    # exactly this (None -> key omitted entirely; see
+    # test_composer_fx.py::test_fx_card_routing, which asserts
+    # `"proxy_routed_card_ids" not in drift` for fx). Asserting `== []` here
+    # would be asserting behaviour the real code does not have.
+    assert meta["proxy_routed_card_ids"] is None
+
+
+def test_routable_cards_equity_proxy_lane_recorded():
+    from .composer import routable_cards, INDEX_FUTURES_PROXY_TOPICS
+    topic = sorted(INDEX_FUTURES_PROXY_TOPICS)[0]
+    accepted = {
+        "eq1": _card("eq1", ["equities"]),
+        "fut": _card("fut", ["futures"], topics=[topic]),
+    }
+    cards, meta = routable_cards(accepted, "equity_etf")
+    assert "eq1" in cards and "fut" in cards
+    assert "fut" in meta["proxy_routed_card_ids"]

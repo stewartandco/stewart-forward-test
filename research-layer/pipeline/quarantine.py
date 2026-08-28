@@ -49,6 +49,11 @@ Conventions:
     day. Re-running a date whose `bars_sha256` no longer matches is REFUSED,
     not recomputed -- while a refresh that merely appends later bars is
     correctly a non-event, which is what keeps backfill working.
+  * A `--date` run whose write phase finds `logs/chain.lock` held by another
+    writer DEFERS politely: exit 0, nothing recorded, no different from a day
+    nobody got around to running. The day is owed and covered the same way as
+    any other missed day -- an explicit `--date` backfill once the lock is
+    free, and `--review` lists it among the dates never recorded.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -61,6 +66,7 @@ import argparse
 from pathlib import Path
 
 from . import cells
+from .chainlock import ChainLock, ChainLockHeld
 from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
                        DuplicateQuarantineSnapshot,
                        OverlappingQuarantineSupplement)
@@ -600,131 +606,167 @@ def run(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 1
 
+    # The write phase below (snapshot, then decision rows) is the only part
+    # of a --date run that touches the chain. Eligibility resolution and bar
+    # loading above are cheap local reads and must not hold the lock; the
+    # lock is acquired as late as correctness allows, right before the first
+    # possible chain write, and only when there is one to make (ready is
+    # empty here only when nobody was eligible, in which case nothing below
+    # writes anything and taking the lock would just waste other writers'
+    # window time).
+    lock = None
     if ready:
-        assets = sorted({a for sid in ready
-                         for a in specs[sid]["universe"]["assets"]})
-        # Provenance BEFORE any decision row, because invariant 9 asks for an
-        # EARLIER snapshot: recording the bars afterwards would prove nothing
-        # about what the rows were computed from.
-        bars_digests = hash_bars_used(args.data_dir, assets, args.date)
-        recorded = data_snapshots(registry).get(args.date)
-        sups = snapshot_supplements(registry).get(args.date, [])
-        if recorded is None and not sups:
-            try:
-                registry.record_quarantine_snapshot(
-                    {"date": args.date,
-                     "data_sha256": hash_price_files(args.data_dir, assets),
-                     "bars_sha256": bars_digests})
-            except DuplicateQuarantineSnapshot as dup:
-                # another process chained this date's provenance between the
-                # read above and this write; reconcile against what landed
-                recorded = dup.chained
-                sups = snapshot_supplements(registry).get(args.date, [])
-        if recorded is not None or sups:
-            if recorded is None:
-                # The two chain reads above are separate un-locked walks, so
-                # a concurrent run can chain base+supplement BETWEEN them and
-                # leave this one seeing 'supplement but no base' on a healthy
-                # chain. Read the base again before crying defect: after the
-                # re-read, a supplement with genuinely no base can only be a
-                # hand-appended entry (the writer requires the base), which
-                # the verifier rejects -- recording against it would
-                # compound the defect.
-                recorded = data_snapshots(registry).get(args.date)
-            if recorded is None:
-                print(f"REFUSED: {args.date} has supplement provenance but "
-                      f"no base quarantine_data_snapshot -- a defective "
-                      f"chain needs human eyes, not more rows.",
-                      file=sys.stderr)
-                return 1
-            if (not isinstance(recorded.get("bars_sha256"), dict)
-                    or not recorded["bars_sha256"]):
-                # fails CLOSED, the `or {}` precedent: a base snapshot with
-                # no usable bars_sha256 covers nothing, and papering over it
-                # with a supplement for everything would legitimise a
-                # fabricated provenance root
-                print(f"REFUSED: the quarantine_data_snapshot chained for "
-                      f"{args.date} carries no usable bars_sha256 map, so it "
-                      f"covers nothing -- {', '.join(sorted(bars_digests))} "
-                      f"included -- and cannot be supplemented honestly.",
-                      file=sys.stderr)
-                return 1
-            covered = merged_bars_coverage(recorded, sups)
-            conflicts = snapshot_conflicts(covered, bars_digests)
-            if conflicts:
-                print(f"REFUSED: the provenance chained for {args.date} does "
-                      f"not match the bars this run would use, so re-running "
-                      f"the date would not reproduce the rows already on the "
-                      f"chain:", file=sys.stderr)
-                for reason in conflicts:
-                    print(f"  {reason}", file=sys.stderr)
-                return 1
-            new_assets = sorted(set(bars_digests) - set(covered))
-            if new_assets:
-                # the backfill of a class deferred when the base was chained
-                try:
-                    registry.record_quarantine_snapshot_supplement(
-                        {"date": args.date,
-                         "data_sha256": hash_price_files(args.data_dir,
-                                                         new_assets),
-                         "bars_sha256": {a: bars_digests[a]
-                                         for a in new_assets}})
-                except OverlappingQuarantineSupplement as clash:
-                    # a concurrent writer covered (some of) these assets
-                    # between the read above and this write; absorb only an
-                    # IDENTICAL cover -- anything else is irreconcilable
-                    landed = clash.chained.get("bars_sha256", {})
-                    if any(landed.get(a) != bars_digests[a]
-                           for a in new_assets):
-                        print(f"REFUSED: a concurrent supplement for "
-                              f"{args.date} covers {new_assets} with "
-                              f"different bar hashes than this run computed.",
-                              file=sys.stderr)
-                        return 1
+        logs_dir = args.registry.parent / "logs"
+        lock = ChainLock(logs_dir, holder="quarantine",
+                         purpose=f"daily {args.date}")
+        try:
+            lock.acquire()
+        except ChainLockHeld:
+            if lock.is_stale():
+                print("WARN: chain.lock is stale (>3h); if no writer is "
+                      "alive, remove logs/chain.lock or let the loop's "
+                      "two-strike rule break it", file=sys.stderr)
+            print(f"deferred_lock: chain.lock held, skipping {args.date}; "
+                  f"re-run with --date {args.date} to backfill")
+            return 0
 
-    seen = existing_decisions(registry)
-    n_written = n_skipped = 0
     try:
-        for sid in ready:
-            for row in observe_day(specs[sid], bars_by_asset, args.date,
-                                   entered[sid]):
-                key = (row["strategy_id"], row["date"], row["asset"])
-                if key in seen:
-                    n_skipped += 1
-                    continue
+        if ready:
+            assets = sorted({a for sid in ready
+                             for a in specs[sid]["universe"]["assets"]})
+            # Provenance BEFORE any decision row, because invariant 9 asks for
+            # an EARLIER snapshot: recording the bars afterwards would prove
+            # nothing about what the rows were computed from.
+            bars_digests = hash_bars_used(args.data_dir, assets, args.date)
+            recorded = data_snapshots(registry).get(args.date)
+            sups = snapshot_supplements(registry).get(args.date, [])
+            if recorded is None and not sups:
                 try:
-                    registry.record_quarantine_decision(row)
-                except DuplicateQuarantineDecision as dup:
-                    # Another process chained this row between our snapshot of
-                    # `seen` and this write. The structural guarantee held --
-                    # no duplicate exists -- so a scheduler retry overlapping
-                    # the daily job resolves quietly and truthfully instead of
-                    # paging someone. Only this case is absorbed; every other
-                    # ValueError from the writer means a malformed payload and
-                    # stays fatal.
-                    #
-                    # But absorb ONLY when the chained row is identical to the
-                    # one just computed. Same key with different numbers means
-                    # the data or the spec moved underneath us, and silently
-                    # discarding the losing row would hide exactly that.
-                    if getattr(dup, "chained", None) != row:
-                        raise
-                    seen.add(key)
-                    n_skipped += 1
-                    continue
-                seen.add(key)
-                n_written += 1
-                print(f"{sid}  {row['asset']}  {row['action']:<11} "
-                      f"px={row['price']:.2f}  pos={row['position_frac']:.3f} "
-                      f" eq={row['equity']:.4f}")
-    except BaseException:
-        print(f"\nPARTIAL WRITE: {n_written} decision(s) chained before "
-              f"failure. Re-running this date is a no-op for what landed.",
-              file=sys.stderr)
-        raise
+                    registry.record_quarantine_snapshot(
+                        {"date": args.date,
+                         "data_sha256": hash_price_files(args.data_dir, assets),
+                         "bars_sha256": bars_digests})
+                except DuplicateQuarantineSnapshot as dup:
+                    # another process chained this date's provenance between
+                    # the read above and this write; reconcile against what
+                    # landed
+                    recorded = dup.chained
+                    sups = snapshot_supplements(registry).get(args.date, [])
+            if recorded is not None or sups:
+                if recorded is None:
+                    # The two chain reads above are separate un-locked walks,
+                    # so a concurrent run can chain base+supplement BETWEEN
+                    # them and leave this one seeing 'supplement but no base'
+                    # on a healthy chain. Read the base again before crying
+                    # defect: after the re-read, a supplement with genuinely
+                    # no base can only be a hand-appended entry (the writer
+                    # requires the base), which the verifier rejects --
+                    # recording against it would compound the defect.
+                    recorded = data_snapshots(registry).get(args.date)
+                if recorded is None:
+                    print(f"REFUSED: {args.date} has supplement provenance "
+                          f"but no base quarantine_data_snapshot -- a "
+                          f"defective chain needs human eyes, not more rows.",
+                          file=sys.stderr)
+                    return 1
+                if (not isinstance(recorded.get("bars_sha256"), dict)
+                        or not recorded["bars_sha256"]):
+                    # fails CLOSED, the `or {}` precedent: a base snapshot
+                    # with no usable bars_sha256 covers nothing, and papering
+                    # over it with a supplement for everything would
+                    # legitimise a fabricated provenance root
+                    print(f"REFUSED: the quarantine_data_snapshot chained "
+                          f"for {args.date} carries no usable bars_sha256 "
+                          f"map, so it covers nothing -- "
+                          f"{', '.join(sorted(bars_digests))} included -- "
+                          f"and cannot be supplemented honestly.",
+                          file=sys.stderr)
+                    return 1
+                covered = merged_bars_coverage(recorded, sups)
+                conflicts = snapshot_conflicts(covered, bars_digests)
+                if conflicts:
+                    print(f"REFUSED: the provenance chained for {args.date} "
+                          f"does not match the bars this run would use, so "
+                          f"re-running the date would not reproduce the rows "
+                          f"already on the chain:", file=sys.stderr)
+                    for reason in conflicts:
+                        print(f"  {reason}", file=sys.stderr)
+                    return 1
+                new_assets = sorted(set(bars_digests) - set(covered))
+                if new_assets:
+                    # the backfill of a class deferred when the base was
+                    # chained
+                    try:
+                        registry.record_quarantine_snapshot_supplement(
+                            {"date": args.date,
+                             "data_sha256": hash_price_files(args.data_dir,
+                                                             new_assets),
+                             "bars_sha256": {a: bars_digests[a]
+                                             for a in new_assets}})
+                    except OverlappingQuarantineSupplement as clash:
+                        # a concurrent writer covered (some of) these assets
+                        # between the read above and this write; absorb only
+                        # an IDENTICAL cover -- anything else is
+                        # irreconcilable
+                        landed = clash.chained.get("bars_sha256", {})
+                        if any(landed.get(a) != bars_digests[a]
+                               for a in new_assets):
+                            print(f"REFUSED: a concurrent supplement for "
+                                  f"{args.date} covers {new_assets} with "
+                                  f"different bar hashes than this run "
+                                  f"computed.", file=sys.stderr)
+                            return 1
 
-    print(f"\n{n_written} decision(s) chained, {n_skipped} already present.")
-    return 0
+        seen = existing_decisions(registry)
+        n_written = n_skipped = 0
+        try:
+            for sid in ready:
+                for row in observe_day(specs[sid], bars_by_asset, args.date,
+                                       entered[sid]):
+                    key = (row["strategy_id"], row["date"], row["asset"])
+                    if key in seen:
+                        n_skipped += 1
+                        continue
+                    try:
+                        registry.record_quarantine_decision(row)
+                    except DuplicateQuarantineDecision as dup:
+                        # Another process chained this row between our
+                        # snapshot of `seen` and this write. The structural
+                        # guarantee held -- no duplicate exists -- so a
+                        # scheduler retry overlapping the daily job resolves
+                        # quietly and truthfully instead of paging someone.
+                        # Only this case is absorbed; every other ValueError
+                        # from the writer means a malformed payload and stays
+                        # fatal.
+                        #
+                        # But absorb ONLY when the chained row is identical
+                        # to the one just computed. Same key with different
+                        # numbers means the data or the spec moved underneath
+                        # us, and silently discarding the losing row would
+                        # hide exactly that.
+                        if getattr(dup, "chained", None) != row:
+                            raise
+                        seen.add(key)
+                        n_skipped += 1
+                        continue
+                    seen.add(key)
+                    n_written += 1
+                    print(f"{sid}  {row['asset']}  {row['action']:<11} "
+                          f"px={row['price']:.2f}  "
+                          f"pos={row['position_frac']:.3f} "
+                          f" eq={row['equity']:.4f}")
+        except BaseException:
+            print(f"\nPARTIAL WRITE: {n_written} decision(s) chained before "
+                  f"failure. Re-running this date is a no-op for what "
+                  f"landed.", file=sys.stderr)
+            raise
+
+        print(f"\n{n_written} decision(s) chained, {n_skipped} already "
+              f"present.")
+        return 0
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

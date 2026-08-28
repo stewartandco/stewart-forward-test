@@ -38,6 +38,7 @@ from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
 from .reader import build_card, chunk_text, extract_claims_usage
+from .chainlock import ChainLock, ChainLockHeld
 
 LAYER = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = "claude-sonnet-5"  # D23 throughput-first: Sonnet for screen AND bulk extraction
@@ -78,7 +79,7 @@ def poll_source(source: dict, seen: SeenStore, fetch=fetch_url) -> list[dict]:
     return fresh
 
 
-RESUME_STATUSES = ("deferred_screen", "deferred_budget", "seen")
+RESUME_STATUSES = ("deferred_screen", "deferred_budget", "deferred_lock", "seen")
 RESUME_STALE_MINUTES = 20
 
 
@@ -90,7 +91,19 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
     orphaned - poll_source records 'seen' first, and dedup then blocks
     re-polling forever). 'seen' items are only resumed once they are older
     than stale_minutes so the current cycle's own items aren't double-fed.
-    max_attempts parks persistent failures so nothing can spin the loop."""
+    max_attempts parks persistent failures so nothing can spin the loop.
+    deferred_lock occurrences are excluded from that attempt count: the park
+    mechanism exists to stop pathological ITEMS, and lock contention is
+    environmental, not the item's fault. An item must never be permanently
+    dropped just because the loop happened to be mid-write. Unbounded
+    re-feed on lock contention alone is safe -- NOT because the lock itself
+    clears quickly (a manual session may legitimately hold it for hours,
+    and a stale lock only breaks after 3h STALE_AFTER_S plus the loop's
+    two-strike rule) but because _extract_item / process_inbox probe
+    chain.lock BEFORE the gather phase's LLM spend: a lock-deferred re-feed
+    costs only the batched screen call and a re-fetch (~$0.001/item/cycle),
+    never a re-paid extraction, so re-feeding it indefinitely while the lock
+    is held stays cheap."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     out = []
     for status in statuses:
@@ -103,7 +116,7 @@ def refeedable_deferred(seen: SeenStore, max_attempts: int = MAX_DEFER_ATTEMPTS,
                 if touched > cutoff:
                     continue  # in flight in this cycle
             attempts = sum(1 for e in seen.events_for(iid)
-                           if e["status"] in statuses)
+                           if e["status"] in statuses and e["status"] != "deferred_lock")
             if attempts >= max_attempts:
                 seen.record(iid, event["source_id"], "deferred_parked",
                             reason=f"parked after {attempts} attempts")
@@ -127,7 +140,10 @@ def _extract_item(client, model, item, source, page_text, html, *,
                   meter, registry, known_claims, discovery_path,
                   watchlist_sources):
     """Stage 2 for one kept item: extraction, honesty guard, registration,
-    discovery queueing. Returns (cards_registered, honesty_dropped)."""
+    discovery queueing. Returns (cards_registered, honesty_dropped,
+    deferred_lock). deferred_lock=True means chain.lock was held by another
+    writer: nothing in this item was registered and the caller must leave
+    the item re-feedable rather than marking it extracted."""
     source_meta = {
         "type": CLASS_TO_SOURCE_TYPE[source["class"]],
         "title": item["title"], "authors": [], "year": None,
@@ -135,12 +151,41 @@ def _extract_item(client, model, item, source, page_text, html, *,
         "credibility_tier": "practitioner",
     }
     run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-scanner"
-    registered = dropped = 0
+
+    logs_dir = Path(registry.log_path).parent / "logs"
+    lock = ChainLock(logs_dir, holder="scanner",
+                     purpose=f"extract {item['source_id']}/{item['item_id']}")
+    if lock.info() is not None:
+        # Pre-gather probe: someone else is mid-write. Defer before paying
+        # for the gather phase's LLM calls, not just before the append --
+        # unbounded lock re-feed (RESUME_STATUSES / park exemption below)
+        # would otherwise re-pay this spend every cycle a lock is held. This
+        # is a probe only (.info(), never acquire()): a false positive costs
+        # a free no-op deferral, a false negative just falls through to the
+        # real acquire() below, which still guards the append -- no TOCTOU
+        # exposure either way.
+        return 0, 0, True
+
+    # Gather every chunk's claims first (LLM calls only, no chain writes) so
+    # the chain.lock window below covers just the card-append batch, not the
+    # extraction calls themselves.
+    all_claims = []
     for label, chunk in chunk_text(page_text):
         claims, usage = extract_claims_usage(client, model, label, chunk)
         meter.record_call(model, usage, purpose="extract",
                           agent="reader")
-        for raw in claims:
+        all_claims.extend(claims)
+
+    registered = dropped = 0
+    try:
+        lock.acquire()
+    except ChainLockHeld:
+        # advisory, non-blocking: never wait on another writer's window.
+        # Nothing for this item is registered this cycle; it stays
+        # re-feedable via RESUME_STATUSES / refeedable_deferred.
+        return 0, 0, True
+    try:
+        for raw in all_claims:
             if not quote_in_source(raw["quote"], page_text):
                 dropped += 1
                 continue
@@ -150,6 +195,9 @@ def _extract_item(client, model, item, source, page_text, html, *,
             card = build_card(raw, source_meta, model, run_id)
             registry.register_card(card)
             registered += 1
+    finally:
+        lock.release()
+
     # off-list references become Tier 3 proposals for Coen — never fetched
     domains = _watchlist_domains(watchlist_sources)
     queued = 0
@@ -164,7 +212,7 @@ def _extract_item(client, model, item, source, page_text, html, *,
                            found_in=f"{item['source_id']}/{item['item_id']}",
                            reason="referenced by ingested item"):
             queued += 1
-    return registered, dropped
+    return registered, dropped, False
 
 
 def process_new_items(new_items: list[dict], *, client, model: str, meter,
@@ -172,9 +220,9 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
                       watchlist_sources: list[dict], discovery_path,
                       screen_log, actions: ActionLog) -> dict:
     stats = {"items": len(new_items), "screen_keep": 0, "screen_kill": 0,
-             "screen_keep_low": 0, "deferred": 0, "paywalled": 0,
-             "fetch_failed": 0, "thin_content": 0, "extracted": 0,
-             "cards_registered": 0, "honesty_dropped": 0}
+             "screen_keep_low": 0, "deferred": 0, "deferred_lock": 0,
+             "paywalled": 0, "fetch_failed": 0, "thin_content": 0,
+             "extracted": 0, "cards_registered": 0, "honesty_dropped": 0}
     if not new_items:
         return stats
 
@@ -225,7 +273,7 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             stats["thin_content"] += 1
             continue
         try:
-            registered, dropped = _extract_item(
+            registered, dropped, deferred_lock = _extract_item(
                 client, model, item, src_by_id[item["source_id"]], page_text,
                 html, meter=meter, registry=registry, known_claims=known_claims,
                 discovery_path=discovery_path,
@@ -234,6 +282,12 @@ def process_new_items(new_items: list[dict], *, client, model: str, meter,
             seen.record(item["item_id"], item["source_id"], "extract_failed",
                         reason=f"{type(exc).__name__}: {exc}"[:200])
             print(f"  extract failed for {item['link']}: {exc}", file=sys.stderr)
+            continue
+        if deferred_lock:
+            seen.record(item["item_id"], item["source_id"], "deferred_lock",
+                        reason="chain.lock held by another writer")
+            stats["deferred"] += 1
+            stats["deferred_lock"] += 1
             continue
         seen.record(item["item_id"], item["source_id"], "extracted",
                     reason=f"{registered} cards")
@@ -305,7 +359,7 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
     sidecar URL or a title match to a flagged item; unidentifiable files are
     left in place with a note so Coen can add a sidecar."""
     stats = {"files": 0, "cards_registered": 0, "honesty_dropped": 0,
-             "skipped_no_identity": 0}
+             "skipped_no_identity": 0, "deferred_lock": 0}
     if not inbox.exists():
         return stats
     from .reader import read_source_text
@@ -335,12 +389,48 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
                        "credibility_tier": "practitioner"}
         run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "-inbox"
         known_claims = {c["claim"] for c in registry.cards().values()}
-        registered = dropped = 0
+
+        logs_dir = Path(registry.log_path).parent / "logs"
+        lock = ChainLock(logs_dir, holder="scanner",
+                         purpose=f"inbox batch {path.name}")
+        if lock.info() is not None:
+            # Pre-gather probe: someone else is mid-write. Defer before
+            # paying for the gather phase's LLM calls -- the inbox has no
+            # deferred-status mechanism (unlike seen-store items), so the
+            # simplest safe move is to leave the file and its sidecar
+            # exactly where they are, unprocessed; the next process_inbox
+            # call retries it from scratch. Probe only (.info(), never
+            # acquire()): a false positive costs a free no-op deferral, a
+            # false negative falls through to the real acquire() below,
+            # which still guards the append -- no TOCTOU exposure.
+            print(f"  inbox: chain.lock held, deferring {path.name}",
+                  file=sys.stderr)
+            stats["deferred_lock"] += 1
+            continue
+
+        # Gather every chunk's claims first (LLM calls only, no chain
+        # writes) so the chain.lock window below covers just the
+        # card-append batch — same pattern as the scanner's own extraction
+        # path (_extract_item), per the spec: the lock is adopted by ALL of
+        # the scanner's registration paths, inbox included.
+        all_claims = []
         for label, chunk in chunk_text(text):
             claims, usage = extract_claims_usage(client, model, label, chunk)
             meter.record_call(model, usage, purpose="inbox_extract",
                               agent="reader")
-            for raw in claims:
+            all_claims.extend(claims)
+
+        registered = dropped = 0
+        try:
+            lock.acquire()
+        except ChainLockHeld:
+            # advisory, non-blocking: never wait on another writer's window.
+            print(f"  inbox: chain.lock held, deferring {path.name}",
+                  file=sys.stderr)
+            stats["deferred_lock"] += 1
+            continue
+        try:
+            for raw in all_claims:
                 if not quote_in_source(raw["quote"], text):
                     dropped += 1
                     continue
@@ -349,6 +439,8 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
                 known_claims.add(raw["claim"])
                 registry.register_card(build_card(raw, source_meta, model, run_id))
                 registered += 1
+        finally:
+            lock.release()
         if event is not None:
             seen.record(event["item_id"], event["source_id"], "extracted",
                         reason=f"{registered} cards via inbox")
@@ -600,7 +692,7 @@ def run(argv: list[str] | None = None) -> int:
                 inbox_stats = process_inbox(
                     client=client, model=args.model, meter=meter, seen=seen,
                     registry=registry, actions=actions)
-                if inbox_stats["files"]:
+                if inbox_stats["files"] or inbox_stats["deferred_lock"]:
                     print(f"inbox: {inbox_stats}")
                 # D27 case 3: single-citation proposals -> prefilter -> source screen -> probation
                 def _screen(domain, titles, about):
