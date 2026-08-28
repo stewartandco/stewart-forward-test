@@ -62,7 +62,8 @@ def write_watchlist(tmp_path, sources):
 # ---------------- watchlist ----------------
 
 def test_committed_watchlist_loads_and_gate_tracks_verification():
-    sources = load_watchlist(LAYER / "sources" / "verified_sources.json")
+    sources = load_watchlist(
+        HERE / "fixtures" / "verified_sources_snapshot_20260828.json")
     assert len(sources) >= 15
     classes = {s["class"] for s in sources}
     assert classes == {"arxiv", "aggregator", "blog", "ssrn", "central_bank", "github"}
@@ -78,13 +79,48 @@ def test_committed_watchlist_loads_and_gate_tracks_verification():
     # that reads a live, agent-mutated file has to encode the rules the agent
     # is actually running under.
     #
+    # It then happened AGAIN: D27 case 3 (source probation filter, designed
+    # 2026-08-23, live same day, docs/2026-08-23-source-probation-filter-design.md)
+    # added the probation pair `auto-d27-probation` (admitted by the source
+    # screen, tier "probation") and `auto-d27-promoted` (>= 2 keeps in the
+    # 40-item yield window, tier flips to "verified"). The live watchlist grew
+    # 6 such entries by 2026-08-28 and this test, still reading the LIVE file
+    # with a two-path admission set, was red for a week. Per the 2026-08-28
+    # handoff decision it now reads a frozen fixture snapshot of that live
+    # file (pipeline/fixtures/verified_sources_snapshot_20260828.json,
+    # 218 sources: 192 coen / 20 auto-d27 / 5 probation / 1 promoted), so the
+    # gate rules are asserted against a real, representative, immutable
+    # watchlist instead of whatever the resident scanner mutated last night.
+    #
     # What must NOT weaken: no source is pollable without a verified_date, and
-    # no admission path exists beyond these two. That is D23's Tier 3 gate.
-    ADMISSION_PATHS = {"coen", "auto-d27"}
+    # no admission path exists beyond the recognised set below. That is D23's
+    # Tier 3 gate as amended by D27 (cases 1-3).
+    ADMISSION_PATHS = {
+        "coen",                # Coen's own verification pass (D23)
+        "auto-d27",            # D27 cases 1-2: scout-researched / 2+ citers
+        "auto-d27-probation",  # D27 case 3: source screen passed, on probation
+        "auto-d27-promoted",   # D27 case 3: probation yield bar met
+    }
+    # The runtime's gate must recognise exactly these paths -- a new stamp
+    # added in watchlist.py without a decision landing here is the regression
+    # this test exists to catch.
+    from .watchlist import POLLABLE_PROVENANCE
+    assert POLLABLE_PROVENANCE == ADMISSION_PATHS
     stamped = {s["id"] for s in sources
                if s["added_by"] in ADMISSION_PATHS and s["verified_date"]}
     assert {s["id"] for s in pollable(sources)} == stamped
     assert {s["added_by"] for s in sources} <= ADMISSION_PATHS
+    # D27 case 3 state field: a probation admit carries tier "probation";
+    # promotion flips the tier to "verified".
+    for s in sources:
+        if s["added_by"] == "auto-d27-probation":
+            assert s.get("tier") == "probation", s["id"]
+        if s["added_by"] == "auto-d27-promoted":
+            assert s.get("tier") == "verified", s["id"]
+    # The snapshot really contains probation-era entries (it is not a stale
+    # pre-case-3 copy that would let the assertions above pass vacuously).
+    assert any(s["added_by"] == "auto-d27-probation" for s in sources)
+    assert any(s["added_by"] == "auto-d27-promoted" for s in sources)
     # The SSRN placeholder stays out until its URL is pinned.
     assert "ssrn-new-papers" not in stamped
 
