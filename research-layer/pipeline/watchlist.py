@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 VALID_CLASSES = {"arxiv", "aggregator", "blog", "ssrn", "central_bank", "github"}
+POLLABLE_PROVENANCE = {"coen", "auto-d27", "auto-d27-probation", "auto-d27-promoted"}
 REQUIRED_FIELDS = ("id", "class", "name", "url", "feed", "poll_minutes",
                    "added_by", "verified_date", "notes")
 TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref")
@@ -77,10 +78,10 @@ def load_watchlist(path: str | Path) -> list[dict]:
             raise WatchlistError(f"source {src['id']!r} feed must be http(s) or null")
         if src.get("tier") not in (None, "verified", "probation"):
             raise WatchlistError(f"source {src['id']!r} has unknown tier {src['tier']!r}")
+        if src["added_by"] not in POLLABLE_PROVENANCE:
+            raise WatchlistError(
+                f"source {src['id']!r} has unknown added_by {src['added_by']!r}")
     return sources
-
-
-POLLABLE_PROVENANCE = {"coen", "auto-d27", "auto-d27-probation", "auto-d27-promoted"}
 
 
 def pollable(sources: list[dict]) -> list[dict]:

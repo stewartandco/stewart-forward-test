@@ -137,6 +137,14 @@ def test_watchlist_rejects_unknown_class(tmp_path):
         load_watchlist(p)
 
 
+def test_watchlist_rejects_unknown_added_by(tmp_path):
+    # A typo'd provenance stamp (e.g. "ceon") would fail the pollable() gate
+    # closed but invisibly -- the loader must reject it loudly instead.
+    p = write_watchlist(tmp_path, [make_source(added_by="ceon")])
+    with pytest.raises(WatchlistError, match="added_by"):
+        load_watchlist(p)
+
+
 def test_watchlist_rejects_missing_field(tmp_path):
     src = make_source()
     del src["poll_minutes"]
@@ -149,10 +157,14 @@ def test_pollable_requires_coen_verification(tmp_path):
     srcs = [
         make_source(id="ok"),
         make_source(id="unverified", verified_date=None),
-        make_source(id="wrong-adder", added_by="claude"),
     ]
     p = write_watchlist(tmp_path, srcs)
-    assert [s["id"] for s in pollable(load_watchlist(p))] == ["ok"]
+    loaded = load_watchlist(p)
+    # an unrecognised adder is a load error now (see
+    # test_watchlist_rejects_unknown_added_by); pollable() still filters it
+    # as defense in depth
+    loaded.append(make_source(id="wrong-adder", added_by="claude"))
+    assert [s["id"] for s in pollable(loaded)] == ["ok"]
 
 
 def test_normalize_url_collapses_variants():
@@ -757,10 +769,13 @@ def test_discovery_queue_accumulates_distinct_citers(tmp_path):
 def test_pollable_accepts_auto_d27_provenance(tmp_path):
     srcs = [make_source(id="human"),
             make_source(id="auto", added_by="auto-d27"),
-            make_source(id="auto-unstamped", added_by="auto-d27", verified_date=None),
-            make_source(id="rogue", added_by="claude")]
+            make_source(id="auto-unstamped", added_by="auto-d27", verified_date=None)]
     p = write_watchlist(tmp_path, srcs)
-    assert {s["id"] for s in pollable(load_watchlist(p))} == {"human", "auto"}
+    loaded = load_watchlist(p)
+    # a rogue stamp cannot get past load_watchlist any more; pollable() still
+    # filters it as defense in depth
+    loaded.append(make_source(id="rogue", added_by="claude"))
+    assert {s["id"] for s in pollable(loaded)} == {"human", "auto"}
 
 
 def test_auto_admit_scout_and_two_citers_only(tmp_path):
