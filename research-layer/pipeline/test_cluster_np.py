@@ -379,3 +379,103 @@ def test_effective_trials_np_deterministic():
     ids, X = _returns_matrix(series)
     assert (_effective_trials_np(series, ids, X)
             == _effective_trials_np(series, ids, X))
+
+
+# ---------------- duplicate-row pinning (rho clamp identity break) ----------
+
+# Byte-exact fixture where the REFERENCE correlation on a byte-identical
+# duplicate lands at rho = 1 - 1ulp (pow-vs-multiply term drift), BELOW the
+# clamp: reference distance is 7.45e-9, not 0.0. Found by fuzz 2026-08-28.
+_TAIL_HEX = ["0x1.d2176496033f0p-7", "0x1.9cd277e8c6e09p+1",
+             "-0x1.074a6cab8e68ap-8", "0x1.17ae88d344523p+1",
+             "-0x1.62432b038b93ep-6", "0x1.3c68b10f8330fp+0",
+             "-0x1.317b5eb4ee0a9p-7", "0x1.6201585308a7ap-7"]
+
+
+def test_duplicate_rows_pinned_to_reference_value():
+    # common case: identical positive-variance rows -> the reference rho is
+    # exactly 1.0 (or 1 + 1ulp, clamped), so the pinned distance is 0.0
+    s = [0.01, -0.02, 0.03, 0.01, -0.015, 0.02]
+    series = {"a" * 16: list(s), "b" * 16: list(s),
+              "c" * 16: [-0.01, 0.02, -0.03, 0.0, 0.01, -0.02]}
+    _, X = _returns_matrix(series)
+    D = _distance_matrix_np(X)
+    assert distance(correlation(s, s)) == 0.0
+    assert D[0, 1] == 0.0 and D[1, 0] == 0.0
+    assert D[0, 0] == 0.0 and D[1, 1] == 0.0
+
+
+def test_duplicate_rows_tail_case_pins_nonzero_reference_value():
+    # the pin must reproduce the reference VALUE, not force 0.0: on this
+    # fixture the reference distance for the duplicate pair is nonzero
+    s = [float.fromhex(h) for h in _TAIL_HEX]
+    d_ref = distance(correlation(s, list(s)))
+    assert d_ref != 0.0                      # this fixture IS the tail case
+    series = {"a" * 16: list(s), "b" * 16: list(s)}
+    _, X = _returns_matrix(series)
+    D = _distance_matrix_np(X)
+    assert D[0, 1] == d_ref and D[1, 0] == d_ref
+    # end-to-end identity on a pool containing the tail pair
+    series["c" * 16] = [v * 0.5 + 0.001 * i for i, v in enumerate(s)]
+    series["d" * 16] = [-v for v in s]
+    assert effective_trials(series) == _effective_trials_ref(series)
+
+
+def test_duplicate_all_zero_rows_keep_sqrt_half():
+    # zero-variance duplicates are EXCLUDED from the pin: the reference
+    # correlation returns 0.0 even for identical lists -> d = sqrt(0.5)
+    series = {"a" * 16: [0.0] * 6, "b" * 16: [0.0] * 6,
+              "c" * 16: [0.01, -0.02, 0.03, 0.0, 0.01, -0.01]}
+    _, X = _returns_matrix(series)
+    assert X is not None
+    D = _distance_matrix_np(X)
+    assert D[0, 1] == pytest.approx(0.5 ** 0.5)
+    assert D[0, 1] == D[1, 0]
+    assert np.array_equal(D, D.T)
+
+
+def test_effective_trials_np_minimal_duplicate_repro():
+    # reviewer's minimal repro: n=4, two exact-duplicate pairs from distinct
+    # groups. Pre-pin, tied zero-distance merges ordered differently between
+    # the paths and the -inf silhouette disqualification flipped k (ref k=3
+    # vs np k=2, recorded-var difference up to 7x).
+    base = seeded_series(2, 40)
+    s1, s2 = (base[i] for i in sorted(base))
+    series = {"a" * 16: list(s1), "b" * 16: list(s1),
+              "c" * 16: list(s2), "d" * 16: list(s2)}
+    _assert_effective_trials_identical(series)
+    assert effective_trials(series) == _effective_trials_ref(series)
+
+
+def test_effective_trials_duplicate_dense_sweep():
+    # ~30 fixtures, n 8-20: 2-4 duplicate groups of size 2-4 drawn from
+    # seeded structured rows, plus singletons; every third fixture also
+    # carries one all-zero row. Tuple identity end-to-end through the
+    # public dispatcher.
+    rng = np.random.default_rng(20260829)
+    for case in range(30):
+        n_groups = int(rng.integers(2, 5))
+        length = int(rng.integers(40, 90))
+        pool = seeded_series(12, length)
+        rows = [pool[i] for i in sorted(pool)]
+        series = {}
+        i = 0
+        for g in range(n_groups):
+            for _ in range(int(rng.integers(2, 5))):
+                series[f"{i:04d}" + "d" * 12] = list(rows[g])
+                i += 1
+        s_idx = n_groups
+        for _ in range(int(rng.integers(1, 4))):
+            series[f"{i:04d}" + "d" * 12] = list(rows[s_idx])
+            i += 1
+            s_idx += 1
+        while len(series) < 8:
+            series[f"{i:04d}" + "d" * 12] = list(rows[s_idx])
+            i += 1
+            s_idx += 1
+        if case % 3 == 0:
+            series[f"{i:04d}" + "d" * 12] = [0.0] * length
+            i += 1
+        assert 8 <= len(series) <= 21
+        assert effective_trials(series) == _effective_trials_ref(series), \
+            f"case {case}"

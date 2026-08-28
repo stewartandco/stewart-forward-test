@@ -17,11 +17,16 @@ implementation exactly: `effective_trials` dispatches to it for rectangular
 input and falls back to the hand-written functions otherwise. The reference
 functions below are the CONTRACT; test_cluster_np.py holds the two paths
 identical, and the tie-break key round(d, 12) is what absorbs BLAS-vs-loop
-float summation differences. That absorption is probabilistic, not
-absolute: two summation orders can land within ulps of a half-1e-12
-rounding boundary and still round apart, so the real ship bar is the
-recorded-data identity proof in tools_verify_cluster_identity.py (plan
-Tasks 4/5), not the rounding alone.
+float summation differences. The DOMINANT divergence class was not that
+rounding tail but the rho = 1 clamp discontinuity on exact-duplicate rows
+(BLAS landing 1ulp under the clamp where the reference lands on or over
+it: 0.0 vs ~1e-8, unabsorbable at 12dp); it is closed by the duplicate pin
+in _distance_matrix_np, which reproduces the reference-computed distance
+for byte-identical positive-variance rows. What remains is the rounding
+tail, and that absorption is probabilistic, not absolute: two summation
+orders can land within ulps of a half-1e-12 rounding boundary and still
+round apart, so the real ship bar is the recorded-data identity proof in
+tools_verify_cluster_identity.py (plan Tasks 4/5), not the rounding alone.
 """
 from __future__ import annotations
 
@@ -106,7 +111,20 @@ def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
     zero-variance rows correlate 0.0 with everything (distance sqrt(0.5)),
     rho clamped to [-1, 1], diagonal forced to 0.0, result exactly
     symmetric (the reference assigns (i, j) and (j, i) from one number;
-    BLAS output is mirrored from the upper triangle to match)."""
+    BLAS output is mirrored from the upper triangle to match).
+
+    Duplicate-row pin: byte-identical positive-variance rows hit rho =
+    1 +/- 1ulp differently under BLAS than under the reference's
+    pow/multiply mix, a discontinuity at the clamp (0.0 vs ~1e-8, far
+    beyond round(d, 12) absorption) that merge-order ties and the -inf
+    silhouette disqualification both amplify. Every within-group pair of
+    identical rows is therefore pinned to the REFERENCE-computed value,
+    distance(correlation(s, s)) evaluated once per group in pure Python:
+    usually exactly 0.0, but rho lands at 1 - 1ulp for ~0.09% of duplicate
+    lists (pow-vs-multiply term drift) and the pinned value is then
+    7.45e-9, exactly as the reference reports it. Zero-variance duplicate
+    rows are excluded: the good-mask above already reproduces the
+    reference's 0.0-correlation semantics (distance sqrt(0.5))."""
     n, L = X.shape
     if L < 2:
         R = np.zeros((n, n))
@@ -121,7 +139,19 @@ def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
     np.clip(R, -1.0, 1.0, out=R)
     D = np.sqrt(0.5 * (1.0 - R))
     D = np.triu(D, 1)
-    return D + D.T
+    D = D + D.T
+    if L >= 2 and n >= 2:
+        _, inverse = np.unique(X, axis=0, return_inverse=True)
+        inverse = np.asarray(inverse).ravel()
+        for g in np.unique(inverse):
+            members = np.flatnonzero(inverse == g)
+            if len(members) < 2 or not good[members[0]]:
+                continue
+            s = X[members[0]].tolist()
+            d = distance(correlation(s, s))
+            D[np.ix_(members, members)] = d
+            D[members, members] = 0.0
+    return D
 
 
 def agglomerate(ids: list[str], dmat: dict) -> list[tuple]:
