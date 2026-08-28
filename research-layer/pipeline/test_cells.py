@@ -167,12 +167,15 @@ def test_excluded_block_types_declared_per_class():
 
 
 def test_benchmark_declared_per_class():
-    # B1 (SP4 Track 2a addendum, pre-registered 2026-08-26): equity_etf is
-    # single-name, long-only-honest, and declares "self"; crypto and fx
-    # declare None (no key is ever written on their verdicts). bond/metal
-    # declare their own value at 2b, never inherited from equity_etf's here.
+    # B1 (SP4 Track 2a addendum, pre-registered 2026-08-26) + SP5 D3
+    # (docs/2026-08-28-market-data-universe-design.md s7, Coen 2026-08-28):
+    # every single-name class declares "self" -- fx flipped under SP5 because
+    # a recorded-not-gated control is strictly more information than none.
+    # crypto alone still declares None (no key is ever written on its
+    # verdicts); it flips at SP5 Phase 3 with the per-cell migration, not
+    # here.
     assert cells.CLASSES["crypto"]["benchmark"] is None
-    assert cells.CLASSES["fx"]["benchmark"] is None
+    assert cells.CLASSES["fx"]["benchmark"] == "self"
     assert cells.CLASSES["equity_etf"]["benchmark"] == "self"
     assert cells.CLASSES["bond_etf"]["benchmark"] == "self"
     assert cells.CLASSES["metal_etf"]["benchmark"] == "self"

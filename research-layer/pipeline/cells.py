@@ -92,12 +92,17 @@ METAL_ETF_ERAS = (("pre_gfc", "2004-11-18", "2008-12-31"), ("zirp", "2009-01-01"
 # whether the gauntlet records a same-OOS-window buy-and-hold control against
 # the cell's own asset. `"self"` for a class whose cells are single-name
 # assets with an honest long buy-and-hold (equity_etf; bond/metal declare
-# their own value at 2b, not inherited from here). `None` for crypto and fx:
+# their own value at 2b, not inherited from here). `None` for crypto:
 # crypto's cells are the ...USDT grid (a "buy and hold BTC" comparison is a
-# different, not-yet-declared question) and fx has no long-only drift to
-# separate from skill in the first place. RECORDED, NOT GATED -- see
-# gauntlet.py's benchmark_relative computation and the addendum's
-# pre-registration for the exact shape.
+# different, not-yet-declared question); crypto flips at SP5 Phase 3 with
+# the per-cell migration, not here. fx flips to "self" under SP5
+# (docs/2026-08-28-market-data-universe-design.md s7, Coen 2026-08-28):
+# recorded-not-gated means a control is strictly more information than
+# none. LIMITATION, declared: a USD-per-foreign hold's true return driver
+# is carry, which a price-only control cannot see -- the per-class basis
+# string (gauntlet.py's BENCHMARK_BASIS) says so on every fx verdict.
+# RECORDED, NOT GATED -- see gauntlet.py's benchmark_relative computation
+# and the addendum's pre-registration for the exact shape.
 CLASSES = {
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
@@ -108,7 +113,7 @@ CLASSES = {
            "periods_per_year": 261, "bar_kind": "single_fix",
            "cost_model": FX_COST_MODEL, "eras": FX_ERAS,
            "max_end_lag_days": 10,
-           "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES, "benchmark": None},
+           "excluded_block_types": FX_EXCLUDED_BLOCK_TYPES, "benchmark": "self"},
     # Track 2a: declared, NOT in LIVE_CLASSES. bar_kind "ohlcv" (real Tiingo
     # daily OHLC), so no block type is excluded on range grounds -- unlike fx.
     # max_end_lag_days 4 VERIFIED (track 2a review, 2026-08-25) against the
