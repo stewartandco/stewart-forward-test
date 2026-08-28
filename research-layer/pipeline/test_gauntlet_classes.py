@@ -382,8 +382,9 @@ def test_mixed_registry_e2e_unequal_history_intersects_before_check_aligned(tmp_
     art = tmp_path / "art"
     # --cutoff inside every fixture calendar (SP5 D3): fx now declares
     # benchmark "self", so its verdicts need OOS bars for the buy-and-hold
-    # control -- the old default cutoff (2023-12-31) sat past every fixture's
-    # 2020-12-31 end, which _benchmark_relative loudly refuses.
+    # control -- the default cutoff (2023-12-31), which this test previously
+    # rode on, sits past every fixture bar (they end 2020-12-31), and
+    # _benchmark_relative loudly refuses a zero-bar OOS window.
     rc = gauntlet_run(["--registry", str(reg.log_path),
                        "--data-dir", str(data),
                        "--artifacts-dir", str(art),
@@ -985,7 +986,8 @@ def test_progress_lines_appear_in_dry_run_too(tmp_path, capsys):
 # (docs/2026-08-28-market-data-universe-design.md s7): fx flipped to "self"
 # with a per-class-honest basis string; crypto stays None until Phase 3.
 
-from .gauntlet import _benchmark_relative, _candidate_payload, _evaluate_candidate
+from .gauntlet import (BENCHMARK_BASIS, _benchmark_relative,
+                       _candidate_payload, _evaluate_candidate)
 
 
 def test_benchmark_relative_analytic_fixture():
@@ -1247,11 +1249,20 @@ def test_fx_benchmark_recorded_with_carry_basis():
     same worker path as the equity B1 tests above gets the full
     benchmark_relative block -- and its basis string declares the fx-specific
     limitation (a USD-per-foreign hold's true driver is carry, which a
-    price-only control cannot see), not the ETF dividends wording."""
+    price-only control cannot see), not the ETF dividends wording.
+
+    single_fix note: open==close==the daily fix on every fx bar, so the
+    control here is fix-to-fix by construction -- the entry-open/exit-close
+    endpoint choice is exercised where the endpoints actually differ, by the
+    equity OHLC fixtures above."""
     from .engine import run_spec
 
     spec, spec_bars = _fx_benchmark_candidate()
     res = run_spec(spec, spec_bars)
+    # the fixture must stay a REAL candidate: if the triangle wave ever stops
+    # producing ma_cross trades, this test would silently stop exercising the
+    # strategy_net side of the block.
+    assert res["trades"], "fixture degraded: fx benchmark candidate has no trades"
     rets = [r for _, r in daily_returns_with_dates(res["equity"])]
     trials_n, _labels, trials_var = effective_trials({_FX_B_SID: rets})
     family = [{"sid": _FX_B_SID, "axes": {}, "score": 1.0,
@@ -1290,3 +1301,26 @@ def test_benchmark_basis_is_per_class():
             "universe": {"assets": ["SPY"], "asset_class": "equity_etf"}}
     result = _benchmark_relative(spec, bars, 0.02, "2023-12-31")
     assert result["basis"] == "price returns, dividends excluded on both sides"
+
+
+# The classes that DELIBERATELY ride _DEFAULT_BASIS's dividends wording --
+# pinned here, not inferred, so falling through to the default is a decision
+# with a name on it, never an accident.
+_DEFAULT_BASIS_CLASSES = frozenset({"equity_etf", "bond_etf", "metal_etf"})
+
+
+def test_every_self_benchmark_class_made_a_basis_decision():
+    """Completeness guard (rules-as-pipeline-stages: a convention that lives
+    only in prose is not a guard): every class declaring `benchmark: "self"`
+    must either carry its own BENCHMARK_BASIS entry or be a pinned member of
+    _DEFAULT_BASIS_CLASSES above. A NEW class flipping to "self" therefore
+    fails HERE, loudly, until its author makes a deliberate basis decision --
+    in a test, never a runtime raise, because recorded-not-gated must never
+    abort a live gauntlet pass."""
+    for cls, spec in cells.CLASSES.items():
+        if spec.get("benchmark") != "self":
+            continue
+        assert cls in BENCHMARK_BASIS or cls in _DEFAULT_BASIS_CLASSES, (
+            f"class {cls!r} declares benchmark 'self' but has neither its own "
+            f"BENCHMARK_BASIS entry nor a pinned seat in "
+            f"_DEFAULT_BASIS_CLASSES -- decide its basis wording deliberately")
