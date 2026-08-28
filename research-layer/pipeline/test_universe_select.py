@@ -10,7 +10,9 @@ def _coin(rank, cid, sym, mcap=1e9, price=100.0):
 
 def _top130():
     """130 clean candidates with the five incumbents in their real ranks and
-    tether at rank 3, mirroring the live top of the table."""
+    tether at rank 3, mirroring the live top of the table. Meta values are
+    (first_1d_utc, last_1d_utc) spans; every pair is actively trading (last
+    bar the day before the test's now of 2026-08-28)."""
     coins = [_coin(i, f"coin{i}", f"c{i}") for i in range(1, 131)]
     coins[0] = _coin(1, "bitcoin", "btc")
     coins[1] = _coin(2, "ethereum", "eth")
@@ -18,7 +20,8 @@ def _top130():
     coins[3] = _coin(4, "solana", "sol")
     coins[4] = _coin(5, "ripple", "xrp")
     coins[5] = _coin(6, "binancecoin", "bnb")
-    meta = {c["symbol"].upper() + "USDT": "2020-01-01" for c in coins}
+    meta = {c["symbol"].upper() + "USDT": ("2020-01-01", "2026-08-27")
+            for c in coins}
     return coins, meta
 
 
@@ -41,8 +44,8 @@ def test_normal_coin_not_excluded():
 
 def test_build_manifest_admits_exactly_100_with_reasons_and_incumbents():
     coins, meta = _top130()
-    meta["C9USDT"] = None                       # no pair -> excluded
-    meta["C10USDT"] = "2025-06-01"              # <2y history -> excluded
+    meta["C9USDT"] = None                                    # no pair -> excluded
+    meta["C10USDT"] = ("2025-06-01", "2026-08-27")           # <2y history -> excluded
     m = build_manifest(coins, meta, now_utc="2026-08-28T00:00:00Z")
     assert len(m["admitted"]) == 100
     assert {a["binance_symbol"] for a in m["admitted"]} >= {
@@ -91,14 +94,35 @@ def test_history_cutoff_boundary_is_inclusive_of_exactly_two_years():
     """now - 730 days: a first bar ON the cutoff date is admitted; one day
     inside the window is excluded."""
     coins, meta = _top130()
-    meta["C11USDT"] = "2024-08-28"              # exactly 730 days before now
-    meta["C12USDT"] = "2024-08-29"              # 729 days -> too young
+    meta["C11USDT"] = ("2024-08-28", "2026-08-27")   # exactly 730 days before now
+    meta["C12USDT"] = ("2024-08-29", "2026-08-27")   # 729 days -> too young
     m = build_manifest(coins, meta, now_utc="2026-08-28T00:00:00Z")
     admitted = {a["binance_symbol"] for a in m["admitted"]}
     excluded = {e["binance_symbol"]: e["reason"]
                 for e in m["excluded"] if "binance_symbol" in e}
     assert "C11USDT" in admitted
     assert excluded.get("C12USDT") == "history < 2y"
+
+
+def test_delisted_pair_excluded_as_inactive():
+    """T7 live finding: four pairs with >=2y of history but a last bar years
+    old (delisted, two of them ticker collisions) passed the original rule.
+    A pair whose latest daily bar is older than ACTIVE_WITHIN_DAYS is out."""
+    coins, meta = _top130()
+    meta["C15USDT"] = ("2018-01-01", "2024-02-20")   # long history, dead pair
+    m = build_manifest(coins, meta, now_utc="2026-08-28T00:00:00Z")
+    excluded = {e["binance_symbol"]: e["reason"]
+                for e in m["excluded"] if "binance_symbol" in e}
+    assert excluded.get("C15USDT") == "Binance pair inactive (delisted)"
+    assert "C15USDT" not in {a["binance_symbol"] for a in m["admitted"]}
+
+
+def test_active_pair_admitted_carries_last_bar():
+    coins, meta = _top130()
+    m = build_manifest(coins, meta, now_utc="2026-08-28T00:00:00Z")
+    btc = next(a for a in m["admitted"] if a["binance_symbol"] == "BTCUSDT")
+    assert btc["last_1d_utc"] == "2026-08-27"
+    assert all(a["last_1d_utc"] for a in m["admitted"])
 
 
 def test_write_manifest_refuses_overwrite(tmp_path):
@@ -112,7 +136,7 @@ def test_non_ascii_symbol_is_no_pair_without_a_probe():
     # Binance symbols are strictly [A-Z0-9]+; a unicode CoinGecko ticker can
     # never be a pair, and probing it would crash URL encoding (live finding
     # 2026-08-28). The guard answers None with no network call.
-    from tools_select_crypto_universe import _fetch_first_1d_utc, _valid_binance_symbol
+    from tools_select_crypto_universe import _fetch_1d_span, _valid_binance_symbol
     assert not _valid_binance_symbol("\u0e3f\u00c9USDT")
     assert _valid_binance_symbol("BTCUSDT")
-    assert _fetch_first_1d_utc("\u0e3f\u00c9USDT") is None
+    assert _fetch_1d_span("\u0e3f\u00c9USDT") is None

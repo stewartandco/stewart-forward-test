@@ -24,6 +24,14 @@ PEG_BAND = 0.02
 
 LAYER_ROOT = Path(__file__).resolve().parent
 HISTORY_DAYS = 730
+# A pair must have printed a daily bar within this many days of selection.
+# T7 live finding (2026-08-28): four DELISTED pairs passed the >=2y-history
+# rule - BTTUSDT (old BTT denomination), DAIUSDT (CoinGecko id
+# "dai-on-pulsechain" colliding with real DAI's dead pair), LITUSDT (id
+# "lighter" colliding with delisted Litentry), XMRUSDT (Monero delisted
+# 2024-02). Two are ticker COLLISIONS that would map the wrong asset's
+# history; all four would break crypto's same-day alignment forever.
+ACTIVE_WITHIN_DAYS = 7
 TARGET_SIZE = 100
 INCUMBENTS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT")
 
@@ -34,13 +42,17 @@ RULE = (
     "derivatives (marker substrings of the CoinGecko id or symbol), and undeclared "
     "USD-peg suspects (price within {peg} of 1.0 with 'usd' in the id or symbol). "
     "Admission additionally requires a Binance USDT spot pair with at least {days} "
-    "days ({years} years) of daily history at selection time. HONESTY LIMIT: this "
+    "days ({years} years) of daily history at selection time, AND the pair must be "
+    "actively trading: its latest daily bar must fall within {active} days of "
+    "selection, which excludes delisted pairs and ticker collisions with dead "
+    "pairs. HONESTY LIMIT: this "
     "universe is selected by today's outcomes - assets that died or fell out of the "
     "top-100 before today were never candidates, so any backtest over this universe "
     "inherits survivorship bias. That bias is documented here, not corrected; the "
     "forward quarantine period is the honest arbiter. Re-selection is a new declared "
     "event with its own manifest, never a silent refresh of this one."
-).format(peg=PEG_BAND, days=HISTORY_DAYS, years=HISTORY_DAYS // 365)
+).format(peg=PEG_BAND, days=HISTORY_DAYS, years=HISTORY_DAYS // 365,
+         active=ACTIVE_WITHIN_DAYS)
 
 
 class PinnedManifestError(RuntimeError):
@@ -74,12 +86,14 @@ def _parse_utc(stamp):
     return dt.astimezone(timezone.utc)
 
 
-def _admission_walk(coins, binance_meta, cutoff):
+def _admission_walk(coins, binance_meta, cutoff, active_cutoff):
     """The single admission walk both build_manifest and main()'s page-2
     decision use: ascending market_cap_rank, stop once TARGET_SIZE assets are
-    admitted. Returns (admitted, excluded). Raises RuntimeError LOUDLY on a
-    duplicate coin id or duplicate Binance symbol among survivors - silent
-    dedupe would change the declared rule. Pure: no network, no filesystem."""
+    admitted. binance_meta values are (first_1d_utc, last_1d_utc) spans, or
+    None for no pair. Returns (admitted, excluded). Raises RuntimeError LOUDLY
+    on a duplicate coin id or duplicate Binance symbol among survivors -
+    silent dedupe would change the declared rule. Pure: no network, no
+    filesystem."""
     admitted = []
     excluded = []
     seen_ids = set()
@@ -109,22 +123,31 @@ def _admission_walk(coins, binance_meta, cutoff):
                 "USDT pair; investigate before pinning anything"
                 % (binance_symbol, cid, rank))
         seen_binance_symbols.add(binance_symbol)
-        first_1d = binance_meta.get(binance_symbol)
-        if first_1d is None:
+        span = binance_meta.get(binance_symbol)
+        if span is None:
             excluded.append({"rank": rank, "id": cid, "symbol": sym,
                              "binance_symbol": binance_symbol,
                              "reason": "no Binance USDT spot pair"})
             continue
+        first_1d, last_1d = span
         if _parse_utc(first_1d) > cutoff:
             excluded.append({"rank": rank, "id": cid, "symbol": sym,
                              "binance_symbol": binance_symbol,
                              "first_1d_utc": first_1d,
                              "reason": "history < 2y"})
             continue
+        if _parse_utc(last_1d) < active_cutoff:
+            excluded.append({"rank": rank, "id": cid, "symbol": sym,
+                             "binance_symbol": binance_symbol,
+                             "first_1d_utc": first_1d,
+                             "last_1d_utc": last_1d,
+                             "reason": "Binance pair inactive (delisted)"})
+            continue
         admitted.append({"rank": rank, "id": cid, "symbol": sym,
                          "binance_symbol": binance_symbol,
                          "market_cap": coin.get("market_cap"),
-                         "first_1d_utc": first_1d})
+                         "first_1d_utc": first_1d,
+                         "last_1d_utc": last_1d})
     return admitted, excluded
 
 
@@ -132,8 +155,11 @@ def build_manifest(coins, binance_meta, now_utc):
     """Walk coins by ascending market_cap_rank, applying the declared rule,
     until TARGET_SIZE assets are admitted. Only coins actually walked appear
     in the manifest. Pure function: no network, no filesystem."""
-    cutoff = _parse_utc(now_utc) - timedelta(days=HISTORY_DAYS)
-    admitted, excluded = _admission_walk(coins, binance_meta, cutoff)
+    now = _parse_utc(now_utc)
+    cutoff = now - timedelta(days=HISTORY_DAYS)
+    active_cutoff = now - timedelta(days=ACTIVE_WITHIN_DAYS)
+    admitted, excluded = _admission_walk(coins, binance_meta, cutoff,
+                                         active_cutoff)
     if len(admitted) < TARGET_SIZE:
         raise RuntimeError(
             "under-full universe: only %d of %d admitted (short %d) - a "
@@ -152,7 +178,7 @@ def build_manifest(coins, binance_meta, now_utc):
         "selected_utc": now_utc,
         "rule": RULE,
         "source": ("coingecko /coins/markets keyless + "
-                   "binance /api/v3/klines first-bar probe"),
+                   "binance /api/v3/klines first/last-bar probe"),
         "admitted": admitted,
         "excluded": excluded,
     }
@@ -185,8 +211,12 @@ def write_manifest(manifest, path):
 _UA = {"User-Agent": "stewart-research-layer/1.0"}
 _COINGECKO_URL = ("https://api.coingecko.com/api/v3/coins/markets"
                   "?vs_currency=usd&order=market_cap_desc&per_page=250&page=%d")
-_BINANCE_URL = ("https://api.binance.com/api/v3/klines"
-                "?symbol=%s&interval=1d&limit=1&startTime=0")
+# With startTime=0 klines returns the OLDEST daily bar; without startTime it
+# returns the NEWEST. One request each = the pair's full (first, last) span.
+_BINANCE_FIRST_URL = ("https://api.binance.com/api/v3/klines"
+                      "?symbol=%s&interval=1d&limit=1&startTime=0")
+_BINANCE_LAST_URL = ("https://api.binance.com/api/v3/klines"
+                     "?symbol=%s&interval=1d&limit=1")
 
 
 def _get_json(url):
@@ -203,23 +233,41 @@ def _valid_binance_symbol(binance_symbol):
     return bool(re.fullmatch(r"[A-Z0-9]+", binance_symbol))
 
 
-def _fetch_first_1d_utc(binance_symbol):
-    """First daily bar open time for a Binance symbol, ISO date string, or
-    None when the pair does not exist (HTTP 400 or empty klines), or when
-    the symbol is not even a valid Binance symbol shape (no probe sent)."""
-    if not _valid_binance_symbol(binance_symbol):
-        return None
-    try:
-        klines = _get_json(_BINANCE_URL % binance_symbol)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 400:
-            return None
-        raise
+def _kline_open_iso(klines):
+    """ISO date of the single kline's open time, or None for an empty list."""
     if not klines:
         return None
     open_ms = klines[0][0]
     return datetime.fromtimestamp(open_ms / 1000.0, tz=timezone.utc).strftime(
         "%Y-%m-%d")
+
+
+def _fetch_1d_span(binance_symbol):
+    """(first_iso, last_iso) daily-bar span for a Binance symbol, or None
+    when the pair does not exist (HTTP 400 or empty klines), or when the
+    symbol is not even a valid Binance symbol shape (no probe sent). Two
+    requests with 0.25s pacing between them; the latest bar is required by
+    the active-trading rule (T7 delisted-pair finding)."""
+    if not _valid_binance_symbol(binance_symbol):
+        return None
+    try:
+        first_iso = _kline_open_iso(_get_json(_BINANCE_FIRST_URL % binance_symbol))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 400:
+            return None
+        raise
+    if first_iso is None:
+        return None
+    time.sleep(0.25)
+    last_iso = _kline_open_iso(_get_json(_BINANCE_LAST_URL % binance_symbol))
+    if last_iso is None:
+        # A pair with a first bar but no latest bar is a source contradiction,
+        # not a no-pair: stop loudly rather than guess.
+        raise RuntimeError(
+            "Binance returned a first 1d bar but no latest 1d bar for %s - "
+            "inconsistent klines responses; investigate before pinning "
+            "anything" % binance_symbol)
+    return first_iso, last_iso
 
 
 def main():
@@ -233,23 +281,26 @@ def main():
     binance_meta = {}
 
     def _probe_candidates():
-        """Probe Binance first-bar for every not-yet-probed candidate that
-        survives classify_exclusion."""
+        """Probe the Binance first/last-bar span for every not-yet-probed
+        candidate that survives classify_exclusion."""
         for coin in sorted(coins, key=lambda c: c["market_cap_rank"]):
             if classify_exclusion(coin) is not None:
                 continue
             binance_symbol = str(coin["symbol"]).upper() + "USDT"
             if binance_symbol in binance_meta:
                 continue
-            binance_meta[binance_symbol] = _fetch_first_1d_utc(binance_symbol)
+            binance_meta[binance_symbol] = _fetch_1d_span(binance_symbol)
             time.sleep(0.25)
 
     def _admitted_count():
         """Count admissions via the SAME walk build_manifest uses (shared
         helper, so the two can never drift), without the shortfall/incumbent
         asserts - pages may be incomplete mid-run."""
-        cutoff = _parse_utc(now_utc) - timedelta(days=HISTORY_DAYS)
-        admitted, _ = _admission_walk(coins, binance_meta, cutoff)
+        now = _parse_utc(now_utc)
+        cutoff = now - timedelta(days=HISTORY_DAYS)
+        active_cutoff = now - timedelta(days=ACTIVE_WITHIN_DAYS)
+        admitted, _ = _admission_walk(coins, binance_meta, cutoff,
+                                      active_cutoff)
         return len(admitted)
 
     print("fetching CoinGecko page 1 ...")
