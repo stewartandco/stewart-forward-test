@@ -17,7 +17,11 @@ implementation exactly: `effective_trials` dispatches to it for rectangular
 input and falls back to the hand-written functions otherwise. The reference
 functions below are the CONTRACT; test_cluster_np.py holds the two paths
 identical, and the tie-break key round(d, 12) is what absorbs BLAS-vs-loop
-float summation differences.
+float summation differences. That absorption is probabilistic, not
+absolute: two summation orders can land within ulps of a half-1e-12
+rounding boundary and still round apart, so the real ship bar is the
+recorded-data identity proof in tools_verify_cluster_identity.py (plan
+Tasks 4/5), not the rounding alone.
 """
 from __future__ import annotations
 

@@ -236,3 +236,86 @@ def test_agglomerate_np_deterministic():
 def test_agglomerate_np_trivial_sizes():
     assert _agglomerate_np([], np.zeros((0, 0))) == []
     assert _agglomerate_np(["a" * 16], np.zeros((1, 1))) == []
+
+
+def test_agglomerate_np_quantized_tie_sweep():
+    """Randomized equivalence sweep on tie-heavy coarse-grid matrices
+    (values integers(1,6)/10, so exact ties are frequent and bit-identical).
+    Pins the tie machinery of _agglomerate_np: the candidate window in
+    row_best, the lexicographic min inside the window, and the round(d, 12)
+    row key.
+
+    A fine-grid variant (0.5 + k*1e-12, integer k) was tried and DIVERGES
+    by construction: cluster averages of integer-k leaves land exactly on
+    half-1e-12 rounding boundaries, where the fast path's S-accumulation
+    and the reference's flat sums round apart (1 ulp across the boundary).
+    That is the documented quantization limitation in the module docstring,
+    not a tie-machinery bug; real correlation distances are continuous and
+    never sit on those boundaries, and the recorded-data identity proof
+    (plan Tasks 4/5) is the ship bar for the real chain.
+    """
+    rng = np.random.default_rng(20260828)
+    for case in range(20):
+        n = int(rng.integers(8, 13))
+        ids = sorted(f"{k:02d}" + "q" * 14 for k in range(n))
+        vals = rng.integers(1, 6, size=(n, n)) / 10.0
+        D = np.triu(vals, 1)
+        D = D + D.T
+        dmat = {}
+        for i, a in enumerate(ids):
+            for j, b in enumerate(ids):
+                dmat[(a, b)] = float(D[i, j])
+        ref = agglomerate(ids, dmat)
+        new = _agglomerate_np(ids, D)
+        assert _hist_as_sets(new) == _hist_as_sets(ref), f"case {case}"
+
+
+def _dict_from_pairs(ids, default, pairs):
+    dmat = {}
+    for i in ids:
+        for j in ids:
+            dmat[(i, j)] = 0.0 if i == j else default
+    for x, y, v in pairs:
+        dmat[(x, y)] = v
+        dmat[(y, x)] = v
+    return dmat
+
+
+def test_agglomerate_np_sub_rounding_ties():
+    """Hand-built raw-vs-rounded tie cases the coarse sweep cannot reach:
+    candidate distances that differ raw (by 1e-13 or 1.2e-12) but round
+    together at 12dp, placed at least 1e-13 away from every half-1e-12
+    rounding boundary so both paths round identically by construction. The
+    decisive rounds involve only singleton clusters, so the fast path's S
+    values are the leaf doubles exactly and no summation-order drift exists.
+
+    Pins the two tie-machinery behaviors the coarse sweep leaves open:
+    the 2e-12 candidate window in row_best (a raw argmin that is NOT the
+    key winner on any row of the winning pair), and taking the
+    lexicographic min INSIDE the window rather than the first candidate in
+    slot order (an earlier-slot decoy in the window with a higher rounded
+    distance on both rows of the winning pair).
+    """
+    a, b, c, d = (ch * 16 for ch in "abcd")
+
+    # window case: every row's raw argmin misses the true key winner (a, b),
+    # which sits 1e-13 above each row's raw minimum yet rounds equal
+    ids = [a, b, c]
+    dmat = _dict_from_pairs(ids, 0.2, [(a, b, 0.2 + 1e-13)])
+    ref = agglomerate(ids, dmat)
+    new = _agglomerate_np(ids, dmat_to_array(ids, dmat))
+    assert _hist_as_sets(new) == _hist_as_sets(ref)
+    assert new[0] == (frozenset({a}), frozenset({b}))
+
+    # first-candidate case: winning pair (c, d) at raw 0.3; both of its rows
+    # carry an earlier-slot decoy 1.2e-12 above (inside the window, rounding
+    # one 12dp step higher), so slot order and key order disagree
+    ids = [a, b, c, d]
+    dmat = _dict_from_pairs(ids, 0.9,
+                            [(c, d, 0.3),
+                             (b, c, 0.3 + 1.2e-12),
+                             (a, d, 0.3 + 1.2e-12)])
+    ref = agglomerate(ids, dmat)
+    new = _agglomerate_np(ids, dmat_to_array(ids, dmat))
+    assert _hist_as_sets(new) == _hist_as_sets(ref)
+    assert new[0] == (frozenset({c}), frozenset({d}))
