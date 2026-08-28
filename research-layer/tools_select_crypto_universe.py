@@ -6,6 +6,7 @@ selected by today's outcomes - survivorship bias is documented, not corrected;
 forward quarantine is the honest arbiter."""
 
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -194,9 +195,20 @@ def _get_json(url):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _valid_binance_symbol(binance_symbol):
+    """Binance spot symbols are strictly uppercase ASCII alphanumerics. A
+    CoinGecko ticker outside that alphabet (unicode meme symbols exist in the
+    real top-250; hit live 2026-08-28 as a UnicodeEncodeError in the URL)
+    cannot be a Binance pair, so it is a no-pair exclusion WITHOUT a probe."""
+    return bool(re.fullmatch(r"[A-Z0-9]+", binance_symbol))
+
+
 def _fetch_first_1d_utc(binance_symbol):
     """First daily bar open time for a Binance symbol, ISO date string, or
-    None when the pair does not exist (HTTP 400 or empty klines)."""
+    None when the pair does not exist (HTTP 400 or empty klines), or when
+    the symbol is not even a valid Binance symbol shape (no probe sent)."""
+    if not _valid_binance_symbol(binance_symbol):
+        return None
     try:
         klines = _get_json(_BINANCE_URL % binance_symbol)
     except urllib.error.HTTPError as exc:

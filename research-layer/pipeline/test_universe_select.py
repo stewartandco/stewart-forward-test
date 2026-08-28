@@ -106,3 +106,13 @@ def test_write_manifest_refuses_overwrite(tmp_path):
     p.write_text("{}")
     with pytest.raises(PinnedManifestError):
         write_manifest({"admitted": []}, p)
+
+
+def test_non_ascii_symbol_is_no_pair_without_a_probe():
+    # Binance symbols are strictly [A-Z0-9]+; a unicode CoinGecko ticker can
+    # never be a pair, and probing it would crash URL encoding (live finding
+    # 2026-08-28). The guard answers None with no network call.
+    from tools_select_crypto_universe import _fetch_first_1d_utc, _valid_binance_symbol
+    assert not _valid_binance_symbol("\u0e3f\u00c9USDT")
+    assert _valid_binance_symbol("BTCUSDT")
+    assert _fetch_first_1d_utc("\u0e3f\u00c9USDT") is None
