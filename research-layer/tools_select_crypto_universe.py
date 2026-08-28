@@ -16,7 +16,12 @@ from pathlib import Path
 
 STABLECOIN_IDS = frozenset({"tether","usd-coin","dai","binance-usd","true-usd",
     "first-digital-usd","ethena-usde","usds","paypal-usd","frax","usdd",
-    "gemini-dollar","paxos-standard","liquity-usd","susds","usual-usd"})
+    "gemini-dollar","paxos-standard","liquity-usd","susds","usual-usd",
+    # T7 re-selection finding (2026-08-28): two DEPEGGED USD stables (USDa
+    # $0.967, USDA $0.964) sat outside the 2% peg band and collided on the
+    # ticker USDA, tripping the duplicate guard. The peg heuristic stays
+    # narrow on purpose; depegged stables get declared entries instead.
+    "usda-2","usda-3"})
 WRAPPED_MARKERS = ("wrapped","staked","bridged","restaked","wbeth","wsteth",
     "steth","reth","cbeth","cbbtc","weeth","rseth","ezeth","oseth","lseth",
     "tbtc","solvbtc")
