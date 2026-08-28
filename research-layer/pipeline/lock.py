@@ -33,6 +33,7 @@ class FileLock:
     def acquire(self) -> None:
         deadline = time.monotonic() + self.timeout
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        last_error: OSError | None = None
         while True:
             try:
                 fd = os.open(self.lock_path,
@@ -41,19 +42,28 @@ class FileLock:
                 os.close(fd)
                 self._held = True
                 return
-            except FileExistsError:
-                try:
-                    age = time.time() - os.path.getmtime(self.lock_path)
-                    if age > self.stale_after:
-                        os.unlink(self.lock_path)  # break dead holder's lock
-                        continue
-                except OSError:
-                    continue  # lock vanished between checks; retry immediately
-                if time.monotonic() >= deadline:
-                    raise FileLockTimeout(
-                        f"could not acquire {self.lock_path} within "
-                        f"{self.timeout}s (held by another writer?)")
-                time.sleep(self.poll)
+            except FileExistsError as e:
+                last_error = e
+            except PermissionError as e:
+                # Windows: a lockfile another process is mid-unlink sits in
+                # delete-pending state, and CreateFile on it (or on a file an
+                # AV/indexer briefly holds) fails ERROR_ACCESS_DENIED ->
+                # PermissionError, not FileExistsError. Same meaning here:
+                # someone else has the lock right now.
+                last_error = e
+            try:
+                age = time.time() - os.path.getmtime(self.lock_path)
+                if age > self.stale_after:
+                    os.unlink(self.lock_path)  # break dead holder's lock
+                    continue
+            except OSError:
+                pass  # lock vanished/unstatable between checks; poll again
+            if time.monotonic() >= deadline:
+                raise FileLockTimeout(
+                    f"could not acquire {self.lock_path} within "
+                    f"{self.timeout}s (held by another writer?) "
+                    f"[last error: {last_error!r}]")
+            time.sleep(self.poll)
 
     def release(self) -> None:
         if self._held:
