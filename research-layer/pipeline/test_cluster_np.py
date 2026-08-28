@@ -253,6 +253,10 @@ def test_agglomerate_np_quantized_tie_sweep():
     not a tie-machinery bug; real correlation distances are continuous and
     never sit on those boundaries, and the recorded-data identity proof
     (plan Tasks 4/5) is the ship bar for the real chain.
+
+    Known incomplete: byte-identical duplicate rows DO sit exactly on the
+    rho = 1 clamp boundary; that class is closed by the duplicate-row pin
+    in _distance_matrix_np (see its docstring), not by this sweep.
     """
     rng = np.random.default_rng(20260828)
     for case in range(20):
