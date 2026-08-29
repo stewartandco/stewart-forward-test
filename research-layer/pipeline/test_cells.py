@@ -81,6 +81,35 @@ def test_live_classes_gates_activation():
     assert "metal_etf" in cells.LIVE_CLASSES
 
 
+# ---------------- SP5 P2-T1: ACTIVE_CELLS (cell-level activation gate) ----------------
+
+def test_active_cells_declares_every_live_class():
+    for cls in cells.LIVE_CLASSES:
+        assert cls in cells.ACTIVE_CELLS
+
+
+def test_tradfi_classes_are_fully_active_so_behavior_is_unchanged():
+    for cls in ("fx", "equity_etf", "bond_etf", "metal_etf"):
+        assert cells.active_cells(cls) == cells.class_cells(cls)
+
+
+def test_crypto_active_set_is_empty_until_activation():
+    # Phase 2 declares; Phase 3 (Coen's own commit) activates. The empty
+    # active set is what keeps the legacy pooled path serving crypto.
+    assert cells.active_cells("crypto") == []
+
+
+def test_active_cells_is_a_subset_of_the_declared_grid():
+    for cls in cells.LIVE_CLASSES:
+        assert set(cells.active_cells(cls)) <= set(cells.class_cells(cls))
+
+
+def test_validate_cell_still_accepts_the_whole_declared_grid():
+    # declaration admits data/import work; activation admits sweeping
+    for asset, tf in cells.class_cells("crypto"):
+        cells.validate_cell(asset, tf)
+
+
 def test_validate_cell_class_aware():
     assert cells.validate_cell("BTCUSDT", "1h") == ("BTCUSDT", "1h")          # crypto inferred, unchanged
     assert cells.validate_cell("EUR", "1d") == ("EUR", "1d")                   # fx inferred

@@ -15,6 +15,11 @@ declaring "fx" here does not put a single fx trial into any denominator.
 Only LIVE_CLASSES gates what a generation may sweep, because activating a
 class moves the trial denominator (spec s2/s7) - that is a decision Coen makes
 in its own reviewed commit, never a side effect of adding a class dict here.
+ACTIVE_CELLS extends that same rule to cell granularity, for the case
+LIVE_CLASSES cannot express: an ALREADY-LIVE class whose declared grid grows.
+Widening a class's assets/timeframes declares cells; only growing that class's
+ACTIVE_CELLS entry - again Coen's own reviewed commit - lets a generation
+sweep them.
 Crypto's entry in CLASSES is a read-only mirror of ASSETS/TIMEFRAMES above;
 every existing crypto caller (all_cells, phase_cells, validate_cell with two
 positional args) keeps its exact current behaviour untouched.
@@ -160,6 +165,22 @@ LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08
 # class's dry-run ship-bar step (spec s8), per the CLASSES/LIVE_CLASSES
 # docstring above.
 
+# SP5 D4/D5 (docs/2026-08-28-market-data-universe-design.md s3): LIVE_CLASSES
+# gates CLASSES; it cannot stage an ALREADY-LIVE class's expansion. crypto is
+# live, so widening its grid without this gate would sweep the expansion on
+# the next loop fire with no activation event. ACTIVE_CELLS is that gate at
+# cell granularity: growing an entry is the DENOMINATOR EVENT and is Coen's
+# own reviewed commit, never a side effect of declaring assets above.
+# "all" = the class's whole declared grid (the four tradfi classes: byte-
+# identical to pre-SP5 behavior, test-pinned).
+ACTIVE_CELLS = {
+    "crypto":     {"assets": (), "timeframes": ()},
+    "fx":         {"assets": "all", "timeframes": "all"},
+    "equity_etf": {"assets": "all", "timeframes": "all"},
+    "bond_etf":   {"assets": "all", "timeframes": "all"},
+    "metal_etf":  {"assets": "all", "timeframes": "all"},
+}
+
 SESSION_PERIODS = {"24x7": 365, "fx_5d": 261, "us_equity_5d": 252}
 
 # Every class's declared assets must be disjoint from every other class's -
@@ -194,7 +215,25 @@ for _cls, _spec in CLASSES.items():
         raise AssertionError(
             f"CLASSES[{_cls!r}]['benchmark'] must be declared as None or "
             f"'self' (B1 addendum), got {_bench!r}")
-del _cls, _spec, _asset, _lag, _excl, _bench
+for _live in LIVE_CLASSES:
+    if _live not in ACTIVE_CELLS:
+        raise AssertionError(
+            f"LIVE_CLASSES member {_live!r} has no ACTIVE_CELLS entry: a live "
+            f"class must declare which of its declared cells are active")
+for _acls, _gate in ACTIVE_CELLS.items():
+    if _acls not in CLASSES:
+        raise AssertionError(
+            f"ACTIVE_CELLS[{_acls!r}] is not a declared class: {sorted(CLASSES)}")
+    for _key in ("assets", "timeframes"):
+        _sub = _gate[_key]
+        if _sub == "all":
+            continue
+        if not isinstance(_sub, tuple) or not set(_sub) <= set(CLASSES[_acls][_key]):
+            raise AssertionError(
+                f"ACTIVE_CELLS[{_acls!r}][{_key!r}] must be 'all' or a tuple "
+                f"subset of CLASSES[{_acls!r}][{_key!r}]={CLASSES[_acls][_key]!r}, "
+                f"got {_sub!r}")
+del _cls, _spec, _asset, _lag, _excl, _bench, _live, _acls, _gate, _key, _sub
 
 
 def all_cells() -> list[tuple[str, str]]:
@@ -219,6 +258,17 @@ def class_cells(asset_class: str) -> list[tuple[str, str]]:
     """Every declared cell for one class (assets x timeframes, fixed order)."""
     spec = _class_spec(asset_class)
     return [(a, tf) for a in spec["assets"] for tf in spec["timeframes"]]
+
+
+def active_cells(asset_class: str) -> list[tuple[str, str]]:
+    """The cells a generation MAY sweep for this class: class_cells()
+    restricted to the ACTIVE_CELLS subsets. Declaration (CLASSES) is a space;
+    this is the decision to search part of it."""
+    spec = _class_spec(asset_class)
+    gate = ACTIVE_CELLS[asset_class]
+    assets = spec["assets"] if gate["assets"] == "all" else gate["assets"]
+    tfs = spec["timeframes"] if gate["timeframes"] == "all" else gate["timeframes"]
+    return [(a, tf) for a in assets for tf in tfs]
 
 
 def class_of_asset(asset: str) -> str:
