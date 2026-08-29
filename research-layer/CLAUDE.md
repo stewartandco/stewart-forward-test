@@ -16,6 +16,17 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   trigger decision without running anything; --seed-watermarks initialises
   every class watermark to the current corpus (ACTIVATION step -- prevents a
   whole-corpus generation on first fire).
+- **DO NOT run --seed-watermarks after the 2026-08-29 trigger fix.** It seeds
+  every watermark to the CURRENT triggerable count, which today includes the
+  539-card pending backlog. Seeding now banks that backlog as "already seen",
+  so no class fires until 25 genuinely NEW cards arrive -- the loop would look
+  exactly like the deadlock it just escaped (no_trigger, exit 0, healthy) while
+  the whole backlog sits stranded behind the watermark. --seed-watermarks is
+  an ACTIVATION-only step, for a fresh loop_state.json.
+- **D38's activation checklist step 1 (run --seed-watermarks) is now
+  CONDITIONAL, not unconditional:** it applies only to a loop_state.json that
+  has never been seeded. The live file was seeded 2026-08-28 and must be left
+  as it is.
 - **Trigger basis (amended Coen 2026-08-29 -- do not revert):** a class fires
   on its TRIGGERABLE count minus its watermark, where triggerable = routable
   cards that are accepted OR pending, never rejected. NOT accepted-only:
@@ -31,7 +42,41 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   reader agent); run log logs/pipeline-loop-run.log; instance guard logs/loop.lock.
   Items carry BOTH routable_<cls> (accepted-only) and triggerable_<cls>
   (accepted+pending) per class -- a large gap between them is an undrained
-  pending backlog.
+  pending backlog. Present on every path that has read the chain (no_trigger,
+  dry_run, cycle_complete, stage_failed, the budget/lock defers); the three
+  paths that run BEFORE the chain read -- the two startup lock probes and
+  loop_crashed -- legitimately omit them.
+- `budget_state` item: ok | batch_stop (80% line) | hard_cap. A budget park
+  also stamps `last_park_ts_utc` in loop_state.json, which rotates that class
+  to the back of pick_class's queue. Parks bank NO watermark (no work was
+  done); the stamp exists only so one parked class cannot monopolise every
+  fire and starve the others.
+
+## Triage cost controls (loop stage 4a)
+- `--limit` comes from `loop.TRIAGE_LIMIT` (40, not 200). It is sized to fit
+  the scheduled task's ExecutionTimeLimit alongside the rest of the cycle:
+  ~3.85 s/reviewer-call x 3-reviewer panel, so 40 cards is ~7.7 min against a
+  75-90 min cycle. **Raising it without raising ExecutionTimeLimit in
+  `quant/tasks/xml/25_PipelineLoop.xml` re-creates a mid-flight kill loop**:
+  Windows kills the cycle, the watermark never advances, and the class
+  re-fires forever paying full freight. Pinned by
+  test_triage_limit_fits_the_scheduled_execution_window.
+- `logs/triage_escalated.json` is the advisory escalation skip-set. Escalated
+  cards are never chained, so without it they re-occupy the head of the
+  --limit window every cycle and the backlog behind them is unreachable.
+  Advisory: missing or corrupt -> WARN + skip nothing, never a crash.
+  `--no-skip-escalated` forces a re-review. It is a TRIAGE-cost control only
+  and never a trigger input -- escalated cards still count as pending work.
+- `no_new_accepted_cards` outcome: triage ran but accepted nothing new for a
+  class that fired on pending cards, so the composer would see an unchanged
+  corpus. Exits 0 before any metered composer call and still advances the
+  watermark (those cards were seen). Spec Decision 2, "no new information, no
+  new trials".
+- `gauntlet_orphan` outcome (exit 1, FAIL): a strategy sits in state
+  'gauntlet' with a gauntlet verdict already chained -- gauntlet.py refuses on
+  this unconditionally, so the loop detects it next to the pre-spend chain
+  verify rather than paying ~$4.20/fire to reach a guaranteed failure. Repair
+  the chain manually.
 - Fires 10:30 / 15:30 / 21:30 local once \StewartCo\25_PipelineLoop is
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real
