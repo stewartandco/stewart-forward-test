@@ -13,10 +13,11 @@ are reported to status; only the former decides.
 Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
 \\StewartCo\\25_PipelineLoop (~3x daily) as `python -m pipeline.loop --once`.
 
-Exit 0: cycle_complete | no_trigger | deferred_lock | deferred_budget |
-        deferred_instance | dry_run_would_fire
+Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_lock |
+        deferred_budget | deferred_instance | dry_run_would_fire
         (distinguished in logs/pipeline_status.json items.outcome)
-Exit 1: stage_failed | chain_invalid | loop_crashed -- a real defect.
+Exit 1: stage_failed | chain_invalid | gauntlet_orphan | loop_crashed
+        -- a real defect.
 
 ACTIVATION: `python -m pipeline.loop --seed-watermarks` initialises every
 LIVE_CLASSES watermark to the current triggerable count, so the FIRST
