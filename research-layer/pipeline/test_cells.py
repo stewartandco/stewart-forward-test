@@ -6,23 +6,28 @@ import pytest
 from pipeline import cells
 
 
-def test_the_grid_is_five_assets_by_six_timeframes():
-    assert len(cells.ASSETS) == 5
+def test_the_grid_is_one_hundred_assets_by_six_timeframes():
+    """SP5 P2-T3: the declared crypto grid is the pinned 100-asset universe.
+    DECLARED, not active - ACTIVE_CELLS["crypto"] is still empty, so none of
+    these 600 cells is in any trial denominator yet."""
+    assert len(cells.ASSETS) == 100
     assert len(cells.TIMEFRAMES) == 6
-    assert len(cells.all_cells()) == 30
+    assert len(cells.all_cells()) == 600
 
 
 def test_the_grid_is_declared_in_a_fixed_order():
     """Order is part of the declaration: a run manifest that lists cells in a
-    different order every time cannot be diffed."""
+    different order every time cannot be diffed. The order is the universe
+    manifest's own (market-cap rank at selection), so the first cell is still
+    BTC's cheapest timeframe and the last is the 100th admitted asset's 1d."""
     assert cells.all_cells()[0] == ("BTCUSDT", "15m")
-    assert cells.all_cells()[-1] == ("BNBUSDT", "1d")
+    assert cells.all_cells()[-1] == ("GASUSDT", "1d")
 
 
 def test_phase_one_excludes_the_two_most_expensive_timeframes():
     """15m is 74.4% of all bars in the grid; 30m is not cached yet."""
     p1 = cells.phase_cells(1)
-    assert len(p1) == 20
+    assert len(p1) == 400
     assert all(tf in ("1h", "4h", "12h", "1d") for _, tf in p1)
 
 
@@ -35,14 +40,27 @@ def test_a_cell_names_itself_unambiguously():
 
 
 def test_unknown_cells_are_rejected_not_silently_accepted():
-    """A typo'd cell must not become a 31st trial nobody declared."""
+    """A typo'd cell must not become a 601st trial nobody declared.
+
+    The undeclared-asset probe is BTTUSDT, not DOGEUSDT: DOGE is admitted by
+    the pinned universe manifest (P2-T3), so it is now a declared asset. BTT
+    is the sharper probe anyway - the manifest EXCLUDED it ("Binance pair
+    inactive (delisted)", last 1d bar 2022-01-17, caught by the amended
+    active-trading rule) and `data/BTTUSDT_1d.csv` is nonetheless sitting on
+    disk. Search-Space-First: on disk is not declared.
+    """
     with pytest.raises(ValueError):
-        cells.validate_cell("DOGEUSDT", "1h")
+        cells.validate_cell("BTTUSDT", "1h")
     with pytest.raises(ValueError):
         cells.validate_cell("BTCUSDT", "3m")
 
 
-def test_classes_registry_crypto_unchanged():
+def test_classes_registry_crypto_mirrors_the_declared_grid():
+    """crypto's CLASSES entry is the read-only mirror of ASSETS/TIMEFRAMES.
+    (Was `test_classes_registry_crypto_unchanged` until P2-T3 - the entry is
+    no longer unchanged: assets, cost_model and benchmark all moved. What is
+    still true, and what this test is for, is the mirror relationship and the
+    back-compat aliases.)"""
     c = cells.CLASSES["crypto"]
     assert c["assets"] == cells.ASSETS and c["timeframes"] == cells.TIMEFRAMES
     assert c["session"] == "24x7" and c["periods_per_year"] == 365 and c["bar_kind"] == "ohlcv"
@@ -91,6 +109,43 @@ def test_active_cells_declares_every_live_class():
 def test_tradfi_classes_are_fully_active_so_behavior_is_unchanged():
     for cls in ("fx", "equity_etf", "bond_etf", "metal_etf"):
         assert cells.active_cells(cls) == cells.class_cells(cls)
+
+
+# ---------------- SP5 P2-T3: the 100-asset crypto grid (declared, NOT active) ----------------
+
+def test_crypto_assets_are_the_pinned_universe_manifest():
+    """The tuple in cells.py is a LITERAL written from the pinned manifest
+    (design s2); the manifest is the PROVENANCE of the declaration, never a
+    runtime input. This test is the only thing keeping the two in step."""
+    import json
+    import pathlib
+    man = json.loads((pathlib.Path(__file__).resolve().parent.parent
+                      / "data" / "crypto_universe_manifest.json").read_text(encoding="utf-8"))
+    assert list(cells.CLASSES["crypto"]["assets"]) == [
+        a["binance_symbol"] for a in man["admitted"]]
+
+
+def test_crypto_declares_a_cost_model_and_defers_its_benchmark():
+    """The cost_model half of the design's s4 migration lands here; the
+    benchmark half does NOT. Flipping benchmark to "self" while the legacy
+    pooled path still builds 2-asset BTCUSD+ETHUSD specs makes every crypto
+    verdict raise in gauntlet._benchmark_relative, so it rides with the
+    Phase 3 routing change instead (design s4/s7 corrected accordingly).
+    The both-or-neither coupling is pinned in test_gauntlet_classes.py."""
+    spec = cells.CLASSES["crypto"]
+    assert spec["cost_model"] == {"commission_per_side": 0.001,
+                                  "slippage_ticks": 0.0005}
+    assert spec["benchmark"] is None
+
+
+def test_crypto_declared_grid_is_100_assets_by_6_timeframes():
+    assert len(cells.CLASSES["crypto"]["assets"]) == 100
+    assert len(cells.CLASSES["crypto"]["timeframes"]) == 6
+    assert len(cells.class_cells("crypto")) == 600
+
+
+def test_crypto_is_declared_but_still_inactive():
+    assert cells.active_cells("crypto") == []
 
 
 def test_crypto_active_set_is_empty_until_activation():
@@ -208,8 +263,11 @@ def test_validate_cell_class_aware():
         cells.validate_cell("EUR", "1h")            # fx has no 1h
     with pytest.raises(ValueError):
         cells.validate_cell("EUR", "1d", asset_class="crypto")
+    # DOGEUSDT is now a DECLARED crypto asset (P2-T3's pinned universe), so it
+    # no longer works as the undeclared probe -- BTTUSDT, which the manifest
+    # excluded as a delisted pair, does.
     with pytest.raises(ValueError):
-        cells.validate_cell("DOGEUSDT", "1d")
+        cells.validate_cell("BTTUSDT", "1d")
 
 
 def test_class_of_asset():
@@ -290,8 +348,11 @@ def test_benchmark_declared_per_class():
     # every single-name class declares "self" -- fx flipped under SP5 because
     # a recorded-not-gated control is strictly more information than none.
     # crypto alone still declares None (no key is ever written on its
-    # verdicts); it flips at SP5 Phase 3 with the per-cell migration, not
-    # here.
+    # verdicts). P2-T3 declared its 100-asset grid and its cost_model but
+    # DEFERRED this flip: the legacy pooled path still serves crypto, and a
+    # "self" control needs exactly one asset per cell. It flips at Phase 3,
+    # coupled to the routing change -- see cells.py's crypto comment block
+    # and test_gauntlet_classes.py's coupling pin.
     assert cells.CLASSES["crypto"]["benchmark"] is None
     assert cells.CLASSES["fx"]["benchmark"] == "self"
     assert cells.CLASSES["equity_etf"]["benchmark"] == "self"

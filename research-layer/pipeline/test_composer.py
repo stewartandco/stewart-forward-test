@@ -529,7 +529,10 @@ def _family(blocks):
 def test_expand_universe_produces_one_spec_per_cell():
     base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
     out = composer.expand_universe(base, cells_mod.phase_cells(1))
-    assert len(out) == 20
+    # 100 declared crypto assets x the 4 phase-1 timeframes (was 5 x 4 = 20
+    # before SP5 P2-T3 widened the DECLARED grid; declaration only -- what a
+    # generation may sweep is cells.active_cells, still empty for crypto).
+    assert len(out) == 400
     assert {(s["universe"]["assets"][0], s["universe"]["timeframe"]) for s in out} \
         == set(cells_mod.phase_cells(1))
 
@@ -561,8 +564,11 @@ def test_the_same_cell_twice_still_fingerprints_identically():
 
 def test_undeclared_cells_are_refused():
     base = _family([{"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}}])
+    # BTTUSDT, not DOGEUSDT: DOGE is a DECLARED crypto asset since SP5 P2-T3.
+    # BTT was EXCLUDED by the universe manifest (delisted pair) yet still has
+    # a CSV on disk -- on disk is not declared.
     with pytest.raises(ValueError):
-        composer.expand_universe(base, [("DOGEUSDT", "1h")])
+        composer.expand_universe(base, [("BTTUSDT", "1h")])
 
 
 def test_each_cell_gets_its_own_sibling_group(tmp_path):

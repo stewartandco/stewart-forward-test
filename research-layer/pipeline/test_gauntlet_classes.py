@@ -1033,6 +1033,59 @@ def test_benchmark_relative_absent_for_none_classes():
     assert _benchmark_relative(crypto_spec, bars, 0.01, "2023-12-31") is None
 
 
+def test_crypto_benchmark_and_the_legacy_pooled_path_flip_together():
+    """SP5 P2-T3: the deferral is BOTH-OR-NEITHER, pinned so it cannot be
+    half-shipped.
+
+    Phase 2 declares crypto's 100-asset grid and its cost_model but leaves
+    `benchmark` at None. It has to: while crypto is routed to the legacy
+    pooled path, its specs are named from composer.ALLOWED_ASSETS
+    (BTCUSD/ETHUSD -- tickers that are not declared crypto cell assets at
+    all) and are the 2-asset pooled book. All 155 crypto strategies on the
+    chain are that book. `_benchmark_relative` REQUIRES exactly one asset
+    per cell for a benchmark:"self" class, so flipping the declaration on
+    its own turns every crypto verdict into a ValueError -- which is exactly
+    what the first cut of this task did, against a green-looking cells.py.
+
+    The flip belongs to the PHASE 3 ACTIVATION COMMIT, which in the same
+    commit populates ACTIVE_CELLS["crypto"], routes crypto through
+    expand_family_for_class (single-asset per-cell specs sourced from the
+    DECLARED grid), and deletes the legacy branch. This test fails in EITHER
+    direction: flip the benchmark alone and the equality below breaks (and
+    the pooled spec below starts raising); switch the routing alone and the
+    equality breaks the other way.
+    """
+    from . import composer
+
+    # The crypto path still sources its assets from the legacy pooled list,
+    # NOT from the declared grid. That is the fact the benchmark hangs on.
+    crypto_path_is_legacy_pooled = (
+        set(composer.ALLOWED_ASSETS) != set(cells.CLASSES["crypto"]["assets"]))
+    assert (cells.CLASSES["crypto"]["benchmark"] is None) == crypto_path_is_legacy_pooled, (
+        "crypto's benchmark and its composer routing must flip in the SAME "
+        "commit (SP5 Phase 3): benchmark 'self' needs one asset per cell, "
+        "and the legacy pooled path cannot give it one")
+
+    # And prove it behaviourally on a real spec off that path, so the pin is
+    # not merely a restatement of the rule: a pooled spec must survive
+    # _benchmark_relative today (no key, no raise).
+    fam = {"family": "coupling_pin", "card_ids": ["aaaaaaaaaaaaaaaa"],
+           "assets": list(composer.ALLOWED_ASSETS),
+           "blocks": [
+               {"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}},
+               {"role": "stop", "type": "atr_stop", "params": {"atr_len": 14, "mult": 2.0}},
+               {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
+               {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+           ]}
+    pooled = composer.expand_family(fam, "run-coupling", "claude-opus-5",
+                                    "2026-08-29T00:00:00Z")[0]
+    assert len(pooled["universe"]["assets"]) == 2, pooled["universe"]
+    assert pooled["universe"]["asset_class"] == "crypto"
+    # Empty bars on purpose: with benchmark None this returns before touching
+    # them. If someone flips the declaration alone, this raises instead.
+    assert _benchmark_relative(pooled, {}, 0.0, "2023-12-31") is None
+
+
 def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
     """Batch review rider: a time-suffixed bar dated exactly on the cutoff
     (the declared USDT-grid CSVs are suffixed AND carry a 2023-12-31 bar)

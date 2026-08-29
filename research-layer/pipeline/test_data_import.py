@@ -57,4 +57,6 @@ def test_a_missing_source_cell_is_refused_not_skipped(parquet, tmp_path):
 
 def test_undeclared_cells_are_refused(parquet, tmp_path):
     with pytest.raises(ValueError):
-        di.import_cell(parquet, tmp_path / "out", "DOGEUSDT", "4h")
+        # BTTUSDT, not DOGEUSDT: DOGE is a DECLARED crypto asset since SP5
+        # P2-T3's pinned universe; BTT was excluded from it (delisted pair).
+        di.import_cell(parquet, tmp_path / "out", "BTTUSDT", "4h")
