@@ -1050,21 +1050,33 @@ def test_crypto_benchmark_and_the_legacy_pooled_path_flip_together():
     The flip belongs to the PHASE 3 ACTIVATION COMMIT, which in the same
     commit populates ACTIVE_CELLS["crypto"], routes crypto through
     expand_family_for_class (single-asset per-cell specs sourced from the
-    DECLARED grid), and deletes the legacy branch. This test fails in EITHER
-    direction: flip the benchmark alone and the equality below breaks (and
-    the pooled spec below starts raising); switch the routing alone and the
-    equality breaks the other way.
+    DECLARED grid), and deletes the legacy branch in composer.expander_for.
+
+    This pin reads the REAL ROUTING DISPATCH (composer.expander_for), not a
+    proxy for it. An earlier cut keyed on whether composer.ALLOWED_ASSETS
+    still differed from the declared grid; review mutation-tested that and
+    found it caught the benchmark-flipped-alone case but PASSED when the
+    routing was switched alone -- and the routing-alone half-land is the
+    silent one: crypto specs go single-asset per-cell, benchmark stays None,
+    _benchmark_relative returns None before touching anything, and no
+    benchmark key appears on any crypto verdict, where absence is the
+    declared signal for "not applicable". Hundreds of crypto strategies with
+    no buy-and-hold control and nothing complaining -- the same
+    beta-blindness the equity audit exposed. Hence: observe the dispatch.
     """
     from . import composer
 
-    # The crypto path still sources its assets from the legacy pooled list,
-    # NOT from the declared grid. That is the fact the benchmark hangs on.
-    crypto_path_is_legacy_pooled = (
-        set(composer.ALLOWED_ASSETS) != set(cells.CLASSES["crypto"]["assets"]))
-    assert (cells.CLASSES["crypto"]["benchmark"] is None) == crypto_path_is_legacy_pooled, (
+    # THE ROUTING DECISION ITSELF. expander_for returns expand_family only
+    # while crypto takes the legacy pooled path; Phase 3 deleting that branch
+    # makes this False, and the benchmark must move in the same commit.
+    routed_to_legacy_pooled = (
+        composer.expander_for("crypto") is composer.expand_family)
+    assert (cells.CLASSES["crypto"]["benchmark"] is None) == routed_to_legacy_pooled, (
         "crypto's benchmark and its composer routing must flip in the SAME "
-        "commit (SP5 Phase 3): benchmark 'self' needs one asset per cell, "
-        "and the legacy pooled path cannot give it one")
+        "commit (SP5 Phase 3): benchmark 'self' needs exactly one asset per "
+        "cell, which only expand_family_for_class provides -- and a per-cell "
+        "route with benchmark still None writes NO control on any crypto "
+        "verdict, silently")
 
     # And prove it behaviourally on a real spec off that path, so the pin is
     # not merely a restatement of the rule: a pooled spec must survive

@@ -576,6 +576,31 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     return specs
 
 
+def expander_for(asset_class: str):
+    """The family-expansion callable for one class - the ROUTING DECISION,
+    lifted out of run() so it can be observed rather than only executed.
+
+    Pure refactor (P2-T3 rider): run() used to inline
+    `if args.asset_class == "crypto": expand_family(...) else
+    expand_family_for_class(...)`. Behaviour is byte-identical; the branch
+    simply has a name now.
+
+    crypto is the special case: it still takes the LEGACY POOLED path
+    (expand_family + UNIVERSE_BASE + ALLOWED_ASSETS), which builds one
+    multi-asset BTCUSD/ETHUSD spec per sweep combo, while every other class
+    takes the per-cell path (expand_family_for_class, one single-asset spec
+    per ACTIVE cell). SP5 Phase 3's activation commit deletes the crypto
+    branch here and flips CLASSES["crypto"]["benchmark"] to "self" in the
+    SAME commit - a benchmark:"self" class needs exactly one asset per cell,
+    which only the per-cell path provides. That coupling is what
+    test_gauntlet_classes.py's
+    test_crypto_benchmark_and_the_legacy_pooled_path_flip_together reads this
+    function for; making the dispatch observable is the whole point of it
+    being a function.
+    """
+    return expand_family if asset_class == "crypto" else expand_family_for_class
+
+
 PROPOSAL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1492,10 +1517,14 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                 print(f"    - {e}")
             continue
         seen_names.add(name)
-        if args.asset_class == "crypto":
-            specs = expand_family(fam, args.run_id, args.model, created_utc)
+        # The routing decision itself lives in expander_for() so it can be
+        # observed by a test, not just executed here (P2-T3 rider); the two
+        # expanders take different arguments, so the call still forks.
+        expander = expander_for(args.asset_class)
+        if expander is expand_family:
+            specs = expander(fam, args.run_id, args.model, created_utc)
         else:
-            specs = expand_family_for_class(
+            specs = expander(
                 fam, args.run_id, args.model, created_utc, args.asset_class,
                 proxy_card_ids=frozenset(proxy_routed_card_ids or ()))
         kept_specs, drop_notes, malformed = screen_siblings(

@@ -144,10 +144,6 @@ def test_crypto_declared_grid_is_100_assets_by_6_timeframes():
     assert len(cells.class_cells("crypto")) == 600
 
 
-def test_crypto_is_declared_but_still_inactive():
-    assert cells.active_cells("crypto") == []
-
-
 def test_crypto_active_set_is_empty_until_activation():
     # Phase 2 declares; Phase 3 (Coen's own commit) activates. The empty
     # active set is what keeps the legacy pooled path serving crypto.

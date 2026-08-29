@@ -55,12 +55,15 @@ ASSETS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "TRXUSDT", "ZEC
 TIMEFRAMES = ("15m", "30m", "1h", "4h", "12h", "1d")
 
 # Phase 1 defers the two most expensive timeframes. 15m alone is 74.4% of all
-# bars in the grid, and both it and 30m are deferred until the chain has
-# produced its first survivor - not because the data is missing (all 30 cells
-# of the pre-SP5 5-asset grid were cached as of 2026-08-17; the 95 assets
-# P2-T3 added carry 1d ONLY, which is exactly the slice Phase 3 activates)
-# but because they are the least likely to survive costs at that bar size.
-# Phase 2 is everything.
+# bars in the grid, and both it and 30m are deferred because they are the
+# least likely to survive costs at that bar size. Phase 2 is everything.
+# WHAT IS ACTUALLY ON DISK (counted 2026-08-29, P2-T3 rider; an older comment
+# here claimed "all 30 cells are cached" and that was never true): data/ holds
+# ZERO *_15m.csv and ZERO *_30m.csv - the 10 cells on those two timeframes
+# have never been cached. 1h/4h/12h exist for the 5 pre-SP5 incumbents only
+# (BTC ETH SOL XRP BNB), so of the old 30-cell grid the 20 phase-1 cells are
+# cached and the 10 deferred ones are not. The 95 assets P2-T3 added carry
+# 1d ONLY - which is exactly the slice Phase 3 activates.
 PHASE_1_TIMEFRAMES = ("1h", "4h", "12h", "1d")
 
 # Declared but not yet active (see CLASSES/LIVE_CLASSES docstring above).
@@ -191,13 +194,21 @@ CLASSES = {
     # REQUIRED COMPANION CHANGE: the flip to "self" belongs to the PHASE 3
     # ACTIVATION COMMIT and only there -- the same commit that populates
     # ACTIVE_CELLS["crypto"], routes crypto through expand_family_for_class
-    # (single-asset per-cell specs), and deletes the legacy branch. Whoever
-    # flips this field must make that routing change in the SAME commit;
-    # neither half is safe alone, in either direction. That coupling is
-    # test-pinned (test_gauntlet_classes.py:
-    # test_crypto_benchmark_and_the_legacy_pooled_path_flip_together), so a
-    # half-flip fails rather than shipping green. gauntlet.py's
-    # BENCHMARK_BASIS already declares crypto's basis string, ready for it.
+    # (single-asset per-cell specs), and deletes the crypto branch in
+    # composer.expander_for. Whoever flips this field must make that routing
+    # change in the SAME commit; neither half is safe alone, and the two
+    # halves fail DIFFERENTLY. Benchmark alone: every crypto verdict RAISES
+    # (loud). Routing alone: crypto goes per-cell with benchmark still None,
+    # so _benchmark_relative returns None and NO control is written on any
+    # crypto verdict -- and absence is this codebase's declared signal for
+    # "not applicable", so the loss is SILENT. That is the dangerous half.
+    # BOTH directions are test-pinned, against the real routing dispatch
+    # rather than a proxy for it (test_gauntlet_classes.py:
+    # test_crypto_benchmark_and_the_legacy_pooled_path_flip_together reads
+    # composer.expander_for("crypto")); both were mutation-tested at the
+    # P2-T3 rider, so a half-flip in either direction fails rather than
+    # shipping green. gauntlet.py's BENCHMARK_BASIS already declares
+    # crypto's basis string, ready for the flip.
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
                "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005},
