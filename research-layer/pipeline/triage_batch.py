@@ -20,12 +20,14 @@ import argparse
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .registry import Registry
 from .triage import apply_decisions
 
 REVIEWER = "auto-d31"
+ESCALATED_STATE_NAME = "triage_escalated.json"
 # D33's pipeline cap, shared with the Composer -- see pipeline/budget.py.
 from .budget import PIPELINE_CAP_USD
 PANEL_SIZE = 3
@@ -190,6 +192,57 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     }
 
 
+def load_escalated(path: Path) -> dict[str, dict]:
+    """The advisory escalation skip-set: {card_id: {reason,
+    first_escalated_utc, times_seen}}.
+
+    ADVISORY, never a gate. A missing file is the normal first-run state and
+    a corrupt one must degrade to "skip nothing" with a printed WARN -- this
+    runs unattended inside a loop cycle, and taking the triage stage down
+    (which fails the whole cycle, exit 1, Sentinel FAILs the digest) over a
+    bookkeeping file would be far worse than re-reviewing some cards.
+
+    Deliberately NOT a chain entry type (Coen 2026-08-29): this is
+    operational state, not chain truth. A card_reviewed-style marker would
+    misrepresent an un-dispositioned card as reviewed, and the chain is the
+    trust asset -- escalation means "still waiting on Coen", which is exactly
+    what leaving it pending already says.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("skip-set must be a JSON object")
+        return {k: v for k, v in data.items() if isinstance(v, dict)}
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        print(f"WARN: unreadable escalation skip-set at {path} ({exc}) -- "
+              f"skipping nothing this run", flush=True)
+        return {}
+
+
+def save_escalated(path: Path, skipped: dict[str, dict],
+                   newly_escalated: dict[str, str]) -> None:
+    """Merge this run's escalations into the skip-set and bump times_seen for
+    entries still sitting in pending. Written atomically (tmp+replace) so a
+    crash mid-write cannot leave the corrupt file load_escalated then has to
+    warn about."""
+    now = datetime.now(timezone.utc).isoformat()
+    out = dict(skipped)
+    for cid, reason in newly_escalated.items():
+        prior = out.get(cid)
+        if prior:
+            prior["times_seen"] = int(prior.get("times_seen", 1)) + 1
+            prior["reason"] = reason
+        else:
+            out[cid] = {"reason": reason, "first_escalated_utc": now,
+                        "times_seen": 1}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _client_and_meter():
     """Real client and budget meter. Split out so tests can stub it.
 
@@ -221,13 +274,36 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true",
                     help="CHAIN the decisions. Without this it is a dry run "
                          "that writes nothing (D29: activation is gated).")
+    ap.add_argument("--escalated-state", type=Path, default=None,
+                    help="advisory escalation skip-set (default: "
+                         "<registry dir>/logs/" + ESCALATED_STATE_NAME + ")")
+    ap.add_argument("--no-skip-escalated", action="store_true",
+                    help="ignore the skip-set and re-review escalated cards "
+                         "(for a deliberate re-run after a prompt change)")
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
+    state_path = args.escalated_state or (
+        args.registry.resolve().parent / "logs" / ESCALATED_STATE_NAME)
     all_cards = registry.cards()
     pending = {cid: c for cid, c in registry.cards(status="pending").items()}
     accepted = {cid: c for cid, c in all_cards.items()
                 if (c.get("review") or {}).get("status") == "accepted"}
+
+    # Skip-set filter runs BEFORE the --limit slice, and that order is the
+    # whole fix. Escalated cards are never chained, so they stay pending at
+    # the HEAD of chain order forever; filtering after the slice would hand
+    # the panel a window already full of cards it must skip and review
+    # nothing, while the cards behind them stay unreachable for good.
+    skipped = {} if args.no_skip_escalated else load_escalated(state_path)
+    still_pending_skips = {cid: e for cid, e in skipped.items() if cid in pending}
+    if still_pending_skips:
+        pending = {cid: c for cid, c in pending.items()
+                   if cid not in still_pending_skips}
+        print(f"skipping {len(still_pending_skips)} previously-escalated card(s) "
+              f"awaiting Coen (see {state_path.name}); they still count toward "
+              f"the loop trigger")
+
     if args.limit:
         pending = dict(list(pending.items())[:args.limit])
     if not pending:
@@ -251,6 +327,12 @@ def run(argv: list[str] | None = None) -> int:
 
     apply_decisions(registry, out["decisions"], REVIEWER)
     print(f"{len(out['decisions'])} card_reviewed entries chained as {REVIEWER}.")
+
+    # Persist AFTER the chain write: the skip-set is a cost control derived
+    # from what actually happened, and recording a skip for a run whose
+    # apply_decisions then failed would suppress cards that were never
+    # really reviewed.
+    save_escalated(state_path, still_pending_skips, out["escalated"])
     return 0
 
 
