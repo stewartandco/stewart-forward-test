@@ -1,5 +1,14 @@
 """Pipeline loop orchestrator: triage -> compose -> screen -> gauntlet when a
-class accumulates enough new accepted cards.
+class accumulates enough new cards.
+
+TRIGGER BASIS (amended by Coen 2026-08-29): a class fires on its
+TRIGGERABLE count -- class-routable cards that are accepted OR pending,
+never rejected -- minus its watermark. Not the accepted-only count: cards
+are only ever accepted by the triage panel this module runs at step 4a,
+INSIDE a cycle, after the step-2 trigger decision, and nothing else in the
+system triages. Reading accepted-only therefore deadlocked the loop
+outright (see _triggerable_counts). Both _triggerable_counts and _routable_counts
+are reported to status; only the former decides.
 
 Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
 \\StewartCo\\25_PipelineLoop (~3x daily) as `python -m pipeline.loop --once`.
@@ -10,7 +19,7 @@ Exit 0: cycle_complete | no_trigger | deferred_lock | deferred_budget |
 Exit 1: stage_failed | chain_invalid | loop_crashed -- a real defect.
 
 ACTIVATION: `python -m pipeline.loop --seed-watermarks` initialises every
-LIVE_CLASSES watermark to the current routable-accepted count, so the FIRST
+LIVE_CLASSES watermark to the current triggerable count, so the FIRST
 scheduled fire against a fresh loop_state.json only responds to genuinely
 NEW cards rather than triggering a whole-corpus generation for every live
 class at once. Mutually exclusive with --once (argparse enforcement); read-
@@ -54,8 +63,41 @@ def _make_run_id(asset_class: str) -> str:
 
 
 def _routable_counts(registry: Registry) -> dict[str, int]:
+    """The HONEST routable number per class: ACCEPTED cards only -- exactly
+    the set the composer would consume today. Reported as status
+    items.routable_<cls>. NOT the trigger basis (see _triggerable_counts);
+    kept because the digest must still say how many cards are actually
+    usable right now, separately from how many fired the cycle."""
     accepted = registry.cards(status="accepted")
     return {cls: len(routable_cards(accepted, cls)[0]) for cls in cells.LIVE_CLASSES}
+
+
+def _triggerable_counts(registry: Registry) -> dict[str, int]:
+    """THE TRIGGER BASIS (Coen 2026-08-29): per class, the routable cards a
+    cycle COULD act on -- ACCEPTED (already routable) plus PENDING (triage,
+    the cycle's own first stage, will resolve them). Rejected cards are
+    settled work and NEVER count.
+
+    Fixes a live deadlock. The trigger used to read _routable_counts, but the
+    only thing that ever moves a card from pending to accepted is the D31
+    triage panel at _run_locked_cycle's step 4a -- INSIDE a cycle, after the
+    trigger decision at step 2. Nothing else triages: no scheduled task runs
+    pipeline.triage_batch, and the resident scanner only registers PENDING
+    cards. So the accepted count was frozen between fires, routable stayed
+    equal to the watermark, every fire honestly reported no_trigger, and the
+    pending backlog (539 cards by 2026-08-29) could never drain. The loop
+    could not start a generation on its own -- ever.
+
+    Routed through the SAME routable_cards() filter as _routable_counts so
+    the two numbers differ ONLY in which review states they admit, never in
+    routing semantics.
+
+    Whatever this returns MUST also be what gets banked as the watermark
+    after a cycle (loop_state's BASIS WARNING): comparing a triggerable count
+    against an accepted-only watermark would re-fire forever."""
+    live = {cid: c for cid, c in registry.cards().items()
+            if (c.get("review") or {}).get("status") in ("accepted", "pending")}
+    return {cls: len(routable_cards(live, cls)[0]) for cls in cells.LIVE_CLASSES}
 
 
 def _entry_count(registry_path: Path) -> int:
@@ -167,6 +209,17 @@ def _budget_escalations(spent: float) -> list[str]:
     routine, not urgent -- escalating it would train Coen to ignore the
     channel exactly as pipeline_status.py's own docstring warns against."""
     return ["budget_cap"] if spent >= PIPELINE_CAP_USD else []
+
+
+def _count_items(routable: dict[str, int], triggerable: dict[str, int]) -> dict[str, str]:
+    """Status items for BOTH per-class counts. routable_<cls> is the
+    accepted-only figure (what a composer could consume now); triggerable_
+    <cls> is the accepted+pending figure the trigger actually compares
+    against the watermark. Emitted together, always -- one without the other
+    is how the 2026-08-28 deadlock read as healthy."""
+    items = {f"routable_{c}": str(n) for c, n in routable.items()}
+    items.update({f"triggerable_{c}": str(n) for c, n in triggerable.items()})
+    return items
 
 
 def _watermark_items(state: dict) -> dict[str, str]:
@@ -312,12 +365,20 @@ def _break_stale_chain_lock_or_defer(probe: ChainLock, state: dict, state_path: 
 
 def _seed_watermarks(layer: Path, registry_path: Path, state_path: Path) -> int:
     """ACTIVATION step (--seed-watermarks): initialise every LIVE_CLASSES
-    watermark to the CURRENT routable-accepted count. Without this, a fresh
-    loop_state.json reads every class's watermark as 0, so the first
-    scheduled fire after activation would treat the entire existing corpus
-    as "new" and trigger a whole-corpus generation for every over-threshold
-    class simultaneously -- this seeds the baseline so only genuinely NEW
-    cards (accepted after activation) ever count toward a trigger.
+    watermark to the CURRENT triggerable (accepted+pending) count. Without
+    this, a fresh loop_state.json reads every class's watermark as 0, so the
+    first scheduled fire after activation would treat the entire existing
+    corpus as "new" and trigger a whole-corpus generation for every
+    over-threshold class simultaneously -- this seeds the baseline so only
+    genuinely NEW cards (registered after activation) ever count toward a
+    trigger.
+
+    Seeds on the TRIGGERABLE basis, not the accepted-only one, for the same
+    reason the post-cycle watermark does (loop_state's BASIS WARNING): a
+    watermark measured on a different basis than the trigger reads does not
+    suppress anything -- an accepted-only seed against an accepted+pending
+    trigger would leave the whole pending backlog counting as "new" and fire
+    on the very first run it was meant to hold back.
 
     Deliberately narrow: a pure read of the registry (no chain.lock -- read
     paths never take it, chainlock.py's own rule) plus a loop_state.json
@@ -325,13 +386,13 @@ def _seed_watermarks(layer: Path, registry_path: Path, state_path: Path) -> int:
     recorded is the literal string "seed" so a seeded watermark is always
     distinguishable from a real generation's run_id in loop_state.json."""
     registry = Registry(registry_path)
-    counts = _routable_counts(registry)
+    counts = _triggerable_counts(registry)
     state = loop_state.load(state_path)
     now = _now_utc()
     for cls in cells.LIVE_CLASSES:
         n = counts.get(cls, 0)
         loop_state.record_generation(state, cls, run_id="seed",
-                                     routable_count=n, ts_utc=now)
+                                     watermark_count=n, ts_utc=now)
         print(f"seeded {cls} watermark={n}", flush=True)
     loop_state.save(state_path, state)
     return 0
@@ -346,8 +407,8 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
                            "module's job -- the OS scheduler owns cadence)")
     mode.add_argument("--seed-watermarks", action="store_true",
                       help="ACTIVATION: seed every LIVE_CLASSES watermark to "
-                           "the current routable-accepted count instead of "
-                           "running a cycle; see module docstring")
+                           "the current triggerable (accepted+pending) count "
+                           "instead of running a cycle; see module docstring")
     ap.add_argument("--layer", type=Path, default=LAYER_DEFAULT,
                     help="research-layer root (holds registry_log.jsonl and logs/)")
     ap.add_argument("--dry-run", action="store_true",
@@ -480,12 +541,18 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
 
     # -- 2. trigger check ----------------------------------------------------
     registry = Registry(registry_path)
+    # Two counts, two jobs: triggerable (accepted+pending) DECIDES, routable
+    # (accepted-only) REPORTS. Both go to status so the digest never has to
+    # guess which number fired the cycle -- and so a large routable/
+    # triggerable gap (an undrained pending backlog) is visible rather than
+    # inferred.
     routable_counts = _routable_counts(registry)
-    asset_class = loop_state.pick_class(state, routable_counts)
+    triggerable_counts = _triggerable_counts(registry)
+    asset_class = loop_state.pick_class(state, triggerable_counts)
     if asset_class is None:
         print("no_trigger: no live class is over threshold", flush=True)
         _write_status(logs_dir, "no_trigger",
-                      extra={f"routable_{c}": str(n) for c, n in routable_counts.items()},
+                      extra=_count_items(routable_counts, triggerable_counts),
                       spent=_spent(logs_dir), state=state)
         return 0
 
@@ -501,12 +568,16 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 0
 
     routable_count = routable_counts[asset_class]
+    triggerable_count = triggerable_counts[asset_class]
     if args.dry_run:
         print(f"dry_run_would_fire: {asset_class} would trigger "
-              f"(routable={routable_count})", flush=True)
+              f"(triggerable={triggerable_count}, routable={routable_count})",
+              flush=True)
         _write_status(logs_dir, "dry_run_would_fire",
                       extra={"asset_class": asset_class,
-                             "routable_count": str(routable_count)},
+                             "routable_count": str(routable_count),
+                             "triggerable_count": str(triggerable_count),
+                             **_count_items(routable_counts, triggerable_counts)},
                       spent=spent, state=state)
         return 0
 
@@ -566,11 +637,22 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if rc != 0:
         return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.triage_batch", rc)
 
-    # Watermark truth: the routable-accepted set the composer is about to
-    # consume is the set right after triage, not whatever the chain looks
-    # like after screen/gauntlet (and possibly a foreign writer) have also
-    # run. Recorded now, used at the end.
-    watermark_after_triage = _routable_counts(registry)[asset_class]
+    # Watermark truth, on the TRIGGERABLE basis -- it must match what
+    # pick_class reads above or the comparison is apples-to-oranges (see
+    # loop_state's BASIS WARNING). Measured right after triage, not after
+    # screen/gauntlet (and possibly a foreign writer) have also run.
+    #
+    # What this number means: triage has just moved every card it handled out
+    # of pending -- accepted ones stay in the triggerable set, rejected ones
+    # leave it -- so this is the honest "cards seen and dispositioned as of
+    # this cycle". The next fire therefore needs genuinely NEW cards to cross
+    # the threshold again, which is the whole point of a watermark.
+    #
+    # Consequence worth knowing: pending cards this cycle's --limit 200 did
+    # NOT reach are still inside the banked watermark, so they stop counting
+    # toward the next trigger. A backlog larger than 200 drains over several
+    # cycles as new cards arrive, not in one sweep.
+    watermark_after_triage = _triggerable_counts(registry)[asset_class]
 
     # Budget re-check (plan: "before triage AND before composer"): triage may
     # itself have spent against the cap; a composer batch must not start on
@@ -643,7 +725,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # produced".
     chain_growth = _entry_count(registry_path) - entries_before
     loop_state.record_generation(state, asset_class, run_id=run_id,
-                                 routable_count=watermark_after_triage,
+                                 watermark_count=watermark_after_triage,
                                  ts_utc=_now_utc())
     loop_state.save(state_path, state)
 

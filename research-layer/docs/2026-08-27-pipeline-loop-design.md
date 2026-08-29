@@ -1,5 +1,18 @@
 # Pipeline loop - design spec (2026-08-27)
 
+> **AMENDED 2026-08-29 (Coen) - trigger basis.** Decision 2 and section 2
+> below originally read "new **accepted**, class-routable cards". As built,
+> that deadlocked the loop: a card only becomes accepted via the D31 triage
+> panel, which runs *inside* a cycle, after the trigger decision - and
+> nothing else in the system triages. The accepted count could not move
+> between fires, so every fire honestly reported `no_trigger` and the pending
+> backlog (539 cards) never drained. The trigger now counts **triggerable**
+> cards: class-routable cards that are accepted **or pending**, never
+> rejected - the cards a cycle could actually act on, matching this
+> decision's own heading ("new-cards threshold"). The watermark is recorded
+> on that same basis. Both paragraphs are corrected in place below; this
+> banner is the record of the change.
+
 Coen's stated goal (Morpheus 3.0, Track 1): the estate runs 24/7 -
 constantly scanning for new resources, constantly converting them into
 candidate edges, running every candidate through the gauntlet for each
@@ -34,10 +47,13 @@ and the activation checklist that D29 gates on Ops Sentinel graduation.
    D27 probation filter. "Constantly scanning" is already true; this spec
    does not widen intake.
 2. **Trigger = new-cards threshold.** A generation cycle fires for a class
-   only when enough genuinely new accepted, class-routable cards have
-   accumulated since that class's last generation. Default threshold 25,
-   tunable per class. No fixed-cadence churn: no new information, no new
-   trials.
+   only when enough genuinely new *triggerable*, class-routable cards have
+   accumulated since that class's last generation - triggerable = accepted
+   OR pending (never rejected), i.e. the cards a cycle could act on, since
+   the cycle's own first stage is the triage panel that resolves the pending
+   ones. Default threshold 25, tunable per class. No fixed-cadence churn: no
+   new information, no new trials. (Amended 2026-08-29; see banner. Reading
+   accepted-only here is the deadlock.)
 3. **Budget: keep existing caps, park at limit.** Reader USD 35/mo and the
    pipeline cap stand. At 80% the loop stops starting new metered batches;
    at cap, metered stages park and self-resume on month rollover. Gauntlet
@@ -93,11 +109,27 @@ and manual sessions (documented in the repo CLAUDE.md). Rules:
 
 `logs/loop_state.json`: per class, the chain position (entry index + card
 count) at that class's last completed generation, plus the count of new
-accepted, class-routable cards since. Class-routable follows the SP4
+triggerable, class-routable cards since. Triggerable = accepted OR pending;
+rejected cards are settled and never count. Class-routable follows the SP4
 routing rules already shipped (crypto unrestricted; non-crypto
 class-matched + cross_asset; recorded proxy lanes). A card can trigger
 more than one class; each class's watermark is independent. The threshold
 (default 25) lives in this file, per class, Coen-editable.
+
+**The watermark is recorded on the same basis it is compared against** -
+the post-triage triggerable count, not the accepted count. A watermark
+measured on a different basis than the trigger reads either never fires
+(the 2026-08-29 deadlock) or fires forever. `--seed-watermarks` seeds on
+that same basis for the same reason. Note the trade this implies: pending
+cards a cycle's `--limit 200` did not reach are still banked in the
+watermark, so a backlog above 200 drains across several cycles as new cards
+arrive, rather than in one sweep.
+
+`logs/pipeline_status.json` carries BOTH counts per class -
+`routable_<cls>` (accepted-only: what a composer could consume right now)
+and `triggerable_<cls>` (accepted+pending: what the trigger compares). The
+digest reports both so an undrained pending backlog is visible rather than
+inferred.
 
 ### 3. Cycle body (existing code paths only)
 

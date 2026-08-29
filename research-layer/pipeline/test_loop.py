@@ -33,6 +33,37 @@ def _mk_layer(tmp_path, accepted_fx=0):
     return layer, reg
 
 
+def _add_cards(reg, n, *, status, asset_classes, prefix, reject_reason=None):
+    """Append n cards in a given review state with a given asset_classes tag.
+
+    Separate from _mk_layer (whose signature every existing test depends on)
+    so the trigger-basis tests can build PENDING and REJECTED populations --
+    the two states _mk_layer cannot express, and the two the triggerable
+    count has to treat differently."""
+    for i in range(n):
+        cid = f"{prefix}{i:04d}"
+        reg.register_card({"card_id": cid, "claim": f"{prefix}{i}", "quote": "q",
+                           "topics": [], "tags": {"asset_classes": list(asset_classes)},
+                           "review": {"status": "pending", "reject_reason": None},
+                           "source": {}, "links": [], "credibility_tier": "practitioner"})
+        if status != "pending":
+            reg.review_card(cid, status, "coen", reject_reason)
+
+
+def _seed_all_classes_caught_up(layer, registry_path):
+    """Seed every LIVE_CLASSES watermark to the CURRENT triggerable count, so
+    a test's subsequently-added cards are the ONLY thing that can fire a
+    class. Mirrors what --seed-watermarks does at activation."""
+    state_path = layer / "logs" / "loop_state.json"
+    state = loop_state.load(state_path)
+    counts = loop._triggerable_counts(Registry(registry_path))
+    for cls in cells.LIVE_CLASSES:
+        loop_state.record_generation(state, cls, run_id="seed",
+                                     watermark_count=counts.get(cls, 0),
+                                     ts_utc="2020-01-01T00:00:00+00:00")
+    loop_state.save(state_path, state)
+
+
 class FakeRunner:
     """Records invocations; returns preset exit codes per python -m module,
     or per argv[0] for anything else (e.g. every git subcommand keys as
@@ -77,7 +108,7 @@ def _seed_crypto_caught_up(layer, count):
     state_path = layer / "logs" / "loop_state.json"
     state = loop_state.load(state_path)
     loop_state.record_generation(state, "crypto", run_id="seed-crypto-caught-up",
-                                 routable_count=count, ts_utc="2020-01-01T00:00:00+00:00")
+                                 watermark_count=count, ts_utc="2020-01-01T00:00:00+00:00")
     loop_state.save(state_path, state)
 
 
@@ -855,14 +886,23 @@ def test_git_commit_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
 
 def test_seed_watermarks_seeds_all_classes_and_prevents_immediate_trigger(tmp_path):
     """ACTIVATION step: --seed-watermarks must set EVERY LIVE_CLASSES
-    watermark to the current routable-accepted count -- not just the class
-    with cards seeded by the fixture -- and a subsequent --once against the
-    unchanged corpus must then report no_trigger (the whole point: a fresh
-    state file must not fire a whole-corpus generation)."""
+    watermark to the current TRIGGERABLE (accepted+pending) count -- the same
+    basis the trigger reads, or the seed would not actually suppress the
+    first fire -- not just the class with cards seeded by the fixture. A
+    subsequent --once against the unchanged corpus must then report
+    no_trigger (the whole point: a fresh state file must not fire a
+    whole-corpus generation).
+
+    The fixture deliberately carries PENDING cards as well as accepted ones:
+    with an all-accepted corpus the two bases coincide numerically and this
+    test would pass under the old accepted-only seed too."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     registry_path = layer / "registry_log.jsonl"
-    expected = loop._routable_counts(Registry(registry_path))
+    _add_cards(reg, 12, status="pending", asset_classes=["crypto"], prefix="pend")
+    expected = loop._triggerable_counts(Registry(registry_path))
     assert set(expected) == set(cells.LIVE_CLASSES)   # sanity: covers all five
+    # The bases must actually differ here, or this test proves nothing.
+    assert expected["crypto"] != loop._routable_counts(Registry(registry_path))["crypto"]
 
     rc = loop.run(["--seed-watermarks", "--layer", str(layer)], runner=FakeRunner())
     assert rc == 0
@@ -918,3 +958,109 @@ def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatc
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"   # proceeded, nothing to defer to
     assert not lock_path.exists()
+
+
+# -- trigger basis: accepted + pending (the 2026-08-29 deadlock fix) ---------
+# Regression cover for a LIVE defect: the trigger used to count ACCEPTED
+# cards only, but the only thing that ever accepts a card is the D31 triage
+# panel, which runs INSIDE a cycle -- after the trigger decision. Nothing
+# else triages (no scheduled task runs pipeline.triage_batch; the resident
+# scanner only registers PENDING cards). So the accepted count could never
+# move between fires: routable == watermark forever, every fire honestly
+# reported no_trigger, and the pending backlog never drained. Two live fires
+# (2026-08-28 15:30 and 21:30) both no_trigger, exit 0, with 539 pending
+# cards on the chain.
+
+
+def test_pending_cards_alone_fire_a_cycle(tmp_path):
+    """THE DEADLOCK. 30 PENDING crypto-tagged cards over the watermark and
+    ZERO new accepted cards must now trigger a crypto cycle -- under the old
+    accepted-only basis this was the exact no_trigger wedge."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert status["items"]["asset_class"] == "crypto"
+    # Triage is the FIRST stage: the pending cards that fired this cycle are
+    # exactly the cards the cycle then triages.
+    assert _modules(fr)[0] == "pipeline.triage_batch"
+    # ...and the honest accepted-only figure is still zero. The cycle fired
+    # on work-to-do, not on a routable count that does not exist yet.
+    assert loop._routable_counts(Registry(registry_path))["crypto"] == 0
+
+
+def test_rejected_cards_never_count_toward_the_trigger(tmp_path):
+    """A rejected card is not work a cycle could act on -- it is settled.
+    30 rejected cards must leave every class under threshold; the same 30 as
+    pending would fire."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="rejected", asset_classes=["crypto"],
+               prefix="rej", reject_reason="off_topic")
+
+    counts = loop._triggerable_counts(Registry(registry_path))
+    assert counts["crypto"] == 0                 # rejected are invisible to the trigger
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert fr.calls == []                        # no stage ran
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"
+
+
+def test_post_cycle_watermark_is_recorded_on_the_triggerable_basis(tmp_path):
+    """The watermark MUST be comparable to what the trigger measures. If the
+    trigger reads accepted+pending but the watermark recorded accepted-only,
+    the delta would stay >= threshold forever and the loop would re-fire on
+    every scheduled run against an unchanged corpus."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc == 0
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    # FakeRunner never actually triages, so the corpus is unchanged: the
+    # triggerable count (30) is what must be banked, NOT the accepted count (0).
+    assert st["classes"]["crypto"]["watermark"] == 30
+
+    # An immediate second fire against the SAME corpus must NOT re-trigger.
+    fr2 = FakeRunner()
+    rc2 = loop.run(["--once", "--dry-run", "--layer", str(layer)], runner=fr2)
+    assert rc2 == 0
+    assert fr2.calls == []
+    status2 = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status2["items"]["outcome"] == "no_trigger"
+
+
+def test_status_reports_both_routable_and_triggerable_counts(tmp_path):
+    """The digest must stay honest about BOTH numbers: routable_<cls> is the
+    accepted-only figure a composer could consume today; triggerable_<cls> is
+    the accepted+pending figure that actually fired (or did not fire) the
+    cycle. Reporting only one would either hide the backlog or overstate the
+    routable corpus."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=3)      # 3 accepted, fx-tagged
+    registry_path = layer / "registry_log.jsonl"
+    _add_cards(reg, 4, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc == 0
+    items = json.loads((layer / "logs" / "pipeline_status.json")
+                       .read_text(encoding="utf-8"))["items"]
+    assert items["outcome"] == "no_trigger"              # 7 and 3 are both < 25
+    for cls in cells.LIVE_CLASSES:
+        assert f"routable_{cls}" in items and f"triggerable_{cls}" in items
+    # crypto is unrestricted: 3 accepted (fx-tagged) route to it, plus 4 pending.
+    assert items["routable_crypto"] == "3"
+    assert items["triggerable_crypto"] == "7"
+    # fx: the 3 accepted fx cards route; the crypto-tagged pending ones do not.
+    assert items["routable_fx"] == "3"
+    assert items["triggerable_fx"] == "3"

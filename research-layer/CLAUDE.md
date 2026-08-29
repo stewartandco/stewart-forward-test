@@ -16,9 +16,22 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   trigger decision without running anything; --seed-watermarks initialises
   every class watermark to the current corpus (ACTIVATION step -- prevents a
   whole-corpus generation on first fire).
+- **Trigger basis (amended Coen 2026-08-29 -- do not revert):** a class fires
+  on its TRIGGERABLE count minus its watermark, where triggerable = routable
+  cards that are accepted OR pending, never rejected. NOT accepted-only:
+  cards are only accepted by the triage panel the loop runs INSIDE a cycle,
+  after the trigger decision, and nothing else triages -- so an accepted-only
+  trigger can never move between fires. That was a live deadlock (every fire
+  no_trigger, 539 pending cards stranded). The watermark is banked on that
+  SAME basis; changing one side without the other re-breaks the loop in one
+  direction or the other. loop.py `_triggerable_counts` decides;
+  `_routable_counts` (accepted-only) is reported, never compared.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
   reader agent); run log logs/pipeline-loop-run.log; instance guard logs/loop.lock.
+  Items carry BOTH routable_<cls> (accepted-only) and triggerable_<cls>
+  (accepted+pending) per class -- a large gap between them is an undrained
+  pending backlog.
 - Fires 10:30 / 15:30 / 21:30 local once \StewartCo\25_PipelineLoop is
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real

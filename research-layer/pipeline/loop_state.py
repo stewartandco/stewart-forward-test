@@ -1,12 +1,26 @@
 """Per-class watermark state for the pipeline loop (logs/loop_state.json).
 
-The trigger rule (spec 2026-08-27-pipeline-loop-design): a class fires when
-routable_accepted_now - watermark >= threshold (default 25). The watermark
-is the routable-accepted count recorded at that class's last completed
+The trigger rule (spec 2026-08-27-pipeline-loop-design, amended by Coen
+2026-08-29): a class fires when triggerable_now - watermark >= threshold
+(default 25), where "triggerable" is the count of class-routable cards a
+cycle COULD act on -- accepted AND pending, never rejected. The watermark is
+that same triggerable count recorded at the class's last completed
 generation. pick_class returns ONE class per fire: the over-threshold class
 whose last generation is oldest; a never-run class counts as oldest;
 ties break by cells.LIVE_CLASSES order. Also holds the two-strike stale
 chain.lock bookkeeping (the lock itself is pipeline/chainlock.py).
+
+BASIS WARNING (the 2026-08-29 deadlock fix -- read before touching either
+side of the comparison): this module does not compute the counts, it only
+compares them, so it CANNOT enforce that the two sides share a basis. The
+caller (pipeline/loop.py) must feed pick_class and record_generation the
+SAME measure. Originally both were the accepted-only count, which deadlocked:
+cards are only ever accepted by the D31 triage panel, which runs INSIDE a
+cycle, after the trigger decision -- so the accepted count could not move
+between fires and the loop could never start a generation on its own.
+Feeding one side accepted+pending and the other accepted-only would be the
+mirror defect: the loop would re-fire on every run against an unchanged
+corpus.
 """
 from __future__ import annotations
 
@@ -41,8 +55,14 @@ def save(path: str | Path, state: dict) -> None:
 
 
 def record_generation(state: dict, asset_class: str, *, run_id: str,
-                      routable_count: int, ts_utc: str) -> None:
+                      watermark_count: int, ts_utc: str) -> None:
     """Record a completed generation's watermark.
+
+    watermark_count MUST be measured on the SAME basis pick_class's counts
+    are (the triggerable accepted+pending count -- see the module BASIS
+    WARNING). Named for the slot it fills, not for a measure, precisely
+    because that basis changed once already on 2026-08-29 and a name like
+    "routable_count" outlived its meaning.
 
     ts_utc MUST be datetime.now(timezone.utc).isoformat() (the loop's
     _now_utc) -- pick_class orders entries by a lexical string compare of
@@ -53,20 +73,23 @@ def record_generation(state: dict, asset_class: str, *, run_id: str,
     formats in loop_state.json.
     """
     entry = state["classes"].setdefault(asset_class, {"threshold": DEFAULT_THRESHOLD})
-    entry["watermark"] = routable_count
+    entry["watermark"] = watermark_count
     entry["last_run_id"] = run_id
     entry["last_gen_ts_utc"] = ts_utc
 
 
-def pick_class(state: dict, routable_counts: dict[str, int]) -> str | None:
+def pick_class(state: dict, counts: dict[str, int]) -> str | None:
+    """`counts` is the caller's TRIGGERABLE per-class count (accepted+pending)
+    -- see the module BASIS WARNING. The comparison arithmetic below is
+    unchanged from the original spec; only what the caller measures changed."""
     over: list[str] = []
     for cls in cells.LIVE_CLASSES:
-        if cls not in routable_counts:
+        if cls not in counts:
             continue
         entry = state["classes"].get(cls, {})
         threshold = entry.get("threshold", DEFAULT_THRESHOLD)
         watermark = entry.get("watermark", 0)
-        if routable_counts[cls] - watermark >= threshold:
+        if counts[cls] - watermark >= threshold:
             over.append(cls)
     if not over:
         return None
