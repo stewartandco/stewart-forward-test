@@ -22,12 +22,21 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .registry import Registry
 from .triage import apply_decisions
 
 REVIEWER = "auto-d31"
 ESCALATED_STATE_NAME = "triage_escalated.json"
+
+
+class EscalationState(NamedTuple):
+    """entries: the skip-set as loaded (empty when absent OR unreadable).
+    writable: False ONLY when the file exists but could not be read -- the
+    caller must not overwrite it from an empty dict."""
+    entries: dict
+    writable: bool
 # D33's pipeline cap, shared with the Composer -- see pipeline/budget.py.
 from .budget import PIPELINE_CAP_USD
 PANEL_SIZE = 3
@@ -192,7 +201,7 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     }
 
 
-def load_escalated(path: Path) -> dict[str, dict]:
+def load_escalated(path: Path) -> EscalationState:
     """The advisory escalation skip-set: {card_id: {reason,
     first_escalated_utc, times_seen}}.
 
@@ -207,33 +216,59 @@ def load_escalated(path: Path) -> dict[str, dict]:
     misrepresent an un-dispositioned card as reviewed, and the chain is the
     trust asset -- escalation means "still waiting on Coen", which is exactly
     what leaving it pending already says.
+
+    ABSENT vs UNREADABLE is the load-bearing distinction (2026-08-29 review).
+    Both degrade to "skip nothing", but only ABSENT is safe to overwrite: a
+    file that exists and merely could not be read this once (a JSON decode
+    error, or a transient OSError -- on Windows an AV scanner or the search
+    indexer holding a sharing lock is entirely plausible, and this runs
+    unattended 3x/day) still holds the real history. Saving over it from an
+    empty dict would silently destroy the whole skip-set and make the next
+    cycle re-pay for the entire escalated backlog. `.writable` is False in
+    that case and run() skips the save.
     """
     if not path.exists():
-        return {}
+        return EscalationState({}, True)      # absent: safe to write fresh
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("skip-set must be a JSON object")
-        return {k: v for k, v in data.items() if isinstance(v, dict)}
+        return EscalationState({k: v for k, v in data.items()
+                                if isinstance(v, dict)}, True)
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         print(f"WARN: unreadable escalation skip-set at {path} ({exc}) -- "
-              f"skipping nothing this run", flush=True)
-        return {}
+              f"skipping nothing this run, and NOT overwriting it (the file "
+              f"is still there and may hold real history; move it aside by "
+              f"hand if it is genuinely corrupt)", flush=True)
+        return EscalationState({}, False)
 
 
-def save_escalated(path: Path, skipped: dict[str, dict],
+def save_escalated(path: Path, retained: dict[str, dict],
                    newly_escalated: dict[str, str]) -> None:
-    """Merge this run's escalations into the skip-set and bump times_seen for
-    entries still sitting in pending. Written atomically (tmp+replace) so a
-    crash mid-write cannot leave the corrupt file load_escalated then has to
-    warn about."""
+    """Write the skip-set: `retained` (entries carried forward from the load,
+    whose cards are still pending) plus this run's `newly_escalated`.
+
+    times_seen counts CYCLES THIS CARD HAS BEEN SIGHTED still waiting on
+    Coen, so every retained entry is bumped -- a card sitting at times_seen
+    40 has been blocking the head of the queue for weeks, which is exactly
+    the signal a T3 queue needs. (Before the 2026-08-29 review this field was
+    dead: a skipped card is filtered out of `pending` before review, so it
+    could never be re-escalated and the only bump path never ran.)
+
+    Written atomically (tmp+replace) so a crash mid-write cannot leave the
+    corrupt file load_escalated then has to warn about.
+    """
     now = datetime.now(timezone.utc).isoformat()
-    out = dict(skipped)
+    out: dict[str, dict] = {}
+    for cid, entry in retained.items():
+        e = dict(entry)
+        e["times_seen"] = int(e.get("times_seen", 1)) + 1
+        out[cid] = e
     for cid, reason in newly_escalated.items():
-        prior = out.get(cid)
-        if prior:
-            prior["times_seen"] = int(prior.get("times_seen", 1)) + 1
-            prior["reason"] = reason
+        if cid in out:
+            # Only reachable under --no-skip-escalated (a re-review of a card
+            # already on the list). Already bumped above -- never twice.
+            out[cid]["reason"] = reason
         else:
             out[cid] = {"reason": reason, "first_escalated_utc": now,
                         "times_seen": 1}
@@ -295,19 +330,42 @@ def run(argv: list[str] | None = None) -> int:
     # the HEAD of chain order forever; filtering after the slice would hand
     # the panel a window already full of cards it must skip and review
     # nothing, while the cards behind them stay unreachable for good.
-    skipped = {} if args.no_skip_escalated else load_escalated(state_path)
-    still_pending_skips = {cid: e for cid, e in skipped.items() if cid in pending}
-    if still_pending_skips:
-        pending = {cid: c for cid, c in pending.items()
-                   if cid not in still_pending_skips}
-        print(f"skipping {len(still_pending_skips)} previously-escalated card(s) "
+    # The skip-set is ALWAYS loaded, even under --no-skip-escalated. That flag
+    # suppresses the FILTER, not the history: reading an empty set and then
+    # saving from it wipes every first_escalated_utc/times_seen on the file
+    # and makes the next automated cycle re-pay for the whole escalated
+    # backlog (2026-08-29 review, MEDIUM).
+    loaded = load_escalated(state_path)
+    # Carried forward on save: every loaded entry whose card is still pending.
+    # Computed from the FULL loaded set and from `pending` BEFORE the --limit
+    # slice, so neither the flag nor the window can prune real history. An
+    # entry whose card has left pending (Coen dispositioned it in T3) is
+    # dropped here -- that is the intended garbage collection.
+    retained_skips = {cid: e for cid, e in loaded.entries.items() if cid in pending}
+
+    active_skips = {} if args.no_skip_escalated else retained_skips
+    if active_skips:
+        pending = {cid: c for cid, c in pending.items() if cid not in active_skips}
+        print(f"skipping {len(active_skips)} previously-escalated card(s) "
               f"awaiting Coen (see {state_path.name}); they still count toward "
               f"the loop trigger")
+    elif args.no_skip_escalated and retained_skips:
+        print(f"--no-skip-escalated: re-reviewing {len(retained_skips)} "
+              f"previously-escalated card(s); the skip-set is preserved, not "
+              f"cleared")
 
     if args.limit:
         pending = dict(list(pending.items())[:args.limit])
     if not pending:
         print("No pending cards.")
+        # Still a SIGHTING of everything on the skip-set: this is the steady
+        # state once the whole remaining backlog is escalated, and without
+        # this the times_seen counter freezes exactly when it is most useful
+        # (a card that has blocked the queue for weeks). Guarded on --apply so
+        # a dry run stays a dry run, and on writable so an unreadable file is
+        # never overwritten.
+        if args.apply and loaded.writable and retained_skips:
+            save_escalated(state_path, retained_skips, {})
         return 0
 
     client, meter = _client_and_meter()
@@ -332,7 +390,16 @@ def run(argv: list[str] | None = None) -> int:
     # from what actually happened, and recording a skip for a run whose
     # apply_decisions then failed would suppress cards that were never
     # really reviewed.
-    save_escalated(state_path, still_pending_skips, out["escalated"])
+    #
+    # Never write over a file that exists but could not be read -- doing so
+    # would replace real history with this run's fragment. load_escalated has
+    # already WARNed about it.
+    if loaded.writable:
+        save_escalated(state_path, retained_skips, out["escalated"])
+    else:
+        print(f"WARN: leaving {state_path.name} untouched this run "
+              f"(unreadable at load); {len(out['escalated'])} new escalation(s) "
+              f"not recorded", flush=True)
     return 0
 
 

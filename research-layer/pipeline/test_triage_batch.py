@@ -472,3 +472,107 @@ def test_skip_filter_runs_before_the_limit_slice(tmp_path, monkeypatch):
             "--limit", "2", "--apply"])
     # c0-c2 skipped; the window of 2 is spent on the cards BEHIND them.
     assert seen == ["c3", "c4"]
+
+
+# ---------------- skip-set durability (wave-3 review, 2026-08-29) ------------
+# Two ways the skip-set was silently wiped, both of which hand the next
+# automated cycle the entire escalated backlog to re-pay for.
+
+
+def _skipset(**cards):
+    return _json.dumps({cid: {"reason": "dissent",
+                              "first_escalated_utc": "2020-01-01T00:00:00+00:00",
+                              "times_seen": n}
+                        for cid, n in cards.items()})
+
+
+def test_no_skip_escalated_preserves_the_skip_set(tmp_path, monkeypatch):
+    """--no-skip-escalated suppresses the FILTER, not the HISTORY. It used to
+    load an empty set, which meant the save then rewrote the file from empty
+    and destroyed every first_escalated_utc/times_seen on it."""
+    _seed_pending(tmp_path, 8)
+    reg_path = tmp_path / "registry_log.jsonl"
+    state = tmp_path / "triage_escalated.json"
+    state.write_text(_skipset(**{f"c{i}": 3 for i in range(8)}), encoding="utf-8")
+
+    seen = []
+    def _accept(client, model, card, meter, panel_size=3):
+        seen.append(card["card_id"])
+        return _votes(True, True, True)
+    monkeypatch.setattr(tb, "review_card", _accept)
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    tb.run(["--registry", str(reg_path), "--escalated-state", str(state),
+            "--limit", "2", "--no-skip-escalated", "--apply"])
+
+    assert seen == ["c0", "c1"]          # the flag DID suppress the filter
+    kept = _json.loads(state.read_text(encoding="utf-8"))
+    assert len(kept) == 8, "the skip-set was wiped by a --no-skip-escalated run"
+    assert kept["c7"]["first_escalated_utc"] == "2020-01-01T00:00:00+00:00"
+
+
+def test_an_unreadable_skip_set_is_never_overwritten(tmp_path, monkeypatch, capsys):
+    """A transient read failure (on Windows an AV scanner or the indexer
+    holding a sharing lock is entirely plausible) must not cost the file. The
+    run degrades to 'skip nothing' but leaves the bytes alone."""
+    _seed_pending(tmp_path, 2)
+    reg_path = tmp_path / "registry_log.jsonl"
+    state = tmp_path / "triage_escalated.json"
+    original = _skipset(c0=5, c1=5)
+    state.write_text(original, encoding="utf-8")
+
+    real_read = Path.read_text
+    def _sharing_violation(self, *a, **k):
+        if self.name == "triage_escalated.json":
+            raise OSError(13, "The process cannot access the file")
+        return real_read(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", _sharing_violation)
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    rc = tb.run(["--registry", str(reg_path), "--escalated-state", str(state),
+                 "--apply"])
+    assert rc == 0
+    monkeypatch.undo()
+    assert state.read_text(encoding="utf-8") == original, \
+        "a transient read error overwrote a still-valid skip-set"
+    out = capsys.readouterr().out
+    assert "WARN" in out and "untouched" in out
+
+
+def test_an_absent_skip_set_is_still_written_fresh(tmp_path, monkeypatch):
+    """The other side of the same distinction: ABSENT is safe to create.
+    Only 'present but unreadable' blocks the write."""
+    _seed_pending(tmp_path, 2)
+    reg_path = tmp_path / "registry_log.jsonl"
+    state = tmp_path / "triage_escalated.json"
+    assert not state.exists()
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    tb.run(["--registry", str(reg_path), "--escalated-state", str(state), "--apply"])
+    assert state.exists()
+    assert set(_json.loads(state.read_text(encoding="utf-8"))) == {"c0", "c1"}
+
+
+def test_times_seen_counts_cycles_a_card_has_been_waiting(tmp_path, monkeypatch):
+    """times_seen was dead: a skipped card is filtered out of `pending` before
+    review, so it could never be re-escalated and the only bump path never
+    ran. It now counts sightings, which is the signal a T3 queue needs."""
+    _seed_pending(tmp_path, 2)
+    reg_path = tmp_path / "registry_log.jsonl"
+    state = tmp_path / "triage_escalated.json"
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+    argv = ["--registry", str(reg_path), "--escalated-state", str(state), "--apply"]
+
+    tb.run(argv)
+    assert _json.loads(state.read_text(encoding="utf-8"))["c0"]["times_seen"] == 1
+    for expected in (2, 3, 4):
+        tb.run(argv)
+        got = _json.loads(state.read_text(encoding="utf-8"))["c0"]["times_seen"]
+        assert got == expected, f"times_seen stuck at {got}, expected {expected}"
+    # first_escalated_utc is the ORIGINAL sighting and must never move.
+    first = _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"]
+    tb.run(argv)
+    assert _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"] == first
