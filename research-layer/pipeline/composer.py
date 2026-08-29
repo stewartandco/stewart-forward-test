@@ -558,7 +558,9 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
             },
             "cost_model": dict(cls_spec["cost_model"]),
         }
-        for cell_spec in expand_universe(base, cells.class_cells(asset_class)):
+        # the declared grid (class_cells) admits data/import work; the ACTIVE
+        # set admits sweeping (SP5 s3, P2-T1's gate)
+        for cell_spec in expand_universe(base, cells.active_cells(asset_class)):
             cell_spec["name"] = _build_name(
                 cell_spec["universe"]["assets"], fam["family"],
                 cell_spec["blocks"], cell_spec["universe"]["timeframe"])

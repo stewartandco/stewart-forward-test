@@ -412,6 +412,45 @@ def test_schema_rejects_proxy_keys_without_the_additive_change():
     assert errs, "pre-edit schema should have rejected routed_via/proxy_card_ids"
 
 
+# ---------------- SP5 P2-T2: expansion sweeps the ACTIVE set ----------------
+# equity_etf is the per-cell class this module already fixtures (equity_family
+# above), so the gate is pinned here rather than in a fixture invented for it.
+
+def _active_specs():
+    """equity_family() expanded for equity_etf: 3 swept `fast` values x
+    however many cells the ACTIVE set admits."""
+    return composer.expand_family_for_class(
+        equity_family(), "run1", composer.DEFAULT_MODEL,
+        "2026-08-25T00:00:00Z", "equity_etf")
+
+
+def test_expansion_sweeps_the_active_set_not_the_declared_grid(monkeypatch):
+    # SP5 s3: the declared grid admits data work; the ACTIVE set admits
+    # sweeping. A class whose active set is a strict subset expands to
+    # that subset only.
+    monkeypatch.setitem(cells_mod.ACTIVE_CELLS, "equity_etf",
+                        {"assets": ("SPY",), "timeframes": "all"})
+    specs = _active_specs()
+    assert {s["universe"]["assets"][0] for s in specs} == {"SPY"}
+    assert len(specs) == 3   # 3 sweep combos x 1 active cell
+
+
+def test_full_active_set_expansion_is_unchanged_for_tradfi():
+    # "all"/"all" -> byte-identical to the pre-gate behavior
+    specs = _active_specs()
+    assert len(specs) == 3 * len(cells_mod.class_cells("equity_etf"))
+    assert {(s["universe"]["assets"][0], s["universe"]["timeframe"]) for s in specs} \
+        == set(cells_mod.class_cells("equity_etf"))
+
+
+def test_an_empty_active_set_expands_to_nothing(monkeypatch):
+    # This is the state crypto will be in after P2-T3: declared, not swept.
+    monkeypatch.setitem(cells_mod.ACTIVE_CELLS, "equity_etf",
+                        {"assets": (), "timeframes": ()})
+    specs = _active_specs()
+    assert specs == []
+
+
 # ---------------- equity_etf block exclusions: NONE (real OHLC bars) --------
 
 def test_equity_range_blocks_are_not_excluded():

@@ -110,6 +110,19 @@ def test_validate_cell_still_accepts_the_whole_declared_grid():
         cells.validate_cell(asset, tf)
 
 
+def test_active_cells_refuses_a_declared_class_with_no_active_entry(monkeypatch):
+    # Declare-then-activate is a legal intermediate state for a FUTURE class
+    # (only LIVE_CLASSES members are import-time required to have an entry).
+    # Reaching it must fail loudly like every other unknown-class lookup in
+    # this module, not with a bare KeyError.
+    import pytest
+    monkeypatch.setitem(cells.CLASSES, "commodity_future",
+                        dict(cells.CLASSES["equity_etf"], assets=("USO",)))
+    assert cells.class_cells("commodity_future") == [("USO", "1d")]   # declared
+    with pytest.raises(ValueError, match="ACTIVE_CELLS"):
+        cells.active_cells("commodity_future")                        # not active
+
+
 def test_validate_cell_class_aware():
     assert cells.validate_cell("BTCUSDT", "1h") == ("BTCUSDT", "1h")          # crypto inferred, unchanged
     assert cells.validate_cell("EUR", "1d") == ("EUR", "1d")                   # fx inferred

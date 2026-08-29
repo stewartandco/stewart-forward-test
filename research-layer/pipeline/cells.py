@@ -265,6 +265,11 @@ def active_cells(asset_class: str) -> list[tuple[str, str]]:
     restricted to the ACTIVE_CELLS subsets. Declaration (CLASSES) is a space;
     this is the decision to search part of it."""
     spec = _class_spec(asset_class)
+    if asset_class not in ACTIVE_CELLS:
+        raise ValueError(
+            f"{asset_class!r} is declared but not activatable: a class must "
+            f"declare an ACTIVE_CELLS entry before anything may sweep it; "
+            f"entries: {sorted(ACTIVE_CELLS)}")
     gate = ACTIVE_CELLS[asset_class]
     assets = spec["assets"] if gate["assets"] == "all" else gate["assets"]
     tfs = spec["timeframes"] if gate["timeframes"] == "all" else gate["timeframes"]
