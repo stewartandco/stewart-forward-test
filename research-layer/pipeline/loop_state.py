@@ -78,10 +78,35 @@ def record_generation(state: dict, asset_class: str, *, run_id: str,
     entry["last_gen_ts_utc"] = ts_utc
 
 
+def record_park(state: dict, asset_class: str, *, ts_utc: str) -> None:
+    """Record that a cycle for this class was PARKED (budget) without doing
+    the work.
+
+    Deliberately does NOT touch `watermark`: no cards were triaged, no
+    generation ran, and banking a watermark for undone work would silently
+    skip that backlog forever. Only the ordering hint moves.
+
+    Why it must move something: a park leaves the class exactly as
+    pick_class found it -- still over threshold, still the oldest
+    last_gen_ts_utc -- so the very next fire re-selects the SAME class, parks
+    again, and every other over-threshold class starves behind it until the
+    budget frees up. The park stamp rotates the class to the back of the
+    queue without claiming its work is done.
+    """
+    entry = state["classes"].setdefault(asset_class, {"threshold": DEFAULT_THRESHOLD})
+    entry["last_park_ts_utc"] = ts_utc
+
+
 def pick_class(state: dict, counts: dict[str, int]) -> str | None:
     """`counts` is the caller's TRIGGERABLE per-class count (accepted+pending)
-    -- see the module BASIS WARNING. The comparison arithmetic below is
-    unchanged from the original spec; only what the caller measures changed."""
+    -- see the module BASIS WARNING. The threshold arithmetic below is
+    unchanged from the original spec; only what the caller measures changed.
+
+    Ordering among over-threshold classes: least-recently-ATTENDED first,
+    where "attended" is the later of a completed generation and a budget
+    park. A never-attended class still sorts first; ties break by
+    cells.LIVE_CLASSES order.
+    """
     over: list[str] = []
     for cls in cells.LIVE_CLASSES:
         if cls not in counts:
@@ -94,10 +119,20 @@ def pick_class(state: dict, counts: dict[str, int]) -> str | None:
     if not over:
         return None
     order = {c: i for i, c in enumerate(cells.LIVE_CLASSES)}
-    # never-run sorts before any timestamp; then oldest timestamp; then declared order
+
+    def _attended(cls: str) -> str | None:
+        """Latest time this class occupied a fire, generation or park. Both
+        stamps are the loop's _now_utc isoformat, so max() on the strings is
+        a real recency compare (see record_generation's format warning)."""
+        entry = state["classes"].get(cls, {})
+        stamps = [s for s in (entry.get("last_gen_ts_utc"),
+                              entry.get("last_park_ts_utc")) if s]
+        return max(stamps) if stamps else None
+
+    # never-attended sorts before any timestamp; then oldest; then declared order
     return min(over, key=lambda c: (
-        state["classes"].get(c, {}).get("last_gen_ts_utc") is not None,
-        state["classes"].get(c, {}).get("last_gen_ts_utc") or "",
+        _attended(c) is not None,
+        _attended(c) or "",
         order[c],
     ))
 

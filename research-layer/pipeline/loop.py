@@ -211,6 +211,40 @@ def _spent(logs_dir: str | Path) -> float:
     return meter.month_spend()
 
 
+def _gauntlet_orphans(registry: Registry) -> list[str]:
+    """Strategy ids in state 'gauntlet' that ALREADY carry a chained gauntlet
+    verdict -- the exact condition pipeline/gauntlet.py refuses on (exit 1,
+    "ORPHANED: gauntlet verdicts without state changes"), typically left by a
+    mid-run crash.
+
+    Detected here, next to the pre-spend chain verify, because the refusal is
+    unconditional and happens at the END of the cycle: without this the loop
+    pays for triage and BOTH composer calls (~$4.20 a fire, ~$12.60/day at
+    three fires) to arrive at a guaranteed exit 1, every cycle, until a human
+    repairs the chain. The condition is mirrored from gauntlet.py rather than
+    imported because gauntlet computes it inside run() after argument
+    parsing; if that check ever moves to a shared helper, both should use it.
+    """
+    states = registry.strategy_states()
+    verdicted = {e["payload"]["strategy_id"] for e in registry.entries()
+                 if e["entry_type"] == "verdict"
+                 and e["payload"].get("stage") == "gauntlet"}
+    return sorted(sid for sid, st in states.items()
+                  if st == "gauntlet" and sid in verdicted)
+
+
+def _budget_state(spent: float) -> str:
+    """Which budget line the cycle is standing on, as a status item. The
+    digest could previously only infer this from the presence of a
+    budget_cap escalation, which conflates "parked at the 80% batch-stop
+    line" (routine) with "parked at the hard cap" (urgent)."""
+    if not pipeline_budget.may_spend(spent):
+        return "hard_cap"
+    if not pipeline_budget.may_start_batch(spent):
+        return "batch_stop"
+    return "ok"
+
+
 def _budget_escalations(spent: float) -> list[str]:
     """budget_cap (a PUSH_TRIGGERS entry, interrupts the digest) only at the
     hard cap. The 80% batch-stop line parks work just as surely, but it is
@@ -238,10 +272,19 @@ def _watermark_items(state: dict) -> dict[str, str]:
 def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
                   extra: dict[str, str] | None = None, spent: float = 0.0,
                   escalations: list[str] | None = None,
-                  state: dict | None = None) -> None:
+                  state: dict | None = None,
+                  counts: tuple[dict[str, int], dict[str, int]] | None = None) -> None:
+    """`counts` is (routable, triggerable). Passed on EVERY path that has
+    them, not just no_trigger: CLAUDE.md documents both series as always
+    present, and a digest that can only see them when nothing fired cannot
+    tell an undrained pending backlog from a healthy one. Paths that run
+    before the counts are computed (the lock probes, loop_crashed) legitimately
+    omit them -- they have no chain read to report."""
     items: dict[str, str] = {"outcome": outcome}
     if state is not None:
         items.update(_watermark_items(state))
+    if counts is not None:
+        items.update(_count_items(*counts))
     items.update(extra or {})
     payload = pipeline_status.build({"loop": overall}, spent, escalations)
     payload["items"] = {**payload.get("items", {}), **items}
@@ -256,17 +299,19 @@ def _stage(runner: Runner, argv: list[str], cwd: str | Path) -> int:
 
 
 def _abort_stage_failed(logs_dir: str | Path, state: dict, asset_class: str,
-                        module_key: str, rc: int) -> int:
+                        module_key: str, rc: int, counts=None) -> int:
     print(f"loop: stage {module_key} failed rc={rc}, aborting cycle", flush=True)
     _write_status(logs_dir, "stage_failed", overall="FAIL",
                   extra={"asset_class": asset_class, "failed_stage": module_key,
                          "exit_code": str(rc)},
-                  spent=_spent(logs_dir), escalations=["run_aborted"], state=state)
+                  spent=_spent(logs_dir), escalations=["run_aborted"], state=state,
+                  counts=counts)
     return 1
 
 
 def _composer_rc_or_park(logs_dir: str | Path, state: dict, asset_class: str,
-                         module_key: str, rc: int) -> int:
+                         module_key: str, rc: int, state_path: Path | None = None,
+                         counts=None) -> int:
     """After EITHER composer invocation (the --dry-run preflight or the real
     run) exits nonzero, decide whether this is composer's OWN hard-cap
     refusal (propose_families's meter.can_spend() check raises SystemExit,
@@ -286,12 +331,19 @@ def _composer_rc_or_park(logs_dir: str | Path, state: dict, asset_class: str,
                f"pipeline spend USD {post_spent:.2f} at/above the hard cap "
                f"-- treating as a budget park, not a stage defect")
         print(msg, flush=True)
+        # Same starvation rule as the proactive gates: a park banks no
+        # watermark, so without a rotation stamp this class monopolises every
+        # subsequent pick until the budget frees up.
+        if state_path is not None:
+            loop_state.record_park(state, asset_class, ts_utc=_now_utc())
+            loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class},
+                      extra={"asset_class": asset_class,
+                             "budget_state": _budget_state(post_spent)},
                       spent=post_spent, escalations=_budget_escalations(post_spent),
-                      state=state)
+                      state=state, counts=counts)
         return 0
-    return _abort_stage_failed(logs_dir, state, asset_class, module_key, rc)
+    return _abort_stage_failed(logs_dir, state, asset_class, module_key, rc, counts)
 
 
 def _acquire_instance_lock_or_break_dead(instance_lock: ChainLock) -> bool:
@@ -556,12 +608,17 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # inferred.
     routable_counts = _routable_counts(registry)
     triggerable_counts = _triggerable_counts(registry)
+    # *** Reverting this to routable_counts re-introduces the 2026-08-28
+    # deadlock: accepted-only counts cannot move between fires (nothing
+    # outside a cycle triages), so every fire reports no_trigger at exit 0 --
+    # a wedge that reads as healthy. Pinned by
+    # test_pending_cards_alone_fire_a_cycle. ***
     asset_class = loop_state.pick_class(state, triggerable_counts)
     if asset_class is None:
         print("no_trigger: no live class is over threshold", flush=True)
         _write_status(logs_dir, "no_trigger",
-                      extra=_count_items(routable_counts, triggerable_counts),
-                      spent=_spent(logs_dir), state=state)
+                      spent=_spent(logs_dir), state=state,
+                      counts=(routable_counts, triggerable_counts))
         return 0
 
     # -- 3. budget gate (before ANY metered stage may start) -----------------
@@ -570,10 +627,26 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         msg = (f"deferred_budget: pipeline spend USD {spent:.2f} is at/above "
                f"the batch-start threshold -- parking the {asset_class} cycle")
         print(msg, flush=True)
+        # Rotate this class to the back before writing status: a park banks no
+        # watermark (no work was done), so without this the same class is
+        # re-selected on every fire and every other over-threshold class
+        # starves behind it for as long as the budget stays parked.
+        loop_state.record_park(state, asset_class, ts_utc=_now_utc())
+        loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class},
-                      spent=spent, escalations=_budget_escalations(spent), state=state)
+                      extra={"asset_class": asset_class,
+                             "budget_state": _budget_state(spent)},
+                      spent=spent, escalations=_budget_escalations(spent), state=state,
+                      counts=(routable_counts, triggerable_counts))
         return 0
+
+    # Counts as of the trigger decision. Re-read after any chain-writing
+    # stage so a late status line reports what is on the chain NOW, not what
+    # was there before triage wrote to it.
+    trigger_counts = (routable_counts, triggerable_counts)
+
+    def _fresh_counts():
+        return (_routable_counts(registry), _triggerable_counts(registry))
 
     routable_count = routable_counts[asset_class]
     triggerable_count = triggerable_counts[asset_class]
@@ -584,9 +657,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         _write_status(logs_dir, "dry_run_would_fire",
                       extra={"asset_class": asset_class,
                              "routable_count": str(routable_count),
-                             "triggerable_count": str(triggerable_count),
-                             **_count_items(routable_counts, triggerable_counts)},
-                      spent=spent, state=state)
+                             "triggerable_count": str(triggerable_count)},
+                      spent=spent, state=state, counts=trigger_counts)
         return 0
 
     # -- 4. run the cycle ------------------------------------------------------
@@ -606,10 +678,38 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
              f"aborting, zero spend, watermark NOT advanced", flush=True)
         _write_status(logs_dir, "chain_invalid", overall="FAIL",
                       extra={"asset_class": asset_class, "exit_code": str(rc)},
-                      spent=_spent(logs_dir), escalations=["chain_invalid"], state=state)
+                      spent=_spent(logs_dir), escalations=["chain_invalid"], state=state,
+                      counts=trigger_counts)
+        return 1
+
+    # 4.0b gauntlet-orphan pre-flight, same zero-spend position as the chain
+    # verify above. gauntlet.py refuses unconditionally on this condition at
+    # the END of the cycle, so without this check the loop pays for triage and
+    # both composer calls to reach a guaranteed exit 1 -- on every fire, until
+    # a human repairs the chain.
+    orphans = _gauntlet_orphans(registry)
+    if orphans:
+        print(f"gauntlet_orphan: {len(orphans)} strategy(ies) in state "
+              f"'gauntlet' already carry a chained gauntlet verdict -- "
+              f"gauntlet.py will refuse. Repair the chain before the loop can "
+              f"run: {', '.join(orphans)}", flush=True)
+        _write_status(logs_dir, "gauntlet_orphan", overall="FAIL",
+                      extra={"asset_class": asset_class,
+                             "orphans": ", ".join(orphans),
+                             "orphan_count": str(len(orphans))},
+                      spent=_spent(logs_dir), escalations=["chain_invalid"],
+                      state=state, counts=trigger_counts)
         return 1
 
     entries_before = _entry_count(registry_path)
+    routable_before_triage = routable_counts[asset_class]
+    # How much of this class's trigger was PENDING work (vs already-accepted
+    # cards). Only a pending-driven fire can produce the "triage accepted
+    # nothing, composer sees an unchanged corpus" case the guard below
+    # catches; a fire driven by accepted growth (a human T3 session, or a
+    # previous cycle) already has new routable input and must proceed.
+    pending_routable_before = (triggerable_counts[asset_class]
+                               - routable_before_triage)
 
     def _lock_and_run(module_key: str, stage_argv: list[str]) -> tuple[int | None, bool]:
         """(rc, lock_lost). rc is None when the lock could not be acquired."""
@@ -629,7 +729,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         _write_status(logs_dir, "deferred_lock", overall="WARN",
                       extra={"asset_class": asset_class, "at_stage": module_key,
                              "lock_stale": "false"},
-                      spent=_spent(logs_dir), state=state)
+                      spent=_spent(logs_dir), state=state, counts=_fresh_counts())
         return 0
 
     # 4a. triage --apply (chain-writing, metered). --limit bounds worst-case
@@ -651,7 +751,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if lock_lost:
         return _defer_midcycle_lock("pipeline.triage_batch")
     if rc != 0:
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.triage_batch", rc)
+        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.triage_batch",
+                                   rc, _fresh_counts())
 
     # Watermark truth, on the TRIGGERABLE basis -- it must match what
     # pick_class reads above or the comparison is apples-to-oranges (see
@@ -670,6 +771,42 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # several cycles as new cards arrive, not in one sweep.
     watermark_after_triage = _triggerable_counts(registry)[asset_class]
 
+    # 4a-bis. "No new information, no new trials" (spec Decision 2). The
+    # accepted+pending trigger basis means a class can fire on pending cards
+    # that triage then rejects or escalates wholesale -- leaving the composer
+    # exactly the routable corpus it already swept last time, for two metered
+    # calls and a full screen+gauntlet pass. Stop here, at zero further cost.
+    #
+    # Gated on pending_routable_before: a class whose trigger came from
+    # ALREADY-ACCEPTED growth (a human T3 session, or a prior cycle) has
+    # genuinely new routable input for the composer even though this cycle's
+    # triage added nothing, and must not be stopped.
+    #
+    # The watermark still advances: those cards WERE seen and dispositioned,
+    # so they must not re-fire this class on the next tick. This is a
+    # completed cycle that happened to produce no new routable input, not a
+    # deferral -- overall stays OK and the exit code stays 0.
+    routable_after_triage = _routable_counts(registry)[asset_class]
+    if pending_routable_before > 0 and routable_after_triage <= routable_before_triage:
+        print(f"no_new_accepted_cards: triage accepted nothing new for "
+              f"{asset_class} (routable {routable_before_triage} -> "
+              f"{routable_after_triage}) -- no new information, no new "
+              f"trials; watermark advanced to {watermark_after_triage}",
+              flush=True)
+        loop_state.record_generation(state, asset_class, run_id=run_id,
+                                     watermark_count=watermark_after_triage,
+                                     ts_utc=_now_utc())
+        loop_state.save(state_path, state)
+        _write_status(logs_dir, "no_new_accepted_cards",
+                      extra={"asset_class": asset_class,
+                             "watermark": str(watermark_after_triage),
+                             "run_id": run_id,
+                             "routable_before": str(routable_before_triage),
+                             "routable_after": str(routable_after_triage)},
+                      spent=_spent(logs_dir), state=state, counts=_fresh_counts())
+        commit_cycle(registry_path, entries_before, run_id, runner)
+        return 0
+
     # Budget re-check (plan: "before triage AND before composer"): triage may
     # itself have spent against the cap; a composer batch must not start on
     # a stale pre-triage read.
@@ -679,9 +816,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                f"the batch-start threshold after triage -- parking before "
                f"the {asset_class} composer run")
         print(msg, flush=True)
+        loop_state.record_park(state, asset_class, ts_utc=_now_utc())
+        loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class},
-                      spent=spent, escalations=_budget_escalations(spent), state=state)
+                      extra={"asset_class": asset_class,
+                             "budget_state": _budget_state(spent)},
+                      spent=spent, escalations=_budget_escalations(spent), state=state,
+                      counts=_fresh_counts())
         return 0
 
     # 4b. composer --dry-run preflight (no chain write, no lock). NOTE:
@@ -692,7 +833,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                          run_id, "--asset-class", asset_class, "--dry-run"]
     rc = _stage(runner, composer_dry_argv, layer)
     if rc != 0:
-        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc)
+        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc,
+                                    state_path, _fresh_counts())
 
     # 4c. composer real run (chain-writing, metered)
     composer_argv = [py, "-m", "pipeline.composer", *reg_argv, "--run-id",
@@ -701,7 +843,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if lock_lost:
         return _defer_midcycle_lock("pipeline.composer")
     if rc != 0:
-        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc)
+        return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc,
+                                    state_path, _fresh_counts())
 
     # 4d. screen (chain-writing)
     screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv]
@@ -709,7 +852,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if lock_lost:
         return _defer_midcycle_lock("pipeline.screen")
     if rc != 0:
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.screen", rc)
+        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.screen", rc,
+                                   _fresh_counts())
 
     # 4e. gauntlet (chain-writing)
     gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv]
@@ -717,7 +861,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if lock_lost:
         return _defer_midcycle_lock("pipeline.gauntlet")
     if rc != 0:
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc)
+        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc,
+                                   _fresh_counts())
 
     # 4f. chain verify again, post-gauntlet (spec s6): the loop's OWN writes
     # this cycle must satisfy the same invariants a human session's would.
@@ -730,7 +875,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
              f"gauntlet -- aborting, watermark NOT advanced", flush=True)
         _write_status(logs_dir, "chain_invalid", overall="FAIL",
                       extra={"asset_class": asset_class, "exit_code": str(rc)},
-                      spent=_spent(logs_dir), escalations=["chain_invalid"], state=state)
+                      spent=_spent(logs_dir), escalations=["chain_invalid"], state=state,
+                      counts=_fresh_counts())
         return 1
 
     # -- 5. success: advance the watermark, report clean -----------------------
@@ -752,7 +898,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                          "watermark": str(watermark_after_triage),
                          "run_id": run_id,
                          "chain_growth": str(chain_growth)},
-                  spent=_spent(logs_dir), state=state)
+                  spent=_spent(logs_dir), state=state, counts=_fresh_counts())
 
     # -- 6. scoped chain commit -- bookkeeping, never a cycle-failure cause --
     # Runs only after a clean cycle, only after the watermark and final

@@ -1,6 +1,13 @@
 """Offline tests for the pipeline loop orchestrator (no network, no API).
 
 Run: python -m pytest pipeline/test_loop.py -q
+
+DEADLOCK REGRESSION PIN: test_pending_cards_alone_fire_a_cycle is the guard
+against re-introducing the 2026-08-28 trigger deadlock (the trigger counting
+ACCEPTED cards only, which nothing outside a cycle can ever increase). Its
+failure mode is silent -- the loop reports no_trigger at exit 0, which reads
+as healthy -- so that test is the only thing standing between a bad merge
+resolution and a dead pipeline. Do not delete or weaken it.
 """
 from __future__ import annotations
 
@@ -186,7 +193,7 @@ def test_stage_failure_exits_nonzero_and_does_not_advance_watermark(tmp_path):
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 1
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "fx" not in st.get("classes", {})          # watermark NOT advanced
+    assert "watermark" not in st.get("classes", {}).get("fx", {})          # watermark NOT advanced
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["overall"] == "FAIL"
     assert status["items"]["failed_stage"] == "pipeline.screen"
@@ -288,7 +295,7 @@ def test_budget_recheck_after_triage_parks_before_composer(tmp_path):
     assert status["items"]["outcome"] == "deferred_budget"
     assert status["overall"] == "WARN"
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "fx" not in st.get("classes", {})           # watermark NOT advanced
+    assert "watermark" not in st.get("classes", {}).get("fx", {})           # watermark NOT advanced
 
 
 def test_composer_cap_refusal_parks_not_fails(tmp_path):
@@ -326,7 +333,7 @@ def test_composer_cap_refusal_parks_not_fails(tmp_path):
     assert status["overall"] == "WARN"
     assert "budget_cap" in status["escalations"]
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "fx" not in st.get("classes", {})           # watermark NOT advanced
+    assert "watermark" not in st.get("classes", {}).get("fx", {})           # watermark NOT advanced
 
 
 def test_composer_dry_run_cap_refusal_also_parks_not_fails(tmp_path):
@@ -455,7 +462,7 @@ def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_
     assert status["overall"] == "FAIL"
     assert "chain_invalid" in status["escalations"]
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "fx" not in st.get("classes", {})           # watermark NOT advanced
+    assert "watermark" not in st.get("classes", {}).get("fx", {})           # watermark NOT advanced
 
 
 def test_instance_lock_defers_concurrent_run(tmp_path):
@@ -703,7 +710,7 @@ def test_midcycle_foreign_acquire_defers(tmp_path):
     assert status["items"]["lock_stale"] == "false"
     assert status["overall"] == "WARN"
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "fx" not in st.get("classes", {})            # watermark NOT advanced
+    assert "watermark" not in st.get("classes", {}).get("fx", {})            # watermark NOT advanced
 
 
 def test_break_stale_race_treated_as_fresh_lock_defer(tmp_path, monkeypatch):
@@ -978,9 +985,22 @@ def test_break_stale_race_lock_vanished_proceeds_with_cycle(tmp_path, monkeypatc
 
 
 def test_pending_cards_alone_fire_a_cycle(tmp_path):
-    """THE DEADLOCK. 30 PENDING crypto-tagged cards over the watermark and
-    ZERO new accepted cards must now trigger a crypto cycle -- under the old
-    accepted-only basis this was the exact no_trigger wedge."""
+    """*** THE DEADLOCK REGRESSION PIN -- DO NOT DELETE OR WEAKEN. ***
+
+    30 PENDING crypto-tagged cards over the watermark and ZERO new accepted
+    cards must START a cycle. Under the accepted-only trigger basis this was
+    the exact live wedge: the loop reported no_trigger at exit 0 on every
+    fire, which reads as healthy, which is how it survived unnoticed through
+    2026-08-28.
+
+    If this test ever fails with outcome == "no_trigger", the trigger has
+    been reverted to _routable_counts (accepted-only) and the loop is dead
+    again. See loop._triggerable_counts.
+
+    Asserts the cycle STARTS, not that it completes: with a FakeRunner triage
+    is a no-op, so the no_new_accepted_cards guard correctly stops the cycle
+    before the metered composer. The full happy path is covered by
+    test_a_real_accept_still_proceeds_to_the_composer."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=0)
     registry_path = layer / "registry_log.jsonl"
     _seed_all_classes_caught_up(layer, registry_path)
@@ -990,7 +1010,11 @@ def test_pending_cards_alone_fire_a_cycle(tmp_path):
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
-    assert status["items"]["outcome"] == "cycle_complete"
+    # THE pin: the deadlock's signature was no_trigger. Anything else means a
+    # class was selected and a cycle began.
+    assert status["items"]["outcome"] != "no_trigger", (
+        "DEADLOCK REGRESSION: pending cards no longer fire a cycle -- the "
+        "trigger has been reverted to the accepted-only basis")
     assert status["items"]["asset_class"] == "crypto"
     # Triage is the FIRST stage: the pending cards that fired this cycle are
     # exactly the cards the cycle then triages.
@@ -1100,3 +1124,214 @@ def test_triage_limit_fits_the_scheduled_execution_window():
     # And the old value must not silently come back: 200 cards is ~38.5 min of
     # triage, which did not fit even the XML's PT2H once the rest ran.
     assert loop.TRIAGE_LIMIT <= 40
+
+
+# -- item 3: no_new_accepted_cards -------------------------------------------
+
+def test_cycle_stops_before_composer_when_triage_accepted_nothing(tmp_path):
+    """Spec Decision 2: "no new information, no new trials". The
+    accepted+pending trigger basis lets a class fire on pending cards that
+    triage then rejects or escalates wholesale -- leaving the composer with
+    the SAME routable corpus it already swept, for two metered calls. Stop at
+    zero further cost."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    fr = FakeRunner()          # FakeRunner never really triages -> accepted stays 0
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    mods = _modules(fr)
+    assert "pipeline.triage_batch" in mods          # triage DID run
+    assert "pipeline.composer" not in mods          # but nothing metered after it
+    assert "pipeline.screen" not in mods
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_new_accepted_cards"
+    assert status["overall"] == "OK"                 # routine, not a defect
+
+
+def test_watermark_still_advances_when_triage_accepted_nothing(tmp_path):
+    """The cards WERE seen and dispositioned, so the watermark must move even
+    though no generation ran -- otherwise the same class re-fires every tick
+    on the same already-triaged cards."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["crypto"]["watermark"] == 30
+
+    fr2 = FakeRunner()
+    loop.run(["--once", "--layer", str(layer)], runner=fr2)
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"     # did not re-fire
+
+
+def test_a_real_accept_still_proceeds_to_the_composer(tmp_path):
+    """Guard must not swallow the happy path: when triage genuinely accepts a
+    card the routable count rises and the cycle continues."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    class _AcceptingRunner(FakeRunner):
+        """Simulates triage actually accepting a card, the way a real
+        pipeline.triage_batch --apply run chains card_reviewed entries."""
+        def __call__(self, argv, **kw):
+            r = super().__call__(argv, **kw)
+            if "-m" in argv and argv[argv.index("-m") + 1] == "pipeline.triage_batch":
+                reg.review_card("pend0000", "accepted", "auto-d31")
+            return r
+
+    fr = _AcceptingRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert "pipeline.composer" in _modules(fr)
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+
+
+# -- item 4: gauntlet-orphan pre-flight ---------------------------------------
+
+def test_gauntlet_orphan_aborts_at_zero_metered_cost(tmp_path):
+    """gauntlet.py refuses (exit 1) when a strategy sits in state 'gauntlet'
+    with a gauntlet verdict already chained. Without a pre-flight the loop
+    pays for triage AND both composer calls before reaching that guaranteed
+    failure -- ~$12.60/day at 3 fires. Detect it next to the existing
+    pre-spend chain verify instead."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    reg.append("strategy_registered", {"strategy_id": "orphan-sid"})
+    reg.append("state_change", {"strategy_id": "orphan-sid", "from": "proposed",
+                                "to": "gauntlet"})
+    reg.append("verdict", {"strategy_id": "orphan-sid", "stage": "gauntlet",
+                           "passed": False, "metrics": {}})
+
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 1
+    assert _modules(fr) == []            # NOTHING metered ran
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "gauntlet_orphan"
+    assert status["overall"] == "FAIL"
+    assert "orphan-sid" in status["items"]["orphans"]
+
+
+def test_a_clean_chain_has_no_orphans_and_proceeds(tmp_path):
+    """A strategy that reached a verdict AND moved out of 'gauntlet' state is
+    the normal completed case, not an orphan."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    reg.append("strategy_registered", {"strategy_id": "done-sid"})
+    reg.append("state_change", {"strategy_id": "done-sid", "from": "proposed",
+                                "to": "gauntlet"})
+    reg.append("verdict", {"strategy_id": "done-sid", "stage": "gauntlet",
+                           "passed": True, "metrics": {}})
+    reg.append("state_change", {"strategy_id": "done-sid", "from": "gauntlet",
+                                "to": "quarantine"})
+
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+
+
+# -- item 5: budget park must not starve the round-robin ----------------------
+
+def test_budget_park_records_state_and_rotates_the_class_to_the_back(tmp_path):
+    """A parked cycle banks no watermark (correctly - no work was done), so
+    pick_class would re-select the same class on every fire and the
+    round-robin stops dead. The park timestamp rotates it to the back so
+    another over-threshold class gets the next fire, WITHOUT pretending its
+    work was done."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    # Two classes over threshold: crypto-tagged and fx-tagged pending cards.
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="cry")
+    _add_cards(reg, 30, status="pending", asset_classes=["fx"], prefix="fxc")
+
+    ledger = layer / "logs" / "budget_ledger.jsonl"
+    from datetime import datetime, timezone
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
+                                  "usd": 17.0, "purpose": "triage",
+                                  "model": "claude-sonnet-5"}) + "\n",
+                      encoding="utf-8")
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_budget"
+    first = status["items"]["asset_class"]
+    assert status["items"]["budget_state"] == "batch_stop"
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"][first]["last_park_ts_utc"] is not None
+    # Watermark NOT banked: no work was done for it.
+    assert st["classes"][first]["watermark"] == 0
+
+    # Next fire, still parked: a DIFFERENT over-threshold class is selected.
+    rc2 = loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert rc2 == 0
+    status2 = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status2["items"]["asset_class"] != first
+
+
+def test_budget_state_item_distinguishes_cap_from_batch_stop(tmp_path):
+    """The digest must be able to tell "parked at the 80% batch-stop line"
+    from "parked at the hard cap" without reading escalations."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    ledger = layer / "logs" / "budget_ledger.jsonl"
+    from datetime import datetime, timezone
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
+                                  "usd": 20.0, "purpose": "triage",
+                                  "model": "claude-sonnet-5"}) + "\n",
+                      encoding="utf-8")
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["budget_state"] == "hard_cap"
+
+
+def test_both_count_series_appear_on_cycle_complete_and_failure_paths(tmp_path):
+    """CLAUDE.md documents routable_<cls> and triggerable_<cls> as always
+    present. They used to be written only on the no_trigger and dry_run
+    paths, so a digest could not see an undrained pending backlog on any
+    cycle that actually ran -- the exact case where it matters most."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _add_cards(reg, 4, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    def _items(argv, runner):
+        loop.run(argv, runner=runner)
+        return json.loads((layer / "logs" / "pipeline_status.json")
+                          .read_text(encoding="utf-8"))["items"]
+
+    items = _items(["--once", "--layer", str(layer)], FakeRunner())
+    assert items["outcome"] == "cycle_complete"
+    for cls in cells.LIVE_CLASSES:
+        assert f"routable_{cls}" in items and f"triggerable_{cls}" in items
+    assert items["routable_crypto"] == "30" and items["triggerable_crypto"] == "34"
+
+
+def test_both_count_series_appear_on_a_stage_failure(tmp_path):
+    """Same guarantee on the failure path, where the digest most needs the
+    context: a FAIL line that cannot say how big the backlog was is a report
+    nobody can act on."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _add_cards(reg, 4, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    rc = loop.run(["--once", "--layer", str(layer)],
+                  runner=FakeRunner(codes={"pipeline.screen": 1}))
+    assert rc == 1
+    items = json.loads((layer / "logs" / "pipeline_status.json")
+                       .read_text(encoding="utf-8"))["items"]
+    assert items["outcome"] == "stage_failed"
+    for cls in cells.LIVE_CLASSES:
+        assert f"routable_{cls}" in items and f"triggerable_{cls}" in items
