@@ -174,7 +174,8 @@ LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08
 # "all" = the class's whole declared grid (the four tradfi classes: byte-
 # identical to pre-SP5 behavior, test-pinned).
 ACTIVE_CELLS = {
-    "crypto":     {"assets": (), "timeframes": ()},
+    # class -> {"assets": tuple | "all", "timeframes": tuple | "all"}
+    "crypto":     {"assets": (), "timeframes": ()},   # empty until activation
     "fx":         {"assets": "all", "timeframes": "all"},
     "equity_etf": {"assets": "all", "timeframes": "all"},
     "bond_etf":   {"assets": "all", "timeframes": "all"},
@@ -182,6 +183,78 @@ ACTIVE_CELLS = {
 }
 
 SESSION_PERIODS = {"24x7": 365, "fx_5d": 261, "us_equity_5d": 252}
+
+# Sentinel for an ACTIVE_CELLS entry that omits an axis key entirely: bare
+# indexing raised KeyError: 'timeframes' at import, naming neither the class
+# nor the gate. Folded into the axis raise below instead.
+_MISSING_AXIS = "<missing>"
+
+
+def _assert_gate_axes(cls_name: str, gate: dict) -> None:
+    """Import-time shape check for one ACTIVE_CELLS entry's two axes.
+
+    Each axis is "all" (the class's whole declared grid) or a tuple that is
+    (a) a subset of the class's declaration, (b) duplicate-free and (c) in
+    CLASSES declaration order.
+
+    (b) and (c) exist because the set-subset test alone accepts both a
+    repeated value - which yields a DUPLICATED cell, swept twice and counted
+    twice in the trial denominator - and a transposed tuple, which would make
+    active_cells() return gate order while class_cells() returns declared
+    order. Order is part of the declaration in this module (all_cells' fixed
+    order so manifests diff cleanly) and D6's rotation cursor reads this
+    list. Phase 3 hand-writes a ~95-ticker tuple; both mistakes are exactly
+    what hand-writing one produces.
+
+    Split out of the assertion block only so the rules can be exercised
+    against crafted gates in tests - it is called at import for every entry,
+    and nothing calls it at runtime.
+    """
+    declared = CLASSES[cls_name]
+    for key in ("assets", "timeframes"):
+        sub = gate.get(key, _MISSING_AXIS)
+        if sub == "all":
+            continue
+        if not isinstance(sub, tuple) or not set(sub) <= set(declared[key]):
+            raise AssertionError(
+                f"ACTIVE_CELLS[{cls_name!r}][{key!r}] must be 'all' or a tuple "
+                f"subset of CLASSES[{cls_name!r}][{key!r}]={declared[key]!r}, "
+                f"got {sub!r}")
+        if len(set(sub)) != len(sub):
+            raise AssertionError(
+                f"ACTIVE_CELLS[{cls_name!r}][{key!r}] repeats a value: a "
+                f"repeated entry double-sweeps its cells and double-counts "
+                f"them in the trial denominator, got {sub!r}")
+        in_order = tuple(v for v in declared[key] if v in set(sub))
+        if sub != in_order:
+            raise AssertionError(
+                f"ACTIVE_CELLS[{cls_name!r}][{key!r}] must list its values in "
+                f"CLASSES[{cls_name!r}][{key!r}] declaration order (order is "
+                f"part of the declaration: active_cells would otherwise "
+                f"disagree with class_cells), expected {in_order!r}, "
+                f"got {sub!r}")
+
+
+def _assert_gate_both_or_neither(cls_name: str, gate: dict) -> None:
+    """Import-time: a LIVE class's gate fills BOTH axes or neither.
+
+    {"assets": (95 tickers), "timeframes": ()} imports clean and yields zero
+    cells, so an activation commit that fills one axis and forgets the other
+    is a silent no-op - "activation shipped" claimed against a gate that
+    activated nothing (ratification is not deployment). Crypto's legitimate
+    resting state is ((), ()), so both-or-neither costs nothing.
+    """
+    empty = [key for key in ("assets", "timeframes")
+             if gate.get(key, _MISSING_AXIS) == ()]
+    if len(empty) == 1:
+        filled = "assets" if empty[0] == "timeframes" else "timeframes"
+        raise AssertionError(
+            f"ACTIVE_CELLS[{cls_name!r}] fills {filled!r} but leaves "
+            f"{empty[0]!r} empty: a gate must be both-or-neither, because one "
+            f"empty axis sweeps ZERO cells silently. Either activate both "
+            f"axes or leave the whole gate at its resting state "
+            f"{{'assets': (), 'timeframes': ()}}; got {gate!r}")
+
 
 # Every class's declared assets must be disjoint from every other class's -
 # a ticker that could mean two different classes is a declaration bug, not a
@@ -220,20 +293,13 @@ for _live in LIVE_CLASSES:
         raise AssertionError(
             f"LIVE_CLASSES member {_live!r} has no ACTIVE_CELLS entry: a live "
             f"class must declare which of its declared cells are active")
+    _assert_gate_both_or_neither(_live, ACTIVE_CELLS[_live])
 for _acls, _gate in ACTIVE_CELLS.items():
     if _acls not in CLASSES:
         raise AssertionError(
             f"ACTIVE_CELLS[{_acls!r}] is not a declared class: {sorted(CLASSES)}")
-    for _key in ("assets", "timeframes"):
-        _sub = _gate[_key]
-        if _sub == "all":
-            continue
-        if not isinstance(_sub, tuple) or not set(_sub) <= set(CLASSES[_acls][_key]):
-            raise AssertionError(
-                f"ACTIVE_CELLS[{_acls!r}][{_key!r}] must be 'all' or a tuple "
-                f"subset of CLASSES[{_acls!r}][{_key!r}]={CLASSES[_acls][_key]!r}, "
-                f"got {_sub!r}")
-del _cls, _spec, _asset, _lag, _excl, _bench, _live, _acls, _gate, _key, _sub
+    _assert_gate_axes(_acls, _gate)
+del _cls, _spec, _asset, _lag, _excl, _bench, _live, _acls, _gate
 
 
 def all_cells() -> list[tuple[str, str]]:

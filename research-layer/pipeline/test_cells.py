@@ -104,6 +104,17 @@ def test_active_cells_is_a_subset_of_the_declared_grid():
         assert set(cells.active_cells(cls)) <= set(cells.class_cells(cls))
 
 
+def test_a_partial_gate_restricts_BOTH_axes(monkeypatch):
+    # P2-T1 rider R1: every other test on this gate uses "all"/"all" or
+    # crypto's empty tuple, so a timeframes-BLIND active_cells() passed the
+    # whole file. Phase 3 activates 95 assets x 1d out of a 6-timeframe
+    # declared grid: a blind gate would sweep 570 cells, a 6x denominator
+    # blowout shipped green. This is the only test that would catch it.
+    monkeypatch.setitem(cells.ACTIVE_CELLS, "crypto",
+                        {"assets": ("BTCUSDT", "ETHUSDT"), "timeframes": ("1h",)})
+    assert cells.active_cells("crypto") == [("BTCUSDT", "1h"), ("ETHUSDT", "1h")]
+
+
 def test_validate_cell_still_accepts_the_whole_declared_grid():
     # declaration admits data/import work; activation admits sweeping
     for asset, tf in cells.class_cells("crypto"):
@@ -121,6 +132,71 @@ def test_active_cells_refuses_a_declared_class_with_no_active_entry(monkeypatch)
     assert cells.class_cells("commodity_future") == [("USO", "1d")]   # declared
     with pytest.raises(ValueError, match="ACTIVE_CELLS"):
         cells.active_cells("commodity_future")                        # not active
+
+
+# The gate's import-time shape rules are exercised through the two private
+# checkers the assertion block calls (cells._assert_gate_axes /
+# _assert_gate_both_or_neither) rather than re-implemented here: a test that
+# restates the rule cannot catch a rule that was never wired in.
+
+def test_the_shipped_gate_obeys_its_own_import_time_rules():
+    for cls, gate in cells.ACTIVE_CELLS.items():
+        cells._assert_gate_axes(cls, gate)
+    for cls in cells.LIVE_CLASSES:
+        cells._assert_gate_both_or_neither(cls, cells.ACTIVE_CELLS[cls])
+
+
+def test_a_gate_axis_may_not_repeat_a_value():
+    # R2: set(_sub) <= set(declared) accepts ("BTCUSDT", "BTCUSDT"), which
+    # yields a DUPLICATED cell - swept twice, counted twice in the trial
+    # denominator. Hand-writing ~95 tickers is exactly where this happens.
+    with pytest.raises(AssertionError, match="repeats"):
+        cells._assert_gate_axes("crypto", {"assets": ("BTCUSDT", "BTCUSDT"),
+                                           "timeframes": ("1h",)})
+
+
+def test_a_gate_axis_must_be_in_declaration_order():
+    # R2: a transposed tuple also passes the set-subset check, and then
+    # active_cells() returns gate order while class_cells() returns declared
+    # order. Order is part of the declaration (test_the_grid_is_declared_in_
+    # a_fixed_order above) and D6's rotation cursor reads this list.
+    with pytest.raises(AssertionError, match="declaration order"):
+        cells._assert_gate_axes("crypto", {"assets": ("ETHUSDT", "BTCUSDT"),
+                                           "timeframes": ("1h",)})
+    # the same values in declared order are fine
+    cells._assert_gate_axes("crypto", {"assets": ("BTCUSDT", "ETHUSDT"),
+                                       "timeframes": ("1h",)})
+
+
+def test_a_gate_missing_an_axis_key_names_the_class_not_a_bare_KeyError():
+    # R4: _gate[_key] used to raise KeyError: 'timeframes' at IMPORT, with
+    # nothing saying which class's entry was malformed.
+    with pytest.raises(AssertionError, match=r"ACTIVE_CELLS\['crypto'\]\['timeframes'\]"):
+        cells._assert_gate_axes("crypto", {"assets": ("BTCUSDT",)})
+
+
+def test_a_half_filled_gate_is_refused_at_import():
+    # R3: {"assets": (95 tickers), "timeframes": ()} imports clean and sweeps
+    # ZERO cells - an activation commit that fills one axis and forgets the
+    # other is a silent no-op, and "activation shipped" gets claimed against
+    # a gate that activated nothing. Both-or-neither costs nothing because
+    # crypto's legitimate resting state is ((), ()).
+    with pytest.raises(AssertionError, match="both-or-neither"):
+        cells._assert_gate_both_or_neither(
+            "crypto", {"assets": cells.ASSETS, "timeframes": ()})
+    with pytest.raises(AssertionError, match="both-or-neither"):
+        cells._assert_gate_both_or_neither(
+            "crypto", {"assets": (), "timeframes": ("1d",)})
+    # both legal resting/active states pass
+    cells._assert_gate_both_or_neither("crypto", {"assets": (), "timeframes": ()})
+    cells._assert_gate_both_or_neither("fx", {"assets": "all", "timeframes": "all"})
+
+
+def test_a_half_filled_gate_really_would_sweep_nothing(monkeypatch):
+    # the defect R3 guards against, demonstrated: one axis filled, no cells.
+    monkeypatch.setitem(cells.ACTIVE_CELLS, "crypto",
+                        {"assets": cells.ASSETS, "timeframes": ()})
+    assert cells.active_cells("crypto") == []
 
 
 def test_validate_cell_class_aware():
