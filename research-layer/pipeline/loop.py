@@ -46,6 +46,14 @@ from .registry import Registry
 LAYER_DEFAULT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., object]
 
+# Cards the triage stage may review per cycle. Sized to fit the scheduled
+# task's ExecutionTimeLimit with room for the rest of the cycle, NOT to drain
+# the backlog fastest: at ~3.85 s/call x PANEL_SIZE 3, 40 cards is ~7.7 min,
+# leaving the composer pair (12-25 min), screen and gauntlet comfortable
+# inside a PT4H window. Raising this without raising the task's limit in
+# quant/tasks/xml/25_PipelineLoop.xml re-creates the mid-flight-kill loop.
+TRIAGE_LIMIT = 40
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -487,7 +495,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
             if not probe.holder_alive():
                 # Dead-pid fast path (mirrors loop.lock's
                 # _acquire_instance_lock_or_break_dead): a hard-killed loop
-                # (the scheduled task's PT2H limit), a reboot, or a crashed
+                # (the scheduled task's ExecutionTimeLimit), a reboot, or a crashed
                 # writer orphans chain.lock with a provably-dead pid. Left to
                 # the ordinary two-strike rule, that freezes scanner card
                 # registration, quarantine's daily write phase, AND the
@@ -624,13 +632,21 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       spent=_spent(logs_dir), state=state)
         return 0
 
-    # 4a. triage --apply (chain-writing, metered). --limit 200 bounds
-    # worst-case stage spend (~$3) against an unbounded pending backlog --
-    # unlimited, a single stage could carry spend from just under the cap to
-    # the $20 hard cap in one go; overflow just waits for the next fire
-    # (3x daily).
+    # 4a. triage --apply (chain-writing, metered). --limit bounds worst-case
+    # stage spend against an unbounded pending backlog -- unlimited, a single
+    # stage could carry spend from just under the cap to the $20 hard cap in
+    # one go; overflow just waits for the next fire (3x daily).
+    #
+    # 40, not 200 (2026-08-29): the limit must fit the scheduled task's
+    # ExecutionTimeLimit, or Windows hard-kills the cycle mid-flight, the
+    # watermark never advances, and the class re-fires forever paying full
+    # freight each time. At the measured 3.85 s/call x 3-reviewer panel, 200
+    # cards is ~38.5 min of triage alone -- marginal even inside the XML's
+    # PT2H once the composer pair, screen and gauntlet are added, and fatal
+    # against the PT1H the live task actually carries. 40 cards is ~7.7 min.
+    # See TRIAGE_LIMIT.
     triage_argv = [py, "-m", "pipeline.triage_batch", *reg_argv, "--apply",
-                   "--limit", "200"]
+                   "--limit", str(TRIAGE_LIMIT)]
     rc, lock_lost = _lock_and_run("pipeline.triage_batch", triage_argv)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.triage_batch")
@@ -648,10 +664,10 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # this cycle". The next fire therefore needs genuinely NEW cards to cross
     # the threshold again, which is the whole point of a watermark.
     #
-    # Consequence worth knowing: pending cards this cycle's --limit 200 did
+    # Consequence worth knowing: pending cards this cycle's TRIAGE_LIMIT did
     # NOT reach are still inside the banked watermark, so they stop counting
-    # toward the next trigger. A backlog larger than 200 drains over several
-    # cycles as new cards arrive, not in one sweep.
+    # toward the next trigger. A backlog larger than TRIAGE_LIMIT drains over
+    # several cycles as new cards arrive, not in one sweep.
     watermark_after_triage = _triggerable_counts(registry)[asset_class]
 
     # Budget re-check (plan: "before triage AND before composer"): triage may

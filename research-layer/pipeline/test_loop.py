@@ -148,7 +148,12 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
                             "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
     triage_call = next(c for c in fr.calls
                        if "-m" in c and c[c.index("-m") + 1] == "pipeline.triage_batch")
-    assert "--limit" in triage_call and triage_call[triage_call.index("--limit") + 1] == "200"
+    # Pinned to the constant, not a literal: the limit is sized against the
+    # scheduled task's ExecutionTimeLimit (see loop.TRIAGE_LIMIT), so a change
+    # here must be a deliberate edit of that constant, and the window-fit test
+    # below is what actually guards the number.
+    assert ("--limit" in triage_call
+            and triage_call[triage_call.index("--limit") + 1] == str(loop.TRIAGE_LIMIT))
     # composer appears twice: --dry-run preflight then the real run.
     # Narrowed to python calls (argv[0] == sys.executable) -- a plain "-m"
     # in c would also catch `git commit -q -m ...`, and picking this by
@@ -1064,3 +1069,34 @@ def test_status_reports_both_routable_and_triggerable_counts(tmp_path):
     # fx: the 3 accepted fx cards route; the crypto-tagged pending ones do not.
     assert items["routable_fx"] == "3"
     assert items["triggerable_fx"] == "3"
+
+
+def test_triage_limit_fits_the_scheduled_execution_window():
+    """Gate 2 (2026-08-29). The triage limit is not a free knob: it must fit
+    the scheduled task's ExecutionTimeLimit alongside the rest of the cycle,
+    or Windows hard-kills the cycle mid-flight, the watermark never advances,
+    and the class re-fires forever paying full freight every time.
+
+    Measured: 3.85 s per reviewer call, PANEL_SIZE 3 reviewers per card. The
+    rest of the cycle (composer --dry-run + real run, screen, gauntlet) is
+    budgeted at 90 min worst case. The task XML is being moved to PT4H.
+
+    This is arithmetic, not a mock -- it fails the moment someone raises
+    TRIAGE_LIMIT without re-checking the window."""
+    from .triage_batch import PANEL_SIZE
+    seconds_per_call = 3.85
+    triage_minutes = loop.TRIAGE_LIMIT * PANEL_SIZE * seconds_per_call / 60
+    rest_of_cycle_minutes = 90
+    window_minutes = 4 * 60          # PT4H, quant/tasks/xml/25_PipelineLoop.xml
+
+    assert triage_minutes < 15, (
+        f"triage alone is {triage_minutes:.1f} min at limit "
+        f"{loop.TRIAGE_LIMIT}; keep it short enough that a slow panel cannot "
+        f"eat the window")
+    assert triage_minutes + rest_of_cycle_minutes < window_minutes, (
+        f"cycle needs {triage_minutes + rest_of_cycle_minutes:.1f} min but the "
+        f"task allows {window_minutes} min -- raise ExecutionTimeLimit in "
+        f"quant/tasks/xml/25_PipelineLoop.xml BEFORE raising TRIAGE_LIMIT")
+    # And the old value must not silently come back: 200 cards is ~38.5 min of
+    # triage, which did not fit even the XML's PT2H once the rest ran.
+    assert loop.TRIAGE_LIMIT <= 40
