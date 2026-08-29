@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import traceback
@@ -54,6 +55,23 @@ Runner = Callable[..., object]
 # inside a PT4H window. Raising this without raising the task's limit in
 # quant/tasks/xml/25_PipelineLoop.xml re-creates the mid-flight-kill loop.
 TRIAGE_LIMIT = 40
+
+# The scheduled task this module runs under, and the shortest execution
+# window a full cycle can survive. A cycle is 75-90 min (triage + composer
+# pair + screen + gauntlet); Windows hard-kills at ExecutionTimeLimit, and a
+# killed cycle never reaches the watermark advance, so the class re-fires on
+# the next tick and pays full freight again -- forever, silently, because a
+# killed task leaves no failure the Sentinel can see. On 2026-08-29 the live
+# task carried PT1H while its XML declared PT2H (apply_retry_settings.ps1 was
+# overwriting it), which is exactly that trap.
+TASK_NAME = r"\StewartCo\25_PipelineLoop"
+MIN_TASK_WINDOW_S = 2 * 3600            # PT2H
+FIX_WINDOW_CMD = (
+    'schtasks /Create /TN "StewartCo\\25_PipelineLoop" /XML '
+    '"E:\\Users\\Coen\\Claude\\quant\\tasks\\xml\\25_PipelineLoop.xml" /F'
+    '  THEN  powershell -NoProfile -ExecutionPolicy Bypass -File '
+    '"E:\\Users\\Coen\\Claude\\quant\\tasks\\apply_retry_settings.ps1" '
+    '-Task 25_PipelineLoop   (both elevated)')
 
 
 def _now_utc() -> str:
@@ -107,6 +125,73 @@ def _triggerable_counts(registry: Registry) -> dict[str, int]:
     live = {cid: c for cid, c in registry.cards().items()
             if (c.get("review") or {}).get("status") in ("accepted", "pending")}
     return {cls: len(routable_cards(live, cls)[0]) for cls in cells.LIVE_CLASSES}
+
+
+def _parse_iso_duration_s(text: str) -> int | None:
+    """Seconds from the ISO-8601 duration subset Task Scheduler emits
+    (PT1H, PT4H30M, P1DT2H, PT0S). None on anything unrecognised -- this
+    feeds a warning, never a decision, so a format surprise must go quiet
+    rather than guess a number."""
+    m = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
+                     (text or "").strip())
+    if not m or not any(m.groups()):
+        return None
+    d, h, mi, sec = (int(g) if g else 0 for g in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + sec
+
+
+def _live_task_window_s(task_name: str = TASK_NAME) -> int | None:
+    """The LIVE registered task's ExecutionTimeLimit in seconds, or None if it
+    cannot be determined for ANY reason.
+
+    Deliberately total: not registered (tests, a manual run, a fresh clone),
+    no schtasks on PATH, a non-Windows host, UTF-16 vs UTF-8 output, an odd
+    duration string -- every one of those is None, never an exception. The
+    loop must behave identically whether or not a scheduled task exists."""
+    try:
+        proc = subprocess.run(["schtasks", "/query", "/TN", task_name, "/XML"],
+                              capture_output=True, timeout=30)
+        if proc.returncode != 0:
+            return None
+        raw = proc.stdout
+        for encoding in ("utf-16", "utf-8"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        else:
+            return None
+        m = re.search(r"<ExecutionTimeLimit>([^<]+)</ExecutionTimeLimit>", text)
+        return _parse_iso_duration_s(m.group(1)) if m else None
+    except Exception:
+        # Includes FileNotFoundError (no schtasks), TimeoutExpired, OSError.
+        return None
+
+
+def _warn_if_task_window_too_short(reader: Callable[[], int | None] = _live_task_window_s
+                                   ) -> str | None:
+    """Print (and return) a loud WARN when the live task's execution window is
+    too short for a full cycle. Returns None when there is nothing to say.
+
+    WARN, never a refusal: a nonzero exit here would be a brand-new failure
+    path and the Ops Sentinel FAILs the digest on nonzero, so refusing would
+    trade a silent problem for a noisy one that also stops all work. The
+    warning goes to the run log, where the next reader of a suspiciously
+    short cycle will find it."""
+    try:
+        window = reader()
+    except Exception:
+        return None                     # a warning must never break a cycle
+    if window is None or window >= MIN_TASK_WINDOW_S:
+        return None
+    msg = (f"WARN: {TASK_NAME} ExecutionTimeLimit is {window // 60} min, below "
+           f"the {MIN_TASK_WINDOW_S // 60} min a full cycle needs. Windows will "
+           f"hard-kill this cycle mid-flight; the watermark will NOT advance and "
+           f"the class will re-fire and re-pay on every tick, with no failure "
+           f"the Sentinel can see. Fix (elevated): {FIX_WINDOW_CMD}")
+    print(msg, flush=True)
+    return msg
 
 
 def _entry_count(registry_path: Path) -> int:
@@ -281,7 +366,12 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
     tell an undrained pending backlog from a healthy one. Paths that run
     before the counts are computed (the lock probes, loop_crashed) legitimately
     omit them -- they have no chain read to report."""
-    items: dict[str, str] = {"outcome": outcome}
+    items: dict[str, str] = {"outcome": outcome,
+                             # Emitted on EVERY path, not just the three
+                             # budget-blocked ones -- otherwise "ok" is a
+                             # documented value that never actually appears
+                             # in a status file (2026-08-29 review).
+                             "budget_state": _budget_state(spent)}
     if state is not None:
         items.update(_watermark_items(state))
     if counts is not None:
@@ -339,8 +429,7 @@ def _composer_rc_or_park(logs_dir: str | Path, state: dict, asset_class: str,
             loop_state.record_park(state, asset_class, ts_utc=_now_utc())
             loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class,
-                             "budget_state": _budget_state(post_spent)},
+                      extra={"asset_class": asset_class},
                       spent=post_spent, escalations=_budget_escalations(post_spent),
                       state=state, counts=counts)
         return 0
@@ -484,6 +573,10 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
 
     if args.seed_watermarks:
         return _seed_watermarks(layer, registry_path, state_path)
+
+    # Window check BEFORE the cycle: a killed cycle leaves no evidence, so
+    # the only place this can be said is up front, in the run log.
+    _warn_if_task_window_too_short()
 
     try:
         return _run_cycle(args, runner, layer, logs_dir, registry_path, state_path)
@@ -635,8 +728,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         loop_state.record_park(state, asset_class, ts_utc=_now_utc())
         loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class,
-                             "budget_state": _budget_state(spent)},
+                      extra={"asset_class": asset_class},
                       spent=spent, escalations=_budget_escalations(spent), state=state,
                       counts=(routable_counts, triggerable_counts))
         return 0
@@ -783,17 +875,32 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # genuinely new routable input for the composer even though this cycle's
     # triage added nothing, and must not be stopped.
     #
+    # The baseline is "routable as of the last cycle whose composer actually
+    # SWEPT", not this cycle's pre-triage count (2026-08-29 review). Scoping
+    # it to one cycle stranded genuinely new cards: cycle 1 accepts 30 then
+    # the composer fails (watermark not advanced), cycle 2 re-fires, triage
+    # adds nothing, the guard fires on 30 -> 30 and banks the watermark, and
+    # those 30 accepted cards then wait for 25 brand-new ones. Same shape
+    # whenever the class-blind triage accepts cards for a class other than
+    # the one that fired. Falls back to the pre-triage count when the key is
+    # absent (a state file written before this change, or a class that has
+    # never completed a generation).
+    #
     # The watermark still advances: those cards WERE seen and dispositioned,
     # so they must not re-fire this class on the next tick. This is a
     # completed cycle that happened to produce no new routable input, not a
     # deferral -- overall stays OK and the exit code stays 0.
     routable_after_triage = _routable_counts(registry)[asset_class]
-    if pending_routable_before > 0 and routable_after_triage <= routable_before_triage:
+    swept_baseline = state.get("classes", {}).get(asset_class, {}).get(
+        "routable_at_last_generation")
+    if swept_baseline is None:
+        swept_baseline = routable_before_triage
+    if pending_routable_before > 0 and routable_after_triage <= swept_baseline:
         print(f"no_new_accepted_cards: triage accepted nothing new for "
-              f"{asset_class} (routable {routable_before_triage} -> "
-              f"{routable_after_triage}) -- no new information, no new "
-              f"trials; watermark advanced to {watermark_after_triage}",
-              flush=True)
+              f"{asset_class} (routable {routable_after_triage} vs "
+              f"{swept_baseline} at its last swept generation) -- no new "
+              f"information, no new trials; watermark advanced to "
+              f"{watermark_after_triage}", flush=True)
         loop_state.record_generation(state, asset_class, run_id=run_id,
                                      watermark_count=watermark_after_triage,
                                      ts_utc=_now_utc())
@@ -803,7 +910,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                              "watermark": str(watermark_after_triage),
                              "run_id": run_id,
                              "routable_before": str(routable_before_triage),
-                             "routable_after": str(routable_after_triage)},
+                             "routable_after": str(routable_after_triage),
+                             "routable_at_last_generation": str(swept_baseline)},
                       spent=_spent(logs_dir), state=state, counts=_fresh_counts())
         commit_cycle(registry_path, entries_before, run_id, runner)
         return 0
@@ -820,8 +928,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         loop_state.record_park(state, asset_class, ts_utc=_now_utc())
         loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
-                      extra={"asset_class": asset_class,
-                             "budget_state": _budget_state(spent)},
+                      extra={"asset_class": asset_class},
                       spent=spent, escalations=_budget_escalations(spent), state=state,
                       counts=_fresh_counts())
         return 0
@@ -887,9 +994,14 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # it is a chain-health signal, not an attribution of "specs this run
     # produced".
     chain_growth = _entry_count(registry_path) - entries_before
+    # routable_at_generation is recorded ONLY here: this is the one path on
+    # which the composer actually swept, so it is the only honest "last
+    # swept" mark for the no_new_accepted_cards guard to compare against.
     loop_state.record_generation(state, asset_class, run_id=run_id,
                                  watermark_count=watermark_after_triage,
-                                 ts_utc=_now_utc())
+                                 ts_utc=_now_utc(),
+                                 routable_at_generation=_routable_counts(
+                                     registry)[asset_class])
     loop_state.save(state_path, state)
 
     print(f"cycle_complete: {asset_class} watermark now {watermark_after_triage}",

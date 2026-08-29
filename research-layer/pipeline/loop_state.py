@@ -55,8 +55,16 @@ def save(path: str | Path, state: dict) -> None:
 
 
 def record_generation(state: dict, asset_class: str, *, run_id: str,
-                      watermark_count: int, ts_utc: str) -> None:
+                      watermark_count: int, ts_utc: str,
+                      routable_at_generation: int | None = None) -> None:
     """Record a completed generation's watermark.
+
+    routable_at_generation is the ACCEPTED-only routable count as of a cycle
+    in which the composer actually swept -- the baseline the
+    no_new_accepted_cards guard compares against. Passed only on the
+    cycle_complete path; None leaves any prior value untouched, which is what
+    the guard's own early-exit path wants (it did not sweep, so it must not
+    move the "last swept" mark).
 
     watermark_count MUST be measured on the SAME basis pick_class's counts
     are (the triggerable accepted+pending count -- see the module BASIS
@@ -76,6 +84,8 @@ def record_generation(state: dict, asset_class: str, *, run_id: str,
     entry["watermark"] = watermark_count
     entry["last_run_id"] = run_id
     entry["last_gen_ts_utc"] = ts_utc
+    if routable_at_generation is not None:
+        entry["routable_at_last_generation"] = routable_at_generation
 
 
 def record_park(state: dict, asset_class: str, *, ts_utc: str) -> None:

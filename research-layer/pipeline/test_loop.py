@@ -997,9 +997,12 @@ def test_pending_cards_alone_fire_a_cycle(tmp_path):
     been reverted to _routable_counts (accepted-only) and the loop is dead
     again. See loop._triggerable_counts.
 
-    Asserts the cycle STARTS, not that it completes: with a FakeRunner triage
-    is a no-op, so the no_new_accepted_cards guard correctly stops the cycle
-    before the metered composer. The full happy path is covered by
+    Pins the EXACT expected outcome. With a FakeRunner triage is a no-op, so
+    the no_new_accepted_cards guard correctly stops the cycle before the
+    metered composer -- that specific outcome is what a healthy trigger
+    produces here, and asserting it is strictly stronger than asserting
+    "not no_trigger" (which every other outcome, including a crash, would
+    also satisfy). The full happy path is covered by
     test_a_real_accept_still_proceeds_to_the_composer."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=0)
     registry_path = layer / "registry_log.jsonl"
@@ -1010,11 +1013,15 @@ def test_pending_cards_alone_fire_a_cycle(tmp_path):
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
-    # THE pin: the deadlock's signature was no_trigger. Anything else means a
-    # class was selected and a cycle began.
-    assert status["items"]["outcome"] != "no_trigger", (
-        "DEADLOCK REGRESSION: pending cards no longer fire a cycle -- the "
-        "trigger has been reverted to the accepted-only basis")
+    # THE pin. The deadlock's signature was no_trigger; the healthy outcome
+    # for this fixture is exactly no_new_accepted_cards (a class WAS selected,
+    # a cycle began, triage ran, and the guard then stopped it because the
+    # FakeRunner accepted nothing).
+    assert status["items"]["outcome"] == "no_new_accepted_cards", (
+        f"DEADLOCK REGRESSION or changed cycle shape: expected "
+        f"no_new_accepted_cards, got {status['items']['outcome']!r}. If this "
+        f"says 'no_trigger', pending cards no longer fire a cycle and the "
+        f"trigger has been reverted to the accepted-only basis.")
     assert status["items"]["asset_class"] == "crypto"
     # Triage is the FIRST stage: the pending cards that fired this cycle are
     # exactly the cards the cycle then triages.
@@ -1335,3 +1342,160 @@ def test_both_count_series_appear_on_a_stage_failure(tmp_path):
     assert items["outcome"] == "stage_failed"
     for cls in cells.LIVE_CLASSES:
         assert f"routable_{cls}" in items and f"triggerable_{cls}" in items
+
+
+# -- wave 3: guard baseline, budget_state coverage, task-window warning ------
+
+
+def test_guard_baseline_is_the_last_swept_generation_not_this_cycle(tmp_path):
+    """The no_new_accepted_cards guard used to compare against THIS cycle's
+    pre-triage count, which stranded genuinely new cards: cycle 1 accepts 30
+    then the composer fails (watermark not advanced), cycle 2 re-fires, triage
+    adds nothing, and the guard fires on 30 -> 30 even though 30 cards have
+    never been swept. Baseline is now routable_at_last_generation."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    class _AcceptAllOnTriage(FakeRunner):
+        def __call__(self, argv, **kw):
+            r = super().__call__(argv, **kw)
+            if "-m" in argv and argv[argv.index("-m") + 1] == "pipeline.triage_batch":
+                for i in range(30):
+                    try:
+                        reg.review_card(f"pend{i:04d}", "accepted", "auto-d31")
+                    except Exception:
+                        pass
+            return r
+
+    # Cycle 1: triage accepts 30, then the composer fails -> no watermark, and
+    # crucially no routable_at_last_generation either.
+    rc = loop.run(["--once", "--layer", str(layer)],
+                  runner=_AcceptAllOnTriage(codes={"pipeline.composer": 1}))
+    assert rc == 1
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert "routable_at_last_generation" not in st["classes"].get("crypto", {})
+    assert loop._routable_counts(Registry(registry_path))["crypto"] == 30
+
+    # Cycle 2: triage now accepts nothing (all 30 already accepted). The old
+    # one-cycle baseline fired the guard here; the swept baseline must not,
+    # because those 30 cards have still never reached a composer.
+    fr2 = FakeRunner()
+    rc2 = loop.run(["--once", "--layer", str(layer)], runner=fr2)
+    assert rc2 == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete", (
+        "guard stranded 30 accepted cards that no composer has ever swept")
+    assert "pipeline.composer" in _modules(fr2)
+    st2 = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st2["classes"]["crypto"]["routable_at_last_generation"] == 30
+
+
+def test_guard_still_fires_once_the_corpus_has_actually_been_swept(tmp_path):
+    """The other half: after a real generation banks the baseline, a later
+    fire whose triage adds nothing must still stop before the composer."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="a")
+
+    class _AcceptOnce(FakeRunner):
+        def __call__(self, argv, **kw):
+            r = super().__call__(argv, **kw)
+            if "-m" in argv and argv[argv.index("-m") + 1] == "pipeline.triage_batch":
+                for i in range(30):
+                    try:
+                        reg.review_card(f"a{i:04d}", "accepted", "auto-d31")
+                    except Exception:
+                        pass
+            return r
+
+    loop.run(["--once", "--layer", str(layer)], runner=_AcceptOnce())
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["crypto"]["routable_at_last_generation"] == 30
+
+    # New pending cards fire the class again; triage accepts none of them.
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="b")
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_new_accepted_cards"
+    assert status["items"]["routable_at_last_generation"] == "30"
+    assert "pipeline.composer" not in _modules(fr)
+
+
+def test_budget_state_ok_appears_on_a_healthy_cycle(tmp_path):
+    """CLAUDE.md documents ok | batch_stop | hard_cap. "ok" was unreachable:
+    _budget_state was only called from the three budget-BLOCKED paths, so the
+    one value describing a healthy run never appeared in a status file."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    items = json.loads((layer / "logs" / "pipeline_status.json")
+                       .read_text(encoding="utf-8"))["items"]
+    assert items["outcome"] == "cycle_complete"
+    assert items["budget_state"] == "ok"
+
+
+def test_budget_state_is_present_on_no_trigger_too(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=3)
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    items = json.loads((layer / "logs" / "pipeline_status.json")
+                       .read_text(encoding="utf-8"))["items"]
+    assert items["outcome"] == "no_trigger"
+    assert items["budget_state"] == "ok"
+
+
+# -- the execution-window warning -------------------------------------------
+
+def test_iso_duration_parsing():
+    assert loop._parse_iso_duration_s("PT1H") == 3600
+    assert loop._parse_iso_duration_s("PT4H") == 4 * 3600
+    assert loop._parse_iso_duration_s("PT4H30M") == 4 * 3600 + 1800
+    assert loop._parse_iso_duration_s("P1DT2H") == 86400 + 7200
+    assert loop._parse_iso_duration_s("PT0S") == 0
+    # Unrecognised -> None, never a guessed number.
+    for junk in ("", "   ", "banana", "1H", "P", None):
+        assert loop._parse_iso_duration_s(junk) is None
+
+
+def test_short_task_window_warns_loudly_and_names_the_fix(capsys):
+    """The only failure mode the repo could not previously see: a task window
+    shorter than a cycle kills the run mid-flight, leaving NO failure the
+    Sentinel can detect."""
+    msg = loop._warn_if_task_window_too_short(reader=lambda: 3600)   # PT1H
+    assert msg is not None
+    out = capsys.readouterr().out
+    assert "WARN" in out
+    assert "60 min" in out and "120 min" in out
+    assert "schtasks" in out and "apply_retry_settings.ps1" in out   # the fix
+
+
+def test_adequate_task_window_is_silent(capsys):
+    assert loop._warn_if_task_window_too_short(reader=lambda: 4 * 3600) is None
+    assert capsys.readouterr().out == ""
+
+
+def test_unreadable_task_window_is_a_silent_no_op(capsys):
+    """The loop must behave identically when the task is not registered at
+    all -- tests, manual runs, a fresh clone."""
+    assert loop._warn_if_task_window_too_short(reader=lambda: None) is None
+    assert capsys.readouterr().out == ""
+
+
+def test_a_raising_task_reader_never_breaks_the_cycle(capsys):
+    """Defensive to the point of swallowing: a warning helper must never be
+    the reason a cycle fails."""
+    def _boom():
+        raise OSError("schtasks exploded")
+    assert loop._warn_if_task_window_too_short(reader=_boom) is None
+    assert capsys.readouterr().out == ""
+
+
+def test_live_task_window_reader_never_raises():
+    """The real reader against whatever this machine actually has. Asserts
+    only that it returns an int or None -- never that a task exists."""
+    got = loop._live_task_window_s("\\StewartCo\\definitely-not-a-real-task")
+    assert got is None
