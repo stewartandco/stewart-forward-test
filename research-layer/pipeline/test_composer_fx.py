@@ -58,8 +58,12 @@ def fx_family(**overrides):
     ETHUSD), so this fixture carries an actual fx pair rather than the
     crypto ticker it used to need only to satisfy a crypto-only check. It
     is still NOT a cell-selecting field: the real per-cell assets come from
-    cells.class_cells("fx") inside expand_family_for_class, which ignores
-    this field entirely when building specs.
+    cells.active_cells("fx") inside expand_family_for_class, which ignores
+    this field entirely when building specs. Declared vs ACTIVE (SP5 D4):
+    class_cells is fx's whole declared grid, active_cells is the subset the
+    ACTIVE_CELLS gate lets a generation sweep. fx gates "all"/"all", so the
+    two are the same list today -- they stop being the same the moment a
+    gate narrows, and expansion follows the gate.
     """
     fam = {
         "family": "fx_trend_family",

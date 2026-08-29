@@ -217,9 +217,13 @@ def fixture_family(card_ids: list[str], asset_class: str) -> dict:
     omission -- the first real fx generation dropped all 5 model-proposed
     families on exactly this check, and this harness carried the same
     now-stale ["BTCUSD"] until this fix). It is still NOT cell-selecting:
-    the real per-cell assets come from cells.class_cells(asset_class) inside
+    the real per-cell assets come from cells.active_cells(asset_class) inside
     expand_family_for_class, which ignores this field entirely once
-    validate_family has passed it.
+    validate_family has passed it. Declared vs ACTIVE (SP5 D4): class_cells
+    is the class's whole declared grid, active_cells is the subset the
+    ACTIVE_CELLS gate lets a generation sweep. Every class this harness runs
+    gates "all"/"all", so the two are the same list today -- they stop being
+    the same the moment a gate narrows, and expansion follows the gate.
     """
     cls_spec = cells.CLASSES[asset_class]
     if cls_spec["bar_kind"] == "single_fix":

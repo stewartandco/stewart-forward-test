@@ -492,14 +492,21 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     strategy_ids, exactly like expand_family.
 
     fam["assets"] is NOT used for cell selection here (that comes from
-    cells.class_cells(asset_class)): validate_family now checks it against
+    cells.active_cells(asset_class)): validate_family now checks it against
     THIS class's own declared assets (real-fx-generation finding, task 6b
     follow-up), rather than the crypto-only ALLOWED_ASSETS list it used to
     be pinned against regardless of asset_class -- so the field is a real,
     class-checked value on this path. It is still not a cell-selecting one:
-    per-cell expansion below is exhaustive over cells.class_cells(asset_class)
+    per-cell expansion below is exhaustive over cells.active_cells(asset_class)
     regardless of which of the class's assets the family named, so the
-    model's chosen subset is validated and then discarded here.
+    model's chosen subset is validated and then discarded here. DECLARED vs
+    ACTIVE (SP5 D4): cells.class_cells is the class's whole declared grid,
+    which admits data/import work; cells.active_cells is the subset the
+    ACTIVE_CELLS gate permits a generation to SWEEP, because sweeping a cell
+    moves the trial denominator. The four tradfi classes gate "all", so
+    active == declared for them today; crypto's gate is empty until Coen's
+    Phase 3 activation commit, and expansion here follows the gate, never
+    the declaration.
 
     proxy_card_ids (Coen, 2026-08-25: proxy routing is recorded on the
     REGISTRATION, not only on the run-level drift record): the full set of
@@ -1053,9 +1060,13 @@ def proposal_schema_for(asset_class: str) -> dict:
     this same per-class list (real-fx-generation finding, task 6b follow-up)
     so the model's proposal is genuinely validated, but expand_family_for_
     class still ignores fam["assets"] entirely when building specs, sourcing
-    the real per-cell assets from cells.class_cells(asset_class) instead.
+    the real per-cell assets from cells.active_cells(asset_class) instead.
     The model may propose any subset of the class's declared assets here;
-    per-cell expansion overrides it regardless of what was proposed.
+    per-cell expansion overrides it regardless of what was proposed. Note
+    those are two different lists (SP5 D4): this enum is the DECLARED asset
+    list (CLASSES), while expansion sweeps only the cells the ACTIVE_CELLS
+    gate activates -- so a declared-but-not-yet-active asset can legally be
+    proposed here and still contribute no cell.
     """
     if asset_class == "crypto":
         return PROPOSAL_SCHEMA
