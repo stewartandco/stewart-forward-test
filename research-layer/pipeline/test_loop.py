@@ -25,6 +25,23 @@ from . import cells, loop, loop_state
 from .test_pipeline import make_strategy, register_example_blocks
 
 
+@pytest.fixture(autouse=True)
+def _no_real_schtasks(monkeypatch):
+    """Stub the live-task window reader for EVERY test in this module.
+
+    loop.run() reads the scheduled task's ExecutionTimeLimit at startup, which
+    without this spawns a real `schtasks` subprocess on every one of the ~50
+    loop.run() calls in this file. That is slow, and worse it makes the suite
+    MACHINE-DEPENDENT: on this box the task exists at PT1H so the WARN prints
+    into capsys, while on a box where it is absent (CI, a fresh clone) or
+    already fixed at PT4H nothing prints. Tests must not care.
+
+    None is the "cannot determine" answer, i.e. the silent no-op path. The
+    warning itself is covered directly, with explicit stubs, by the
+    test_*_task_window_* tests below."""
+    monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: None)
+
+
 def _mk_layer(tmp_path, accepted_fx=0):
     """Minimal layer: registry with N accepted fx-routable cards, logs dir."""
     layer = tmp_path
@@ -1494,8 +1511,21 @@ def test_a_raising_task_reader_never_breaks_the_cycle(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_live_task_window_reader_never_raises():
-    """The real reader against whatever this machine actually has. Asserts
-    only that it returns an int or None -- never that a task exists."""
-    got = loop._live_task_window_s("\\StewartCo\\definitely-not-a-real-task")
-    assert got is None
+def test_live_task_window_reader_never_raises(monkeypatch):
+    """The REAL reader (the autouse stub is undone first) against a task that
+    certainly does not exist. Asserts only that a missing task yields None
+    rather than an exception -- never that any task exists, so this holds on
+    a fresh clone, in CI, and on a non-Windows host."""
+    monkeypatch.undo()                  # drop the module-wide stub for this test
+    assert loop._live_task_window_s("\\StewartCo\\definitely-not-a-real-task") is None
+
+
+def test_the_startup_window_check_is_wired_into_run(tmp_path, monkeypatch):
+    """The helper is only useful if run() actually calls it. Pins the wiring
+    (and that it is late-bound, so the stub above genuinely takes effect)."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=3)
+    calls = []
+    monkeypatch.setattr(loop, "_live_task_window_s",
+                        lambda *a, **k: calls.append(1) or 3600)
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
+    assert calls, "run() never consulted the live task window"

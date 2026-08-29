@@ -169,10 +169,16 @@ def _live_task_window_s(task_name: str = TASK_NAME) -> int | None:
         return None
 
 
-def _warn_if_task_window_too_short(reader: Callable[[], int | None] = _live_task_window_s
+def _warn_if_task_window_too_short(reader: Callable[[], int | None] | None = None
                                    ) -> str | None:
     """Print (and return) a loud WARN when the live task's execution window is
     too short for a full cycle. Returns None when there is nothing to say.
+
+    `reader` defaults to _live_task_window_s resolved AT CALL TIME, not bound
+    as a default argument -- a bound default would survive monkeypatching, and
+    the test suite has to be able to stub this out globally (every loop.run()
+    would otherwise spawn a real schtasks subprocess and make the tests
+    depend on this machine's task registry).
 
     WARN, never a refusal: a nonzero exit here would be a brand-new failure
     path and the Ops Sentinel FAILs the digest on nonzero, so refusing would
@@ -180,7 +186,7 @@ def _warn_if_task_window_too_short(reader: Callable[[], int | None] = _live_task
     warning goes to the run log, where the next reader of a suspiciously
     short cycle will find it."""
     try:
-        window = reader()
+        window = (reader or _live_task_window_s)()
     except Exception:
         return None                     # a warning must never break a cycle
     if window is None or window >= MIN_TASK_WINDOW_S:
