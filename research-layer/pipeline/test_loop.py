@@ -162,6 +162,63 @@ def test_foreign_lock_defers(tmp_path):
     assert status["items"]["lock_stale"] == "false"
 
 
+class TriageReportingRunner(FakeRunner):
+    """FakeRunner that also performs triage's REPORTING side effect.
+
+    The real pipeline.triage_batch reviews at most --limit cards and records
+    how many it actually reviewed. FakeRunner runs nothing, so without this
+    the loop has no way to distinguish "triage reviewed the whole backlog"
+    from "triage reviewed a window of it" -- which is the entire behaviour
+    under test."""
+    def __init__(self, layer, reviewed, codes=None):
+        super().__init__(codes)
+        self.layer = layer
+        self.reviewed = reviewed
+
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if argv[0] == sys.executable and "-m" in argv:
+            if argv[argv.index("-m") + 1] == "pipeline.triage_batch":
+                (self.layer / "logs" / "triage_result.json").write_text(
+                    json.dumps({"reviewed": self.reviewed}), encoding="utf-8")
+        return r
+
+
+def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, monkeypatch):
+    """The defect this fixes (2026-08-31). loop.py banked the watermark at the
+    FULL post-triage triggerable count, but triage reviews at most
+    TRIAGE_LIMIT cards per cycle. Every pending card the window never reached
+    was banked too, so it stopped counting toward the next trigger and only
+    moved as genuinely NEW cards arrived.
+
+    It also contradicted triage_batch, which skips escalated cards and prints
+    that "they still count toward the loop trigger" -- while the loop banked
+    them.
+
+    Live shape when found: watermark 655, triggerable 1250, TRIAGE_LIMIT 200.
+    One cycle banked all 1250 and stranded ~395 cards behind the watermark.
+
+    The watermark means "cards seen and dispositioned as of this cycle" -- its
+    own comment's words -- so it must advance by what triage REVIEWED."""
+    monkeypatch.setattr(loop, "TRIAGE_LIMIT", 10)
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _add_cards(reg, 100, status="pending", asset_classes=["fx"], prefix="pend")
+    # crypto routes every accepted card too; park it so fx is the class that fires.
+    _seed_crypto_caught_up(layer, 130)
+
+    fr = TriageReportingRunner(layer, reviewed=10)
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    watermark = st["classes"]["fx"]["watermark"]
+    assert watermark == 10, (
+        f"watermark banked at {watermark}; triage reviewed only 10 of the 130 "
+        f"triggerable cards, so banking more than 10 strands the remainder "
+        f"behind the watermark where they stop counting toward the next "
+        f"trigger")
+
+
 def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
