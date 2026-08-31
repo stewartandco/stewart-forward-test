@@ -49,12 +49,27 @@ LAYER_DEFAULT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., object]
 
 # Cards the triage stage may review per cycle. Sized to fit the scheduled
-# task's ExecutionTimeLimit with room for the rest of the cycle, NOT to drain
-# the backlog fastest: at ~3.85 s/call x PANEL_SIZE 3, 40 cards is ~7.7 min,
-# leaving the composer pair (12-25 min), screen and gauntlet comfortable
-# inside a PT4H window. Raising this without raising the task's limit in
-# quant/tasks/xml/25_PipelineLoop.xml re-creates the mid-flight-kill loop.
-TRIAGE_LIMIT = 40
+# task's ExecutionTimeLimit with room for the rest of the cycle. Raising this
+# without raising the task's limit in quant/tasks/xml/25_PipelineLoop.xml
+# re-creates the mid-flight-kill loop.
+#
+# 200 (Coen 2026-08-31, raised from 40). The 40 was sized against the PT2H the
+# XML then declared; the live task is PT4H now, which 200 fits with roughly
+# half the window in reserve. It is not merely a speed knob: the watermark is
+# banked at the post-triage TRIGGERABLE count, so pending cards a cycle's
+# TRIAGE_LIMIT never reached are banked too and stop counting toward the next
+# trigger (see the note at the watermark advance). A limit far below the
+# backlog therefore STRANDS cards behind the watermark rather than queueing
+# them for the next cycle -- the backlog only moves as new cards arrive.
+TRIAGE_LIMIT = 200
+
+# Cycle-time model, kept in ONE place. MIN_TASK_WINDOW_S is DERIVED from
+# TRIAGE_LIMIT deliberately: the two drifting apart is its own bug. At limit
+# 200 a cycle needs ~129 min, so the old hardcoded PT2H threshold would have
+# stayed SILENT on a task that could not finish -- the exact failure the
+# startup WARN exists to catch.
+_TRIAGE_S_PER_CARD = 3.85 * 3           # measured: 3.85 s/call x PANEL_SIZE 3
+_REST_OF_CYCLE_S = 90 * 60              # composer dry+real, screen, gauntlet
 
 # The scheduled task this module runs under, and the shortest execution
 # window a full cycle can survive. A cycle is 75-90 min (triage + composer
@@ -65,7 +80,7 @@ TRIAGE_LIMIT = 40
 # task carried PT1H while its XML declared PT2H (apply_retry_settings.ps1 was
 # overwriting it), which is exactly that trap.
 TASK_NAME = r"\StewartCo\25_PipelineLoop"
-MIN_TASK_WINDOW_S = 2 * 3600            # PT2H
+MIN_TASK_WINDOW_S = int(TRIAGE_LIMIT * _TRIAGE_S_PER_CARD + _REST_OF_CYCLE_S)
 FIX_WINDOW_CMD = (
     'schtasks /Create /TN "StewartCo\\25_PipelineLoop" /XML '
     '"E:\\Users\\Coen\\Claude\\quant\\tasks\\xml\\25_PipelineLoop.xml" /F'

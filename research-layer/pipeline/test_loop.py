@@ -1127,27 +1127,44 @@ def test_triage_limit_fits_the_scheduled_execution_window():
 
     Measured: 3.85 s per reviewer call, PANEL_SIZE 3 reviewers per card. The
     rest of the cycle (composer --dry-run + real run, screen, gauntlet) is
-    budgeted at 90 min worst case. The task XML is being moved to PT4H.
+    budgeted at 90 min worst case. The task XML is PT4H (verified live
+    2026-08-31).
 
     This is arithmetic, not a mock -- it fails the moment someone raises
-    TRIAGE_LIMIT without re-checking the window."""
+    TRIAGE_LIMIT without re-checking the window.
+
+    The old `TRIAGE_LIMIT <= 40` ceiling was retired 2026-08-31 with the raise
+    to 200. That ceiling was sized against the PT2H the XML declared at the
+    time, not against a re-checked window, so keeping it would have pinned a
+    stale constraint rather than a real one. What replaces it is stricter in
+    the way that matters: the cycle must still fit if the panel runs at HALF
+    its measured speed. A flat card count could not express that."""
     from .triage_batch import PANEL_SIZE
     seconds_per_call = 3.85
     triage_minutes = loop.TRIAGE_LIMIT * PANEL_SIZE * seconds_per_call / 60
     rest_of_cycle_minutes = 90
     window_minutes = 4 * 60          # PT4H, quant/tasks/xml/25_PipelineLoop.xml
+    SLOW_PANEL_FACTOR = 2.0          # a bad API day must not eat the window
 
-    assert triage_minutes < 15, (
-        f"triage alone is {triage_minutes:.1f} min at limit "
-        f"{loop.TRIAGE_LIMIT}; keep it short enough that a slow panel cannot "
-        f"eat the window")
     assert triage_minutes + rest_of_cycle_minutes < window_minutes, (
         f"cycle needs {triage_minutes + rest_of_cycle_minutes:.1f} min but the "
         f"task allows {window_minutes} min -- raise ExecutionTimeLimit in "
         f"quant/tasks/xml/25_PipelineLoop.xml BEFORE raising TRIAGE_LIMIT")
-    # And the old value must not silently come back: 200 cards is ~38.5 min of
-    # triage, which did not fit even the XML's PT2H once the rest ran.
-    assert loop.TRIAGE_LIMIT <= 40
+
+    slow = triage_minutes * SLOW_PANEL_FACTOR + rest_of_cycle_minutes
+    assert slow < window_minutes, (
+        f"at limit {loop.TRIAGE_LIMIT} a HALF-SPEED panel needs {slow:.1f} min "
+        f"against a {window_minutes} min window. A cycle killed at the wall "
+        f"never advances the watermark, so the class re-fires and re-pays "
+        f"forever with no failure the Sentinel can see.")
+
+    # The startup WARN threshold must cover the cycle this limit implies, or
+    # it stays silent on a task that cannot finish. Derived in loop.py for
+    # exactly this reason; assert the coupling so it cannot be un-derived.
+    assert loop.MIN_TASK_WINDOW_S >= (triage_minutes + rest_of_cycle_minutes) * 60, (
+        f"MIN_TASK_WINDOW_S ({loop.MIN_TASK_WINDOW_S // 60} min) is below the "
+        f"{triage_minutes + rest_of_cycle_minutes:.1f} min a cycle needs at "
+        f"TRIAGE_LIMIT {loop.TRIAGE_LIMIT} -- the WARN would never fire")
 
 
 # -- item 3: no_new_accepted_cards -------------------------------------------
@@ -1486,7 +1503,10 @@ def test_short_task_window_warns_loudly_and_names_the_fix(capsys):
     assert msg is not None
     out = capsys.readouterr().out
     assert "WARN" in out
-    assert "60 min" in out and "120 min" in out
+    # Both numbers derived, never literals: the required window moves with
+    # TRIAGE_LIMIT, and a hardcoded "120 min" here silently rotted the moment
+    # the limit was raised (2026-08-31, 40 -> 200).
+    assert "60 min" in out and f"{loop.MIN_TASK_WINDOW_S // 60} min" in out
     assert "schtasks" in out and "apply_retry_settings.ps1" in out   # the fix
 
 
