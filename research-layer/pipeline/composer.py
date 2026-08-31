@@ -21,18 +21,33 @@ import json
 import hashlib
 import argparse
 import itertools
-from math import prod
 from pathlib import Path
 from datetime import datetime, timezone
 
 from .common import content_id
 from .registry import Registry
 from .blocks import BLOCK_TYPES, validate_block, block_type_payload
-from . import cells
+from . import cells, loop_state
 
 PIPELINE_VERSION = "g1.0.0"
 DEFAULT_MODEL = "claude-opus-5"
 SIBLING_CAP_DEFAULT = 60
+
+# D9 (docs/notes/family-openness-v1.md, chained 2026-08-29 BEFORE this code):
+# how far a cell's data must have moved past a burying verdict's cutoff before
+# that buried COMPOSITION may be proposed again as a new strategy. Six months,
+# measured in DATA and not on the wall clock.
+#
+# WHY THE CLOCK RUNS ON THE DATA. The gauntlet is deterministic: given the
+# same spec over the same bars it returns the same verdict. A same-data
+# re-test is therefore a KNOWN ANSWER bought at the price of a higher bar for
+# every live survivor -- it spends the denominator (registered_n, the
+# effective-trials clustering, the BH divisor over the quarantine cohort) and
+# learns nothing. A re-test after the cell's data has moved on is a different
+# object: different bars, a different out-of-sample window, and a genuinely
+# different answer available. Per CELL, because a cell is the unit of
+# survival here.
+RETRIAL_WINDOW_DAYS = 183
 
 # protocol-v4: a family may only sweep axes on a dense block type. Mixing a
 # dense axis with a coarse one manufactures fake cliffs in plateau selection —
@@ -235,11 +250,12 @@ def registered_fingerprints(registry: Registry) -> dict[str, str]:
 
 
 def screen_siblings(specs: list[dict], known_fps: dict[str, str],
-                    run_fps: dict[str, str]) -> tuple[list[dict], list[str], bool]:
+                    run_fps: dict[str, str],
+                    retrial_ok=None) -> tuple[list[dict], list[str], bool]:
     """Rule 7 at SIBLING level -> (kept_specs, drop_notes, malformed).
 
     A composition already registered in ANY lifecycle state, graveyard
-    included, can never be re-registered — but its siblings can. A real idea
+    included, is not re-registered — but its siblings can be. A real idea
     comes back at neighbouring parameters; one that worked only at the exact
     buried point was overfit and deserved burying. So a collision drops that
     sibling alone and the family survives on the rest.
@@ -249,8 +265,28 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
     malformed proposal rather than a collision. malformed=True means the
     caller drops the whole family and ignores kept_specs.
 
-    The invariant the public chain rests on: no returned spec's fingerprint
-    is in known_fps or in run_fps."""
+    retrial_ok (D9, docs/notes/family-openness-v1.md) turns the chain
+    collision from a PERMANENT exclusion into an expiry. It is a callable
+    (matched_strategy_id, spec) -> bool: True means that registration's
+    burying verdict is far enough behind the target cell's current data end
+    (RETRIAL_WINDOW_DAYS) that the composition may be proposed again as a NEW
+    strategy with a new id and its own number, entering N honestly.
+    retrial_oracle() builds the real one.
+
+    DEFAULT None = today's behaviour, byte-identical: every collision is a
+    permanent drop. Every caller that predates D9 — and every test that
+    exercises the resurrection guard directly — is unchanged by passing
+    nothing, and a caller with no artifacts to read cannot accidentally open
+    the window.
+
+    IN-RUN AND IN-CYCLE DUPLICATES ARE NEVER RE-TRIALS and the oracle is not
+    consulted for them: two siblings of one family that are the same
+    composition still kill the family as malformed, and a composition
+    duplicating one registered earlier in THIS run is still dropped. Those are
+    same-data by construction, which is exactly what the window excludes.
+
+    The invariant the public chain rests on: no returned spec's fingerprint is
+    in run_fps, nor in known_fps unless retrial_ok admitted it explicitly."""
     fam_fps: dict[str, str] = {}
     kept_specs: list[dict] = []
     drop_notes: list[str] = []
@@ -265,7 +301,14 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
                 f"same composition — duplicate blocks or mirrored sweep axes")
             return kept_specs, drop_notes, True
         fam_fps[fp] = spec["strategy_id"]
-        if fp in known_fps:
+        if fp in known_fps and retrial_ok is not None and retrial_ok(known_fps[fp], spec):
+            drop_notes.append(
+                f"sibling {spec['strategy_id']} admitted as a RE-TRIAL of "
+                f"buried {known_fps[fp]}: its cell's data has moved "
+                f">= {RETRIAL_WINDOW_DAYS} days past that burial's cutoff "
+                f"(D9) — a new strategy, a new number, N charged in full")
+            kept_specs.append(spec)
+        elif fp in known_fps:
             drop_notes.append(f"sibling {spec['strategy_id']} dropped: "
                               f"composition already registered as {known_fps[fp]}")
         elif fp in run_fps:
@@ -275,6 +318,214 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
         else:
             kept_specs.append(spec)
     return kept_specs, drop_notes, False
+
+
+# ---------------- D9: the re-trial window ----------------
+
+def _date10(value) -> str:
+    """The DATE part of a chained/on-disk date string, or "".
+
+    data_end can carry a time component ("2026-08-27 00:00:00") while a
+    verdict cutoff is a bare date. screen.load_bars' own fence compares
+    `row["date"][:10] > cutoff[:10]` for exactly this reason; the re-trial
+    window uses the same rule rather than inventing a second one.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value[:10]
+
+
+def retrial_window_open(verdict_cutoff, cell_data_end,
+                        window_days: int = RETRIAL_WINDOW_DAYS) -> bool:
+    """PURE. True when this cell's CURRENT data end is at least `window_days`
+    past the burying verdict's cutoff (D9).
+
+    Boundary, pinned on both sides by test: exactly `window_days` past the
+    cutoff is OPEN; one day short is SHUT.
+
+    Anything it cannot read — a missing cutoff, an empty data end, a string
+    that is not a date — is SHUT. An expiry that cannot be established is not
+    an expiry, and this function's failure direction must be the conservative
+    one: a composition stays buried.
+    """
+    a, b = _date10(verdict_cutoff), _date10(cell_data_end)
+    if not a or not b:
+        return False
+    try:
+        cutoff = datetime.strptime(a, "%Y-%m-%d").date()
+        end = datetime.strptime(b, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return (end - cutoff).days >= window_days
+
+
+def cell_data_end(data_dir, asset: str | tuple, timeframe: str | None = None) -> str:
+    """The last bar date on disk for one cell, or "" when the cell has no
+    cached data. Accepts either (asset, timeframe) or a single (a, tf) tuple.
+
+    Deliberately reads the CSV rather than any snapshot manifest: the manifest
+    records what a fetch claimed, and the re-trial window has to run on the
+    bars a gauntlet would actually be given. "" (unreadable/absent) closes the
+    window, via retrial_window_open.
+    """
+    if timeframe is None:
+        asset, timeframe = asset
+    path = Path(data_dir) / f"{asset}_{timeframe}.csv"
+    last = ""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            header = f.readline()
+            if not header:
+                return ""
+            for line in f:
+                if line.strip():
+                    last = line.split(",", 1)[0]
+    except OSError:
+        return ""
+    return _date10(last)
+
+
+def buried_from(registry: Registry) -> dict[str, str]:
+    """{strategy_id: the lifecycle state it was buried FROM} for every
+    strategy CURRENTLY in the graveyard.
+
+    Two facts, deliberately taken from two places. Membership comes from
+    strategy_states() (the state machine's own answer to "is this buried
+    now"), while the FROM state comes from the burying state_change entry's
+    `buried_at` field, because that is what says which stage's verdict — and
+    therefore which artifact bundle's cutoff — did the burying.
+    """
+    states = registry.strategy_states()
+    out: dict[str, str] = {}
+    for e in registry.entries():
+        if e["entry_type"] != "state_change":
+            continue
+        p = e["payload"]
+        if p.get("to") == "graveyard" and states.get(p["strategy_id"]) == "graveyard":
+            out[p["strategy_id"]] = p.get("buried_at") or p.get("from") or ""
+    return out
+
+
+def burying_cutoff(artifacts_dir, strategy_id: str, buried_at: str) -> str | None:
+    """The cutoff of the verdict that buried this strategy, or None.
+
+    The cutoff is not on the chain — record_verdict's payload carries
+    strategy_id/stage/verdict/metrics/artifacts_hash and no window — so it is
+    read from the artifact bundle the verdict hashes: `gauntlet/config.json`
+    for a strategy buried out of the gauntlet, the screen bundle's
+    `config.json` otherwise. Both writers put "cutoff" at the top level.
+
+    None on anything unreadable (no bundle, corrupt JSON, no cutoff key),
+    which closes the window. That is also why no tmp-registry test in the
+    suite is disturbed by D9: those registries have no artifact bundles, so
+    no window ever opens for them.
+    """
+    root = Path(artifacts_dir) / strategy_id
+    candidates = ([root / "gauntlet" / "config.json", root / "config.json"]
+                  if buried_at == "gauntlet"
+                  else [root / "config.json", root / "gauntlet" / "config.json"])
+    for path in candidates:
+        try:
+            cutoff = json.loads(path.read_text(encoding="utf-8")).get("cutoff")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(cutoff, str) and cutoff:
+            return cutoff
+    return None
+
+
+def retrial_oracle(registry: Registry, artifacts_dir, data_end_of_cell=None,
+                   data_dir=None):
+    """Build screen_siblings' `retrial_ok` callable for one run.
+
+    (matched_strategy_id, candidate_spec) -> bool. True only when ALL of:
+      * the matched registration is CURRENTLY BURIED. A registration in
+        quarantine or live has NO burying verdict, therefore no expiry, and
+        stays permanently excluded — family-openness-v1 declares that case
+        explicitly, and declares it as a TIGHTENING: the strategy is under
+        test and a second copy of it is a duplicate, not a re-trial;
+      * that burial's verdict cutoff is readable;
+      * every cell the candidate spec names has data ending at least
+        RETRIAL_WINDOW_DAYS past that cutoff. EVERY cell, not any: a pooled
+        multi-asset spec is one trial over all its cells, so the newest cell
+        must not carry the oldest one into a re-test the oldest has not
+        earned. min() over the cells' data ends is that rule.
+
+    `data_end_of_cell` is a ((asset, timeframe) -> date string) callable,
+    injected so the window can be tested without a data directory; it defaults
+    to reading `data_dir` off disk.
+    """
+    if data_end_of_cell is None:
+        if data_dir is None:
+            raise ValueError("retrial_oracle needs data_end_of_cell or data_dir")
+        data_end_of_cell = lambda cell: cell_data_end(data_dir, cell)   # noqa: E731
+    buried = buried_from(registry)
+    # EVERY registration of a composition, not just the one known_fps happens
+    # to name. registered_fingerprints() collapses a fingerprint to its FIRST
+    # registering id, which was lossless while a fingerprint could only ever
+    # be registered once -- D9 is precisely what ends that. Once a re-trial
+    # exists, the oldest registration of a composition can be buried while a
+    # LATER copy of it sits in quarantine, and opening the window off the old
+    # burial alone would readmit a composition that is currently under test.
+    # family-openness-v1 forbids exactly that: "a second copy of it is a
+    # duplicate, not a re-trial".
+    fingerprint_ids: dict[str, list[str]] = {}
+    for e in registry.entries():
+        if e["entry_type"] == "strategy_registered":
+            fingerprint_ids.setdefault(
+                composition_fingerprint(e["payload"]), []).append(
+                    e["payload"]["strategy_id"])
+    cutoffs: dict[str, str | None] = {}
+
+    def _cutoff(sid: str) -> str | None:
+        if sid not in cutoffs:
+            cutoffs[sid] = burying_cutoff(artifacts_dir, sid, buried[sid])
+        return cutoffs[sid]
+
+    def _ok(strategy_id: str, spec: dict) -> bool:
+        sids = fingerprint_ids.get(composition_fingerprint(spec)) or [strategy_id]
+        if any(s not in buried for s in sids):
+            return False
+        found = [_cutoff(s) for s in sids]
+        if not all(found):
+            return False
+        # The LATEST burial governs: a composition buried again last month has
+        # not earned a re-trial just because an older copy of it was buried
+        # years ago.
+        cutoff = max(found)
+        uni = spec.get("universe", {})
+        tf = uni.get("timeframe")
+        ends = [_date10(data_end_of_cell((a, tf))) for a in uni.get("assets", [])]
+        if not ends or not all(ends):
+            return False
+        # The OLDEST cell governs: a pooled multi-asset spec is one trial over
+        # all its cells, so the freshest cell must not carry the stalest one
+        # into a re-test the stale one has not earned.
+        return retrial_window_open(cutoff, min(ends))
+
+    return _ok
+
+
+# ---------------- D10: caps become queues ----------------
+
+def split_for_cycle(specs: list[dict], cap: int | None) -> tuple[list[dict], list[dict]]:
+    """(this_cycle, queued) — split-and-carry, replacing a refusal.
+
+    family-openness-v1: a family whose sweep exceeds the per-cycle sibling
+    bound registers the first window NOW and QUEUES the remainder, draining
+    across subsequent cycles until every proposed variation has been tested.
+    The invariant, checkable rather than aspirational: `this_cycle + queued`
+    is `specs`, in order, always — no proposed variation is ever dropped
+    without either a gauntlet verdict or a queue entry.
+
+    cap None or <= 0 means NO per-cycle bound, and returns everything. That is
+    the manual-run case: a hand invocation with nowhere to persist a queue
+    must register the whole family rather than discard its tail, because a
+    dropped tail is exactly the outcome D10 exists to remove.
+    """
+    if cap is None or cap <= 0 or len(specs) <= cap:
+        return list(specs), []
+    return list(specs[:cap]), list(specs[cap:])
 
 
 def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
@@ -398,10 +649,16 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
                     f"one-grid-step neighbour is never registered and the "
                     f"axis cannot form a neighbourhood")
 
-    if not errors:
-        n = prod(len(ax["values"]) for ax in fam.get("sweep", [])) if fam.get("sweep") else 1
-        if n > sibling_cap:
-            errors.append(f"{n} siblings exceeds cap {sibling_cap} — rejected, not clipped")
+    # D10 (docs/notes/family-openness-v1.md, chained 2026-08-29): the
+    # "{n} siblings exceeds cap {sibling_cap} — rejected, not clipped" refusal
+    # that stood here is GONE. It discarded proposed work without a verdict,
+    # which is a capacity limit presented as a judgment — the same mistake
+    # protocol-v6 retired when it dropped one-winner-per-sibling-group. The
+    # cap is now a per-cycle SCHEDULE applied after expansion by
+    # split_for_cycle(): the first window registers now, the remainder queues
+    # in loop_state.json and drains on later cycles. `sibling_cap` stays in
+    # this signature (every caller and test passes it positionally) but no
+    # longer decides anything here.
     return errors
 
 
@@ -474,9 +731,36 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
     return specs
 
 
+def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
+    """The cells THIS invocation may sweep: active_cells(), optionally
+    narrowed to an explicit asset subset (D6's rotation window, or a manual
+    `--assets` override for a hand run).
+
+    Two gates, in order, and neither substitutes for the other:
+    ACTIVE_CELLS decides what may EVER be swept (a denominator decision, and
+    Coen's own commit); this subset decides what is swept THIS GENERATION (a
+    schedule). A subset naming an inactive asset is refused loudly rather than
+    silently ignored — the whole point of the rotation window is that it is a
+    view onto the active set, never a way past it.
+    """
+    active = cells.active_cells(asset_class)
+    if assets is None:
+        return active
+    wanted = list(dict.fromkeys(assets))
+    unknown = [a for a in wanted if a not in {c[0] for c in active}]
+    if unknown:
+        raise ValueError(
+            f"--assets names {unknown} which are not ACTIVE cells of class "
+            f"{asset_class!r}; the sweep subset is a view onto the active set "
+            f"(cells.ACTIVE_CELLS), never a way past it")
+    keep = set(wanted)
+    return [c for c in active if c[0] in keep]
+
+
 def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str,
                             asset_class: str,
-                            proxy_card_ids: frozenset[str] = frozenset()) -> list[dict]:
+                            proxy_card_ids: frozenset[str] = frozenset(),
+                            assets=None) -> list[dict]:
     """Non-crypto counterpart of expand_family (spec s4/s10.7-8).
 
     The family's blocks and sweep axes expand exactly like the crypto path
@@ -566,8 +850,10 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
             "cost_model": dict(cls_spec["cost_model"]),
         }
         # the declared grid (class_cells) admits data/import work; the ACTIVE
-        # set admits sweeping (SP5 s3, P2-T1's gate)
-        for cell_spec in expand_universe(base, cells.active_cells(asset_class)):
+        # set admits sweeping (SP5 s3, P2-T1's gate); `assets` narrows THIS
+        # generation's slice of the active set (D6's rotation window, spec s5)
+        # without changing what is active -- see sweep_cells.
+        for cell_spec in expand_universe(base, sweep_cells(asset_class, assets)):
             cell_spec["name"] = _build_name(
                 cell_spec["universe"]["assets"], fam["family"],
                 cell_spec["blocks"], cell_spec["universe"]["timeframe"])
@@ -1432,6 +1718,89 @@ def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[st
     return propose_input, meta
 
 
+def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
+                         queue_path: Path, known_fps: dict[str, str],
+                         per_cycle_specs: int | None) -> int:
+    """D10: register one window off this class's sibling queue, propose nothing.
+
+    A drain cycle is a FULL substitute for a proposal cycle, not an addition
+    to it: it makes no metered model call, and it registers at most the same
+    per-cycle window a proposal cycle would. That keeps the bound meaning what
+    it says and stops a long queue from being paid for twice in one cycle.
+
+    Every drained spec is still screened against the chain. A queued spec was
+    never registered, so a collision here means some OTHER run registered an
+    equivalent composition while this one sat in the queue -- that is the
+    de-duplication rule doing its job, not the cap discarding work, and the
+    composition is under test either way.
+
+    The queue is only MUTATED on a real run. The loop invokes the composer
+    twice per cycle (a --dry-run preflight, then the real run); a dry run that
+    consumed the queue would leave the real run with nothing to register.
+    """
+    drained = loop_state.dequeue_specs(queue_state, args.asset_class,
+                                       per_cycle_specs or 10 ** 9)
+    remaining = loop_state.queue_depth(queue_state, args.asset_class)
+    fresh, collided = [], []
+    for spec in drained:
+        (collided if composition_fingerprint(spec) in known_fps else fresh).append(spec)
+
+    print(f"QUEUE DRAIN ({args.asset_class}): {len(drained)} queued sibling(s) "
+          f"taken, {len(fresh)} to register, {len(collided)} now collide with "
+          f"the chain, {remaining} still queued. No families proposed this "
+          f"cycle (D10: a drain replaces a proposal, it does not add to it).")
+    for spec in collided:
+        print(f"    - queued {spec['strategy_id']} dropped: composition "
+              f"already registered as {known_fps[composition_fingerprint(spec)]}")
+
+    _persist_drift_record(
+        drift_record(args.run_id, args.dry_run, fresh), args.registry)
+
+    if args.dry_run:
+        print(f"\nDRY RUN — queue drain only; {len(fresh)} spec(s) would be "
+              f"registered, nothing written and the queue is untouched.")
+        return 0
+
+    # loop_state.json is Coen-editable, so a queued spec is re-validated
+    # against the schema before it can reach the chain -- the proposal path
+    # validates every spec it registers and the drain path must not be the
+    # softer door into the same registry.
+    import jsonschema
+    validator = jsonschema.Draft202012Validator(json.loads(
+        (Path(__file__).resolve().parent.parent / "schemas"
+         / "strategy_spec.schema.json").read_text(encoding="utf-8")))
+    for spec in fresh:
+        validator.validate(spec)
+
+    existing = registry.block_types()
+    n_blocks = 0
+    for key in BLOCK_TYPES:
+        if key not in existing:
+            registry.register_block_type(block_type_payload(*key))
+            n_blocks += 1
+    n_written = 0
+    try:
+        for spec in fresh:
+            registry.register_strategy(spec)
+            n_written += 1
+            print(f"  registered {spec['strategy_id']}  {spec['name']}")
+    except BaseException:
+        # The queue has NOT been saved yet at this point, so the unwritten
+        # remainder is still on disk and the next cycle re-drains it. Only the
+        # specs already chained above are duplicated on that re-drain, and the
+        # screen at the top of this function catches them.
+        print(f"\nPARTIAL WRITE: {n_written}/{len(fresh)} queued spec(s) chained "
+              f"before failure; the queue on disk is unchanged, so the next "
+              f"cycle re-drains this window.", file=sys.stderr)
+        raise
+    loop_state.save(queue_path, queue_state)
+
+    print(f"\nqueue drain complete: {n_written} spec(s) registered, "
+          f"{remaining} still queued for {args.asset_class}, "
+          f"{n_blocks} block type(s) newly registered.")
+    return 0
+
+
 def run(argv: list[str] | None = None, propose_fn=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--max-families", type=int, default=8)
@@ -1447,7 +1816,36 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                     help="cell class to compose for (spec s4); crypto is "
                          "today's unrestricted default and every new branch "
                          "below is guarded on asset_class != 'crypto'")
+    ap.add_argument("--assets", default=None,
+                    help="comma-separated subset of this class's ACTIVE assets "
+                         "to sweep THIS generation (spec s5/D6: the loop's "
+                         "rotation window, or a manual override for a hand "
+                         "run). A schedule, never a filter -- omitted means "
+                         "the whole active set, exactly as before D6")
+    ap.add_argument("--data-dir", type=Path, default=None,
+                    help="bar cache, read ONLY to date each cell's data for the "
+                         "D9 re-trial window; defaults next to --registry so a "
+                         "tmp-registry test never reads the live cache")
+    ap.add_argument("--loop-state", type=Path, default=None,
+                    help="where the D10 sibling queue is persisted; defaults to "
+                         "logs/loop_state.json next to --registry, for the same "
+                         "test-isolation reason as --data-dir")
     args = ap.parse_args(argv)
+
+    # --assets is a view onto the ACTIVE CELL set, and the legacy pooled
+    # crypto path has none: its universe comes from ALLOWED_ASSETS +
+    # UNIVERSE_BASE, not from cells.active_cells. Refuse rather than accept an
+    # argument that would be silently ignored. Phase 3's activation commit,
+    # which routes crypto through expand_family_for_class, is what makes this
+    # combination meaningful.
+    if args.assets and args.asset_class == "crypto":
+        print("--assets has no meaning on the legacy pooled crypto path "
+              "(composer.expander_for('crypto') is expand_family, whose "
+              "universe is ALLOWED_ASSETS/UNIVERSE_BASE, not active cells). "
+              "It becomes meaningful at SP5 Phase 3's activation commit.")
+        return 1
+    sweep_assets = ([a.strip() for a in args.assets.split(",") if a.strip()]
+                    if args.assets else None)
 
     registry = Registry(args.registry)
     accepted = registry.cards(status="accepted")
@@ -1462,6 +1860,41 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         print("Aborting — grammar changes must be additive (new types); "
               "never mutate a chained params_schema.")
         return 1
+
+    # D6/D10 per-cycle bound, expressed in the unit run() actually splits:
+    # EXPANDED SPECS. The cap has always been a bound on the family's SWEEP
+    # (its combo count), and the per-cell expander multiplies every combo by
+    # the cells it sweeps -- so the equivalent post-expansion bound is
+    # sibling_cap x specs-per-combo. Computing it this way is what keeps D10
+    # byte-identical for every family that fits: a family of n <= cap combos
+    # expands to at most cap x per_combo specs and is therefore never split.
+    # Only families that TODAY are refused outright are affected.
+    try:
+        specs_per_combo = (1 if args.asset_class == "crypto"
+                           else max(1, len(sweep_cells(args.asset_class, sweep_assets))))
+    except ValueError as exc:
+        print(f"  {exc}")
+        return 1
+    per_cycle_specs = (args.sibling_cap * specs_per_combo
+                       if args.sibling_cap and args.sibling_cap > 0 else None)
+    queue_path = (args.loop_state if args.loop_state is not None
+                  else args.registry.resolve().parent / "logs" / "loop_state.json")
+    data_dir = (args.data_dir if args.data_dir is not None
+                else args.registry.resolve().parent / "data")
+
+    known_fps = registered_fingerprints(registry)
+
+    # -- D10 drain, BEFORE any proposal -------------------------------------
+    # family-openness-v1: the queued remainder of an over-cap family is fed
+    # into the NEXT cycle for that class BEFORE new families are proposed,
+    # draining until empty. A draining cycle does NOT propose: it makes no
+    # metered model call at all (a real spend saving, not just an ordering),
+    # and it keeps the per-cycle bound meaning what it says -- one window of
+    # siblings per cycle, whether they are new or carried.
+    queue_state = loop_state.load(queue_path)
+    if loop_state.queue_depth(queue_state, args.asset_class):
+        return _drain_sibling_queue(args, registry, queue_state, queue_path,
+                                    known_fps, per_cycle_specs)
 
     # Card routing (spec s4/D2): see routable_cards() for the full lane
     # breakdown (crypto unrestricted; fx/equity_etf/bond_etf/metal_etf
@@ -1492,8 +1925,14 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
 
     created_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     accepted_ids = set(accepted)
-    known_fps = registered_fingerprints(registry)
     run_fps: dict[str, str] = {}
+    # D9: burial with EXPIRY, not permanent exclusion. The oracle opens only
+    # for a matched registration that is currently BURIED, whose burying
+    # verdict's cutoff is readable, and whose target cell's data on disk has
+    # moved >= RETRIAL_WINDOW_DAYS past it. Quarantine and live registrations
+    # have no burying verdict, so they never expire.
+    retrial_ok = retrial_oracle(registry, args.registry.resolve().parent / "artifacts",
+                                data_dir=data_dir)
     # T4-rider-3 (spec s10.7 addendum, track 2a): the exclusion set is now a
     # per-class DECLARATION (cells.CLASSES[cls]["excluded_block_types"])
     # instead of an inferred "any non-crypto class" rule -- equity_etf has
@@ -1503,6 +1942,7 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # every class that existed before this change.
     excluded_types = cells.CLASSES[args.asset_class]["excluded_block_types"]
     kept, dropped, seen_names = [], 0, set()
+    carried: list[dict] = []            # D10 overflow, queued at the end of run()
     for fam in proposals:
         name = fam.get("family", "?")
         errors = validate_family(fam, accepted_ids, args.sibling_cap,
@@ -1526,9 +1966,10 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         else:
             specs = expander(
                 fam, args.run_id, args.model, created_utc, args.asset_class,
-                proxy_card_ids=frozenset(proxy_routed_card_ids or ()))
+                proxy_card_ids=frozenset(proxy_routed_card_ids or ()),
+                assets=sweep_assets)
         kept_specs, drop_notes, malformed = screen_siblings(
-            specs, known_fps, run_fps)
+            specs, known_fps, run_fps, retrial_ok=retrial_ok)
         if malformed:
             dropped += 1
             print(f"  DROPPED family {name}:")
@@ -1536,19 +1977,22 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                 print(f"    - {note}")
             continue
 
-        # Split the two drop causes: a chain collision is expected saturation
-        # as the grammar space fills, while a family duplicated under two
-        # names in one run is a proposal-quality defect. Reporting both as
-        # "already registered" would send the operator after the wrong thing.
-        # Counting known_fps over `specs` cannot double-count a survivor —
-        # screen_siblings guarantees no kept fingerprint is in known_fps, and
-        # a repeated fingerprint would have returned malformed above.
+        # Split the three outcomes: a chain collision is expected saturation
+        # as the grammar space fills, a family duplicated under two names in
+        # one run is a proposal-quality defect, and a D9 RE-TRIAL is a buried
+        # composition readmitted on new data. Reporting them together would
+        # send the operator after the wrong thing.
+        kept_ids = {s["strategy_id"] for s in kept_specs}
+        n_retrial = sum(1 for s in specs
+                        if s["strategy_id"] in kept_ids
+                        and composition_fingerprint(s) in known_fps)
         n_buried = sum(1 for s in specs
-                       if composition_fingerprint(s) in known_fps)
+                       if composition_fingerprint(s) in known_fps) - n_retrial
         n_dupe = len(specs) - len(kept_specs) - n_buried
         dupe_txt = f", {n_dupe} duplicated in this run" if n_dupe else ""
+        retrial_txt = f", {n_retrial} re-trial(s) (D9)" if n_retrial else ""
         print(f"  family {name}: {len(specs)} expanded, {n_buried} already "
-              f"registered{dupe_txt}, {len(kept_specs)} new")
+              f"registered{dupe_txt}{retrial_txt}, {len(kept_specs)} new")
         for note in drop_notes:
             print(f"    - {note}")
         if not kept_specs:
@@ -1562,7 +2006,17 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         for spec in kept_specs:
             validator.validate(spec)   # composer bug if this raises: abort pre-write
             run_fps[composition_fingerprint(spec)] = name
-        kept.append((fam, kept_specs))
+        # D10 split-and-carry, per FAMILY (exactly where the cap used to
+        # refuse, so a family that fits is untouched): the first window
+        # registers now, the remainder queues and drains on later cycles.
+        # Nothing is dropped -- the two halves are `kept_specs`, in order.
+        this_cycle, overflow = split_for_cycle(kept_specs, per_cycle_specs)
+        if overflow:
+            print(f"  QUEUED family {name}: {len(this_cycle)} sibling(s) this "
+                  f"cycle, {len(overflow)} carried to the next {args.asset_class} "
+                  f"cycle (D10 -- a cap is a schedule, not a verdict)")
+            carried.extend(overflow)
+        kept.append((fam, this_cycle))
 
     total = sum(len(s) for _, s in kept)
 
@@ -1587,7 +2041,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
 
     if args.dry_run:
         print(f"\nDRY RUN — {len(kept)} families kept, {dropped} dropped, "
-              f"{total} sibling spec(s); nothing written.")
+              f"{total} sibling spec(s), {len(carried)} would queue (D10); "
+              f"nothing written.")
         return 0
 
     existing = registry.block_types()
@@ -1608,6 +2063,20 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
               f"the last sibling group is incomplete; review the registry tail "
               f"before re-running.", file=sys.stderr)
         raise
+
+    # D10: the carried remainder is persisted AFTER the chain writes above,
+    # never before. A queue entry written for work that then failed to chain
+    # would double-register it on the next drain; written last, a crash leaves
+    # the overflow unqueued, which the very next generation re-proposes -- the
+    # honest failure direction of the two.
+    if carried:
+        queue_state = loop_state.load(queue_path)
+        loop_state.enqueue_specs(queue_state, args.asset_class, carried)
+        loop_state.save(queue_path, queue_state)
+        print(f"  QUEUE: {len(carried)} sibling(s) carried to the next "
+              f"{args.asset_class} cycle (depth now "
+              f"{loop_state.queue_depth(queue_state, args.asset_class)}) "
+              f"-> {queue_path}")
 
     print(f"\n{len(kept)} families kept, {dropped} dropped, {total} spec(s) "
           f"registered in {len(kept)} sibling group(s), "

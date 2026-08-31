@@ -23,17 +23,17 @@ suite green.
 
 Run: python -m pytest pipeline/test_phase2_freeze.py -q
 """
-# GAP, DECLARED RATHER THAN FORGOTTEN: sweep rotation (design D6) is SP5
-# Phase 2 Task 4 and has NOT been built yet. Its freeze proof -- that the
-# rotation cursor is inert while ACTIVE_CELLS["crypto"] is empty, i.e. that
-# rotating over zero active cells rotates nothing and advances no state --
-# belongs in this module and lands with Task 4. Until then there is no
-# rotation machinery to pin, and this file deliberately contains no rotation
-# test rather than a placeholder that asserts something weaker.
+# GAP CLOSED (P2-T4, 2026-08-31): sweep rotation (design D6) is built, and
+# section 7 below is the freeze proof the gap notice promised -- the rotation
+# window changes NOTHING for any live class today, both where the active set
+# is empty (crypto) and where it is smaller than the window (the four tradfi
+# classes).
 from __future__ import annotations
 
 from . import cells
 from . import composer
+from . import loop
+from . import loop_state
 
 # Family fixtures, reused rather than reinvented: each class's own composer
 # test module already carries the minimal valid family for that class, and a
@@ -256,3 +256,68 @@ def test_phase3_benchmark_and_routing_stay_coupled():
             == (composer.expander_for("crypto") is composer.expand_family)), (
         "crypto's benchmark declaration and its composer routing have "
         "half-flipped: they are one commit (SP5 Phase 3), never two")
+
+
+# ---------------- 7. D6 sweep rotation is machinery, not behaviour ----------------
+
+def test_rotation_is_inert_over_an_empty_active_set():
+    """crypto: rotating over zero active cells rotates nothing.
+
+    The window is empty, it EQUALS the (empty) active set -- which is what
+    makes the loop pass no --assets at all -- and no rotation_cursor is
+    written into loop_state.json for a class that swept nothing.
+    """
+    assert cells.active_cells("crypto") == [], (
+        "this test's premise is gone: crypto has active cells")
+    state = {"classes": {}}
+    window, rotates = loop._sweep_window(state, "crypto")
+    assert window == []
+    assert rotates is False, (
+        "the loop would pass --assets for crypto, which is still on the "
+        "legacy pooled path where --assets has no meaning")
+    loop_state.advance_rotation(state, "crypto", 0, loop.ROTATION_SIZE)
+    assert state["classes"].get("crypto", {}).get("rotation_cursor") is None
+
+
+def test_rotation_is_inert_for_every_tradfi_class():
+    """The four already-sweeping classes are untouched by D6.
+
+    Each is checked TWICE, because the freeze needs both halves:
+
+    * the window equals the whole active asset list, so `rotates` is False and
+      the loop's composer argv carries no --assets -- byte-identical to the
+      pre-D6 invocation;
+    * asking for that same window through the composer's own subset gate
+      (sweep_cells) returns exactly active_cells(), same cells, same ORDER.
+
+    equity_etf is the one that matters most here and is the reason
+    ROTATION_CLASSES is a DECLARATION and not "any class bigger than the
+    window": its active set is 16 assets, ABOVE ROTATION_SIZE 12. An inferred
+    rule would have windowed it 12-of-16 and broken this freeze silently.
+    """
+    for cls in TRADFI_CLASSES:
+        active = [a for a, _ in cells.active_cells(cls)]
+        state = {"classes": {}}
+        window, rotates = loop._sweep_window(state, cls)
+        assert window == active, f"{cls}: the rotation window is not the whole active set"
+        assert rotates is False, (
+            f"{cls}: D6 started restricting a class that swept its whole "
+            f"active set before Phase 2 -- the sweep freeze is broken")
+        assert state == {"classes": {}}, (
+            f"{cls}: a non-rotating class wrote rotation state")
+        assert composer.sweep_cells(cls, window) == cells.active_cells(cls), (
+            f"{cls}: routing the window through the composer's subset gate "
+            f"changed which cells (or their order) get swept")
+    assert len(cells.CLASSES["equity_etf"]["assets"]) > loop.ROTATION_SIZE, (
+        "equity_etf no longer exceeds ROTATION_SIZE; the declaration-not-"
+        "inference argument above needs re-checking against the new numbers")
+
+
+def test_no_live_class_rotates_today():
+    """One line for the whole claim: the only rotating class has no active
+    cells, so not one live generation is scheduled differently today."""
+    assert loop.ROTATION_CLASSES == ("crypto",)
+    for cls in cells.LIVE_CLASSES:
+        state = {"classes": {}}
+        _, rotates = loop._sweep_window(state, cls)
+        assert rotates is False, f"{cls} rotates -- Phase 2's sweep freeze is broken"

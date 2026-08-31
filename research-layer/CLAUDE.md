@@ -59,6 +59,47 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   cards that a failed composer had never consumed. Absent key -> falls back to
   the pre-triage count.
 
+## Sweep rotation, sibling queues, re-trials (SP5 P2-T4: D6 / D10 / D9)
+- **D6 rotation.** `loop.ROTATION_SIZE` = 12 (spec s5); `loop.ROTATION_CLASSES`
+  = `("crypto",)`. A rotating class sweeps a window of 12 of its ACTIVE assets
+  per generation, cursor `rotation_cursor` per class in loop_state.json,
+  advanced ONLY on cycle_complete. **The small-set rule:** an active set of
+  <= ROTATION_SIZE assets is returned WHOLE and the cursor never moves, so no
+  `rotation_cursor` key is written for a class that does not rotate.
+  ROTATION_CLASSES is a DECLARATION, never inferred from the asset count:
+  equity_etf's active set is 16 assets (above the window), so an inferred
+  "bigger than the window" rule would silently window it 12-of-16 and break
+  the Phase 2 sweep freeze. Rotation is a SCHEDULE, never a selection --
+  every active cell is swept with equal frequency and N accounting is
+  untouched. The loop passes `--assets` only when the window differs from the
+  full active list, so today's composer argv is byte-identical to pre-D6.
+  Nothing rotates today (crypto's active set is empty).
+- **D10 sibling queues.** `validate_family`'s "exceeds cap, rejected, not
+  clipped" refusal is GONE (chained pre-declaration:
+  `docs/notes/family-openness-v1.md`). Overflow now splits via
+  `composer.split_for_cycle` and queues in loop_state.json as
+  `sibling_queue` per class; depth is reported as `queue_<cls>` in
+  pipeline_status.json. **The composer writes that queue as a SUBPROCESS**, so
+  `loop_state.refresh_queues(state, path)` runs right after the composer stage
+  or the loop's own save clobbers it. A cycle whose class has a non-empty
+  queue DRAINS instead of proposing -- no metered model call at all -- and is
+  exempt from the `no_new_accepted_cards` stop (queued work needs no new
+  card). Invariant, test-pinned: no proposed variation is ever dropped without
+  either a gauntlet verdict or a queue entry.
+- **D9 re-trials.** `composer.RETRIAL_WINDOW_DAYS` = 183. A composition whose
+  fingerprint matches a registered strategy is still dropped UNLESS that
+  registration is currently BURIED and its burying verdict's cutoff is >= 183
+  days behind the target cell's CURRENT data end. **A composition with no
+  burying verdict (quarantine or live) has no expiry and stays permanently
+  excluded** -- that half is a tightening. The cutoff is not on the chain; it
+  is read from `artifacts/<sid>/gauntlet/config.json` (or the screen bundle's
+  `config.json`), so anything unreadable closes the window -- which is also
+  why no tmp-registry test opens it. In-run/in-cycle duplicates are still
+  malformed/dropped: those ARE same-data. Every re-trial is a NEW strategy id
+  entering N honestly. **More registrations and more survivors at a fixed bar
+  is arithmetic about the denominator, NEVER evidence of edge** -- see the
+  chained note's own wording before reporting any of it.
+
 ## Triage cost controls (loop stage 4a)
 - `--limit` comes from `loop.TRIAGE_LIMIT` (40, not 200). It is sized to fit
   the scheduled task's ExecutionTimeLimit alongside the rest of the cycle:

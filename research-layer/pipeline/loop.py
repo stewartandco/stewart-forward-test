@@ -71,6 +71,41 @@ TRIAGE_LIMIT = 200
 _TRIAGE_S_PER_CARD = 3.85 * 3           # measured: 3.85 s/call x PANEL_SIZE 3
 _REST_OF_CYCLE_S = 90 * 60              # composer dry+real, screen, gauntlet
 
+# D6 sweep rotation (docs/2026-08-28-market-data-universe-design.md s5): a
+# generation sweeps a ROTATING WINDOW of this many of its class's active
+# assets, not all of them, with the cursor persisted per class in
+# logs/loop_state.json. 12 is the spec's declared number, sized against the
+# 100-asset crypto universe: full coverage in 9 generations (100/12, last
+# window short).
+#
+# IT IS A SCHEDULE, NEVER A SELECTION. Every active cell is swept with equal
+# frequency (pinned in test_sp5_p2t4.py); the window decides WHEN a cell is
+# swept, never WHETHER. Nothing about N accounting changes: a cell outside
+# this generation's window is not excluded, it is next.
+ROTATION_SIZE = 12
+
+# WHICH classes rotate, DECLARED rather than inferred -- the same convention
+# cells.LIVE_CLASSES and cells.ACTIVE_CELLS follow, and for the same reason:
+# a change to what a generation sweeps is a decision, never a side effect of
+# an asset count.
+#
+# The tempting rule is "rotate whenever the active set is bigger than the
+# window". It is WRONG here, and measurably so: equity_etf's active set is 16
+# assets, above ROTATION_SIZE, so that rule would silently window equity_etf
+# 12-of-16 and change what a live class sweeps -- inside the phase whose
+# whole invariant is that nothing sweeps differently (SP5 Phase 2 is
+# "behavior-frozen for sweeping"). Design s5 scopes D6 to crypto in its own
+# words ("a CRYPTO generation sweeps a rotating window of 12 assets ... full
+# coverage in 9 generations (100/12)"), which is the 100-asset universe the
+# number was derived from; the four tradfi classes are 2-16 assets and have
+# no cost problem to solve. Adding a class here is a reviewed commit, and
+# ships with its own window size if 12 is not right for it.
+#
+# Crypto's own active set is EMPTY this phase (ACTIVE_CELLS["crypto"] is
+# ((), ())), so rotation is inert everywhere today -- machinery built,
+# behaviour frozen. Pinned by test_phase2_freeze.py.
+ROTATION_CLASSES = ("crypto",)
+
 # The scheduled task this module runs under, and the shortest execution
 # window a full cycle can survive. A cycle is 75-90 min (triage + composer
 # pair + screen + gauntlet); Windows hard-kills at ExecutionTimeLimit, and a
@@ -376,6 +411,48 @@ def _watermark_items(state: dict) -> dict[str, str]:
             for c, e in state.get("classes", {}).items()}
 
 
+def _queue_items(state: dict) -> dict[str, str]:
+    """D10: sibling-queue depth per class, so a PARKED QUEUE IS VISIBLE.
+
+    A queue that stops draining is the failure mode this mechanism can have --
+    proposed variations sitting unregistered forever would be the silent drop
+    the queue exists to replace, just slower. It has to be a number in the
+    status file, not something a human has to open loop_state.json to see.
+    Emitted for every class with a state entry, depth 0 included: a series
+    that only appears when it is non-zero cannot show a queue draining."""
+    return {f"queue_{c}": str(n)
+            for c, n in loop_state.queue_depths(state).items()}
+
+
+def _rotation_assets(asset_class: str) -> list[str]:
+    """This class's ACTIVE assets, deduplicated, in declared order.
+
+    Order is part of the declaration (cells.py's _assert_gate_axes says so and
+    enforces it at import): the rotation cursor indexes this list, so a
+    reordering would move every window, not just rename it."""
+    out: list[str] = []
+    for asset, _tf in cells.active_cells(asset_class):
+        if asset not in out:
+            out.append(asset)
+    return out
+
+
+def _sweep_window(state: dict, asset_class: str) -> tuple[list[str], bool]:
+    """(window, rotates) -- the assets this generation may sweep, and whether
+    rotation is actually restricting anything.
+
+    `rotates` False means the window IS the whole active set, so the loop
+    passes no `--assets` at all and the composer invocation is byte-identical
+    to its pre-D6 form. That is the state every class is in today: the four
+    tradfi classes are not in ROTATION_CLASSES, and crypto's active set is
+    empty."""
+    assets = _rotation_assets(asset_class)
+    if asset_class not in ROTATION_CLASSES:
+        return assets, False
+    window = loop_state.rotation_window(state, asset_class, assets, ROTATION_SIZE)
+    return window, window != assets
+
+
 def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
                   extra: dict[str, str] | None = None, spent: float = 0.0,
                   escalations: list[str] | None = None,
@@ -395,6 +472,7 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
                              "budget_state": _budget_state(spent)}
     if state is not None:
         items.update(_watermark_items(state))
+        items.update(_queue_items(state))
     if counts is not None:
         items.update(_count_items(*counts))
     items.update(extra or {})
@@ -916,7 +994,18 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         "routable_at_last_generation")
     if swept_baseline is None:
         swept_baseline = routable_before_triage
-    if pending_routable_before > 0 and routable_after_triage <= swept_baseline:
+    #
+    # D10 EXEMPTION: a class with a non-empty sibling queue is NOT stopped
+    # here. "No new information, no new trials" is about proposing NEW
+    # families off an unchanged corpus; a queued sibling is work already
+    # proposed and already counted, waiting only for capacity, and draining it
+    # needs no new card at all. Without this exemption a queue could sit
+    # parked indefinitely behind a class whose corpus had gone quiet -- which
+    # is the silent drop D10 exists to remove, just slower. No-op today: every
+    # queue is empty until the first over-cap family lands.
+    queued_for_class = loop_state.queue_depth(state, asset_class)
+    if (pending_routable_before > 0 and routable_after_triage <= swept_baseline
+            and not queued_for_class):
         print(f"no_new_accepted_cards: triage accepted nothing new for "
               f"{asset_class} (routable {routable_after_triage} vs "
               f"{swept_baseline} at its last swept generation) -- no new "
@@ -954,12 +1043,28 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       counts=_fresh_counts())
         return 0
 
+    # 4b-pre. D6 sweep rotation: this generation's window of the class's
+    # ACTIVE assets. `rotates` False (every class, today) means the window is
+    # the whole active set and NO --assets is passed -- the composer argv is
+    # byte-identical to its pre-D6 form, which is the Phase 2 sweep freeze.
+    window, rotates = _sweep_window(state, asset_class)
+    assets_argv = ["--assets", ",".join(window)] if rotates else []
+    if rotates:
+        print(f"loop: rotation window for {asset_class}: {len(window)} of "
+              f"{len(_rotation_assets(asset_class))} active asset(s) this "
+              f"generation (D6 -- a schedule, not a filter)", flush=True)
+
     # 4b. composer --dry-run preflight (no chain write, no lock). NOTE:
     # composer.run() calls the metered propose_families BEFORE it ever
     # branches on --dry-run, so a hard-cap refusal can surface HERE, not
     # only on the real run below -- _composer_rc_or_park covers both calls.
+    # NB no --data-dir/--loop-state: the composer derives both from
+    # --registry's parent, which IS `layer` here, so passing them would add
+    # argv without adding meaning. Keeping the argv minimal is what makes the
+    # not-rotating case byte-identical to the pre-D6 invocation.
     composer_dry_argv = [py, "-m", "pipeline.composer", *reg_argv, "--run-id",
-                         run_id, "--asset-class", asset_class, "--dry-run"]
+                         run_id, "--asset-class", asset_class, *assets_argv,
+                         "--dry-run"]
     rc = _stage(runner, composer_dry_argv, layer)
     if rc != 0:
         return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc,
@@ -967,8 +1072,16 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
 
     # 4c. composer real run (chain-writing, metered)
     composer_argv = [py, "-m", "pipeline.composer", *reg_argv, "--run-id",
-                     run_id, "--asset-class", asset_class]
+                     run_id, "--asset-class", asset_class, *assets_argv]
     rc, lock_lost = _lock_and_run("pipeline.composer", composer_argv)
+    # D10: the composer runs as a SUBPROCESS and owns logs/loop_state.json's
+    # sibling queues while it runs. Fold its writes back into the loop's older
+    # in-memory copy NOW, BEFORE any branch below -- every one of them saves
+    # state, and each would otherwise clobber exactly the queued work the
+    # queue exists to preserve. Placed before the rc check on purpose: the
+    # composer persists its queue only after its chain writes succeed, so a
+    # nonzero exit AFTER that point still leaves a real queue on disk.
+    loop_state.refresh_queues(state, state_path)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.composer")
     if rc != 0:
@@ -1023,6 +1136,15 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                                  ts_utc=_now_utc(),
                                  routable_at_generation=_routable_counts(
                                      registry)[asset_class])
+    # D6: the cursor moves ONLY on a completed generation, and only for a
+    # class that actually rotates. A parked, failed or deferred cycle leaves
+    # it exactly where it was -- advancing past a window that was never swept
+    # would skip those assets silently, which is the one thing a schedule must
+    # never do.
+    if asset_class in ROTATION_CLASSES:
+        loop_state.advance_rotation(state, asset_class,
+                                    len(_rotation_assets(asset_class)),
+                                    ROTATION_SIZE)
     loop_state.save(state_path, state)
 
     print(f"cycle_complete: {asset_class} watermark now {watermark_after_triage}",

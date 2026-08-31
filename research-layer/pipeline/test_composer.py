@@ -270,14 +270,36 @@ def test_single_value_sweep_axis_rejected():
     assert any("t_min" in e and "at least 3" in e for e in errs)
 
 
-def test_sibling_cap_rejects_not_clips():
+def test_sibling_cap_queues_it_rather_than_rejecting_it():
+    """REWRITTEN DELIBERATELY at SP5 P2-T4, not relaxed to make a red suite
+    green. This test used to be test_sibling_cap_rejects_not_clips and pinned
+    validate_family's "{n} siblings exceeds cap {cap} - rejected, not clipped"
+    refusal. D10 removes that refusal, pre-declared on the chain in
+    docs/notes/family-openness-v1.md BEFORE any queue entry existed: "a family
+    whose sweep exceeds the per-cycle sibling bound registers the first window
+    now and QUEUES the remainder ... draining across subsequent cycles until
+    every proposed variation has been tested."
+
+    The reason is not capacity, it is honesty: a cap is a capacity limit
+    presented as a judgment, and the pipeline made that mistake once already
+    (protocol-v6 retired the one-winner-per-sibling-group rule for exactly
+    this). The gauntlet is the only place an edge may die. What replaces the
+    refusal is composer.split_for_cycle, whose invariant -- nothing is lost
+    across the split -- is pinned in test_sp5_p2t4.py.
+    """
     fam = good_family(sweep=[
         {"block": 0, "param": "t_min", "values": [2.0, 2.5, 3.0]},
         {"block": 0, "param": "max_lookback", "values": [60, 75, 90, 105, 120]},
         {"block": 1, "param": "mult", "values": [1.5, 2.0, 2.5, 3.0, 3.5]},
-    ])  # 3 x 5 x 5 = 75 siblings
-    errs = validate_family(fam, ACCEPTED, 25)
-    assert any("sibling" in e and "cap" in e for e in errs)
+    ])  # 3 x 5 x 5 = 75 siblings against a cap of 25
+    assert not [e for e in validate_family(fam, ACCEPTED, 25) if "cap" in e]
+
+    from .composer import split_for_cycle
+    specs = expand_family(fam, "run", "m", "2026-08-31T00:00:00Z")
+    assert len(specs) == 75
+    this_cycle, queued = split_for_cycle(specs, 25)
+    assert len(this_cycle) == 25 and len(queued) == 50
+    assert this_cycle + queued == specs      # nothing dropped, ever
 
 
 def test_bad_family_name_rejected():
