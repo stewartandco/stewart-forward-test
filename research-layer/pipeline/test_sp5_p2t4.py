@@ -72,19 +72,27 @@ def test_rotation_sweeps_every_asset_with_equal_frequency():
     """Rotation is a SCHEDULE, never a selection mechanism (D6/D10).
 
     100 assets, window 12: after 25 generations the cursor has walked
-    25 x 12 = 300 slots = exactly 3 full passes, so every asset must have been
-    swept exactly 3 times. Unequal frequency would make rotation a filter --
-    some cells tested more than others -- which is the one thing it must not
-    be, because N accounting assumes every active cell is reachable.
+    25 x 12 = 300 slots = exactly 3 full passes. Unequal frequency would make
+    rotation a filter -- some cells tested more than others -- which is the
+    one thing it must not be, because N accounting assumes every active cell
+    is reachable.
+
+    ASSERTED AS THE EXACT SEQUENCE, not as a count histogram (P2-T4 review,
+    mutation note). A per-asset count of 3 is satisfied by a 2x or 3x cursor
+    stride too -- any stride whose gcd with 100 is 4 still lands 3 starts per
+    12 positions -- so the histogram alone does not pin the schedule, only its
+    fairness. The concatenated sequence pins BOTH: coverage, frequency, and
+    that consecutive windows are contiguous rather than merely balanced.
     """
     state = {"classes": {}}
     assets = [f"A{i:03d}" for i in range(100)]
-    seen: dict[str, int] = {a: 0 for a in assets}
+    swept: list[str] = []
     for _ in range(25):
-        for a in loop_state.rotation_window(state, "crypto", assets, 12):
-            seen[a] += 1
+        swept.extend(loop_state.rotation_window(state, "crypto", assets, 12))
         loop_state.advance_rotation(state, "crypto", len(assets), 12)
-    assert set(seen.values()) == {3}
+    assert swept == [assets[i % 100] for i in range(300)]
+    counts = {a: swept.count(a) for a in assets}
+    assert set(counts.values()) == {3}
 
 
 def test_cursor_round_trips_through_the_state_file(tmp_path):
@@ -297,11 +305,75 @@ def test_in_run_duplicates_are_never_re_trials():
         [spec], {}, {fp: "otherfam"}, retrial_ok=lambda sid, s: True)
     assert kept == [] and not malformed
     assert any("duplicates family" in n for n in notes)
+
+    # THE BLOCKER CASE (F1): buried on the chain AND already re-tried by an
+    # earlier family in THIS run. The re-trial branch must not out-rank the
+    # in-run duplicate drop, or one composition chains twice on identical
+    # data -- the first duplicate composition fingerprint in the chain's
+    # history. The earlier test above only exercised known_fps={}, which is
+    # exactly why this slipped through.
+    kept, notes, malformed = composer.screen_siblings(
+        [spec], {fp: "old"}, {fp: "famA"}, retrial_ok=lambda sid, s: True)
+    assert kept == [], (
+        "a composition already re-tried by an earlier family in this run was "
+        "admitted a SECOND time as a re-trial -- same run, same data")
+    assert not malformed
+    # It falls through to the known_fps drop, whose message is UNCHANGED from
+    # the pre-D9 wording: the reviewer's fix is deliberately message-
+    # preserving so the no-oracle path stays byte-identical. What matters is
+    # that no note calls it a re-trial.
+    assert not any("RE-TRIAL" in n for n in notes), notes
+    assert any("already registered as old" in n for n in notes)
     # two identical siblings in ONE family -> malformed, whole family dies
     kept, notes, malformed = composer.screen_siblings(
         [spec, dict(spec, strategy_id="new2")], {}, {},
         retrial_ok=lambda sid, s: True)
     assert malformed
+
+
+def test_one_run_never_chains_a_composition_twice_even_with_the_window_open(
+        tmp_path, monkeypatch):
+    """F1 end to end, through composer.run(): the chain-wide invariant.
+
+    Two families in ONE run, proposing the SAME compositions, against a chain
+    where those compositions are already registered and the re-trial window is
+    forced open. Family A's siblings are legitimate re-trials; family B's are
+    in-run duplicates of A and must be dropped.
+
+    NOTE THE INVARIANT IS PER RUN, not chain-wide. Chain-wide fingerprint
+    uniqueness held for all 2,775 pre-D9 registrations and D9 deliberately
+    ends it: a re-trial IS a second registration of a buried composition, on
+    new data, under a new id. What may never happen is two registrations of
+    one composition in the SAME run -- that is same-data by construction, and
+    it is what the run_fps guard exists to stop.
+    """
+    from .test_composer import seeded_registry, good_family
+    from .registry import Registry
+    reg_path, cid = seeded_registry(tmp_path)
+    state_path = tmp_path / "loop_state.json"
+
+    def _run(run_id, families):
+        return composer.run(["--registry", str(reg_path), "--run-id", run_id,
+                             "--loop-state", str(state_path)],
+                            propose_fn=lambda cards: families)
+
+    assert _run("first", [good_family(card_ids=[cid])]) == 0
+    monkeypatch.setattr(composer, "retrial_oracle",
+                        lambda *a, **k: (lambda sid, spec: True))
+    assert _run("second", [good_family(card_ids=[cid], family="fam_a"),
+                           good_family(card_ids=[cid], family="fam_b")]) == 0
+
+    specs = [e["payload"] for e in Registry(reg_path).entries()
+             if e["entry_type"] == "strategy_registered"]
+    per_run: dict[str, list[str]] = {}
+    for s in specs:
+        per_run.setdefault(s["generator"]["run_id"], []).append(
+            composer.composition_fingerprint(s))
+    for run_id, fps in per_run.items():
+        assert len(fps) == len(set(fps)), (
+            f"run {run_id} registered {len(fps) - len(set(fps))} composition(s) "
+            f"twice -- a same-data re-test the window exists to forbid")
+    assert len(specs) == 18      # 9 originals + 9 re-trials, never 27
 
 
 def test_a_composition_with_no_burying_verdict_never_expires(tmp_path):
@@ -543,13 +615,37 @@ def test_assets_subset_refuses_an_inactive_asset(tmp_path):
         composer.sweep_cells("fx", ["EUR", "NOTAPAIR"])
 
 
-def test_assets_is_refused_on_the_legacy_pooled_crypto_path(tmp_path, capsys):
+def test_assets_is_refused_on_the_legacy_pooled_path(tmp_path, capsys):
+    """The refusal is keyed on the ROUTING DISPATCH, not on the class name
+    (F2), so it lifts by itself on the commit that makes a window legal."""
     from .test_composer import seeded_registry
     reg_path, cid = seeded_registry(tmp_path)
     rc = composer.run(["--registry", str(reg_path), "--assets", "BTCUSDT"],
                       propose_fn=lambda cards: [])
     assert rc == 1
-    assert "legacy pooled crypto path" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "legacy pooled path" in out and "expander_for" in out
+
+
+def test_the_assets_refusal_lifts_when_the_class_leaves_the_pooled_path(
+        tmp_path, monkeypatch):
+    """F2's coupling, from the composer's side: nothing about `--assets`
+    depends on the string "crypto". Switch the dispatch (what Phase 3 does)
+    and the same invocation is accepted."""
+    from .test_composer import seeded_registry, good_family
+    monkeypatch.setattr(composer, "expander_for",
+                        lambda cls: composer.expand_family_for_class)
+    gate = dict(cells.ACTIVE_CELLS["crypto"])
+    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:3],
+                                    "timeframes": ("1d",)}
+    try:
+        reg_path, cid = seeded_registry(tmp_path)
+        rc = composer.run(["--registry", str(reg_path), "--run-id", "p3",
+                           "--assets", cells.ASSETS[0], "--dry-run"],
+                          propose_fn=lambda cards: [good_family(card_ids=[cid])])
+        assert rc == 0, "the refusal did not lift with the routing dispatch"
+    finally:
+        cells.ACTIVE_CELLS["crypto"] = gate
 
 
 # ================= the loop's half of D6 and D10 =================
@@ -606,6 +702,116 @@ def test_loop_reports_queue_depth_and_does_not_clobber_it(tmp_path, monkeypatch)
                        .read_text(encoding="utf-8"))["items"]
     assert items["outcome"] == "cycle_complete"
     assert items["queue_crypto"] == "2"
+
+
+def test_a_non_empty_queue_is_itself_a_trigger(tmp_path):
+    """F4: the exemption has to sit at pick_class too, not only at the
+    no_new_accepted_cards guard.
+
+    A class whose card flow goes quiet never crosses its watermark threshold,
+    so it is never picked, so its queue never drains -- the silent drop D10
+    removes, moved one gate earlier. A queue is a second, independent reason
+    to be picked; the threshold arithmetic itself is untouched.
+    """
+    counts = {c: 0 for c in cells.LIVE_CLASSES}
+    state = {"classes": {c: {"threshold": 25, "watermark": 0}
+                         for c in cells.LIVE_CLASSES}}
+    assert loop_state.pick_class(state, counts) is None
+    loop_state.enqueue_specs(state, "bond_etf", [{"strategy_id": "q1"}])
+    assert loop_state.pick_class(state, counts) == "bond_etf"
+    # ...and draining it removes the reason again
+    loop_state.dequeue_specs(state, "bond_etf", 5)
+    assert loop_state.pick_class(state, counts) is None
+
+
+def test_a_dead_queue_entry_is_not_a_trigger(tmp_path):
+    """A parked-forever spec must NOT keep re-firing its class: it needs a
+    human, not another cycle. Only the live queue triggers."""
+    counts = {c: 0 for c in cells.LIVE_CLASSES}
+    state = {"classes": {c: {"threshold": 25, "watermark": 0}
+                         for c in cells.LIVE_CLASSES}}
+    loop_state.record_dead_specs(state, "bond_etf",
+                                 [{"spec": {"strategy_id": "d1"}, "reason": "x"}])
+    assert loop_state.pick_class(state, counts) is None
+
+
+def test_a_poison_queued_spec_does_not_wedge_the_class(tmp_path, capsys):
+    """F3: a queued spec can outlive the card that justified it.
+
+    50 queued, then the cited card's acceptance is revoked. Before the fix
+    every subsequent drain raised on the first spec, chained nothing, and left
+    the queue at 50 forever -- 50 proposed variations with neither a verdict
+    nor any prospect of one, which inverts D10's invariant instead of serving
+    it. Now the offenders are parked visibly and the drain keeps going.
+    """
+    from .test_composer import seeded_registry
+    from .registry import Registry
+    reg_path, cid = seeded_registry(tmp_path)
+    state_path = tmp_path / "loop_state.json"
+    composer.run(["--registry", str(reg_path), "--run-id", "r1",
+                  "--sibling-cap", "25", "--loop-state", str(state_path)],
+                 propose_fn=lambda cards: [_over_cap_family(cid)])
+    assert loop_state.queue_depth(loop_state.load(state_path), "crypto") == 50
+
+    Registry(reg_path).review_card(cid, "rejected", "coen", "off_topic")
+
+    rc = composer.run(["--registry", str(reg_path), "--run-id", "r2",
+                       "--sibling-cap", "25", "--loop-state", str(state_path)],
+                      propose_fn=lambda cards: [])
+    assert rc == 0, "the drain raised instead of parking the casualties"
+    state = loop_state.load(state_path)
+    assert loop_state.queue_depth(state, "crypto") == 25, "the queue did not move"
+    dead = state["classes"]["crypto"]["sibling_queue_dead"]
+    assert len(dead) == 25
+    assert all("not registered+accepted" in d["reason"] for d in dead), dead
+    assert "DEAD queued" in capsys.readouterr().out
+    # The drain also had to get PAST the "no accepted cards" refusal, which is
+    # a proposal precondition, not a drain one -- checked first it wedges the
+    # queue one gate earlier, for the same reason.
+
+    # ...and the class is not wedged: the next cycle drains the rest too
+    assert composer.run(["--registry", str(reg_path), "--run-id", "r3",
+                         "--sibling-cap", "25", "--loop-state", str(state_path)],
+                        propose_fn=lambda cards: []) == 0
+    state = loop_state.load(state_path)
+    assert loop_state.queue_depth(state, "crypto") == 0
+    assert len(state["classes"]["crypto"]["sibling_queue_dead"]) == 50
+
+
+def test_dead_queue_depth_is_reported_only_when_non_zero(tmp_path):
+    state = {"classes": {"crypto": {"threshold": 25}}}
+    assert "queue_dead_crypto" not in loop._queue_items(state)
+    assert loop._queue_items(state)["queue_crypto"] == "0"
+    loop_state.record_dead_specs(state, "crypto",
+                                 [{"spec": {"strategy_id": "d"}, "reason": "r"}])
+    assert loop._queue_items(state)["queue_dead_crypto"] == "1"
+
+
+def test_refresh_queues_never_stubs_a_class_it_was_not_carrying(tmp_path):
+    """F7: loop_state.json has writers other than the loop.
+
+    An earlier version minted a bare {"threshold": 25} for every class it saw
+    on disk, and the loop's end-of-cycle save then wrote that stub over a real
+    entry -- a bond_etf watermark of 77 came back as a stub. A disk-only class
+    is now copied WHOLE (when it carries queue state worth rescuing) or left
+    alone entirely.
+    """
+    path = tmp_path / "loop_state.json"
+    loop_state.save(path, {"classes": {
+        "bond_etf": {"threshold": 25, "watermark": 77},
+        "fx": {"threshold": 25, "watermark": 4,
+               "sibling_queue": [{"strategy_id": "q1"}]}}})
+    in_memory = {"classes": {"crypto": {"threshold": 25, "watermark": 9}}}
+    loop_state.refresh_queues(in_memory, path)
+
+    assert "bond_etf" not in in_memory["classes"], (
+        "a disk-only class with no queue was stubbed into the loop's state; "
+        "the end-of-cycle save would overwrite its real watermark")
+    # ...but a disk-only class the COMPOSER parked work in is adopted whole
+    assert in_memory["classes"]["fx"] == {
+        "threshold": 25, "watermark": 4,
+        "sibling_queue": [{"strategy_id": "q1"}]}
+    assert in_memory["classes"]["crypto"]["watermark"] == 9
 
 
 def test_a_queued_class_is_not_stopped_by_no_new_accepted_cards(tmp_path, monkeypatch):

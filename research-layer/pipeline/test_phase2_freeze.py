@@ -313,6 +313,68 @@ def test_rotation_is_inert_for_every_tradfi_class():
         "inference argument above needs re-checking against the new numbers")
 
 
+def test_a_half_landed_phase3_does_not_emit_a_window_into_a_refusing_composer():
+    """P2-T4 review F2: ACTIVE_CELLS filled, expander NOT switched.
+
+    This is the dangerous half-landing for D6, and it is dangerous at RUNTIME
+    rather than at import: the cells gate is what rotation reads, the routing
+    dispatch is what makes `--assets` legal, and they live in different files.
+    Emitting a window into the pooled composer is a guaranteed nonzero exit,
+    which the loop maps to stage_failed -- a Sentinel FAIL on every crypto
+    fire, three times a day, until a human notices.
+
+    So `rotates` must stay False for as long as crypto is pooled, no matter
+    what ACTIVE_CELLS says. The loud failure for a half-landed Phase 3 is the
+    NEXT test, at test time, where it belongs.
+    """
+    gate = dict(cells.ACTIVE_CELLS["crypto"])
+    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
+                                    "timeframes": ("1d",)}
+    try:
+        assert len(cells.active_cells("crypto")) == 20, "premise check"
+        assert composer.expander_for("crypto") is composer.expand_family, (
+            "premise check: this test simulates the HALF-landed case")
+        window, rotates = loop._sweep_window({"classes": {}}, "crypto")
+        assert rotates is False, (
+            "a half-landed Phase 3 (cells activated, expander still pooled) "
+            "emits --assets into a composer that refuses it: stage_failed on "
+            "every crypto fire")
+    finally:
+        cells.ACTIVE_CELLS["crypto"] = gate
+
+
+def test_a_fully_landed_phase3_rotates_and_the_composer_accepts_the_window(
+        monkeypatch):
+    """The other side: BOTH halves moved, as Phase 3 requires in one commit.
+
+    Rotation must switch on, the window must be exactly ROTATION_SIZE of the
+    activated assets, and the composer's own `--assets` gate must ACCEPT it.
+    That last assertion is the one F2 was about: the loop's emit condition and
+    the composer's accept condition now read the SAME fact (the routing
+    dispatch), so they cannot disagree. If a future edit re-keys either of
+    them on the literal string "crypto", this test fails loudly here instead
+    of in production.
+    """
+    gate = dict(cells.ACTIVE_CELLS["crypto"])
+    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
+                                    "timeframes": ("1d",)}
+    monkeypatch.setattr(composer, "expander_for",
+                        lambda cls: composer.expand_family_for_class)
+    monkeypatch.setattr(loop, "expander_for", composer.expander_for)
+    try:
+        window, rotates = loop._sweep_window({"classes": {}}, "crypto")
+        assert rotates is True, (
+            "a fully-landed Phase 3 did not switch rotation on -- the 100-asset "
+            "universe would be swept whole every generation, which is the cost "
+            "problem D6 exists to solve")
+        assert window == list(cells.ASSETS[:12])
+        # the composer's gate agrees: a window off the per-cell path is legal,
+        # and names only ACTIVE cells
+        assert composer.sweep_cells("crypto", window) == [(a, "1d") for a in window]
+    finally:
+        cells.ACTIVE_CELLS["crypto"] = gate
+
+
 def test_no_live_class_rotates_today():
     """One line for the whole claim: the only rotating class has no active
     cells, so not one live generation is scheduled differently today."""

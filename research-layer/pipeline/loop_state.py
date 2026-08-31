@@ -196,6 +196,35 @@ def queue_depths(state: dict) -> dict[str, int]:
             for cls, e in state.get("classes", {}).items()}
 
 
+def dead_queue_depths(state: dict) -> dict[str, int]:
+    """Per-class count of queued specs that can NEVER be registered -- status
+    reporting. See record_dead_specs."""
+    return {cls: len(e.get("sibling_queue_dead", []))
+            for cls, e in state.get("classes", {}).items()}
+
+
+def record_dead_specs(state: dict, asset_class: str,
+                      entries: list[dict]) -> None:
+    """Park queued specs the registry will never accept, with their reason.
+
+    THE WEDGE THIS PREVENTS (P2-T4 review F3): registry.register_strategy
+    refuses a spec whose cited card is no longer accepted, and review_card can
+    revoke an acceptance at any time -- so a queued spec can outlive the card
+    that justified it. Left in the live queue, that one spec raises on every
+    drain forever: the class never registers anything again and the whole
+    queue behind it is stranded with neither a verdict nor any prospect of
+    one, which INVERTS D10's own invariant instead of serving it.
+
+    Moved here, the drain keeps going and the casualty stays VISIBLE (its
+    depth is a status item) with the registry's own refusal text attached, so
+    the fix is a human decision about a named spec rather than an
+    archaeology exercise. Each entry is {"spec": ..., "reason": ...}.
+    """
+    if not entries:
+        return
+    _entry(state, asset_class).setdefault("sibling_queue_dead", []).extend(entries)
+
+
 def enqueue_specs(state: dict, asset_class: str, specs: list[dict]) -> None:
     """Append carried-over specs to the BACK of this class's queue (FIFO).
 
@@ -240,15 +269,40 @@ def refresh_queues(state: dict, path: str | Path) -> None:
     A queue absent on disk REMOVES the in-memory one; that is the drained
     case, and treating absence as "no news" is how a fully-drained queue comes
     back from the dead.
+
+    IT NEVER STUBS A CLASS (P2-T4 review F7). An earlier version called
+    _entry() for every class it saw on disk, which minted a bare
+    {"threshold": 25} for a class the loop's in-memory state did not carry --
+    and the loop's end-of-cycle save then wrote that stub over the real entry,
+    losing a watermark another writer had set (loop_state.json is documented
+    as Coen-editable, so this file has writers other than the loop). A
+    disk-only class is now either copied WHOLE, when it carries queue state
+    worth rescuing, or left entirely alone.
     """
     disk = load(path)
-    for cls in set(disk.get("classes", {})) | set(state.get("classes", {})):
-        queued = disk.get("classes", {}).get(cls, {}).get("sibling_queue")
-        entry = _entry(state, cls)
-        if queued:
-            entry["sibling_queue"] = queued
-        else:
-            entry.pop("sibling_queue", None)
+    queue_keys = ("sibling_queue", "sibling_queue_dead")
+    for cls, disk_entry in disk.get("classes", {}).items():
+        if cls not in state.setdefault("classes", {}):
+            # Only reason to adopt a class the loop was not carrying: the
+            # composer subprocess created it to park work. Copy the entry as
+            # it stands rather than synthesising one.
+            if any(disk_entry.get(k) for k in queue_keys):
+                state["classes"][cls] = dict(disk_entry)
+            continue
+        entry = state["classes"][cls]
+        for key in queue_keys:
+            value = disk_entry.get(key)
+            if value:
+                entry[key] = value
+            else:
+                entry.pop(key, None)
+    # A class the loop carries that has vanished from disk keeps whatever the
+    # loop has: this function reconciles QUEUES, and inventing a deletion from
+    # an absent file would be a different (and much larger) claim.
+    for cls, entry in state.get("classes", {}).items():
+        if cls not in disk.get("classes", {}):
+            for key in queue_keys:
+                entry.pop(key, None)
 
 
 def pick_class(state: dict, counts: dict[str, int]) -> str | None:
@@ -260,6 +314,16 @@ def pick_class(state: dict, counts: dict[str, int]) -> str | None:
     where "attended" is the later of a completed generation and a budget
     park. A never-attended class still sorts first; ties break by
     cells.LIVE_CLASSES order.
+
+    A NON-EMPTY SIBLING QUEUE IS ITSELF A TRIGGER (D10, P2-T4 review F4). The
+    threshold arithmetic asks "has enough NEW information arrived"; a queued
+    sibling is work already proposed and already counted, and it needs no new
+    card at all -- only capacity. Without this a class whose card flow goes
+    quiet is never picked, so its queue parks indefinitely: the same silent
+    drop D10 removes, moved one gate earlier. The trigger BASIS is untouched
+    (that was corrected 2026-08-29 and is load-bearing); this adds a second,
+    independent reason to be picked, and it cannot fire on its own today
+    because every queue is empty.
     """
     over: list[str] = []
     for cls in cells.LIVE_CLASSES:
@@ -268,7 +332,7 @@ def pick_class(state: dict, counts: dict[str, int]) -> str | None:
         entry = state["classes"].get(cls, {})
         threshold = entry.get("threshold", DEFAULT_THRESHOLD)
         watermark = entry.get("watermark", 0)
-        if counts[cls] - watermark >= threshold:
+        if counts[cls] - watermark >= threshold or queue_depth(state, cls):
             over.append(cls)
     if not over:
         return None

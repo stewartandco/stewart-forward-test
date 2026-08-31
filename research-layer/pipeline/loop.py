@@ -42,7 +42,7 @@ from typing import Callable
 from . import cells, loop_state, pipeline_budget, pipeline_status
 from .budget import BudgetMeter, PIPELINE_CAP_USD
 from .chainlock import ChainLock, ChainLockHeld
-from .composer import routable_cards
+from .composer import expand_family, expander_for, routable_cards
 from .registry import Registry
 
 LAYER_DEFAULT = Path(__file__).resolve().parent.parent
@@ -420,8 +420,16 @@ def _queue_items(state: dict) -> dict[str, str]:
     status file, not something a human has to open loop_state.json to see.
     Emitted for every class with a state entry, depth 0 included: a series
     that only appears when it is non-zero cannot show a queue draining."""
-    return {f"queue_{c}": str(n)
-            for c, n in loop_state.queue_depths(state).items()}
+    items = {f"queue_{c}": str(n)
+             for c, n in loop_state.queue_depths(state).items()}
+    # sibling_queue_dead: queued specs the registry refuses outright (their
+    # cited card lost its acceptance while they waited). Reported ONLY when
+    # non-zero -- unlike queue_<cls>, whose zero is informative, a permanent
+    # zero here would be noise on every class forever, and any non-zero value
+    # is a human action item rather than a level to watch drain.
+    items.update({f"queue_dead_{c}": str(n)
+                  for c, n in loop_state.dead_queue_depths(state).items() if n})
+    return items
 
 
 def _rotation_assets(asset_class: str) -> list[str]:
@@ -445,9 +453,24 @@ def _sweep_window(state: dict, asset_class: str) -> tuple[list[str], bool]:
     passes no `--assets` at all and the composer invocation is byte-identical
     to its pre-D6 form. That is the state every class is in today: the four
     tradfi classes are not in ROTATION_CLASSES, and crypto's active set is
-    empty."""
+    empty.
+
+    TWO gates, and the second one is not redundant (P2-T4 review F2).
+    ROTATION_CLASSES says which classes SHOULD rotate; the routing dispatch
+    says which classes CAN accept a window at all -- `--assets` is a view onto
+    active cells, and the legacy pooled expander has none, so the composer
+    refuses it. crypto is in ROTATION_CLASSES today AND still pooled, so
+    without this second gate a Phase 3 commit that populated
+    ACTIVE_CELLS["crypto"] without also switching expander_for would emit a
+    window into a composer guaranteed to exit 1 -- stage_failed and a Sentinel
+    FAIL on every crypto fire, three times a day. Reading the dispatch makes
+    rotation switch on in the SAME commit that makes it legal. The loud
+    failure for a half-landed Phase 3 lives in the test suite
+    (test_phase2_freeze.py's activation-simulation tests), which is where a
+    coupling error should be caught -- not in a live crash loop."""
     assets = _rotation_assets(asset_class)
-    if asset_class not in ROTATION_CLASSES:
+    if (asset_class not in ROTATION_CLASSES
+            or expander_for(asset_class) is expand_family):
         return assets, False
     window = loop_state.rotation_window(state, asset_class, assets, ROTATION_SIZE)
     return window, window != assets

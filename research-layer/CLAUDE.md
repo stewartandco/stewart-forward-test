@@ -74,6 +74,20 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   untouched. The loop passes `--assets` only when the window differs from the
   full active list, so today's composer argv is byte-identical to pre-D6.
   Nothing rotates today (crypto's active set is empty).
+- **D6 second gate -- BOTH sides read the routing dispatch, never the class
+  name.** `--assets` is a view onto active cells, and the legacy POOLED
+  expander has none, so `composer.run` refuses it. Both `loop._sweep_window`
+  and that refusal test `expander_for(cls) is expand_family`, so rotation
+  switches on in the SAME commit that makes a window legal. Keyed on the
+  string "crypto" instead, SP5 Phase 3 would have emitted a window into a
+  composer guaranteed to exit 1 -- `stage_failed` and a Sentinel FAIL on
+  every crypto fire, three times a day. `test_phase2_freeze.py` simulates
+  both a half-landed and a fully-landed Phase 3, so a coupling error fails at
+  test time rather than in production.
+- **`docs/2026-08-28-market-data-universe-design.md` s5 is STALE in this
+  worktree** on the rotation rule (as is s4 on crypto's benchmark and s7b on
+  the resurrection chaining). Trust the code, `docs/notes/family-openness-v1.md`
+  and this file.
 - **D10 sibling queues.** `validate_family`'s "exceeds cap, rejected, not
   clipped" refusal is GONE (chained pre-declaration:
   `docs/notes/family-openness-v1.md`). Overflow now splits via
@@ -82,10 +96,38 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   pipeline_status.json. **The composer writes that queue as a SUBPROCESS**, so
   `loop_state.refresh_queues(state, path)` runs right after the composer stage
   or the loop's own save clobbers it. A cycle whose class has a non-empty
-  queue DRAINS instead of proposing -- no metered model call at all -- and is
-  exempt from the `no_new_accepted_cards` stop (queued work needs no new
-  card). Invariant, test-pinned: no proposed variation is ever dropped without
-  either a gauntlet verdict or a queue entry.
+  queue DRAINS instead of proposing -- that STAGE makes no metered model call
+  (the cycle's triage panel still runs and still costs). Invariant,
+  test-pinned: no proposed variation is ever dropped without either a gauntlet
+  verdict or a queue entry.
+- **A queue is its own trigger, at BOTH gates.** `pick_class` treats
+  `queue_depth > 0` as over-threshold, and the `no_new_accepted_cards` stop
+  exempts a queued class. Queued work is already proposed and already counted;
+  it needs capacity, not new cards. With only one of the two, a class whose
+  card flow goes quiet parks its queue forever -- the silent drop D10 removes,
+  moved one gate earlier. The trigger BASIS itself is untouched.
+- **The drain runs BEFORE the "no accepted cards" refusal**, which is a
+  proposal precondition, not a drain one. Revoke the last accepted card with
+  that check first and every cycle exits 1 without ever looking at the queue.
+- **`sibling_queue_dead`** holds queued specs the registry refuses outright --
+  a queued spec can outlive its cited card, because `review_card` may revoke
+  an acceptance at any time and `register_strategy` then refuses forever. The
+  drain catches `ValueError` PER SPEC (never a bare except -- chain IO errors
+  must still abort), parks the offender with the registry's own reason, and
+  keeps going. Depth shows as `queue_dead_<cls>` in pipeline_status.json,
+  emitted only when non-zero, and it is **a human action item, not a level to
+  watch drain** -- it never re-triggers its class.
+- **⚠ KNOWN HARM (F5), declared not fixed: a split sweep can manufacture
+  `edge_of_grid` plateau failures at the cut.** `plateau.qualifies` reads what
+  is on the chain when the gauntlet runs, and the queued combos are not there
+  yet, so siblings adjacent to the cut can be failed for a capacity reason
+  wearing a statistical costume -- the very thing family-openness-v1 condemns,
+  one layer down. Draining later does NOT repair it: those verdicts are
+  already written. No clean fix exists (a cartesian product cannot be
+  partitioned without severing an axis; cutting on the outer axis makes the
+  window size vary with family shape, trading a visible harm for a hidden
+  one). Only reachable for families that TODAY are refused outright, so
+  nothing regresses -- but it is Coen's call, not a settled question.
 - **D9 re-trials.** `composer.RETRIAL_WINDOW_DAYS` = 183. A composition whose
   fingerprint matches a registered strategy is still dropped UNLESS that
   registration is currently BURIED and its burying verdict's cutoff is >= 183
@@ -99,6 +141,24 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   entering N honestly. **More registrations and more survivors at a fixed bar
   is arithmetic about the denominator, NEVER evidence of edge** -- see the
   chained note's own wording before reporting any of it.
+- **D9 ends chain-wide fingerprint uniqueness on purpose.** All 2,775 pre-D9
+  registrations carried distinct composition fingerprints; a re-trial is by
+  definition a second registration of one. The surviving invariant is PER RUN:
+  no single run may register a composition twice. That is why
+  `screen_siblings` checks `fp not in run_fps` before admitting a re-trial --
+  without it, family A's re-trial and family B's copy of it both chain, same
+  run, same data.
+
+## ⚠ Composer hazards for HAND RUNS in the live tree
+- `--loop-state` defaults to `logs/loop_state.json` next to `--registry`, so a
+  real (non-dry) `python -m pipeline.composer` in the live tree now READS AND
+  DRAINS THE LIVE SIBLING QUEUE and can write to the loop's state file. The
+  composer never touched that file before P2-T4. Pass an explicit
+  `--loop-state` (or `--dry-run`, which never mutates it) for a hand run you
+  do not want interacting with the loop's queue.
+- `--data-dir` likewise defaults next to `--registry`; it is read-only (D9
+  cell dating) but it means a hand run against a tmp registry silently gets a
+  tmp data dir, which is the intended test isolation.
 
 ## Triage cost controls (loop stage 4a)
 - `--limit` comes from `loop.TRIAGE_LIMIT` (40, not 200). It is sized to fit

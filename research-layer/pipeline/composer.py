@@ -301,7 +301,20 @@ def screen_siblings(specs: list[dict], known_fps: dict[str, str],
                 f"same composition — duplicate blocks or mirrored sweep axes")
             return kept_specs, drop_notes, True
         fam_fps[fp] = spec["strategy_id"]
-        if fp in known_fps and retrial_ok is not None and retrial_ok(known_fps[fp], spec):
+        # `fp not in run_fps` is LOAD-BEARING, not defensive. Without it a
+        # composition admitted as a re-trial by family A is admitted AGAIN by
+        # family B in the same run: B reaches this branch first and never
+        # falls through to the run_fps drop below, so ONE composition chains
+        # twice on identical data -- exactly the same-data re-test the whole
+        # window exists to forbid. family-openness-v1: "a composition
+        # duplicating one already registered earlier in the same run is still
+        # dropped ... Those ARE same-data by construction."
+        #
+        # Ordered known_fps-first on purpose (message-preserving): a spec in
+        # BOTH sets falls through to the known_fps drop below and reports the
+        # pre-D9 wording, so the no-oracle path stays byte-identical.
+        if (fp in known_fps and fp not in run_fps
+                and retrial_ok is not None and retrial_ok(known_fps[fp], spec)):
             drop_notes.append(
                 f"sibling {spec['strategy_id']} admitted as a RE-TRIAL of "
                 f"buried {known_fps[fp]}: its cell's data has moved "
@@ -522,6 +535,34 @@ def split_for_cycle(specs: list[dict], cap: int | None) -> tuple[list[dict], lis
     the manual-run case: a hand invocation with nowhere to persist a queue
     must register the whole family rather than discard its tail, because a
     dropped tail is exactly the outcome D10 exists to remove.
+
+    ================= KNOWN HARM, DECLARED, NOT FIXED =================
+    A SPLIT SWEEP CAN MANUFACTURE `edge_of_grid` PLATEAU FAILURES AT THE CUT
+    (P2-T4 review F5). plateau.qualifies fails a sibling when a one-grid-step
+    neighbour is not registered, and it reads what is ON THE CHAIN when the
+    gauntlet runs. In the cycle that splits a family, the queued combos are
+    not on the chain yet, so the siblings adjacent to the cut can be failed
+    for a capacity reason wearing a statistical costume -- which is precisely
+    what family-openness-v1 condemns, one layer further down than the refusal
+    this function replaced. The queued half draining later does NOT repair it:
+    those verdicts are already written, and verdicts are never re-judged.
+
+    WHY IT IS NOT FIXED HERE. A sweep is a CARTESIAN PRODUCT over one or more
+    axes, and no partition of it leaves every axis's adjacency intact -- with
+    a single axis the product IS the axis, so any cut severs it. Cutting on
+    the outermost axis's boundary (the obvious "clean" fix) preserves the
+    inner axes' neighbourhoods but still severs the outer one, AND makes the
+    window size vary with the family's shape -- a 60-cap silently becoming 45
+    or 75 -- which trades a visible harm for a hidden one. Nothing subtle was
+    invented here; the honest options are to accept this, or to queue at
+    FAMILY granularity instead of sibling granularity (no sweep ever cut),
+    which the chained note's own wording forecloses: "a family whose sweep
+    exceeds the per-cycle sibling bound registers the first window now and
+    QUEUES the remainder".
+
+    SCOPE, measured: this can only bite a family whose sweep exceeds the cap,
+    i.e. one that TODAY is refused outright and registers nothing at all. No
+    currently-reachable behaviour regresses. It is on the list for Coen.
     """
     if cap is None or cap <= 0 or len(specs) <= cap:
         return list(specs), []
@@ -1723,10 +1764,10 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
                          per_cycle_specs: int | None) -> int:
     """D10: register one window off this class's sibling queue, propose nothing.
 
-    A drain cycle is a FULL substitute for a proposal cycle, not an addition
-    to it: it makes no metered model call, and it registers at most the same
-    per-cycle window a proposal cycle would. That keeps the bound meaning what
-    it says and stops a long queue from being paid for twice in one cycle.
+    A drain replaces THIS STAGE's proposal, not the whole cycle: the composer
+    makes no metered model call, and registers at most the same per-cycle
+    window a proposal would. The loop's other metered stage (the triage panel)
+    still runs as usual -- the saving is composer-level, not cycle-level.
 
     Every drained spec is still screened against the chain. A queued spec was
     never registered, so a collision here means some OTHER run registered an
@@ -1747,8 +1788,9 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
 
     print(f"QUEUE DRAIN ({args.asset_class}): {len(drained)} queued sibling(s) "
           f"taken, {len(fresh)} to register, {len(collided)} now collide with "
-          f"the chain, {remaining} still queued. No families proposed this "
-          f"cycle (D10: a drain replaces a proposal, it does not add to it).")
+          f"the chain, {remaining} still queued. No families proposed (D10: a "
+          f"drain replaces this stage's proposal, it does not add to it; the "
+          f"cycle's triage panel still runs and still costs).")
     for spec in collided:
         print(f"    - queued {spec['strategy_id']} dropped: composition "
               f"already registered as {known_fps[composition_fingerprint(spec)]}")
@@ -1779,9 +1821,29 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
             registry.register_block_type(block_type_payload(*key))
             n_blocks += 1
     n_written = 0
+    dead: list[dict] = []
     try:
         for spec in fresh:
-            registry.register_strategy(spec)
+            # ValueError ONLY, and per spec (P2-T4 review F3). A queued spec
+            # can outlive the card that justified it -- review_card may revoke
+            # an acceptance at any time, and register_strategy then refuses it
+            # forever. Raising here would wedge the whole class: every
+            # subsequent drain re-hits the same spec, nothing after it ever
+            # registers, and the queue behind it is stranded with neither a
+            # verdict nor any prospect of one. That inverts the invariant D10
+            # exists to serve, so the offender is parked (visibly, with the
+            # registry's own reason) and the drain continues.
+            #
+            # Deliberately NOT a bare except: an OSError on the chain file, a
+            # KeyboardInterrupt or a hash failure is an infrastructure problem
+            # that must still abort loudly through the handler below. Only the
+            # registry's own domain refusal is survivable.
+            try:
+                registry.register_strategy(spec)
+            except ValueError as exc:
+                dead.append({"spec": spec, "reason": str(exc)[:300]})
+                print(f"  DEAD queued {spec['strategy_id']}: {exc}")
+                continue
             n_written += 1
             print(f"  registered {spec['strategy_id']}  {spec['name']}")
     except BaseException:
@@ -1793,10 +1855,13 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
               f"before failure; the queue on disk is unchanged, so the next "
               f"cycle re-drains this window.", file=sys.stderr)
         raise
+    loop_state.record_dead_specs(queue_state, args.asset_class, dead)
     loop_state.save(queue_path, queue_state)
 
+    dead_txt = (f", {len(dead)} moved to sibling_queue_dead (the registry "
+                f"refuses them; they need a human)" if dead else "")
     print(f"\nqueue drain complete: {n_written} spec(s) registered, "
-          f"{remaining} still queued for {args.asset_class}, "
+          f"{remaining} still queued for {args.asset_class}{dead_txt}, "
           f"{n_blocks} block type(s) newly registered.")
     return 0
 
@@ -1832,26 +1897,36 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                          "test-isolation reason as --data-dir")
     args = ap.parse_args(argv)
 
-    # --assets is a view onto the ACTIVE CELL set, and the legacy pooled
-    # crypto path has none: its universe comes from ALLOWED_ASSETS +
-    # UNIVERSE_BASE, not from cells.active_cells. Refuse rather than accept an
-    # argument that would be silently ignored. Phase 3's activation commit,
-    # which routes crypto through expand_family_for_class, is what makes this
-    # combination meaningful.
-    if args.assets and args.asset_class == "crypto":
-        print("--assets has no meaning on the legacy pooled crypto path "
-              "(composer.expander_for('crypto') is expand_family, whose "
-              "universe is ALLOWED_ASSETS/UNIVERSE_BASE, not active cells). "
-              "It becomes meaningful at SP5 Phase 3's activation commit.")
+    # --assets is a view onto the ACTIVE CELL set, and the legacy POOLED path
+    # has none: its universe comes from ALLOWED_ASSETS + UNIVERSE_BASE, not
+    # from cells.active_cells. Refuse rather than accept an argument that
+    # would be silently ignored.
+    #
+    # Keyed on the REAL ROUTING DISPATCH, not on the literal string "crypto"
+    # (P2-T4 review F2). The two are the same fact today, but only the
+    # dispatch stays correct through Phase 3: that commit switches
+    # expander_for("crypto") to the per-cell path, and on the same commit this
+    # refusal must stop firing -- because pipeline/loop.py starts emitting a
+    # rotation window for crypto at exactly that moment. Written against the
+    # class name instead, Phase 3 would have produced a guaranteed nonzero
+    # composer exit on every crypto fire (stage_failed, Sentinel FAIL, three
+    # times a day) until someone noticed. Same convention the P2-T3 rider
+    # established for the benchmark pin: read the dispatch, never a proxy
+    # for it.
+    if args.assets and expander_for(args.asset_class) is expand_family:
+        print(f"--assets has no meaning on the legacy pooled path that class "
+              f"{args.asset_class!r} still routes through "
+              f"(composer.expander_for({args.asset_class!r}) is expand_family, "
+              f"whose universe is ALLOWED_ASSETS/UNIVERSE_BASE, not active "
+              f"cells). It becomes meaningful when that class moves to "
+              f"expand_family_for_class -- for crypto, SP5 Phase 3's "
+              f"activation commit.")
         return 1
     sweep_assets = ([a.strip() for a in args.assets.split(",") if a.strip()]
                     if args.assets else None)
 
     registry = Registry(args.registry)
     accepted = registry.cards(status="accepted")
-    if not accepted:
-        print("No accepted cards in the registry — run the Reader and triage first.")
-        return 1
 
     conflicts = preflight_block_types(registry)
     if conflicts:
@@ -1887,14 +1962,27 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # -- D10 drain, BEFORE any proposal -------------------------------------
     # family-openness-v1: the queued remainder of an over-cap family is fed
     # into the NEXT cycle for that class BEFORE new families are proposed,
-    # draining until empty. A draining cycle does NOT propose: it makes no
-    # metered model call at all (a real spend saving, not just an ordering),
-    # and it keeps the per-cycle bound meaning what it says -- one window of
-    # siblings per cycle, whether they are new or carried.
+    # draining until empty. A draining invocation does NOT propose, so THIS
+    # STAGE makes no metered model call (a real saving, not just an ordering);
+    # the cycle's triage panel is a separate stage and still runs. It keeps
+    # the per-cycle bound meaning what it says -- one window of siblings per
+    # cycle, whether they are new or carried.
+    #
+    # ORDERED BEFORE THE "no accepted cards" REFUSAL ON PURPOSE (P2-T4 review
+    # F3, second half). That refusal is a PROPOSAL precondition -- you cannot
+    # invent families without cards -- and it is not a drain precondition: a
+    # queued spec was already proposed and already cites its cards. Checked
+    # first, it wedges the queue exactly as the poison pill did, one gate
+    # earlier: revoke the last accepted card and every subsequent cycle exits
+    # 1 without ever looking at the queue, stranding it forever.
     queue_state = loop_state.load(queue_path)
     if loop_state.queue_depth(queue_state, args.asset_class):
         return _drain_sibling_queue(args, registry, queue_state, queue_path,
                                     known_fps, per_cycle_specs)
+
+    if not accepted:
+        print("No accepted cards in the registry — run the Reader and triage first.")
+        return 1
 
     # Card routing (spec s4/D2): see routable_cards() for the full lane
     # breakdown (crypto unrestricted; fx/equity_etf/bond_etf/metal_etf
