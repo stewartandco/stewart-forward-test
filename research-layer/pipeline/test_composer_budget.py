@@ -124,3 +124,63 @@ def test_a_dry_run_is_metered_too(tmp_path, monkeypatch, capsys):
     # no accepted cards means the model is never reached; the point is that the
     # dry-run path goes through the metered factory rather than around it
     assert composer_mod._client_and_meter() == (client, meter)
+
+
+# ---------------- the client must load the reader key ----------------
+#
+# 2026-08-29, live: a real cycle ran verify -> triage (40 cards, ~USD 0.77
+# spent, 12 entries chained) and then died in the composer preflight on
+# "Could not resolve authentication method". The key is not in the ambient
+# environment on this machine -- it lives in the reader's .env, and every
+# other entry point loads it. The composer did not, so the watermark never
+# advanced and the class re-fired forever, burning the triage spend each time.
+# Every one of the six historical composer calls had been session-launched,
+# where the key happened to be in the session env, which is why the first
+# UNATTENDED run was the first to hit it.
+
+def test_missing_api_key_fails_with_a_clear_message_not_an_sdk_traceback(monkeypatch):
+    """Mirrors the triage-batch test. The failure must name ANTHROPIC_API_KEY
+    and the path it was looked for at, not surface 30 frames deep inside the
+    anthropic SDK saying nothing about where the key belongs."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("READER_ENV_PATH", "no-such-file.env")
+    with pytest.raises(SystemExit) as e:
+        composer_mod._client_and_meter()
+    assert "ANTHROPIC_API_KEY" in str(e.value)
+
+
+def test_the_client_loads_the_reader_env_rather_than_inventing_its_own(monkeypatch, tmp_path):
+    """Reuse scanner._load_api_key - one loader, one source of truth for where
+    the sc-reader key lives."""
+    env = tmp_path / "reader.env"
+    env.write_text("ANTHROPIC_API_KEY=sk-test-not-a-real-key\n", encoding="utf-8")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("READER_ENV_PATH", str(env))
+    client, meter = composer_mod._client_and_meter()
+    assert client is not None and meter is not None
+
+
+def test_the_loader_runs_before_the_client_is_constructed(monkeypatch):
+    """The ambient key must not be what makes this pass. Record the loader
+    call and stub the SDK: if the composer ever goes back to relying on the
+    environment it happened to be launched with, this fails even on a machine
+    where the key IS set."""
+    import anthropic
+
+    from . import scanner as scanner_mod
+
+    called: list[Path] = []
+
+    def fake_load(env_path):
+        called.append(env_path)
+
+    class FakeAnthropic:
+        def __init__(self, *a, **kw):
+            assert called, "client constructed before the reader .env was loaded"
+
+    monkeypatch.setattr(scanner_mod, "_load_api_key", fake_load)
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+
+    client, meter = composer_mod._client_and_meter()
+    assert called == [scanner_mod.DEFAULT_READER_ENV]
+    assert isinstance(client, FakeAnthropic) and meter is not None

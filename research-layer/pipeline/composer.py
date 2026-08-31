@@ -1132,10 +1132,23 @@ def preflight_block_types(registry: Registry) -> list[str]:
 
 def _client_and_meter():
     """Real client and budget meter. Split out so tests can stub it, and so
-    both the dry run and the real run go through the SAME metered path."""
+    both the dry run and the real run go through the SAME metered path.
+
+    The sc-reader key lives in the reader's .env, not in the ambient
+    environment, so load it the way every other entry point does. Loading it
+    here is what makes an UNATTENDED run work: every composer call before
+    2026-08-29 was session-launched, where the key happened to be in the
+    session env, so the first scheduled cycle was the first to die on
+    "Could not resolve authentication method" -- thirty frames deep in the
+    anthropic SDK, saying nothing about where the key actually belongs, after
+    the triage stage had already paid full freight for the cycle.
+    """
     import anthropic
     from pathlib import Path as _Path
     from .budget import BudgetMeter, PIPELINE_CAP_USD
+    from .scanner import DEFAULT_READER_ENV, _load_api_key
+
+    _load_api_key(DEFAULT_READER_ENV)      # raises SystemExit with the path
     logs = _Path(__file__).resolve().parent.parent / "logs"
     return anthropic.Anthropic(), BudgetMeter(
         logs / "budget_ledger.jsonl", monthly_cap_usd=PIPELINE_CAP_USD,
