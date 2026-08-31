@@ -154,6 +154,20 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `screen_siblings` checks `fp not in run_fps` before admitting a re-trial --
   without it, family A's re-trial and family B's copy of it both chain, same
   run, same data.
+- **`verify_registry.py` invariant 8 enforces that SAME rule, through the same
+  function.** `composer.retrial_verdict` is the one implementation; the
+  verifier and `retrial_oracle` are both thin readers of it, and a second copy
+  of the rule anywhere is a defect. They differ ONLY in how they read a window
+  they cannot establish: the composer is deciding, so unreadable = refuse; the
+  verifier is checking with strictly less evidence, so unreadable = report
+  `window not verifiable` and PASS. A verifier that failed there would call
+  the chain corrupt every time an artifact bundle was pruned.
+- **The window leg is not a chain fact.** The verifier reads the cutoff from
+  `artifacts/` and the data end from `data/`, defaulting to beside the log and
+  overridable with `--artifacts-dir`/`--data-dir` (the loop passes both). Run
+  it against a COPY of the chain without those dirs and it still says VALID,
+  but it has only checked the buried-priors and same-run legs -- read the
+  NOTE line before concluding a re-trial was verified.
 
 ## ⚠ Composer hazards for HAND RUNS in the live tree
 - `--loop-state` defaults to `logs/loop_state.json` next to `--registry`, so a

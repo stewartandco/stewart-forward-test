@@ -120,9 +120,20 @@ python verify_registry.py registry_log.jsonl
 6. Strategy blocks reference previously registered block types.
 7. Every `quarantine_decision` references a strategy **currently** in
    `quarantine`, and `(strategy_id, date, asset)` is unique.
-8. No two `strategy_registered` entries share a `composition_fingerprint` —
-   "a buried composition never returns", checkable from the chain rather than
-   trusted to the Composer's in-process guard.
+8. A repeated `composition_fingerprint` is a legitimate **D9 re-trial**, not a
+   duplicate. `docs/notes/family-openness-v1.md` (chained) retired chain-wide
+   composition uniqueness, so what is checked is the Composer's own admission
+   rule, through the one shared implementation `composer.retrial_verdict`:
+   every **earlier** registration of that fingerprint is currently buried, and
+   the latest burying verdict's cutoff is ≥ `RETRIAL_WINDOW_DAYS` (183) behind
+   the **oldest** referenced cell's data end. Two registrations of one
+   composition inside one run are never a re-trial, and a duplicate of a
+   quarantine/live/unjudged registration still fails. The buried-priors and
+   same-run legs are chain-only; the window leg needs off-chain evidence (the
+   cutoff is in `artifacts/<sid>/{gauntlet/,}config.json`, the data end in
+   `data/<cell>.csv`), read
+   from beside the log or `--artifacts-dir`/`--data-dir`. When that evidence
+   is absent the window is reported **unverified**, never failed.
 9. `quarantine_data_snapshot` dates are unique, and every
    `quarantine_decision` is covered by an **earlier** snapshot naming its
    asset with a well-formed digest. Since the 2026-08-27 per-class-calendars
@@ -180,9 +191,13 @@ Mechanics worth knowing:
   grammar, a family-level guard would have killed whole families on one
   collision and silently prevented rediscovery. Applied per sibling it becomes
   a robustness filter — a real idea returns at neighbouring parameters, and one
-  that worked only at the exact buried point was overfit. `verify_registry.py`
-  invariant 8 re-checks fingerprint uniqueness from the chain itself, so the
-  guarantee no longer rests on the Composer's in-process guard.
+  that worked only at the exact buried point was overfit. Since D9
+  (`docs/notes/family-openness-v1.md`) the collision is an EXPIRY rather than a
+  permanent exclusion: a buried composition may be proposed again as a new
+  strategy with a new id once its cell's data has moved 183 days past the
+  burying verdict's cutoff. `verify_registry.py` invariant 8 re-checks that
+  same admission rule from the chain, so the guarantee no longer rests on the
+  Composer's in-process guard.
 - **The gauntlet tests robustness; quarantine does the out-of-sample work.**
   Protocol-v3 retired the deflated-Sharpe gate from the gauntlet. Measured on
   this registry its implied hurdle had reached **1.86 annualized Sharpe against

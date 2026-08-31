@@ -425,11 +425,21 @@ bundle tamper-evident without bloating the registry.
    registered via `block_type_registered`.
 7. Every `quarantine_decision` references a strategy **currently** in
    `quarantine` state, and `(strategy_id, date, asset)` is unique.
-8. No two `strategy_registered` entries share a `composition_fingerprint`.
-   This is rule 7 — a buried composition never returns — verified from the
-   chain itself rather than trusted to the composer's in-process guard. The
-   fingerprint covers universe and blocks only, so a re-registration under a
-   fresh `strategy_id` is caught.
+8. A repeated `composition_fingerprint` satisfies the **D9 re-trial** rule
+   (`docs/notes/family-openness-v1.md`, chained), applied through the same
+   implementation the composer uses, `composer.retrial_verdict`: every earlier
+   registration of that fingerprint is currently buried, and the latest
+   burying verdict's cutoff is ≥ 183 days behind the oldest referenced cell's
+   data end. Otherwise it is a duplicate and fails — including a duplicate of
+   a quarantine or live registration (which has no burying verdict and
+   therefore no expiry) and two registrations of one composition inside one
+   `generator.run_id` (same data by construction). The window leg reads
+   off-chain evidence (`artifacts/<sid>/{gauntlet/,}config.json` for the
+   cutoff, `data/<cell>.csv` for the data end, defaulting to beside the log,
+   overridable with `--artifacts-dir`/`--data-dir`); when that evidence is
+   missing it is reported unverified rather than failed, because the verifier
+   is checking rather than deciding and must not call a chain corrupt over a
+   pruned artifact bundle.
 9. `quarantine_data_snapshot` dates are unique, both digest maps name the same
    assets, and every digest is a real 64-character lowercase SHA-256 — the
    same check the writer applies, so a hand-appended fake cannot license a

@@ -12,9 +12,23 @@ invariants:
   6. strategy blocks reference previously registered block types
   7. quarantine_decision entries reference a strategy CURRENTLY in quarantine,
      and (strategy_id, date, asset) is unique
-  8. no two strategy_registered entries share a composition_fingerprint —
-     rule 7 (a buried composition never returns) verified from the chain
-     itself, not merely trusted to the composer's in-process guard
+  8. a repeated composition_fingerprint is a legitimate D9 RE-TRIAL, not a
+     duplicate. docs/notes/family-openness-v1.md (chained, entry 16,071)
+     retired chain-wide composition uniqueness: a buried COMPOSITION may be
+     proposed again as a NEW strategy with a new id and its own number. So
+     what is checked is the composer's own admission rule, via the ONE shared
+     implementation (composer.retrial_verdict): every EARLIER registration of
+     the fingerprint is currently BURIED, and the latest burying verdict's
+     cutoff is >= RETRIAL_WINDOW_DAYS behind the OLDEST referenced cell's
+     data end. Two registrations of one composition inside ONE run are never
+     a re-trial, and a duplicate of a quarantine/live/unjudged registration
+     still fails. WHAT THIS VERIFIER CANNOT DO FROM THE CHAIN ALONE: the
+     cutoff lives in artifacts/<sid>/{gauntlet/,}config.json and the data end
+     in data/<cell>.csv, and neither is a chain fact. Both legs are read from
+     disk beside the log (override with --artifacts-dir/--data-dir); when
+     they cannot be read the window leg is reported UNVERIFIED rather than
+     failed, and the count is printed. The buried-priors and same-run legs
+     are chain-only and always enforced
   9. quarantine_data_snapshot dates are unique, both digest maps name the same
      assets, every digest is a real 64-char lowercase sha256 (the same check
      the writer applies, so a hand-appended fake cannot license a date), and
@@ -29,6 +43,7 @@ invariants:
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
+                              [--artifacts-dir DIR] [--data-dir DIR]
 """
 from __future__ import annotations
 
@@ -46,7 +61,10 @@ from pathlib import Path
 _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:                    # idempotent under re-import
     sys.path.insert(0, _HERE)
-from pipeline.composer import composition_fingerprint          # noqa: E402
+from pipeline.composer import (composition_fingerprint,        # noqa: E402
+                              burying_cutoff, cell_data_end,
+                              retrial_verdict, RETRIAL_REASONS,
+                              RETRIAL_OK, RETRIAL_WINDOW_UNKNOWN)
 from pipeline.registry import (is_sha256_hex,                  # noqa: E402
                                QUARANTINE_SNAPSHOT_DIGEST_KEYS)
 
@@ -143,10 +161,21 @@ def snapshot_digest_coverage(lineno, etype, payload, fail):
     return valid[0] & valid[1]
 
 
-def verify(log_path: Path) -> int:
+def verify(log_path: Path, artifacts_dir: Path | None = None,
+           data_dir: Path | None = None) -> int:
+    """Walk the chain. `artifacts_dir`/`data_dir` supply invariant 8's
+    OFF-CHAIN evidence (the burying cutoff and the cells' data ends); they
+    default to `artifacts/` and `data/` beside the log, which is where the
+    composer keeps them and where the loop's pre-spend gate finds them. When
+    a piece of that evidence is missing the window leg is reported unverified,
+    never failed — see invariant 8 in the module docstring."""
     if not log_path.exists():
         print(f"ERROR: log file not found: {log_path}")
         return 2
+
+    beside = log_path.resolve().parent
+    artifacts_dir = Path(artifacts_dir) if artifacts_dir else beside / "artifacts"
+    data_dir = Path(data_dir) if data_dir else beside / "data"
 
     prev_hash = GENESIS_HASH
     n_entries = 0
@@ -164,8 +193,38 @@ def verify(log_path: Path) -> int:
     state: dict[str, str] = {}
     by_type: dict[str, int] = {}
     quarantine_seen: set[tuple] = set()
-    fingerprints: dict[str, str] = {}       # composition -> first strategy_id
+    # EVERY registering id per composition, in chain order -- not just the
+    # first. Collapsing to the first was lossless only while a fingerprint
+    # could be registered once, and D9 is precisely what ends that: the oldest
+    # copy can be buried while a later one is under test, and the rule has to
+    # see all of them.
+    fingerprints: dict[str, list[str]] = {}   # composition -> registering ids
+    run_of: dict[str, str] = {}               # strategy_id -> generator.run_id
+    buried_at_of: dict[str, str] = {}         # strategy_id -> stage it was buried from
+    unverified_windows: list[str] = []        # invariant 8, evidence missing
     snapshots: dict[str, set] = {}          # date -> assets fully provenanced
+
+    cutoff_cache: dict[str, str | None] = {}
+
+    def cutoff_of(sid: str) -> str | None:
+        """The burying verdict's cutoff, off disk. None (unreadable) makes the
+        window UNVERIFIED here, not shut -- the verifier is checking, not
+        deciding, and must not call a chain corrupt over a pruned bundle."""
+        if sid not in cutoff_cache:
+            cutoff_cache[sid] = burying_cutoff(artifacts_dir, sid,
+                                               buried_at_of.get(sid, ""))
+        return cutoff_cache[sid]
+
+    data_end_cache: dict[tuple, str] = {}
+
+    def data_end_of(cell) -> str:
+        """Last bar on disk for one cell. Cached: cell_data_end scans a whole
+        CSV, and a chain with many re-trials would otherwise re-scan the same
+        handful of files once per duplicate per asset."""
+        cell = tuple(cell)
+        if cell not in data_end_cache:
+            data_end_cache[cell] = cell_data_end(data_dir, cell)
+        return data_end_cache[cell]
 
     def fail(lineno: int, msg: str) -> None:
         print(f"  line {lineno}: {msg}")
@@ -298,14 +357,40 @@ def verify(log_path: Path) -> int:
                 except Exception as exc:            # malformed spec, not a dupe
                     fail(lineno, f"strategy {sid}: cannot fingerprint ({exc})")
                 else:
-                    if fp in fingerprints:
+                    priors = fingerprints.get(fp, [])
+                    # `state` here is the lifecycle state AS OF THIS LINE,
+                    # which is the moment the composer's oracle was consulted.
+                    # A later transition cannot retro-license or retro-void a
+                    # registration that was legitimate when it was made
+                    # (graveyard is terminal, so a burial never un-happens).
+                    verdict = retrial_verdict(
+                        [(s, state.get(s, "proposed"), run_of.get(s, ""))
+                         for s in priors],
+                        payload, cutoff_of, data_end_of)
+                    if verdict == RETRIAL_WINDOW_UNKNOWN:
+                        unverified_windows.append(f"line {lineno} {sid}")
+                    elif verdict != RETRIAL_OK:
+                        # Name EVERY earlier registration once there is more
+                        # than one: post-D9 the culprit is not always the
+                        # oldest, and a chain_invalid abort is diagnosed from
+                        # this line alone.
+                        also = ("" if len(priors) < 2 else
+                                f" (all: {', '.join(priors)})")
                         fail(lineno, f"strategy {sid}: duplicate composition "
-                                     f"already registered as {fingerprints[fp]}")
-                    elif sid:
-                        # only a NAMED strategy may become the first holder, or
-                        # a later duplicate reports "already registered as
-                        # None" and the real culprit goes unnamed
-                        fingerprints[fp] = sid
+                                     f"already registered as {priors[0]}"
+                                     f"{also} — {RETRIAL_REASONS[verdict]}")
+                    if sid:
+                        # only a NAMED strategy may be recorded, or a later
+                        # duplicate reports "already registered as None" and
+                        # the real culprit goes unnamed
+                        fingerprints.setdefault(fp, []).append(sid)
+                        gen = payload.get("generator")
+                        rid = gen.get("run_id") if isinstance(gen, dict) else None
+                        # "" never equals another entry's run_id, so a spec
+                        # with no readable run_id falls through to the buried
+                        # /window legs rather than being waved through OR
+                        # condemned on a field it does not have
+                        run_of[sid] = rid if isinstance(rid, str) else ""
                     # an unnamed spec is already reported by as_key above
 
             elif etype == "quarantine_data_snapshot":
@@ -396,9 +481,28 @@ def verify(log_path: Path) -> int:
                         fail(lineno, f"strategy {sid}: illegal transition {frm!r} -> {to!r}")
                     else:
                         state[sid] = to
+                        if to == "graveyard":
+                            # which stage's verdict did the burying, and
+                            # therefore which artifact bundle carries the
+                            # cutoff (composer.burying_cutoff's argument)
+                            ba = payload.get("buried_at") or frm
+                            buried_at_of[sid] = ba if isinstance(ba, str) else ""
 
     n_bad = len(bad_lines)
     print()
+    if unverified_windows:
+        # Loud on purpose. These entries passed invariant 8's chain-only legs
+        # (every earlier registration buried, not the same run) but their
+        # re-trial WINDOW could not be checked because the burying cutoff or
+        # the cell's bars were not on disk. Reported, never failed.
+        print(f"  NOTE: {len(unverified_windows)} re-trial(s) admitted with "
+              f"the window not verifiable (no artifact cutoff or no bars "
+              f"under {artifacts_dir} / {data_dir}):")
+        for row in unverified_windows[:10]:
+            print(f"    {row}")
+        if len(unverified_windows) > 10:
+            print(f"    ... and {len(unverified_windows) - 10} more")
+        print()
     print(f"  Entries           : {n_entries}")
     print(f"  By type           : "
           + ", ".join(f"{t}={n}" for t, n in sorted(by_type.items())))
@@ -427,11 +531,19 @@ def main() -> int:
     ap.add_argument("path", nargs="?",
                     default="registry_log.jsonl",
                     help="Path to registry_log.jsonl")
+    # Invariant 8's window leg reads OFF-CHAIN evidence. Both default to
+    # sitting beside the log, which is the layout the composer writes and the
+    # loop's pre-spend gate runs against; pass them when verifying a chain
+    # copied somewhere else for inspection.
+    ap.add_argument("--artifacts-dir", default=None,
+                    help="artifact bundles (default: artifacts/ beside the log)")
+    ap.add_argument("--data-dir", default=None,
+                    help="cached bars (default: data/ beside the log)")
     args = ap.parse_args()
     log_path = Path(args.path)
     print(f"Verifying registry at {log_path}")
     print("=" * 70)
-    return verify(log_path)
+    return verify(log_path, args.artifacts_dir, args.data_dir)
 
 
 if __name__ == "__main__":

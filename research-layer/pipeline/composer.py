@@ -372,6 +372,89 @@ def retrial_window_open(verdict_cutoff, cell_data_end,
     return (end - cutoff).days >= window_days
 
 
+# ---- the D9 admission rule itself, in ONE place -------------------------
+#
+# Two callers, and they are not symmetric. The composer is DECIDING, with the
+# artifact bundles and the bars in front of it; verify_registry.py is CHECKING
+# a chain, and the cutoff (artifacts/<sid>/gauntlet/config.json) and the data
+# end (data/<cell>.csv) are not ON the chain, so it can be handed a log with
+# neither. Their correct failure directions on missing evidence are therefore
+# OPPOSITE: the composer must refuse ("an expiry that cannot be established is
+# not an expiry"), the verifier must not condemn a chain because a bundle was
+# pruned. A bool cannot carry that distinction, so the rule returns a NAMED
+# verdict and each caller reads it its own way. What neither caller gets to do
+# is hold its own copy of the rule.
+RETRIAL_OK = "ok"
+RETRIAL_SAME_RUN = "same_run"
+RETRIAL_NOT_BURIED = "not_buried"
+RETRIAL_WINDOW_SHUT = "window_shut"
+RETRIAL_WINDOW_UNKNOWN = "window_unknown"
+
+# Why each refusal refused, in the words of family-openness-v1, for whoever
+# reads the failure rather than the code.
+RETRIAL_REASONS = {
+    RETRIAL_SAME_RUN: "registered twice in the same run — same data by "
+                      "construction, never a re-trial",
+    RETRIAL_NOT_BURIED: "the earlier registration is not buried — no burying "
+                        "verdict, no expiry, permanently excluded",
+    RETRIAL_WINDOW_SHUT: "the re-trial window is shut — the cell's data has "
+                         f"not moved {RETRIAL_WINDOW_DAYS} days past that "
+                         "burial's cutoff",
+}
+
+
+def retrial_verdict(priors, spec, cutoff_of, data_end_of_cell,
+                    window_days: int = RETRIAL_WINDOW_DAYS) -> str:
+    """PURE given its two lookups. The D9 rule (docs/notes/family-openness-v1)
+    applied to ONE candidate registration of an already-registered
+    composition.
+
+    priors  -- (strategy_id, lifecycle_state, run_id) for EVERY registration
+               of this composition that already exists, in chain order. Empty
+               means the composition is new and there is nothing to decide.
+    cutoff_of        -- strategy_id -> burying verdict cutoff, or None.
+    data_end_of_cell -- (asset, timeframe) -> last bar date, or "".
+
+    Returns one of the RETRIAL_* constants:
+
+      SAME_RUN   two registrations of one composition inside one run. Checked
+                 FIRST and unconditionally: "IN-RUN AND IN-CYCLE DUPLICATES
+                 REMAIN MALFORMED AND ARE NOT RE-TRIALS ... those ARE
+                 same-data by construction".
+      NOT_BURIED some prior registration is in quarantine or live (or has not
+                 been judged at all). EVERY prior, not the first one
+                 known_fps happens to name: once a composition can be
+                 registered twice, the oldest copy can be buried while a
+                 LATER one sits under test, and "a second copy of it is a
+                 duplicate, not a re-trial".
+      WINDOW_*   the LATEST burial governs (max over the cutoffs) and the
+                 OLDEST cell governs (min over the data ends): a pooled spec
+                 is one trial over all its cells, so the freshest cell must
+                 not carry the stalest into a re-test it has not earned.
+                 UNKNOWN means a cutoff or a data end could not be read at
+                 all, which is not the same claim as SHUT.
+      OK         admissible as a NEW numbered trial.
+    """
+    if not priors:
+        return RETRIAL_OK
+    run_id = (spec.get("generator") or {}).get("run_id")
+    if run_id and any(prior_run == run_id for _, _, prior_run in priors):
+        return RETRIAL_SAME_RUN
+    if any(st != "graveyard" for _, st, _ in priors):
+        return RETRIAL_NOT_BURIED
+    cutoffs = [cutoff_of(sid) for sid, _, _ in priors]
+    if not all(cutoffs):
+        return RETRIAL_WINDOW_UNKNOWN
+    uni = spec.get("universe") or {}
+    tf = uni.get("timeframe")
+    ends = [_date10(data_end_of_cell((a, tf))) for a in uni.get("assets") or []]
+    if not ends or not all(ends):
+        return RETRIAL_WINDOW_UNKNOWN
+    return (RETRIAL_OK if retrial_window_open(max(cutoffs), min(ends),
+                                              window_days)
+            else RETRIAL_WINDOW_SHUT)
+
+
 def cell_data_end(data_dir, asset: str | tuple, timeframe: str | None = None) -> str:
     """The last bar date on disk for one cell, or "" when the cell has no
     cached data. Accepts either (asset, timeframe) or a single (a, tf) tuple.
@@ -483,38 +566,31 @@ def retrial_oracle(registry: Registry, artifacts_dir, data_end_of_cell=None,
     # family-openness-v1 forbids exactly that: "a second copy of it is a
     # duplicate, not a re-trial".
     fingerprint_ids: dict[str, list[str]] = {}
+    run_of: dict[str, str] = {}
     for e in registry.entries():
         if e["entry_type"] == "strategy_registered":
+            p = e["payload"]
             fingerprint_ids.setdefault(
-                composition_fingerprint(e["payload"]), []).append(
-                    e["payload"]["strategy_id"])
+                composition_fingerprint(p), []).append(p["strategy_id"])
+            run_of[p["strategy_id"]] = (p.get("generator") or {}).get("run_id") or ""
+    states = registry.strategy_states()
     cutoffs: dict[str, str | None] = {}
 
     def _cutoff(sid: str) -> str | None:
         if sid not in cutoffs:
-            cutoffs[sid] = burying_cutoff(artifacts_dir, sid, buried[sid])
+            # buried_from() is the membership answer; a sid retrial_verdict
+            # asks about is buried by then, but .get keeps a caller that
+            # reaches here another way from raising.
+            cutoffs[sid] = burying_cutoff(artifacts_dir, sid, buried.get(sid, ""))
         return cutoffs[sid]
 
     def _ok(strategy_id: str, spec: dict) -> bool:
         sids = fingerprint_ids.get(composition_fingerprint(spec)) or [strategy_id]
-        if any(s not in buried for s in sids):
-            return False
-        found = [_cutoff(s) for s in sids]
-        if not all(found):
-            return False
-        # The LATEST burial governs: a composition buried again last month has
-        # not earned a re-trial just because an older copy of it was buried
-        # years ago.
-        cutoff = max(found)
-        uni = spec.get("universe", {})
-        tf = uni.get("timeframe")
-        ends = [_date10(data_end_of_cell((a, tf))) for a in uni.get("assets", [])]
-        if not ends or not all(ends):
-            return False
-        # The OLDEST cell governs: a pooled multi-asset spec is one trial over
-        # all its cells, so the freshest cell must not carry the stalest one
-        # into a re-test the stale one has not earned.
-        return retrial_window_open(cutoff, min(ends))
+        priors = [(s, states.get(s, "proposed"), run_of.get(s, "")) for s in sids]
+        # ONE reading of the rule, shared with verify_registry.py. The oracle
+        # is DECIDING, so anything short of OK — including a window it merely
+        # cannot establish — is a refusal.
+        return retrial_verdict(priors, spec, _cutoff, data_end_of_cell) == RETRIAL_OK
 
     return _ok
 

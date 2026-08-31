@@ -228,6 +228,24 @@ def _registered_strategy(tmp_path, name="s"):
     return reg, spec
 
 
+def _later_run(spec, run_id="a-later-run"):
+    """The same COMPOSITION proposed by a LATER run -- which is what a
+    re-trial candidate actually is.
+
+    Handing the oracle back the very spec object it already has on the chain
+    makes the candidate its own prior, in its own run, and the rule refuses
+    that outright: family-openness-v1, "a composition duplicating one already
+    registered earlier in the same run is still dropped ... those ARE
+    same-data by construction". The fingerprint covers universe and blocks
+    only, so changing run_id keeps the collision these tests are about.
+    """
+    out = json.loads(json.dumps(spec))
+    out["generator"] = dict(out["generator"], run_id=run_id)
+    assert (composer.composition_fingerprint(out)
+            == composer.composition_fingerprint(spec))
+    return out
+
+
 def test_retrial_window_days_is_183():
     assert composer.RETRIAL_WINDOW_DAYS == 183
 
@@ -396,7 +414,7 @@ def test_a_composition_with_no_burying_verdict_never_expires(tmp_path):
         json.dumps({"cutoff": "2019-01-01"}), encoding="utf-8")
 
     ok = composer.retrial_oracle(reg, art, lambda cell: "2026-08-27")
-    assert ok(sid, spec) is False, (
+    assert ok(sid, _later_run(spec)) is False, (
         "a quarantine registration has no burying verdict and therefore no "
         "expiry -- it must stay permanently excluded")
 
@@ -413,10 +431,14 @@ def test_a_buried_composition_expires_once_its_cell_data_moves_on(tmp_path):
     (art / sid / "gauntlet" / "config.json").write_text(
         json.dumps({"cutoff": "2023-12-31"}), encoding="utf-8")
 
+    candidate = _later_run(spec)
     open_now = composer.retrial_oracle(reg, art, lambda cell: "2026-08-27")
-    assert open_now(sid, spec) is True
+    assert open_now(sid, candidate) is True
     still_shut = composer.retrial_oracle(reg, art, lambda cell: "2024-03-01")
-    assert still_shut(sid, spec) is False
+    assert still_shut(sid, candidate) is False
+    # ... and the SAME composition proposed again inside the burial's own run
+    # is never a re-trial, however open the window
+    assert open_now(sid, spec) is False
 
 
 def test_a_later_copy_under_test_shuts_the_window_the_old_burial_opened(tmp_path):
@@ -452,7 +474,7 @@ def test_a_later_copy_under_test_shuts_the_window_the_old_burial_opened(tmp_path
     (art / old / "config.json").write_text(json.dumps({"cutoff": "2019-01-01"}),
                                            encoding="utf-8")
     ok = composer.retrial_oracle(reg, art, lambda cell: "2026-08-27")
-    assert ok(old, spec) is False, (
+    assert ok(old, _later_run(spec)) is False, (
         "the window opened off a stale burial while a live copy of the same "
         "composition is under test")
 
@@ -468,7 +490,7 @@ def test_a_buried_composition_with_no_readable_cutoff_stays_excluded(tmp_path):
     reg.record_state_change(sid, "graveyard", "screen fail")
     ok = composer.retrial_oracle(reg, tmp_path / "artifacts",
                                  lambda cell: "2026-08-27")
-    assert ok(sid, spec) is False
+    assert ok(sid, _later_run(spec)) is False
 
 
 def test_a_buried_composition_uses_the_screen_cutoff_when_it_never_reached_gauntlet(tmp_path):
@@ -480,7 +502,7 @@ def test_a_buried_composition_uses_the_screen_cutoff_when_it_never_reached_gaunt
     (art / sid / "config.json").write_text(
         json.dumps({"cutoff": "2023-12-31"}), encoding="utf-8")
     ok = composer.retrial_oracle(reg, art, lambda cell: "2026-08-27")
-    assert ok(sid, spec) is True
+    assert ok(sid, _later_run(spec)) is True
 
 
 # ================= D10 end to end, through composer.run() =================

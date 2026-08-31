@@ -886,7 +886,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # 4.0 chain verify BEFORE any spend (spec s6): a pre-existing invalid
     # chain must abort here, at zero metered cost, rather than let triage
     # and composer spend against a chain the loop is about to reject anyway.
-    verify_argv = [py, str(layer / "verify_registry.py"), str(registry_path)]
+    # The dirs are invariant 8's OFF-CHAIN evidence (D9 re-trial windows: the
+    # burying cutoff lives in an artifact bundle, the cell data end in the
+    # bars). They default to sitting beside the log, which is already true
+    # here -- passed explicitly so the gate does not silently weaken to
+    # "window not verifiable" if the layout ever moves.
+    verify_argv = [py, str(layer / "verify_registry.py"), str(registry_path),
+                   *data_argv]
     rc = _stage(runner, verify_argv, layer)
     if rc != 0:
         print(f"chain_invalid: verify_registry.py rc={rc} before triage -- "
