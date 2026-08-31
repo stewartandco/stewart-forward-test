@@ -1,5 +1,13 @@
 # Pipeline Loop Implementation Plan
 
+> **HISTORICAL - EXECUTED 2026-08-27, PARTLY SUPERSEDED 2026-08-29.** This
+> file is the record of what was built, kept verbatim; it is NOT the current
+> statement of the rules. Its trigger wording and its verbatim `loop.py` /
+> `loop_state.py` snippets encode the ORIGINAL accepted-only trigger basis,
+> which deadlocked the loop in production. Do not copy code from this plan.
+> The live rule is the amended `docs/2026-08-27-pipeline-loop-design.md`
+> (trigger counts accepted+pending "triggerable" cards) and the code itself.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A scheduled trigger-check orchestrator (`pipeline/loop.py --once`) that runs triage -> compose -> screen -> gauntlet for a class when enough new accepted cards accumulate, under a chain-lock protocol and the existing budget caps.

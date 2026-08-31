@@ -1,12 +1,26 @@
 """Per-class watermark state for the pipeline loop (logs/loop_state.json).
 
-The trigger rule (spec 2026-08-27-pipeline-loop-design): a class fires when
-routable_accepted_now - watermark >= threshold (default 25). The watermark
-is the routable-accepted count recorded at that class's last completed
+The trigger rule (spec 2026-08-27-pipeline-loop-design, amended by Coen
+2026-08-29): a class fires when triggerable_now - watermark >= threshold
+(default 25), where "triggerable" is the count of class-routable cards a
+cycle COULD act on -- accepted AND pending, never rejected. The watermark is
+that same triggerable count recorded at the class's last completed
 generation. pick_class returns ONE class per fire: the over-threshold class
 whose last generation is oldest; a never-run class counts as oldest;
 ties break by cells.LIVE_CLASSES order. Also holds the two-strike stale
 chain.lock bookkeeping (the lock itself is pipeline/chainlock.py).
+
+BASIS WARNING (the 2026-08-29 deadlock fix -- read before touching either
+side of the comparison): this module does not compute the counts, it only
+compares them, so it CANNOT enforce that the two sides share a basis. The
+caller (pipeline/loop.py) must feed pick_class and record_generation the
+SAME measure. Originally both were the accepted-only count, which deadlocked:
+cards are only ever accepted by the D31 triage panel, which runs INSIDE a
+cycle, after the trigger decision -- so the accepted count could not move
+between fires and the loop could never start a generation on its own.
+Feeding one side accepted+pending and the other accepted-only would be the
+mirror defect: the loop would re-fire on every run against an unchanged
+corpus.
 """
 from __future__ import annotations
 
@@ -41,8 +55,22 @@ def save(path: str | Path, state: dict) -> None:
 
 
 def record_generation(state: dict, asset_class: str, *, run_id: str,
-                      routable_count: int, ts_utc: str) -> None:
+                      watermark_count: int, ts_utc: str,
+                      routable_at_generation: int | None = None) -> None:
     """Record a completed generation's watermark.
+
+    routable_at_generation is the ACCEPTED-only routable count as of a cycle
+    in which the composer actually swept -- the baseline the
+    no_new_accepted_cards guard compares against. Passed only on the
+    cycle_complete path; None leaves any prior value untouched, which is what
+    the guard's own early-exit path wants (it did not sweep, so it must not
+    move the "last swept" mark).
+
+    watermark_count MUST be measured on the SAME basis pick_class's counts
+    are (the triggerable accepted+pending count -- see the module BASIS
+    WARNING). Named for the slot it fills, not for a measure, precisely
+    because that basis changed once already on 2026-08-29 and a name like
+    "routable_count" outlived its meaning.
 
     ts_utc MUST be datetime.now(timezone.utc).isoformat() (the loop's
     _now_utc) -- pick_class orders entries by a lexical string compare of
@@ -53,28 +81,68 @@ def record_generation(state: dict, asset_class: str, *, run_id: str,
     formats in loop_state.json.
     """
     entry = state["classes"].setdefault(asset_class, {"threshold": DEFAULT_THRESHOLD})
-    entry["watermark"] = routable_count
+    entry["watermark"] = watermark_count
     entry["last_run_id"] = run_id
     entry["last_gen_ts_utc"] = ts_utc
+    if routable_at_generation is not None:
+        entry["routable_at_last_generation"] = routable_at_generation
 
 
-def pick_class(state: dict, routable_counts: dict[str, int]) -> str | None:
+def record_park(state: dict, asset_class: str, *, ts_utc: str) -> None:
+    """Record that a cycle for this class was PARKED (budget) without doing
+    the work.
+
+    Deliberately does NOT touch `watermark`: no cards were triaged, no
+    generation ran, and banking a watermark for undone work would silently
+    skip that backlog forever. Only the ordering hint moves.
+
+    Why it must move something: a park leaves the class exactly as
+    pick_class found it -- still over threshold, still the oldest
+    last_gen_ts_utc -- so the very next fire re-selects the SAME class, parks
+    again, and every other over-threshold class starves behind it until the
+    budget frees up. The park stamp rotates the class to the back of the
+    queue without claiming its work is done.
+    """
+    entry = state["classes"].setdefault(asset_class, {"threshold": DEFAULT_THRESHOLD})
+    entry["last_park_ts_utc"] = ts_utc
+
+
+def pick_class(state: dict, counts: dict[str, int]) -> str | None:
+    """`counts` is the caller's TRIGGERABLE per-class count (accepted+pending)
+    -- see the module BASIS WARNING. The threshold arithmetic below is
+    unchanged from the original spec; only what the caller measures changed.
+
+    Ordering among over-threshold classes: least-recently-ATTENDED first,
+    where "attended" is the later of a completed generation and a budget
+    park. A never-attended class still sorts first; ties break by
+    cells.LIVE_CLASSES order.
+    """
     over: list[str] = []
     for cls in cells.LIVE_CLASSES:
-        if cls not in routable_counts:
+        if cls not in counts:
             continue
         entry = state["classes"].get(cls, {})
         threshold = entry.get("threshold", DEFAULT_THRESHOLD)
         watermark = entry.get("watermark", 0)
-        if routable_counts[cls] - watermark >= threshold:
+        if counts[cls] - watermark >= threshold:
             over.append(cls)
     if not over:
         return None
     order = {c: i for i, c in enumerate(cells.LIVE_CLASSES)}
-    # never-run sorts before any timestamp; then oldest timestamp; then declared order
+
+    def _attended(cls: str) -> str | None:
+        """Latest time this class occupied a fire, generation or park. Both
+        stamps are the loop's _now_utc isoformat, so max() on the strings is
+        a real recency compare (see record_generation's format warning)."""
+        entry = state["classes"].get(cls, {})
+        stamps = [s for s in (entry.get("last_gen_ts_utc"),
+                              entry.get("last_park_ts_utc")) if s]
+        return max(stamps) if stamps else None
+
+    # never-attended sorts before any timestamp; then oldest; then declared order
     return min(over, key=lambda c: (
-        state["classes"].get(c, {}).get("last_gen_ts_utc") is not None,
-        state["classes"].get(c, {}).get("last_gen_ts_utc") or "",
+        _attended(c) is not None,
+        _attended(c) or "",
         order[c],
     ))
 

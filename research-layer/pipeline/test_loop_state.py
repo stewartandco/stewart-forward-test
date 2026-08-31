@@ -28,7 +28,7 @@ def test_save_load_roundtrip_atomic(tmp_path):
     p = tmp_path / "loop_state.json"
     st = load(p)
     record_generation(st, "fx", run_id="2026-08-27-loop-fx",
-                      routable_count=40, ts_utc="2026-08-27T10:30:00+00:00")
+                      watermark_count=40, ts_utc="2026-08-27T10:30:00+00:00")
     save(p, st)
     assert not p.with_suffix(".json.tmp").exists()
     st2 = load(p)
@@ -71,7 +71,7 @@ def test_pick_class_ignores_unknown_classes():
 
 def test_record_generation_preserves_custom_threshold():
     st = {"classes": {"fx": {"threshold": 99}}, "stale_lock": None}
-    record_generation(st, "fx", run_id="r", routable_count=50,
+    record_generation(st, "fx", run_id="r", watermark_count=50,
                       ts_utc="2026-08-27T12:00:00+00:00")
     assert st["classes"]["fx"]["threshold"] == 99
 
