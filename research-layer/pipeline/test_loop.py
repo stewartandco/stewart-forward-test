@@ -98,14 +98,42 @@ class FakeRunner:
     call_kwargs parallels calls (same index) so a test can check e.g. cwd
     without disturbing every existing assertion that treats fr.calls as a
     plain list of argv lists."""
-    def __init__(self, codes=None):
+    def __init__(self, codes=None, triage_reviewed=None, triage_skipped=0,
+                 triage_reports=True):
         self.calls = []
         self.call_kwargs = []
         self.codes = codes or {}
+        # Triage's REPORTING side effect. The loop needs to know how many
+        # cards the panel actually saw, and FakeRunner runs nothing, so
+        # without this every test would look like "triage did not report".
+        # Default None means "reviewed everything eligible" -- which is what
+        # the pre-2026-08-31 tests already assume when they assert the whole
+        # triggerable count gets banked. A test that wants a PARTIAL triage
+        # (the window smaller than the backlog) passes an explicit number.
+        self.triage_reviewed = triage_reviewed
+        self.triage_skipped = triage_skipped
+        self.triage_reports = triage_reports
+
+    def _report_triage(self, argv):
+        """Derive the logs dir from triage's own --registry argument, exactly
+        as pipeline.triage_batch does. Deriving it means no existing test has
+        to be given a layer it already passed to loop.run."""
+        reg = Path(argv[argv.index("--registry") + 1])
+        n = self.triage_reviewed
+        if n is None:
+            n = 10 ** 9            # "everything eligible"; the loop clamps
+        (reg.resolve().parent / "logs" / "triage_result.json").write_text(
+            json.dumps({"reviewed": n,
+                        "skipped_escalated": self.triage_skipped}),
+            encoding="utf-8")
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         self.call_kwargs.append(dict(kw))
+        if (self.triage_reports and argv[0] == sys.executable and "-m" in argv
+                and argv[argv.index("-m") + 1] == "pipeline.triage_batch"
+                and "--registry" in argv):
+            self._report_triage(argv)
         if argv[0] == sys.executable and "-m" in argv:
             key = argv[argv.index("-m") + 1]
         else:
@@ -162,26 +190,79 @@ def test_foreign_lock_defers(tmp_path):
     assert status["items"]["lock_stale"] == "false"
 
 
-class TriageReportingRunner(FakeRunner):
-    """FakeRunner that also performs triage's REPORTING side effect.
+def test_backlog_larger_than_the_window_drains_over_cycles(tmp_path, monkeypatch):
+    """The point of the fix. Cards the window never reached must still count
+    toward the NEXT trigger, so a backlog drains cycle by cycle instead of
+    waiting for genuinely new cards to arrive."""
+    monkeypatch.setattr(loop, "TRIAGE_LIMIT", 10)
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _add_cards(reg, 100, status="pending", asset_classes=["fx"], prefix="pend")
+    _seed_crypto_caught_up(layer, 130)
 
-    The real pipeline.triage_batch reviews at most --limit cards and records
-    how many it actually reviewed. FakeRunner runs nothing, so without this
-    the loop has no way to distinguish "triage reviewed the whole backlog"
-    from "triage reviewed a window of it" -- which is the entire behaviour
-    under test."""
-    def __init__(self, layer, reviewed, codes=None):
-        super().__init__(codes)
-        self.layer = layer
-        self.reviewed = reviewed
+    loop.run(["--once", "--layer", str(layer)], runner=FakeRunner(triage_reviewed=10))
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["fx"]["watermark"] == 40
 
-    def __call__(self, argv, **kw):
-        r = super().__call__(argv, **kw)
-        if argv[0] == sys.executable and "-m" in argv:
-            if argv[argv.index("-m") + 1] == "pipeline.triage_batch":
-                (self.layer / "logs" / "triage_result.json").write_text(
-                    json.dumps({"reviewed": self.reviewed}), encoding="utf-8")
-        return r
+    # Second fire on the SAME corpus: the 90 unseen cards must still trigger.
+    fr2 = FakeRunner(triage_reviewed=10)
+    loop.run(["--once", "--layer", str(layer)], runner=fr2)
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] != "no_trigger", (
+        "the backlog stopped counting after one cycle -- this is the defect")
+
+
+def test_escalated_cards_are_banked_and_do_not_refire_the_loop(tmp_path):
+    """Escalated cards stay PENDING for Coen's T3, but the panel saw them and
+    the cost was paid. Counting them as unseen would re-fire the class every
+    cycle for work that only Coen can do."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="esc")
+
+    # triage reviewed 0 this run because all 30 were already on the skip-set.
+    fr = FakeRunner(triage_reviewed=0, triage_skipped=30)
+    loop.run(["--once", "--layer", str(layer)], runner=fr)
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["crypto"]["watermark"] == 30
+
+    fr2 = FakeRunner(triage_reviewed=0, triage_skipped=30)
+    loop.run(["--once", "--layer", str(layer)], runner=fr2)
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"
+
+
+def test_missing_triage_report_does_not_advance_the_watermark(tmp_path):
+    """Contract: a successful --apply run always reports. If it did not, the
+    two failure directions are not symmetric -- not advancing costs a
+    re-triage, which is loud and bounded; over-advancing strands cards
+    silently and permanently. Bias to re-work."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+
+    loop.run(["--once", "--layer", str(layer)],
+             runner=FakeRunner(triage_reports=False))
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["crypto"].get("watermark", 0) == 0    # unchanged
+
+
+def test_stale_triage_report_is_not_read_as_this_cycles_count(tmp_path):
+    """A leftover file from a previous cycle would bank work that did not
+    happen -- the same error as banking un-reviewed cards, from the other
+    side. The loop clears it before the stage runs."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    registry_path = layer / "registry_log.jsonl"
+    _seed_all_classes_caught_up(layer, registry_path)
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="pend")
+    (layer / "logs" / "triage_result.json").write_text(
+        json.dumps({"reviewed": 999, "skipped_escalated": 0}), encoding="utf-8")
+
+    loop.run(["--once", "--layer", str(layer)],
+             runner=FakeRunner(triage_reports=False))
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["crypto"].get("watermark", 0) == 0    # stale 999 ignored
 
 
 def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, monkeypatch):
@@ -206,17 +287,20 @@ def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, mon
     # crypto routes every accepted card too; park it so fx is the class that fires.
     _seed_crypto_caught_up(layer, 130)
 
-    fr = TriageReportingRunner(layer, reviewed=10)
+    fr = FakeRunner(triage_reviewed=10)
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
 
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
     watermark = st["classes"]["fx"]["watermark"]
-    assert watermark == 10, (
-        f"watermark banked at {watermark}; triage reviewed only 10 of the 130 "
-        f"triggerable cards, so banking more than 10 strands the remainder "
-        f"behind the watermark where they stop counting toward the next "
-        f"trigger")
+    # 130 triggerable, 100 pending, 10 reviewed -> 90 unseen -> bank 40.
+    # NOT 130 (the bug: strands 90), and NOT 10 (that would ignore the 30
+    # already-ACCEPTED cards, which are dispositioned and must stay banked or
+    # the class re-fires on them forever).
+    assert watermark == 40, (
+        f"watermark banked at {watermark}; triage reviewed only 10 of the 100 "
+        f"pending cards, so the 90 it never saw must stay OUT of the watermark "
+        f"and keep counting toward the next trigger")
 
 
 def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):

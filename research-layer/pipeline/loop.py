@@ -250,6 +250,28 @@ def _warn_if_task_window_too_short(reader: Callable[[], int | None] | None = Non
     return msg
 
 
+TRIAGE_RESULT_NAME = "triage_result.json"
+
+
+def _triage_reviewed(logs_dir: Path) -> tuple[int, int] | None:
+    """(reviewed, skipped_escalated) from triage's result file, or None.
+
+    None means triage did not report -- absent, torn or malformed. Never
+    guess these here: inferring them from TRIAGE_LIMIT would duplicate
+    triage's skip-set-then-slice selection rule in a second place, and the
+    two would drift the first time either changed."""
+    try:
+        data = json.loads((logs_dir / TRIAGE_RESULT_NAME).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    n = data.get("reviewed")
+    m = data.get("skipped_escalated", 0)
+    for v in (n, m):
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            return None
+    return n, m
+
+
 def _entry_count(registry_path: Path) -> int:
     """Raw chain-line count. Read-only, no lock -- read paths never take
     chain.lock (chainlock.py's own rule)."""
@@ -966,6 +988,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # PT2H once the composer pair, screen and gauntlet are added, and fatal
     # against the PT1H the live task actually carries. 40 cards is ~7.7 min.
     # See TRIAGE_LIMIT.
+    # Clear any previous cycle's result first: a stale file read as this
+    # cycle's count would bank work that did not happen -- the same error as
+    # banking un-reviewed cards, arrived at from the other side.
+    try:
+        (logs_dir / TRIAGE_RESULT_NAME).unlink()
+    except FileNotFoundError:
+        pass
     triage_argv = [py, "-m", "pipeline.triage_batch", *reg_argv, "--apply",
                    "--limit", str(TRIAGE_LIMIT)]
     rc, lock_lost = _lock_and_run("pipeline.triage_batch", triage_argv)
@@ -986,11 +1015,47 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # this cycle". The next fire therefore needs genuinely NEW cards to cross
     # the threshold again, which is the whole point of a watermark.
     #
-    # Consequence worth knowing: pending cards this cycle's TRIAGE_LIMIT did
-    # NOT reach are still inside the banked watermark, so they stop counting
-    # toward the next trigger. A backlog larger than TRIAGE_LIMIT drains over
-    # several cycles as new cards arrive, not in one sweep.
-    watermark_after_triage = _triggerable_counts(registry)[asset_class]
+    # Advance by what triage REVIEWED, never to the whole triggerable total
+    # (fixed 2026-08-31). Triage reviews at most TRIAGE_LIMIT cards; banking
+    # the rest put cards the panel never saw behind the watermark, where they
+    # stopped counting toward the next trigger and only moved as genuinely
+    # NEW cards arrived. Live shape when found: watermark 655, triggerable
+    # 1250, limit 200 -- one cycle banked all 1250 and stranded ~395.
+    #
+    # Capped at the triggerable total so the watermark can never claim more
+    # cards than exist: a rejected card leaves the triggerable set, so
+    # before + reviewed can legitimately overshoot.
+    triggerable_after_triage = _triggerable_counts(registry)[asset_class]
+    reviewed = _triage_reviewed(logs_dir)
+    if reviewed is None:
+        # A successful --apply run always reports. Absent means the contract
+        # broke, and the two failure directions are NOT symmetric: not
+        # advancing costs a re-triage, which is loud and bounded, while
+        # over-advancing strands cards silently and permanently. Bias to
+        # re-work, and say so.
+        print(f"WARN: pipeline.triage_batch reported no reviewed count for "
+              f"{asset_class} ({TRIAGE_RESULT_NAME} absent or unreadable). "
+              f"NOT advancing the watermark -- these cards will be re-triaged "
+              f"next fire rather than stranded behind a watermark that never "
+              f"saw them.", flush=True)
+        watermark_after_triage = (state["classes"].get(asset_class, {})
+                                  .get("watermark", 0))
+    else:
+        # Bank everything EXCEPT the pending cards no panel has seen.
+        #
+        # Not `watermark_before + reviewed`: a fire driven by already-ACCEPTED
+        # growth (a human T3 session, or a prior cycle) has nothing for triage
+        # to review, so that form would advance by zero and re-fire the class
+        # forever on cards that are already dispositioned.
+        #
+        # Escalated cards are subtracted as reviewed, not as unseen: the panel
+        # saw them and the cost was paid: they are deliberately left pending
+        # for Coen's T3, and the skip-set stops them being re-reviewed. Left
+        # in the unseen count they would re-fire the loop every cycle for work
+        # nothing will do.
+        n_reviewed, n_skipped = reviewed
+        unseen = max(0, pending_routable_before - n_reviewed - n_skipped)
+        watermark_after_triage = triggerable_after_triage - unseen
 
     # 4a-bis. "No new information, no new trials" (spec Decision 2). The
     # accepted+pending trigger basis means a class can fire on pending cards

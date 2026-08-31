@@ -278,6 +278,29 @@ def save_escalated(path: Path, retained: dict[str, dict],
     tmp.replace(path)
 
 
+RESULT_NAME = "triage_result.json"
+
+
+def save_result(path: Path, reviewed: int, skipped_escalated: int = 0) -> None:
+    """Record how many cards the panel actually reviewed this run.
+
+    The loop needs this and cannot infer it: it knows --limit, but not how
+    many eligible cards existed after the skip-set filter, so it cannot tell
+    "reviewed the whole backlog" from "reviewed a window of it". Banking the
+    difference is what stranded cards behind the watermark before 2026-08-31.
+
+    Written on every --apply path INCLUDING the zero case, so that an absent
+    file means "triage did not report", never "triage reviewed nothing".
+    Atomic, like the skip-set: a torn file would read as a contract
+    violation and cost a re-triage."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"reviewed": reviewed,
+                               "skipped_escalated": skipped_escalated},
+                              indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _client_and_meter():
     """Real client and budget meter. Split out so tests can stub it.
 
@@ -320,6 +343,7 @@ def run(argv: list[str] | None = None) -> int:
     registry = Registry(args.registry)
     state_path = args.escalated_state or (
         args.registry.resolve().parent / "logs" / ESCALATED_STATE_NAME)
+    result_path = args.registry.resolve().parent / "logs" / RESULT_NAME
     all_cards = registry.cards()
     pending = {cid: c for cid, c in registry.cards(status="pending").items()}
     accepted = {cid: c for cid, c in all_cards.items()
@@ -347,8 +371,9 @@ def run(argv: list[str] | None = None) -> int:
     if active_skips:
         pending = {cid: c for cid, c in pending.items() if cid not in active_skips}
         print(f"skipping {len(active_skips)} previously-escalated card(s) "
-              f"awaiting Coen (see {state_path.name}); they still count toward "
-              f"the loop trigger")
+              f"awaiting Coen (see {state_path.name}); they were banked in the "
+              f"watermark by the cycle that reviewed them, so they neither "
+              f"re-fire the loop nor get re-paid for")
     elif args.no_skip_escalated and retained_skips:
         print(f"--no-skip-escalated: re-reviewing {len(retained_skips)} "
               f"previously-escalated card(s); the skip-set is preserved, not "
@@ -366,6 +391,8 @@ def run(argv: list[str] | None = None) -> int:
         # never overwritten.
         if args.apply and loaded.writable and retained_skips:
             save_escalated(state_path, retained_skips, {})
+        if args.apply:
+            save_result(result_path, 0, len(active_skips))
         return 0
 
     client, meter = _client_and_meter()
@@ -383,6 +410,10 @@ def run(argv: list[str] | None = None) -> int:
         print("\nDRY RUN - nothing chained. Re-run with --apply to write.")
         return 0
 
+    # Every card handed to the panel was reviewed, whether it ended accepted,
+    # duplicate or escalated -- the cost was paid and the card was seen, which
+    # is exactly what the watermark records.
+    save_result(result_path, len(pending), len(active_skips))
     apply_decisions(registry, out["decisions"], REVIEWER)
     print(f"{len(out['decisions'])} card_reviewed entries chained as {REVIEWER}.")
 
