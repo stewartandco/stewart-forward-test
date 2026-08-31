@@ -347,13 +347,17 @@ def test_a_fully_landed_phase3_rotates_and_the_composer_accepts_the_window(
         monkeypatch):
     """The other side: BOTH halves moved, as Phase 3 requires in one commit.
 
-    Rotation must switch on, the window must be exactly ROTATION_SIZE of the
-    activated assets, and the composer's own `--assets` gate must ACCEPT it.
-    That last assertion is the one F2 was about: the loop's emit condition and
-    the composer's accept condition now read the SAME fact (the routing
-    dispatch), so they cannot disagree. If a future edit re-keys either of
-    them on the literal string "crypto", this test fails loudly here instead
-    of in production.
+    Rotation must switch on, and the window must be exactly ROTATION_SIZE of
+    the activated assets, in declared order.
+
+    The third assertion is narrower than it looks and is described accurately
+    here (re-review nit): `composer.sweep_cells` resolves a window to CELLS
+    and never consults `expander_for`, so what it proves is that the emitted
+    window addresses real active cells and nothing outside them -- not that
+    the composer would accept the flag. The composer-side half of F2's
+    coupling (that the `--assets` refusal lifts with the routing dispatch) is
+    covered directly by
+    test_sp5_p2t4.py::test_the_assets_refusal_lifts_when_the_class_leaves_the_pooled_path.
     """
     gate = dict(cells.ACTIVE_CELLS["crypto"])
     cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
@@ -368,8 +372,7 @@ def test_a_fully_landed_phase3_rotates_and_the_composer_accepts_the_window(
             "universe would be swept whole every generation, which is the cost "
             "problem D6 exists to solve")
         assert window == list(cells.ASSETS[:12])
-        # the composer's gate agrees: a window off the per-cell path is legal,
-        # and names only ACTIVE cells
+        # the window resolves to real ACTIVE cells and nothing outside them
         assert composer.sweep_cells("crypto", window) == [(a, "1d") for a in window]
     finally:
         cells.ACTIVE_CELLS["crypto"] = gate

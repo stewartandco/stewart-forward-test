@@ -123,11 +123,17 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   yet, so siblings adjacent to the cut can be failed for a capacity reason
   wearing a statistical costume -- the very thing family-openness-v1 condemns,
   one layer down. Draining later does NOT repair it: those verdicts are
-  already written. No clean fix exists (a cartesian product cannot be
-  partitioned without severing an axis; cutting on the outer axis makes the
-  window size vary with family shape, trading a visible harm for a hidden
-  one). Only reachable for families that TODAY are refused outright, so
-  nothing regresses -- but it is Coen's call, not a settled question.
+  already written. No PARTITION avoids it (a cartesian product cannot be split
+  without severing an axis; cutting on the outer axis makes the window size
+  vary with family shape, trading a visible harm for a hidden one) -- but that
+  is exhaustive only over ways to CUT the sweep. Three open options, Coen's
+  call: (1) accept it as shipped; (2) queue at FAMILY granularity so no sweep
+  is cut, which the chained note's wording forecloses; (3) HOLD a split
+  sibling group out of the gauntlet until its queue drains, which costs
+  latency rather than correctness and does not touch the note at all (the note
+  governs the composer's admission, not the gauntlet's batching). Only
+  reachable for families that TODAY are refused outright, so nothing
+  regresses.
 - **D9 re-trials.** `composer.RETRIAL_WINDOW_DAYS` = 183. A composition whose
   fingerprint matches a registered strategy is still dropped UNLESS that
   registration is currently BURIED and its burying verdict's cutoff is >= 183

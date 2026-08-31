@@ -670,15 +670,87 @@ def test_loop_passes_no_assets_flag_while_nothing_rotates(tmp_path, monkeypatch)
             f"the loop passed a rotation subset to the composer: {call}")
 
 
+def test_the_cursor_never_advances_when_no_window_was_emitted(tmp_path, monkeypatch):
+    """Observation B: the advance is gated on `rotates`, not on membership.
+
+    Those are different questions. ROTATION_CLASSES membership says the class
+    SHOULD rotate; `rotates` says a window was actually emitted THIS cycle.
+    In a half-landed Phase 3 -- ACTIVE_CELLS["crypto"] populated but
+    expander_for still pooled -- _sweep_window correctly returns rotates=False
+    and the loop passes no --assets, so nothing is swept from a window. A
+    membership-gated advance would nonetheless walk the cursor 12 positions on
+    every completed generation, silently skipping the assets it stepped over:
+    exactly what D6's own comment says must never happen.
+
+    Simulated at the level the defect lives at -- a non-empty active set with
+    the pooled expander still in place -- rather than by stubbing the loop.
+    """
+    from .test_loop import (FakeRunner, _mk_layer, _add_cards,
+                            _seed_all_classes_caught_up)
+    monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: None)
+    layer, reg = _mk_layer(tmp_path, accepted_fx=0)
+    # A card population exists only so registry_log.jsonl exists on disk (the
+    # cycle's commit step reads it); every class is then seeded caught-up, so
+    # NO class is over threshold on cards.
+    _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="p")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    state_path = layer / "logs" / "loop_state.json"
+    # CRYPTO must be the class that fires, or this test proves nothing: an
+    # fx cycle never touches the crypto cursor under EITHER the correct gate
+    # or the membership-only mutant. A queued sibling is the cheapest way to
+    # make crypto the picked class (F4) without inventing a card population.
+    st = loop_state.load(state_path)
+    loop_state.enqueue_specs(st, "crypto", [{"strategy_id": "q1"}])
+    loop_state.save(state_path, st)
+
+    gate = dict(cells.ACTIVE_CELLS["crypto"])
+    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
+                                    "timeframes": ("1d",)}
+    try:
+        assert composer.expander_for("crypto") is composer.expand_family, (
+            "premise: this test simulates the HALF-landed Phase 3")
+        assert len(cells.active_cells("crypto")) == 20 > loop.ROTATION_SIZE, (
+            "premise: the active set must exceed the window, or "
+            "advance_rotation returns early under both gates and the mutant "
+            "survives for the wrong reason")
+        fr = FakeRunner()
+        assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+        items = json.loads((layer / "logs" / "pipeline_status.json")
+                           .read_text(encoding="utf-8"))["items"]
+        assert items["outcome"] == "cycle_complete", items
+        assert items["asset_class"] == "crypto", items
+        assert not any("--assets" in c for c in fr.calls), (
+            "premise: no window was emitted this cycle")
+        entry = loop_state.load(state_path)["classes"]["crypto"]
+        assert "rotation_cursor" not in entry, (
+            f"the cursor advanced to {entry.get('rotation_cursor')} on a cycle "
+            f"that emitted no window -- every asset it stepped over is skipped "
+            f"silently, which is the one thing a schedule must never do")
+    finally:
+        cells.ACTIVE_CELLS["crypto"] = gate
+
+
 def test_loop_reports_queue_depth_and_does_not_clobber_it(tmp_path, monkeypatch):
     """D10's visibility half, plus the cross-process hazard it creates.
 
-    The composer writes the queue into logs/loop_state.json as a SUBPROCESS.
-    Here a fake composer stage does exactly that mid-cycle; the loop must fold
-    it back in (refresh_queues) rather than overwrite it with its own older
-    in-memory copy at the end-of-cycle save, and must report the depth in
-    pipeline_status.json so a parked queue is visible without opening the
-    state file."""
+    The composer writes BOTH queue keys into logs/loop_state.json as a
+    SUBPROCESS. Here a fake composer stage does exactly that mid-cycle; the
+    loop must fold them back in (refresh_queues) rather than overwrite them
+    with its own older in-memory copy at the end-of-cycle save, and must
+    report the depths in pipeline_status.json so a parked queue is visible
+    without opening the state file.
+
+    `sibling_queue_dead` is asserted alongside `sibling_queue` on purpose
+    (P2-T4 re-review, M12). refresh_queues carries both keys, but only the
+    live one was pinned across the loop's save: narrowing its `queue_keys`
+    tuple to ("sibling_queue",) left the whole suite green while silently
+    destroying the casualty list -- composer writes queue 25 / dead 25, loop
+    saves, dead becomes 0. Those specs would vanish from the live queue AND
+    from the record of why they were parked, which is the silent drop D10
+    exists to remove. test_a_poison_queued_spec_does_not_wedge_the_class
+    drives the composer directly and never crosses the loop's save, so it
+    cannot see this.
+    """
     from .test_loop import FakeRunner, _mk_layer, _seed_crypto_caught_up, _add_cards
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: None)
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
@@ -692,16 +764,24 @@ def test_loop_reports_queue_depth_and_does_not_clobber_it(tmp_path, monkeypatch)
                 st = loop_state.load(state_path)
                 loop_state.enqueue_specs(st, "crypto",
                                          [{"strategy_id": "q1"}, {"strategy_id": "q2"}])
+                loop_state.record_dead_specs(st, "crypto", [
+                    {"spec": {"strategy_id": "d1"}, "reason": "card revoked"}])
                 loop_state.save(state_path, st)
             return super().__call__(argv, **kw)
 
     assert loop.run(["--once", "--layer", str(layer)], runner=QueueWritingRunner()) == 0
-    assert loop_state.queue_depth(loop_state.load(state_path), "crypto") == 2, (
+    saved = loop_state.load(state_path)
+    assert loop_state.queue_depth(saved, "crypto") == 2, (
         "the loop's end-of-cycle save clobbered the queue the composer wrote")
+    assert loop_state.dead_queue_depths(saved).get("crypto") == 1, (
+        "the loop's end-of-cycle save destroyed the casualty list the composer "
+        "wrote -- those specs are gone from the queue AND from the record of "
+        "why, which is the silent drop D10 exists to remove")
     items = json.loads((layer / "logs" / "pipeline_status.json")
                        .read_text(encoding="utf-8"))["items"]
     assert items["outcome"] == "cycle_complete"
     assert items["queue_crypto"] == "2"
+    assert items["queue_dead_crypto"] == "1"
 
 
 def test_a_non_empty_queue_is_itself_a_trigger(tmp_path):

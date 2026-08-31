@@ -547,18 +547,35 @@ def split_for_cycle(specs: list[dict], cap: int | None) -> tuple[list[dict], lis
     this function replaced. The queued half draining later does NOT repair it:
     those verdicts are already written, and verdicts are never re-judged.
 
-    WHY IT IS NOT FIXED HERE. A sweep is a CARTESIAN PRODUCT over one or more
-    axes, and no partition of it leaves every axis's adjacency intact -- with
-    a single axis the product IS the axis, so any cut severs it. Cutting on
-    the outermost axis's boundary (the obvious "clean" fix) preserves the
-    inner axes' neighbourhoods but still severs the outer one, AND makes the
-    window size vary with the family's shape -- a 60-cap silently becoming 45
-    or 75 -- which trades a visible harm for a hidden one. Nothing subtle was
-    invented here; the honest options are to accept this, or to queue at
-    FAMILY granularity instead of sibling granularity (no sweep ever cut),
-    which the chained note's own wording forecloses: "a family whose sweep
-    exceeds the per-cycle sibling bound registers the first window now and
-    QUEUES the remainder".
+    WHY IT IS NOT FIXED HERE. No PARTITION of a sweep avoids it: a sweep is a
+    cartesian product over one or more axes, and no partition leaves every
+    axis's adjacency intact -- with a single axis the product IS the axis, so
+    any cut severs it. Cutting on the outermost axis's boundary (the obvious
+    "clean" fix) preserves the inner axes' neighbourhoods but still severs the
+    outer one, AND makes the window size vary with the family's shape -- a
+    60-cap silently becoming 45 or 75 -- which trades a visible harm for a
+    hidden one.
+
+    THAT SEARCH WAS EXHAUSTIVE ONLY OVER PARTITIONS, and the reader should not
+    take it for more (P2-T4 re-review). Every option above is a way to CUT the
+    sweep; the interesting alternative changes WHEN THE GROUP IS JUDGED
+    instead. Three live options, all Coen's call, none of them Phase 2 work:
+
+      1. Accept it, as shipped: the split registers now and the cut siblings
+         may draw an edge_of_grid verdict they did not earn.
+      2. Queue at FAMILY granularity rather than sibling granularity, so no
+         sweep is ever cut. The chained note's own wording forecloses this:
+         "a family whose sweep exceeds the per-cycle sibling bound registers
+         the first window now and QUEUES the remainder".
+      3. HOLD THE SIBLING GROUP OUT OF THE GAUNTLET until its queue drains, so
+         no verdict is ever written against a partial neighbourhood. This
+         costs LATENCY rather than correctness, and -- unlike (2) -- it does
+         not touch the note at all: the note governs the COMPOSER's admission
+         rules, not the gauntlet's batching. It is the only option that keeps
+         both the note's wording and the plateau neighbourhood intact.
+
+    Nothing subtle was invented here; (3) is named so the next reader knows
+    the question is open rather than closed.
 
     SCOPE, measured: this can only bite a family whose sweep exceeds the cap,
     i.e. one that TODAY is refused outright and registers nothing at all. No

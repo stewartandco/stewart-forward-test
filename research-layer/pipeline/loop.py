@@ -1159,12 +1159,22 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                                  ts_utc=_now_utc(),
                                  routable_at_generation=_routable_counts(
                                      registry)[asset_class])
-    # D6: the cursor moves ONLY on a completed generation, and only for a
-    # class that actually rotates. A parked, failed or deferred cycle leaves
-    # it exactly where it was -- advancing past a window that was never swept
+    # D6: the cursor moves ONLY on a completed generation, and only when a
+    # window was ACTUALLY EMITTED. A parked, failed or deferred cycle leaves it
+    # exactly where it was -- advancing past a window that was never swept
     # would skip those assets silently, which is the one thing a schedule must
     # never do.
-    if asset_class in ROTATION_CLASSES:
+    #
+    # Gated on `rotates` (the value _sweep_window returned at 4b-pre), NOT on
+    # ROTATION_CLASSES membership (P2-T4 re-review, observation B). Those are
+    # different questions: membership says the class SHOULD rotate, `rotates`
+    # says a window was emitted this cycle. In a half-landed Phase 3 --
+    # ACTIVE_CELLS["crypto"] populated, expander_for still pooled -- the
+    # membership test alone walks the cursor 12 positions per completed
+    # generation while `rotates` is False and nothing was ever swept from a
+    # window. That is precisely the silent skip the paragraph above forbids,
+    # committed by the code that forbids it.
+    if rotates:
         loop_state.advance_rotation(state, asset_class,
                                     len(_rotation_assets(asset_class)),
                                     ROTATION_SIZE)
