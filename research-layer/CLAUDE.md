@@ -168,6 +168,32 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   it against a COPY of the chain without those dirs and it still says VALID,
   but it has only checked the buried-priors and same-run legs -- read the
   NOTE line before concluding a re-trial was verified.
+- **⚠ THE 183-DAY WINDOW DOES NOT CURRENTLY BITE. Known protocol gap,
+  measured 2026-09-01, behaviour deliberately UNCHANGED -- Coen's call.** The
+  cutoff `burying_cutoff` reads is the fixed train/OOS split constant, not a
+  per-verdict date: **all 4,065 `config.json` bundles carry
+  `cutoff = 2023-12-31`, zero exceptions, zero missing.** So the window is
+  OPEN for all 2,702 burials and SHUT for none; the narrowest margin is 964
+  days against a 183-day requirement. The first two live re-trials
+  (`50f48ae9a07d01cc`, `4f8d2fc81c27f76e`, chain lines 16183/16184) are
+  therefore **9-day re-tests** -- buried 2026-08-22, re-registered 2026-08-31,
+  gauntlet `data_end` 2026-08-21 against bars ending 2026-08-30 -- on a chain
+  that is 26 days old. As shipped, D9 reads as "any buried composition is
+  re-triable", and every re-trial charges N in full. **Do not report re-trial
+  survivor counts as edge** (the chained note says so itself).
+- **If that clock is ever fixed, the fix is NOT uniform across burial
+  stages.** The gauntlet bundle's per-cell `data_end` IS an honest clock
+  (1175/1218 carry it, all > cutoff) and would have shut the window on both
+  live re-trials. But **screen** bundles' `data_end` is train-truncated
+  (2767/2767 have `data_end <= cutoff`), so it carries no information -- and
+  **1,629 of the 2,702 burials came from `screened`, not `gauntlet`**. A
+  re-screen runs a fixed train window and is deterministic, so it returns the
+  identical verdict however much new data arrives: whether a screen-buried
+  composition should be re-triable at all before the CUTOFF itself moves is an
+  open protocol question.
+  `test_a_buried_composition_uses_the_screen_cutoff_when_it_never_reached_gauntlet`
+  currently asserts that it should. Leave that test alone until the question
+  is decided on the chain.
 
 ## ⚠ Composer hazards for HAND RUNS in the live tree
 - `--loop-state` defaults to `logs/loop_state.json` next to `--registry`, so a

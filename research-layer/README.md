@@ -134,6 +134,20 @@ python verify_registry.py registry_log.jsonl
    `data/<cell>.csv`), read
    from beside the log or `--artifacts-dir`/`--data-dir`. When that evidence
    is absent the window is reported **unverified**, never failed.
+
+   > **KNOWN PROTOCOL GAP (2026-09-01), behaviour deliberately unchanged.** The
+   > cutoff this window measures from is a GLOBAL CONSTANT, not a per-verdict
+   > date: all 4,065 `config.json` bundles on the live chain carry
+   > `cutoff = 2023-12-31`, zero exceptions. So the window is OPEN for all
+   > 2,702 burials and SHUT for none — narrowest margin 964 days against a
+   > 183-day requirement — and the first two live re-trials were 9-day
+   > re-tests (buried 2026-08-22, re-registered 2026-08-31). As implemented,
+   > D9 reads as "any buried composition is re-triable", which inflates N. The
+   > note's *reasoning* ("the clock runs on the DATA") describes a clock
+   > running from the burial's own data end, which the gauntlet bundle already
+   > records. Changing it is a protocol decision for Coen and needs its own
+   > chained note; the verifier's job is to agree with the composer, and it
+   > does.
 9. `quarantine_data_snapshot` dates are unique, and every
    `quarantine_decision` is covered by an **earlier** snapshot naming its
    asset with a well-formed digest. Since the 2026-08-27 per-class-calendars
@@ -198,6 +212,9 @@ Mechanics worth knowing:
   burying verdict's cutoff. `verify_registry.py` invariant 8 re-checks that
   same admission rule from the chain, so the guarantee no longer rests on the
   Composer's in-process guard.
+  **That 183-day clock does not currently bite** — see the caveat under
+  invariant 8: the cutoff it reads is a global constant, so the window is open
+  for every burial and closed for none.
 - **The gauntlet tests robustness; quarantine does the out-of-sample work.**
   Protocol-v3 retired the deflated-Sharpe gate from the gauntlet. Measured on
   this registry its implied hurdle had reached **1.86 annualized Sharpe against

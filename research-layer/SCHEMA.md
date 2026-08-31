@@ -440,6 +440,20 @@ bundle tamper-evident without bloating the registry.
    missing it is reported unverified rather than failed, because the verifier
    is checking rather than deciding and must not call a chain corrupt over a
    pruned artifact bundle.
+
+   > **KNOWN PROTOCOL GAP (2026-09-01), behaviour deliberately unchanged.** The
+   > cutoff this window measures from is a GLOBAL CONSTANT, not a per-verdict
+   > date: all 4,065 `config.json` bundles on the live chain carry
+   > `cutoff = 2023-12-31`, zero exceptions. So the window is OPEN for all
+   > 2,702 burials and SHUT for none — narrowest margin 964 days against a
+   > 183-day requirement — and the first two live re-trials were 9-day
+   > re-tests (buried 2026-08-22, re-registered 2026-08-31). As implemented,
+   > D9 reads as "any buried composition is re-triable", which inflates N. The
+   > note's *reasoning* ("the clock runs on the DATA") describes a clock
+   > running from the burial's own data end, which the gauntlet bundle already
+   > records. Changing it is a protocol decision for Coen and needs its own
+   > chained note; the verifier's job is to agree with the composer, and it
+   > does.
 9. `quarantine_data_snapshot` dates are unique, both digest maps name the same
    assets, and every digest is a real 64-character lowercase SHA-256 — the
    same check the writer applies, so a hand-appended fake cannot license a

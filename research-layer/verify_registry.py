@@ -363,10 +363,22 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                     # A later transition cannot retro-license or retro-void a
                     # registration that was legitimate when it was made
                     # (graveyard is terminal, so a burial never un-happens).
-                    verdict = retrial_verdict(
-                        [(s, state.get(s, "proposed"), run_of.get(s, ""))
-                         for s in priors],
-                        payload, cutoff_of, data_end_of)
+                    #
+                    # Wrapped for the SAME reason the fingerprint call above
+                    # is, and it is a WIDER exposure: this is the only part of
+                    # the walk that touches DISK, and disk is not the chain. A
+                    # corrupt artifact bundle or a corrupt bars file must
+                    # degrade to "window not verifiable", never to a traceback
+                    # -- an uncaught exception here is exit 1, chain_invalid,
+                    # and every loop cycle aborting, which is precisely the
+                    # outage this invariant was rewritten to end.
+                    try:
+                        verdict = retrial_verdict(
+                            [(s, state.get(s, "proposed"), run_of.get(s, ""))
+                             for s in priors],
+                            payload, cutoff_of, data_end_of)
+                    except Exception:
+                        verdict = RETRIAL_WINDOW_UNKNOWN if priors else RETRIAL_OK
                     if verdict == RETRIAL_WINDOW_UNKNOWN:
                         unverified_windows.append(f"line {lineno} {sid}")
                     elif verdict != RETRIAL_OK:
@@ -378,7 +390,8 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                                 f" (all: {', '.join(priors)})")
                         fail(lineno, f"strategy {sid}: duplicate composition "
                                      f"already registered as {priors[0]}"
-                                     f"{also} — {RETRIAL_REASONS[verdict]}")
+                                     f"{also} — "
+                                     f"{RETRIAL_REASONS.get(verdict, verdict)}")
                     if sid:
                         # only a NAMED strategy may be recorded, or a later
                         # duplicate reports "already registered as None" and

@@ -476,7 +476,13 @@ def cell_data_end(data_dir, asset: str | tuple, timeframe: str | None = None) ->
             for line in f:
                 if line.strip():
                     last = line.split(",", 1)[0]
-    except OSError:
+    # UnicodeDecodeError is a ValueError, NOT an OSError, so one non-UTF-8
+    # byte anywhere in the file used to escape this handler. It reaches the
+    # read calls above, not just open(), and it must be caught: this function
+    # is on verify_registry.py's pre-spend path, where an uncaught exception
+    # is a traceback, exit 1, chain_invalid and a stopped pipeline -- over a
+    # corrupt CSV rather than anything on the chain.
+    except (OSError, UnicodeDecodeError):
         return ""
     return _date10(last)
 
@@ -523,7 +529,12 @@ def burying_cutoff(artifacts_dir, strategy_id: str, buried_at: str) -> str | Non
     for path in candidates:
         try:
             cutoff = json.loads(path.read_text(encoding="utf-8")).get("cutoff")
-        except (OSError, json.JSONDecodeError, AttributeError):
+        # UnicodeDecodeError subclasses ValueError, not OSError and not
+        # JSONDecodeError, so a single non-UTF-8 byte in a bundle used to
+        # escape all three and propagate. Same reason as cell_data_end: this
+        # runs inside the loop's pre-spend chain gate.
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                AttributeError):
             continue
         if isinstance(cutoff, str) and cutoff:
             return cutoff

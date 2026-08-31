@@ -369,3 +369,60 @@ def test_retrial_verdict_takes_the_latest_burial_and_the_oldest_cell():
     assert composer.retrial_verdict(
         [("old", "graveyard", "r1")], spec, lambda sid: "2023-12-31",
         lambda cell: "2026-08-30") == composer.RETRIAL_OK
+
+
+def test_a_non_utf8_artifact_bundle_does_not_crash_the_gate(tmp_path):
+    """MEDIUM defect, caught in review: UnicodeDecodeError subclasses
+    ValueError, so it escaped burying_cutoff's (OSError, JSONDecodeError,
+    AttributeError). One bad byte in one bundle would have been a traceback,
+    exit 1, chain_invalid, and every loop cycle aborting -- the exact outage
+    this invariant was rewritten to end, on a different trigger. The exposure
+    is NEW: before this change the verifier never touched disk.
+    """
+    reg, spec = seeded(tmp_path)
+    sid = spec["strategy_id"]
+    bury(reg, sid)
+    write_cutoff(tmp_path, sid)
+    write_bars(tmp_path, "2026-08-30")
+    reg.register_strategy(twin_of(spec))
+    # a real invalid UTF-8 byte, mid-JSON, not a truncation
+    bundle = tmp_path / "artifacts" / sid / "gauntlet" / "config.json"
+    bundle.write_bytes(b'{"cutoff": "2023-12-\xff31"}')
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    assert "Traceback" not in out.stderr, out.stderr
+    assert "window not verifiable" in out.stdout
+    assert "REGISTRY VALID" in out.stdout
+
+
+def test_a_non_utf8_bars_file_does_not_crash_the_gate(tmp_path):
+    """The other evidence path, same subclassing trap: cell_data_end caught
+    only OSError, and the decode error is raised by the READ, not the open."""
+    reg, spec = seeded(tmp_path)
+    bury(reg, spec["strategy_id"])
+    write_cutoff(tmp_path, spec["strategy_id"])
+    write_bars(tmp_path, "2026-08-30")
+    reg.register_strategy(twin_of(spec))
+    bars = tmp_path / "data" / (CELL + ".csv")
+    bars.write_bytes(b"date,open,high,low,close,volume\n"
+                     b"2019-01-02,1,1,1,1,1\n2026-08-\xff30,1,1,1,1,1\n")
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    assert "Traceback" not in out.stderr, out.stderr
+    assert "window not verifiable" in out.stdout
+    assert "REGISTRY VALID" in out.stdout
+
+
+def test_every_refusal_constant_carries_a_reason():
+    """RETRIAL_REASONS is read on the pre-spend path. A refusal constant with
+    no entry would have been a KeyError there; the lookup now falls back to
+    the constant's own name, and this keeps the table honest as well."""
+    refusals = {composer.RETRIAL_SAME_RUN, composer.RETRIAL_NOT_BURIED,
+                composer.RETRIAL_WINDOW_SHUT}
+    assert refusals <= set(composer.RETRIAL_REASONS)
+    # OK and UNKNOWN are handled before the lookup and must NOT read as
+    # refusals if one ever reaches it
+    assert composer.RETRIAL_OK not in composer.RETRIAL_REASONS
+    assert composer.RETRIAL_WINDOW_UNKNOWN not in composer.RETRIAL_REASONS
