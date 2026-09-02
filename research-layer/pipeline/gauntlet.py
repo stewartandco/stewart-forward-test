@@ -56,6 +56,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from . import cells
+from . import deadline as _deadline
 from . import simcache
 from .registry import Registry
 from .engine import run_spec, ENGINE_REV
@@ -136,6 +137,15 @@ MIN_TRIALS_COMMON_DAYS = 100
 # founding principle and needs its own pre-declared chained note saying so.
 FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
               "p_ruin", "cost_stress")
+
+
+# Phase 3 step 1 deadline tuning. The prior is judged only until the first
+# chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
+# fx cycle's observed wall per candidate (~150 min / 499), rounded up.
+GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
+GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
+GAUNTLET_RESERVE_FRAC = 0.25           # of the budget left when candidates begin
+GAUNTLET_RESERVE_MIN_S = 60.0          # ...never less than this, for PBO + writes
 
 
 def _date_le(a: str, b: str) -> bool:
@@ -871,6 +881,12 @@ def run(argv: list[str] | None = None) -> int:
     # off in the fixtures that do not exercise it.
     ap.add_argument("--no-perturb", dest="perturb", action="store_false")
     ap.add_argument("--dry-run", action="store_true")
+    # Phase 3 step 1: stop BEFORE starting candidates this run cannot finish
+    # by the deadline; they stay in 'gauntlet' state with no verdict, which is
+    # exactly 'not gauntleted yet', and the next run picks them up. Absent =
+    # today's behaviour, byte for byte. See pipeline/deadline.py.
+    ap.add_argument("--deadline-utc", default=None,
+                    help="ISO-8601 instant; defer candidates that cannot finish by then")
     args = ap.parse_args(argv)
     simcache_dir = args.simcache_dir or (
         args.registry.resolve().parent / "simcache")
@@ -906,6 +922,25 @@ def run(argv: list[str] | None = None) -> int:
                   if states.get(s["strategy_id"]) == "gauntlet"]
     if not candidates:
         print("No strategies in 'gauntlet' state.")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "gauntlet", evaluated=0, deferred=0,
+                                   deadline_utc=args.deadline_utc, stopped_at_deadline=False)
+        return 0
+
+    budget = _deadline.DeadlineBudget(args.deadline_utc)
+    n_candidates_total = len(candidates)
+    # Cheapest possible refusal: if not even one candidate at the prior rate
+    # fits, defer everything now -- before a single bar is loaded or a single
+    # registry-wide simulation runs. Nothing is written, nothing is started.
+    if budget.active and not budget.fits(1, GAUNTLET_PRIOR_S_PER_CANDIDATE):
+        rem = budget.remaining_s()
+        print(f"DEADLINE: {rem:.0f}s remain before {args.deadline_utc}; not even one "
+              f"candidate fits -- deferring all {n_candidates_total} (they stay in "
+              f"'gauntlet' state, no verdict, and the next run picks them up).")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "gauntlet", evaluated=0,
+                                   deferred=n_candidates_total,
+                                   deadline_utc=args.deadline_utc, stopped_at_deadline=True)
         return 0
 
     # A CELL is (asset, timeframe), same as the screen. This used to load
@@ -1150,12 +1185,49 @@ def run(argv: list[str] | None = None) -> int:
             args.cutoff, args.perturb, trials_alignment, trials_common_days,
             sim_cache_hits, sim_cache_misses)
         for s in candidates]
+    # Evaluate in chunks, and ask the budget before EACH chunk whether it can
+    # still finish. The first chunk is judged at a conservative prior; every
+    # later one at the rate the finished chunks actually ran at. A reserve is
+    # held back for PBO and the artifact/verdict writes, which run after the
+    # candidates and scale with how many live groups they leave (see
+    # deadline.py's module docstring for the honest limits of that).
     t_eval0 = time.time()
-    results_by_sid = _run_candidates(payloads, max_workers)
+    if budget.active:
+        rem0 = budget.remaining_s() or 0.0
+        budget.reserve_s = max(GAUNTLET_RESERVE_MIN_S, GAUNTLET_RESERVE_FRAC * rem0)
+    chunk_size = max(1, max_workers * GAUNTLET_CHUNK_PER_WORKER)
+    results_by_sid: dict[str, dict] = {}
+    n_started = 0
+    stopped_at_deadline = False
+    for chunk in _deadline.chunks(payloads, chunk_size):
+        if budget.active and not budget.fits(
+                len(chunk), budget.rate_s(GAUNTLET_PRIOR_S_PER_CANDIDATE)):
+            stopped_at_deadline = True
+            break
+        t_c0 = time.time()
+        results_by_sid.update(_run_candidates(chunk, max_workers))
+        budget.record(len(chunk), time.time() - t_c0)
+        n_started += len(chunk)
+    deferred = candidates[n_started:]
+    candidates = candidates[:n_started]
+    payloads = payloads[:n_started]
     t_eval = time.time() - t_eval0
     print(f"[gauntlet] candidate evaluation done in {t_eval:.1f}s "
           f"({len(candidates)} candidates, {max_workers} worker(s))",
           flush=True)
+    if stopped_at_deadline:
+        print(f"DEADLINE: stopped before starting {len(deferred)} of "
+              f"{n_candidates_total} candidates ({budget.remaining_s():.0f}s left of "
+              f"the budget, measured {budget.rate_s(GAUNTLET_PRIOR_S_PER_CANDIDATE):.1f}s "
+              f"per candidate); they stay in 'gauntlet' state with no verdict and "
+              f"the next run picks them up.", flush=True)
+    if not candidates:
+        # Only reachable when the FIRST chunk did not fit after clustering ran.
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "gauntlet", evaluated=0,
+                                   deferred=len(deferred), deadline_utc=args.deadline_utc,
+                                   stopped_at_deadline=True)
+        return 0
 
     # PBO over the TRAIN window only — the 2024+ holdout has been consumed
     # three times already and protocol-v5 does not consume it a fourth. The
@@ -1347,8 +1419,12 @@ def run(argv: list[str] | None = None) -> int:
         raise
 
     t_artifacts = time.time() - t_artifacts0
+    _deadline.write_result(args.registry, "gauntlet", evaluated=len(rows),
+                           deferred=len(deferred), deadline_utc=args.deadline_utc,
+                           stopped_at_deadline=stopped_at_deadline)
     print(f"\n{len(rows)} evaluated: {len(quarantine)} -> quarantine, "
-          f"{len(rows) - n_pass} gate-fail -> graveyard.")
+          f"{len(rows) - n_pass} gate-fail -> graveyard"
+          + (f", {len(deferred)} deferred to the next run." if deferred else "."))
     print(f"[gauntlet] stage timings: clustering {t_cluster:.1f}s, "
           f"candidate eval {t_eval:.1f}s ({max_workers} worker(s)), "
           f"pbo {t_pbo:.1f}s, artifacts {t_artifacts:.1f}s, "
