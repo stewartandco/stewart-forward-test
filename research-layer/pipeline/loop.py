@@ -31,6 +31,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
+import contextlib
 import re
 import subprocess
 import sys
@@ -281,6 +284,52 @@ def _entry_count(registry_path: Path) -> int:
         return sum(1 for line in f if line.strip())
 
 
+# Windows caps a process's whole command line at 32,767 characters and refuses
+# to launch beyond it (CreateProcess -> WinError 206). Budget the pathspec
+# portion at well under that so the fixed tokens and the interpreter path
+# never tip it over. Sized in characters, not paths: a path count would rot
+# the moment artifact ids or the repo prefix changed length.
+_PATHSPEC_ARGV_BUDGET = 20_000
+
+
+def _chunk_by_argv_length(paths: list[str],
+                          budget: int = _PATHSPEC_ARGV_BUDGET) -> list[list[str]]:
+    """Split paths into runs whose space-joined length stays under budget.
+    Preserves order; every path lands in exactly one chunk; a single path
+    longer than the budget still gets its own chunk rather than vanishing."""
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    cur_len = 0
+    for p in paths:
+        add = len(p) + (1 if cur else 0)
+        if cur and cur_len + add > budget:
+            chunks.append(cur)
+            cur, cur_len = [], 0
+            add = len(p)
+        cur.append(p)
+        cur_len += add
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+@contextlib.contextmanager
+def _pathspec_file(paths: list[str]):
+    """A temp file holding one pathspec per line, for --pathspec-from-file.
+    Written and CLOSED before the yield -- on Windows git cannot open a file
+    another handle still holds -- and unlinked afterwards whatever happened."""
+    fd, name = tempfile.mkstemp(prefix="loop-pathspec-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(paths) + "\n")
+        yield name
+    finally:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+
+
 def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
     """Repo-relative paths for this cycle's chain delta: the registry plus
     artifacts/<sid> for every strategy_registered entry appended after
@@ -348,19 +397,38 @@ def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runn
     paths = collect_commit_paths(registry_path, start_line)
     has_new_artifacts = len(paths) > 1   # more than just the registry line
 
-    diff = runner(["git", "diff", "--quiet", "--"] + paths, cwd=str(repo))
-    if diff.returncode == 0 and not has_new_artifacts:
+    # The scope NEVER travels on the command line (2026-09-01). The fx cycle
+    # registered 1,260 strategies, chained them, banked its watermark, and
+    # then this function crashed with `[WinError 206] The filename or
+    # extension is too long`: one repo path per bundle on argv, against
+    # Windows' 32,767-character command-line cap. Nothing was lost -- the
+    # chain is the trust asset -- but the task exited 1 and the Sentinel
+    # reported FAIL for a cycle that had succeeded.
+    #
+    # `git diff` has no --pathspec-from-file, so the preflight is CHUNKED:
+    # any chunk reporting a change is the commit signal. add and commit take
+    # the whole scope from one file, so a single commit still covers exactly
+    # this cycle's delta -- chunking THOSE would split one cycle into several
+    # commits, or worse, commit a partial scope if a later chunk failed.
+    changed = False
+    for chunk in _chunk_by_argv_length(paths):
+        diff = runner(["git", "diff", "--quiet", "--"] + chunk, cwd=str(repo))
+        if diff.returncode != 0:
+            changed = True
+            break
+    if not changed and not has_new_artifacts:
         return                            # nothing changed this cycle -- silent, no commit
 
-    add = runner(["git", "add", "--"] + paths, cwd=str(repo))
-    if add.returncode != 0:
-        print("loop: WARNING git add failed; chain delta left uncommitted", flush=True)
-        return
-    cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta", "--"] + paths,
-               cwd=str(repo))
-    if cm.returncode != 0:
-        print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
-        return
+    with _pathspec_file(paths) as ps:
+        add = runner(["git", "add", f"--pathspec-from-file={ps}"], cwd=str(repo))
+        if add.returncode != 0:
+            print("loop: WARNING git add failed; chain delta left uncommitted", flush=True)
+            return
+        cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta",
+                     f"--pathspec-from-file={ps}"], cwd=str(repo))
+        if cm.returncode != 0:
+            print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
+            return
     print(f"loop: committed chain delta ({len(paths) - 1} artifact bundle(s))", flush=True)
 
 

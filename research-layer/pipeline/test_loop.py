@@ -113,6 +113,7 @@ class FakeRunner:
         self.triage_reviewed = triage_reviewed
         self.triage_skipped = triage_skipped
         self.triage_reports = triage_reports
+        self.pathspecs = {}            # call index -> list[str] from --pathspec-from-file
 
     def _report_triage(self, argv):
         """Derive the logs dir from triage's own --registry argument, exactly
@@ -130,6 +131,14 @@ class FakeRunner:
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         self.call_kwargs.append(dict(kw))
+        # Pathspecs handed to git via a file, captured NOW: commit_cycle
+        # unlinks the file as soon as the call returns, so a test reading it
+        # afterwards would find nothing. Keyed by call index so a test can
+        # pair the content with the add/commit argv it went with.
+        for tok in argv:
+            if isinstance(tok, str) and tok.startswith("--pathspec-from-file="):
+                self.pathspecs[len(self.calls) - 1] = Path(
+                    tok.split("=", 1)[1]).read_text(encoding="utf-8").splitlines()
         if (self.triage_reports and argv[0] == sys.executable and "-m" in argv
                 and argv[argv.index("-m") + 1] == "pipeline.triage_batch"
                 and "--registry" in argv):
@@ -966,8 +975,12 @@ def test_cycle_complete_commits_scoped(tmp_path):
     assert "add" in add_call and "commit" in commit_call
     reg_path = "research-layer/registry_log.jsonl"
     art_path = f"research-layer/artifacts/{fr.sid}"
-    assert reg_path in add_call and art_path in add_call
-    assert reg_path in commit_call and art_path in commit_call  # commit is scoped too
+    # The diff preflight has no --pathspec-from-file, so its scope is argv;
+    # add and commit carry their scope in the file (see
+    # test_commit_pathspecs_travel_by_file_not_command_line for why).
+    assert reg_path in diff_call and art_path in diff_call
+    assert fr.pathspecs[i_add] == [reg_path, art_path]
+    assert fr.pathspecs[i_commit] == [reg_path, art_path]   # commit is scoped too
     assert not any("-A" in c for c in (diff_call, add_call, commit_call))   # never -A
 
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
@@ -976,6 +989,75 @@ def test_cycle_complete_commits_scoped(tmp_path):
 
     for i in (i_diff, i_add, i_commit):
         assert fr.call_kwargs[i].get("cwd") == str(layer.parent)
+
+
+class _ComposerRegistersManyRunner(FakeRunner):
+    """Like _ComposerRegistersStrategyRunner, but the composer lands N
+    strategies with N artifact bundles -- the shape of the 2026-09-01 fx
+    cycle, which produced 1,309."""
+    def __init__(self, reg, layer, n):
+        super().__init__()
+        self.reg, self.layer, self.n, self.sids = reg, layer, n, []
+
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if ("-m" in argv and argv[argv.index("-m") + 1] == "pipeline.composer"
+                and "--dry-run" not in argv):
+            from . import test_pipeline as _tp     # content_id, bound there
+            for i in range(self.n):
+                spec = make_strategy(["card0000"])
+                # make_strategy is deterministic (id = content hash), so vary
+                # a real block param and re-derive the id -- N distinct
+                # compositions, like a real sweep, not N copies of one.
+                spec["blocks"][0]["params"]["window_min"] = 15 + i
+                spec["strategy_id"] = _tp.content_id(spec, "strategy_id")
+                self.reg.register_strategy(spec)
+                self.sids.append(spec["strategy_id"])
+                (self.layer / "artifacts" / spec["strategy_id"]).mkdir(parents=True)
+        return r
+
+
+def test_commit_pathspecs_travel_by_file_not_command_line(tmp_path):
+    """2026-09-01 15:30: the fx cycle registered 1,309 strategies, chained
+    them, banked its watermark -- and then crashed at the final commit with
+    `[WinError 206] The filename or extension is too long`. commit_cycle was
+    passing one repo path per artifact bundle on the command line, and
+    Windows caps the whole command line at 32,767 characters. Nothing was
+    lost (the chain is the trust asset; the commit is bookkeeping) but the
+    task exited 1 and the Sentinel reported FAIL for a cycle that succeeded.
+
+    The rule this pins: the scope of `git add` and `git commit` goes through
+    --pathspec-from-file, so their argv is O(1) in the bundle count; and the
+    diff preflight, which git gives no file option for, is chunked so no
+    single invocation can approach the limit."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    register_example_blocks(reg)
+    n = 1500
+    fr = _ComposerRegistersManyRunner(reg, layer, n)
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert len(fr.sids) == n
+
+    expected = ["research-layer/registry_log.jsonl"] +                [f"research-layer/artifacts/{s}" for s in fr.sids]
+    git_calls = [(i, c) for i, c in enumerate(fr.calls) if c and c[0] == "git"]
+    diffs = [(i, c) for i, c in git_calls if c[1] == "diff"]
+    adds = [(i, c) for i, c in git_calls if c[1] == "add"]
+    commits = [(i, c) for i, c in git_calls if c[1] == "commit"]
+    assert len(adds) == 1 and len(commits) == 1
+    assert diffs and diffs[-1][0] < adds[0][0] < commits[0][0]
+
+    # add / commit: no path on the command line, ever.
+    for i, c in adds + commits:
+        assert len(c) <= 6, c                            # O(1) argv
+        assert not any(t.startswith("research-layer/") for t in c), c
+        assert fr.pathspecs[i] == expected               # full scope, exact order
+
+    # diff preflight: chunked so each command line stays far under 32,767.
+    for _, c in diffs:
+        assert len(" ".join(c)) <= loop._PATHSPEC_ARGV_BUDGET + 200, len(" ".join(c))
+    seen = [t for _, c in diffs for t in c[c.index("--") + 1:]]
+    assert seen == expected                              # every path, once, in order
 
 
 def test_zero_delta_cycle_makes_no_commit_and_no_warning(tmp_path, capsys):
