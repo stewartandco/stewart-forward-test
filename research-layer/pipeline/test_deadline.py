@@ -249,3 +249,87 @@ def test_screen_with_a_far_deadline_is_byte_identical_to_no_deadline(tmp_path):
     assert dated == plain
     result = json.loads((base / "logs" / "screen_result.json").read_text(encoding="utf-8"))
     assert result["stopped_at_deadline"] is False and result["deferred"] == 0
+
+
+def _in_one_hour() -> str:
+    """A deadline the candidate chunks comfortably fit and an absurd null
+    prior cannot (a 2099 deadline lets even 1e9 s 'fit')."""
+    import datetime as _dt
+    return (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1)).isoformat()
+
+
+def test_gauntlet_defers_the_family_whose_pbo_null_cannot_fit(tmp_path, monkeypatch, capsys):
+    """2026-09-03 15:30: the PT4H wall killed the cycle at PBO family 325 of
+    366 with every verdict unwritten. The PBO loop now asks the budget before
+    each LIVE family's null. Here the prior says no null can ever fit, so with
+    a far deadline every candidate is EVALUATED, the dead family (no null
+    needed) gets its verdicts, and the live family's null is refused: its
+    candidates are deferred (state 'gauntlet', no verdict) and the result
+    file says so. A plain run afterwards judges them."""
+    from . import gauntlet as gauntlet_mod
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    from .test_gauntlet_classes import dead_and_live_family_registry, _flat_like
+
+    reg, live_sids, dead_sids, live_group, dead_group = \
+        dead_and_live_family_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
+                                     "ETHUSD": _flat_like(v4_bars())})
+    art = tmp_path / "art"
+    live, dead = set(live_sids.values()), set(dead_sids.values())
+
+    monkeypatch.setattr(gauntlet_mod, "PBO_NULL_PRIOR_S", 10 ** 9)
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF,
+                       "--pbo-null-draws", "8",
+                       "--deadline-utc", _in_one_hour()])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"PBO {live_group}: null" in out and "does not fit the deadline" in out
+    assert "DEADLINE: 1 live family" in out
+    reg2 = Registry(reg.log_path)
+    verdicts = {e["payload"]["strategy_id"] for e in reg2.entries()
+                if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+    assert verdicts == dead                      # the dead family was judged
+    states = _gauntlet_states(reg2)
+    assert all(states[sid] == "gauntlet" for sid in live)   # deferred, no verdict
+    result = json.loads((reg.log_path.parent / "logs" / "gauntlet_result.json")
+                        .read_text(encoding="utf-8"))
+    assert result["evaluated"] == len(dead)
+    assert result["deferred"] == len(live)
+    assert result["stopped_at_deadline"] is True
+
+    monkeypatch.setattr(gauntlet_mod, "PBO_NULL_PRIOR_S", 60.0)
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(art), "--cutoff", V4_CUTOFF,
+                       "--pbo-null-draws", "8"])
+    assert rc == 0
+    reg3 = Registry(reg.log_path)
+    verdicts = {e["payload"]["strategy_id"]: e["payload"] for e in reg3.entries()
+                if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+    assert set(verdicts) == live | dead
+    assert all(verdicts[sid]["metrics"]["pbo_null_draws"] == 8 for sid in live)
+    assert not any(st == "gauntlet" for st in _gauntlet_states(reg3).values())
+
+
+def test_gauntlet_pbo_deadline_check_never_fires_on_a_budget_that_fits(tmp_path, monkeypatch, capsys):
+    from . import gauntlet as gauntlet_mod
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    from .test_gauntlet_classes import dead_and_live_family_registry, _flat_like
+
+    reg, live_sids, dead_sids, live_group, dead_group = \
+        dead_and_live_family_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
+                                     "ETHUSD": _flat_like(v4_bars())})
+    monkeypatch.setattr(gauntlet_mod, "PBO_NULL_PRIOR_S", 1.0)
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art"), "--cutoff", V4_CUTOFF,
+                       "--pbo-null-draws", "8",
+                       "--deadline-utc", _in_one_hour()])
+    assert rc == 0
+    assert "does not fit the deadline" not in capsys.readouterr().out
+    result = json.loads((reg.log_path.parent / "logs" / "gauntlet_result.json")
+                        .read_text(encoding="utf-8"))
+    assert result["deferred"] == 0 and result["stopped_at_deadline"] is False
+    assert result["evaluated"] == len(live_sids) + len(dead_sids)

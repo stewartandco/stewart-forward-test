@@ -147,6 +147,16 @@ FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
 # chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
 # fx cycle's observed wall per candidate (~150 min / 499), rounded up.
 GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
+# PBO (after the candidates): one permutation null per LIVE family, pure
+# Python, ~50 draws -- the 2026-09-03 15:30 cycle spent 108 min on 325 of 366
+# families and was killed by the PT4H wall at group 325 with every verdict
+# unwritten. The loop below asks the budget before EACH null (prior below
+# until the first null has been timed, the measured mean after) and defers
+# the CANDIDATES of a family whose null does not fit: they stay in 'gauntlet'
+# state with no verdict, exactly like a candidate the chunk loop never
+# started, and the next run picks them up. Families already measured keep
+# their verdicts. A family is judged in one pass or not at all.
+PBO_NULL_PRIOR_S = 60.0
 GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
 # Memory envelope for the worker pool (2026-09-03 incident: a worker died
 # with "OpenBLAS error: Memory allocation still failed after 10 retries" and
@@ -1394,8 +1404,16 @@ def run(argv: list[str] | None = None) -> int:
     live_groups = {group_of[s["strategy_id"]] for s in candidates
                   if results_by_sid[s["strategy_id"]]["passed"]}
     pbo_by_group = {}
+    # Only a family with a candidate THIS run can have its status read (the
+    # rows loop below is the only reader, per candidate); the other ~300
+    # registered families used to be walked for nothing.
+    candidate_groups = {group_of[s["strategy_id"]] for s in candidates}
+    deferred_groups: set[str] = set()
+    null_times: list[float] = []
     n_groups = len(family_by_group)
     for gi, (g, fam) in enumerate(family_by_group.items(), start=1):
+        if g not in candidate_groups:
+            continue
         series = {s["sid"]: train_returns(s["sid"]) for s in fam}
         res = cscv_pbo(series, s=CSCV_SPLITS)
         n_distinct = distinct_configs(series)
@@ -1415,9 +1433,23 @@ def run(argv: list[str] | None = None) -> int:
             # Seeded off the group id so a rerun of the same chain reproduces
             # the same null exactly, the way every other stochastic step here
             # is seeded off content rather than off the clock.
+            null_rate = ((sum(null_times) / len(null_times)) if null_times
+                         else PBO_NULL_PRIOR_S)
+            if budget.active and not budget.fits(1, null_rate):
+                res["verdict"] = "deferred_deadline"
+                deferred_groups.add(g)
+                pbo_by_group[g] = res
+                print(f"  PBO {g}: null (~{null_rate:.0f}s) does not fit the "
+                      f"deadline ({budget.remaining_s():.0f}s left) -> its "
+                      f"candidates are deferred to the next run")
+                if gi % 25 == 0 or gi == n_groups:
+                    print(f"[gauntlet] pbo group {gi}/{n_groups}", flush=True)
+                continue
+            t_null0 = time.time()
             null = permutation_null(
                 series, s=CSCV_SPLITS, draws=args.pbo_null_draws,
                 seed=int(hashlib.sha256(g.encode()).hexdigest()[:8], 16))
+            null_times.append(time.time() - t_null0)
             res["null_draws"] = len(null)
             if not null:                      # every draw was uncomputable
                 res["verdict"] = "underpowered"
@@ -1459,6 +1491,18 @@ def run(argv: list[str] | None = None) -> int:
               f"the {pbo_by_group[g]['percentile']:.0%} percentile of its own "
               f"no-skill null (kill at {PBO_KILL_PCTILE:.0%})")
     t_pbo = time.time() - t_pbo0
+    if deferred_groups:
+        deferred_pbo = [s for s in candidates
+                        if group_of[s["strategy_id"]] in deferred_groups]
+        candidates = [s for s in candidates
+                      if group_of[s["strategy_id"]] not in deferred_groups]
+        deferred = deferred + deferred_pbo
+        stopped_at_deadline = True
+        print(f"DEADLINE: {len(deferred_groups)} live family(ies) could not get "
+              f"their PBO null before the deadline; their {len(deferred_pbo)} "
+              f"candidate(s) stay in 'gauntlet' state with no verdict and the "
+              f"next run picks them up. Measured families' verdicts are written "
+              f"below.", flush=True)
 
     # Patch each candidate's worker-computed metrics with the pbo status that
     # was only knowable AFTER the whole pool returned (see the P2/P3 comments

@@ -239,13 +239,24 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   **`stopped_at_deadline` is an OK outcome** (overall OK, cycle_complete): a
   cycle that chose to stop is routine; one killed at the wall is the defect.
   When the Sentinel is pointed at pipeline_status.json, treat it so.
-- **Known approximation, stated.** In the gauntlet the registry-wide
-  simulation and clustering run BEFORE any candidate and are not chunked
-  (simcache-bounded after the first pass); PBO runs AFTER and scales with the
-  live groups the candidates leave. A reserve (25% of what is left when
-  candidates begin, floor 60 s) is held back for it; `t_pbo` is printed every
-  run so the reserve can be calibrated from real cycles. The PT4H task limit
-  remains the backstop -- hitting it is now evidence of a bug, not weather.
+- **PBO is deadline-aware too (2026-09-03 evening).** The 15:30 cycle was
+  killed by the PT4H wall at PBO family 325 of 366 with every verdict unwritten:
+  the 25% reserve (~36 min) was nowhere near a ~2 h pass of permutation nulls.
+  Now the PBO loop only visits families that have a candidate this run, and
+  asks the budget before EACH live family's null (`PBO_NULL_PRIOR_S` = 60 s
+  until the first null is timed, the measured mean after). A family whose
+  null does not fit is `deferred_deadline`: its candidates are removed from
+  the verdict write and stay in `gauntlet` state with no verdict, counted in
+  `deferred` / `stopped_at_deadline`, and the next run re-evaluates them (a
+  family is judged in one pass or not at all -- no verdict is ever written
+  against an unmeasured null). Measured families' verdicts are written.
+- **Known approximation, stated.** The registry-wide simulation and clustering
+  still run BEFORE any candidate and are not chunked (simcache-bounded after
+  the first pass; arrays since 2026-09-03). The candidate reserve (25% of what
+  is left when candidates begin, floor 60 s) now only has to cover the
+  verdict/artifact writes plus however many nulls the loop chooses to run.
+  `t_pbo` is printed every run. The PT4H task limit remains the backstop --
+  hitting it is evidence of a bug, not weather.
 - Tuning constants: `gauntlet.GAUNTLET_PRIOR_S_PER_CANDIDATE / _CHUNK_PER_WORKER /
   _RESERVE_FRAC / _RESERVE_MIN_S`, `screen.SCREEN_PRIOR_S_PER_SPEC /
   _CHUNK_PER_WORKER`, `loop.SAFETY_MARGIN_S`. Tests: `pipeline/test_deadline.py`
