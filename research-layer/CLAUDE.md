@@ -358,7 +358,10 @@ fix; the release block now only drops what the pool phase no longer needs.
   this unconditionally, so the loop detects it next to the pre-spend chain
   verify rather than paying ~$4.20/fire to reach a guaranteed failure. Repair
   the chain manually.
-- Fires 10:30 / 15:30 / 21:30 local once \StewartCo\25_PipelineLoop is
+- Fires 22:30 / 02:30 local (NIGHT, since 2026-09-04 -- was 10:30/15:30/21:30:
+  a cycle needs ~9 GB of commit the desktop does not leave free by day, and no
+  4h window may reach 08:20 QuarantineDaily; quant/tasks/xml/25_PipelineLoop.xml
+  + setup_scheduler.bat carry it) once \StewartCo\25_PipelineLoop is
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real
   defect (Sentinel FAILs the digest).
