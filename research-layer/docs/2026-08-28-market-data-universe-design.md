@@ -18,6 +18,7 @@
 | D10 | Caps | Caps become QUEUES. The 60-sibling refusal is replaced by split-and-carry across cycles; nothing proposed is ever silently dropped. The gauntlet is the only place an edge can die |
 | D11 | Edge numbering | Every registered strategy carries a sequential chain-order number (#0001...) on every human-facing surface (reports, audits, Morpheus pipeline UI); the 16-hex id is demoted to provenance detail |
 | D12 | Variation coverage | Bounded by the curated declared per-block param grids (the "reasonable" fence); a coverage map reports declared-but-untested points per family structure; proposer steering toward gaps is a later, separate decision |
+| D15 | Exit rules (2026-09-03) | NO TIME GATING: `exit/time_stop` and `stop/pct_stop` retired; exits are a declared, indicator-placed stop (mandatory), an R-multiple target (optional) and indicator-event signal exits (optional, may reuse the entry's indicator); the engine's undeclared `ma_cross*` crossunder exit becomes a declared block; `version: 2` registrations; verdicts record exit-reason counts; everything re-trialled in the unified re-run, compliant-as-is legacy registrations stand. Design: `docs/2026-09-03-exit-rules-v7-design.md` |
 
 Priority order (Coen): data + benchmark machinery first, grid expansion second, activation last.
 
