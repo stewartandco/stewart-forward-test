@@ -313,6 +313,25 @@ at `quarantine → live`, now the **only** place multiplicity is priced, remains
 uncalibrated. Pre-committed on-chain: more survivors under v6 is evidence of a
 looser gate, **not** of edge, and must not be reported as a breakthrough.
 
+**Amendment, exit-rules-v7 (D15, 2026-09-03; `docs/2026-09-03-exit-rules-v7-design.md`).**
+Retires calendar exits and fixed-percent stops from the Composer grammar
+**in place**: chained `block_type_registered` schemas are immutable, so
+`exit/time_stop` and `stop/pct_stop` stay registered and keep executing for
+every legacy spec, and are refused for NEW registrations by policy
+(`pipeline/blocks.py::RETIRED_TYPES`). New specs are stamped **`version: 2`**
+and run a second engine path — barriers, then declared indicator-event signal
+exits, no deadline, no implicit exit — while `version: 1` is byte-for-byte the
+prior path (the quarantine forward runner re-simulates legacy sids daily; their
+observation must not move under them). Every verdict now records **why each
+trade closed** (`exit_reasons*`, `open_at_end`, `stop_invalid` above) — recorded,
+never gated. **Verifier rule (invariant 10):** after the chained `exit-rules-v7`
+note — the `note` entry whose text begins `exit-rules-v7:` — every
+`strategy_registered` must carry `version: 2` and no retired type; before the
+note, `version: 1` entries stand as history. Ratchet position: **TIGHTENS** (a
+class of exits is forbidden; nothing is loosened). Pre-committed here: without
+forced exits trade counts fall and more families fail `trade_count`; that is the
+honest consequence, not a defect, and `GATE_MIN_TRADES` is unchanged.
+
 ---
 
 ## 4. Registry log — `registry_log.jsonl`
@@ -349,8 +368,25 @@ Common envelope:
 
 `verdict.metrics` minimums per stage:
 
-- `screened`: `{trades, net_pnl, win_rate, max_dd}`
+- `screened`: `{trades, net_pnl, win_rate, max_dd}`, plus D15 (exit-rules-v7,
+  2026-09-03): `{exit_reasons, open_at_end, stop_invalid}` carried through from
+  `run_spec` unchanged — `exit_reasons` is `{reason: n}` over the closed trades
+  (`stop`, `target`, `signal:<type>`, and `time`/`signal` on legacy `version: 1`
+  specs; only keys that occurred), `open_at_end` whether any book ended with a
+  position still open (marked to market in equity, never a closed trade),
+  `stop_invalid` how many **signal-bars** were dropped because the indicator-placed
+  stop was not on the adverse side of the entry. Persistent-signal entries
+  (`trend_scan`, `channel_breakout`, `zscore`) fire on consecutive bars, so this
+  counts bars, not distinct opportunities — never read it as "N trades lost".
+  RECORDED, NOT GATED
 - `gauntlet`: `{is_edge_per_trade, oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin, deflated_sharpe, sibling_group_n, cost_stress_net_pnl}`, plus protocol-v4: `{train_sharpe, pbo, pbo_family_kill}`, plus protocol-v5: `{pbo_n_distinct, pbo_percentile, pbo_null_p05, pbo_null_p95, pbo_null_draws}`, plus protocol-v6: `{plateau_ok, perturbation}` (`perturbation` is the self-perturbation sensitivity record: each dense axis of the strategy's OWN parameters stepped one place along its own grid and the strategy re-run, with `worst_ratio` the sharpest one-step drop. RECORDED, NOT GATED) — an observed PBO cannot be read without the null it was judged against, so the verdict carries the null with it rather than forcing a later reader to recompute one — the plateau gate's qualification/selection outcome is recorded in the sibling-group's `state_change` reasons (`sibling_not_selected`) and in the gauntlet artifact bundle's `group_context`, not as a per-verdict metrics key
+  — plus D15 (exit-rules-v7, 2026-09-03): `{exit_reasons_is, exit_reasons_oos,
+  open_at_end}` (RECORDED, NOT GATED). The two count maps are
+  `engine.exit_reason_counts` over the candidate's ONE simulated trade list split
+  at the cutoff — the same `is_t`/`oos_t` lists the gates read, so IS + OOS sums
+  to the run's closed-trade count. `open_at_end` is `run_spec`'s own figure for
+  the full-sample run, which ends inside OOS, so it is the OOS book ending open.
+  No gate reads any of the three; `FAIL_ORDER` is unchanged
 - `quarantine` (graduation review): `{days, trades, realized_edge_per_trade, projection_percentile}`
 
 A `quarantine_decision` records what a paper-traded strategy's book DID on that

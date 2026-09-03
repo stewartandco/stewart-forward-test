@@ -63,7 +63,7 @@ from . import deadline as _deadline
 from . import simcache
 from .simcache import Series
 from .registry import Registry
-from .engine import run_spec, ENGINE_REV
+from .engine import run_spec, ENGINE_REV, exit_reason_counts
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
                     bootstrap_paths, harvey_liu_haircut)
 from .cluster import effective_trials
@@ -787,6 +787,10 @@ def _candidate_payload(s: dict, spec_bars: dict, res: dict,
     return {
         "spec": s, "spec_bars": spec_bars,
         "res_trades": res["trades"], "res_equity": res["equity"],
+        # D15: the engine's own open_at_end for this candidate (run_spec
+        # metrics). The full-sample run ends inside OOS, so "the book ended
+        # open" and "the OOS book ended open" are one fact. RECORDED only.
+        "res_open_at_end": bool(res["metrics"]["open_at_end"]),
         "rets": rets, "group_n": group_n_val, "registered_n": registered_n,
         "train_sharpe": train_sharpe_val, "trials_n": trials_n,
         "trials_var": trials_var, "seed": int(sid, 16) % (2 ** 31),
@@ -862,6 +866,17 @@ def _evaluate_candidate(payload: dict) -> dict:
     eras = cells.CLASSES.get(spec_class, {}).get("eras", ())
     if eras:
         metrics["era_summary"] = era_summary(payload["res_trades"], eras)
+
+    # D15: RECORDED, NOT GATED (design s4; same doctrine as benchmark_relative
+    # below) -- why the IS and OOS trades closed, and whether the book ended
+    # with a position still open (marked to market in equity, never a closed
+    # trade). The payload carries ONE trade list (res_trades); is_t / oos_t
+    # are its split at the cutoff, made above, and these counts are over
+    # exactly those two lists. exit_reason_counts is the engine's own helper,
+    # so a verdict's figures and run_spec's `exit_reasons` are one formula.
+    metrics["exit_reasons_is"] = exit_reason_counts(is_t)
+    metrics["exit_reasons_oos"] = exit_reason_counts(oos_t)
+    metrics["open_at_end"] = bool(payload["res_open_at_end"])
 
     # B1: RECORDED, NOT GATED (see _benchmark_relative's own docstring and
     # the addendum's pre-registration). strategy_net is the SAME figure the

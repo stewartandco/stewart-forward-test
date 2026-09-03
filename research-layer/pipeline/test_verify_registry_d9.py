@@ -426,3 +426,129 @@ def test_every_refusal_constant_carries_a_reason():
     # refusals if one ever reaches it
     assert composer.RETRIAL_OK not in composer.RETRIAL_REASONS
     assert composer.RETRIAL_WINDOW_UNKNOWN not in composer.RETRIAL_REASONS
+
+
+# ------------- D15 (exit-rules-v7): version 2 after the chained note --------
+#
+# docs/2026-09-03-exit-rules-v7-design.md s2: after the chained exit-rules-v7
+# note (identified by its first line), every strategy_registered MUST be
+# version: 2 and carry no retired type (blocks.RETIRED_TYPES). Before the
+# note, version: 1 entries stand -- the ~5,000 legacy registrations are
+# history, not defects. The note is not on the live chain yet; these run on
+# tmp chains only.
+
+from .blocks import RETIRED_TYPES
+
+V7_NOTE_TEXT = ("exit-rules-v7: test anchor\n\nAfter this entry every "
+                "registration is version 2 with no retired type.")
+
+
+def chain_v7_note(reg):
+    reg.append("note", {"text": V7_NOTE_TEXT})
+
+
+def register_time_stop_type(reg):
+    """exit/time_stop is a retired type; it must still be a REGISTERED type
+    on the tmp chain, or invariant 6 (unregistered block type) would fire and
+    mask the rule under test."""
+    reg.register_block_type({"role": "exit", "type": "time_stop",
+                             "params_schema": {"max_bars": {"type": "int",
+                                                            "grid": [5]}}})
+
+
+def spec_variant(spec, *, version, extra_blocks=(), window_min=30):
+    """A NEW composition (window_min differs from make_strategy's 15, so
+    invariant 8 sees no prior) at the requested version."""
+    out = json.loads(json.dumps(spec))
+    out["version"] = version
+    out["blocks"][0]["params"]["window_min"] = window_min
+    out["blocks"].extend(list(extra_blocks))
+    out["generator"] = dict(out["generator"], run_id=f"run-v{version}")
+    out["strategy_id"] = None
+    out["strategy_id"] = content_id(out, "strategy_id")
+    return out
+
+
+TIME_STOP = {"role": "exit", "type": "time_stop", "params": {"max_bars": 5}}
+
+
+def test_retired_types_are_the_two_the_design_names():
+    assert set(RETIRED_TYPES) == {("exit", "time_stop"), ("stop", "pct_stop")}
+
+
+def test_version_1_history_before_the_note_stands(tmp_path):
+    """seeded()'s version-1 registration AND a version-1 registration
+    carrying a retired type, both BEFORE the note: unchanged history, VALID.
+    The verifier must never call the chain corrupt over what it already
+    said was fine."""
+    reg, spec = seeded(tmp_path)
+    register_time_stop_type(reg)
+    reg.register_strategy(spec_variant(spec, version=1,
+                                       extra_blocks=[TIME_STOP]))
+    chain_v7_note(reg)
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    assert "exit-rules-v7" not in "".join(
+        ln for ln in out.stdout.splitlines() if ln.startswith("  line"))
+
+
+def test_a_version_1_registration_after_the_note_fails(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=1)
+    reg.register_strategy(late)
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1, out.stdout
+    assert "version 1 after exit-rules-v7" in out.stdout
+    assert late["strategy_id"] in out.stdout
+
+
+def test_a_registration_with_no_version_after_the_note_fails(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=1)
+    del late["version"]
+    reg.register_strategy(late)
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1, out.stdout
+    assert "version None after exit-rules-v7" in out.stdout
+
+
+def test_a_version_2_registration_with_a_retired_type_after_the_note_fails(tmp_path):
+    reg, spec = seeded(tmp_path)
+    register_time_stop_type(reg)
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=2, extra_blocks=[TIME_STOP])
+    reg.register_strategy(late)
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 1, out.stdout
+    assert "retired block type exit/time_stop" in out.stdout
+    assert "version" not in [ln for ln in out.stdout.splitlines()
+                             if "retired block type" in ln][0].split("after")[0]
+
+
+def test_a_clean_version_2_registration_after_the_note_verifies(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    reg.register_strategy(spec_variant(spec, version=2))
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+    assert "REGISTRY VALID" in out.stdout
+
+
+def test_an_unrelated_note_does_not_arm_the_rule(tmp_path):
+    """Only a note whose text STARTS with 'exit-rules-v7:' is the marker.
+    A note that merely mentions it in passing (an incident write-up, say)
+    must not retroactively demand version 2."""
+    reg, spec = seeded(tmp_path)
+    reg.append("note", {"text": "incident: see exit-rules-v7: for context"})
+    reg.append("note", {"text": 42})           # malformed text: not the marker
+    reg.register_strategy(spec_variant(spec, version=1))
+
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout

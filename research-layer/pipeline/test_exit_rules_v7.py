@@ -354,3 +354,54 @@ def test_v2_signal_exit_never_fires_from_a_time_deadline():
     book = simulate_asset(v2_blocks, bars, COST, version=2)
     assert all(t["exit_reason"] in ("stop", "target") for t in book["trades"])
     assert "time" not in {t["exit_reason"] for t in book["trades"]}
+
+
+# ---------------- Task 4: gauntlet verdict metrics (RECORDED, NOT GATED) -----
+#
+# One real run through gauntlet.run() on test_gauntlet's smallest end-to-end
+# fixture. The verdict's own pass/fail is whatever it already was; what is
+# pinned here is that every gauntlet verdict now carries the D15 exit-reason
+# counts over the IS and OOS trade lists and whether the book ended open, and
+# that those figures are the engine's own numbers for the same spec on the
+# same bars -- not a second formula.
+
+from .test_gauntlet import gauntlet_registry, chain_gauntlet_note
+from .test_screen import write_data_dir, dated_target_hit_bars
+
+
+def test_gauntlet_verdict_metrics_record_exit_reasons_is_and_oos(tmp_path):
+    from .gauntlet import run as gauntlet_run, split_trades, DEFAULT_CUTOFF
+
+    reg, spec = gauntlet_registry(tmp_path)
+    chain_gauntlet_note(reg)
+    bars = dated_target_hit_bars()
+    data = write_data_dir(tmp_path, {"BTCUSD": bars})
+    rc = gauntlet_run(["--registry", str(reg.log_path),
+                       "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art")])
+    assert rc == 0
+
+    verdicts = [e for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"]["stage"] == "gauntlet"]
+    assert len(verdicts) == 1
+    m = verdicts[0]["payload"]["metrics"]
+
+    for key in ("exit_reasons_is", "exit_reasons_oos"):
+        assert isinstance(m[key], dict), key
+        assert all(isinstance(k, str) and isinstance(v, int) and v > 0
+                   for k, v in m[key].items()), m[key]
+    assert isinstance(m["open_at_end"], bool)
+
+    # the same spec on the same bars through the engine directly: the verdict
+    # records the engine's split counts and the engine's open_at_end, exactly
+    res = run_spec(spec, {"BTCUSD": bars})
+    is_t, oos_t = split_trades(res["trades"], DEFAULT_CUTOFF)
+    # this fixture trades once, in 2023 (train side): the OOS list is
+    # legitimately empty, and the equality below pins that the verdict
+    # recorded {} for it rather than the whole-sample counts
+    assert is_t, "fixture must trade"
+    assert m["exit_reasons_is"] == exit_reason_counts(is_t)
+    assert m["exit_reasons_oos"] == exit_reason_counts(oos_t)
+    assert (sum(m["exit_reasons_is"].values())
+            + sum(m["exit_reasons_oos"].values())) == len(res["trades"])
+    assert m["open_at_end"] == res["metrics"]["open_at_end"]

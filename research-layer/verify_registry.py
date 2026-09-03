@@ -40,6 +40,14 @@ invariants:
      FOLLOW a base snapshot for its date, name only assets the date does not
      already cover, and it licenses decisions exactly as the base does —
      earlier-than-the-row, both maps
+ 10. D15 (docs/2026-09-03-exit-rules-v7-design.md s2): AFTER the chained
+     exit-rules-v7 note -- the `note` entry whose text STARTS with
+     `exit-rules-v7:` -- every strategy_registered must carry `version: 2`
+     and no block whose (role, type) is in blocks.RETIRED_TYPES (exit/
+     time_stop, stop/pct_stop). BEFORE the note, `version: 1` entries stand:
+     the legacy registrations are history, not defects, and the walk is in
+     chain order so nothing earlier can trip a rule armed later. Every block
+     type must still be chained (invariant 6, unchanged)
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -67,6 +75,9 @@ from pipeline.composer import (composition_fingerprint,        # noqa: E402
                               RETRIAL_OK, RETRIAL_WINDOW_UNKNOWN)
 from pipeline.registry import (is_sha256_hex,                  # noqa: E402
                                QUARANTINE_SNAPSHOT_DIGEST_KEYS)
+# Invariant 10 reads the SAME retired-type table the engine and the composer
+# refuse from; a second list here would be two tables that must stay equal.
+from pipeline.blocks import RETIRED_TYPES                      # noqa: E402
 
 # Invariant 8 recomputes fingerprints for FROZEN entries against the LIVE
 # block grammar, so it is fair to ask whether a future grammar edit could
@@ -202,6 +213,7 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
     run_of: dict[str, str] = {}               # strategy_id -> generator.run_id
     buried_at_of: dict[str, str] = {}         # strategy_id -> stage it was buried from
     unverified_windows: list[str] = []        # invariant 8, evidence missing
+    v7_note_line: int | None = None           # invariant 10, armed at the note
     snapshots: dict[str, set] = {}          # date -> assets fully provenanced
 
     cutoff_cache: dict[str, str | None] = {}
@@ -345,6 +357,22 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                     if (b["role"], b["type"]) not in block_types:
                         fail(lineno, f"strategy {sid}: unregistered block type "
                                      f"{b['role']}/{b['type']}")
+                    if (v7_note_line is not None
+                            and (b["role"], b["type"]) in RETIRED_TYPES):
+                        fail(lineno, f"strategy {sid}: retired block type "
+                                     f"{b['role']}/{b['type']} after "
+                                     f"exit-rules-v7 (note at line "
+                                     f"{v7_note_line}) -- "
+                                     f"{RETIRED_TYPES[(b['role'], b['type'])]}")
+                if v7_note_line is not None:
+                    # Invariant 10. `!r` so a missing key reads "version None"
+                    # and a string "2" reads "version '2'" -- neither is 2.
+                    v = payload.get("version")
+                    if v != 2:
+                        fail(lineno, f"strategy {sid}: version {v!r} after "
+                                     f"exit-rules-v7 (note at line "
+                                     f"{v7_note_line}); every registration "
+                                     f"after the note must be version 2")
                 leaked = FORBIDDEN_RESULT_KEYS & set(payload.keys())
                 if leaked:
                     fail(lineno, f"strategy {sid}: results fields in spec {sorted(leaked)}")
@@ -478,6 +506,18 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                                      f"quarantine_data_snapshot covers this "
                                      f"date/asset")
 
+            elif etype == "note":
+                # Invariant 10's marker. Identified by its FIRST LINE (design
+                # s2), never by a substring: an incident note that mentions
+                # the rule in passing must not retroactively arm it. A
+                # non-string text is not the marker and is left to the
+                # schema; the walk never dereferences it. First occurrence
+                # arms; a second copy of the note changes nothing.
+                text = payload.get("text")
+                if (v7_note_line is None and isinstance(text, str)
+                        and text.startswith("exit-rules-v7:")):
+                    v7_note_line = lineno
+
             elif etype in ("verdict", "state_change"):
                 sid = as_key(lineno, payload.get("strategy_id"),
                              f"{etype} strategy_id")
@@ -520,6 +560,10 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
     print(f"  By type           : "
           + ", ".join(f"{t}={n}" for t, n in sorted(by_type.items())))
     print(f"  Cards registered  : {len(cards)}")
+    print(f"  exit-rules-v7     : "
+          + (f"note at line {v7_note_line}; version 2 enforced after it"
+             if v7_note_line is not None else
+             "no note on the chain; version 1 stands"))
     print(f"  Strategies        : {len(strategies)}")
     if strategies:
         funnel: dict[str, int] = {}
