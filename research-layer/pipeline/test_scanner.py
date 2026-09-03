@@ -550,8 +550,8 @@ def test_action_log_chains_and_detects_tamper(tmp_path):
 
 # ---------------- D28: cap raise + tightened intake bar -------------------
 
-def test_default_monthly_cap_is_35_per_d33():
-    """D33 (2026-08-17) cut the Reader's standing budget from 50 to 35 so that
+def test_default_monthly_cap_is_20_per_d39():
+    """D39 (2026-09-03: Intelligence band re-split, Reader 20 / pipeline 40; was 35 under D33) (2026-08-17) cut the Reader's standing budget from 50 to 20.0 so that
     Reader plus the new pipeline line (20) sits inside D28's Intelligence band
     of 30-60. The decision was ratified in the contract and the vault, and the
     runtime kept metering against 50 -- which put the 80% alert at 40 instead
@@ -564,9 +564,9 @@ def test_default_monthly_cap_is_35_per_d33():
     from .scanner import run as scanner_run
     import inspect
     from .budget import BudgetMeter
-    assert BudgetMeter(Path("nul-unused")).monthly_cap_usd == 35.0
+    assert BudgetMeter(Path("nul-unused")).monthly_cap_usd == 20.0
     src = inspect.getsource(scanner_run)
-    assert '"--cap", type=float, default=35.0' in src.replace("'", '"')
+    assert '"--cap", type=float, default=20.0' in src.replace("'", '"')
 
 
 def test_low_testability_keeps_are_recorded_but_not_extracted():
