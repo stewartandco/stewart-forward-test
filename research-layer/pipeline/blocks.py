@@ -122,6 +122,46 @@ BLOCK_TYPES: dict[tuple[str, str], dict] = {
         "z_entry": {"type": "float", "grid": [1.5, 1.75, 2.0, 2.25, 2.5]},
         "direction": {"type": "str", "grid": ["long", "both"]},
     },
+
+    # --- D15 exit rules v7 (docs/2026-09-03-exit-rules-v7-design.md) -------
+    # Indicator-placed stops (the stop LEVEL comes from an indicator at the
+    # signal bar; fixed at entry, no trailing) and indicator-EVENT signal
+    # exits (evaluated on close t, filled at open t+1, like entries). All are
+    # dense-by-design (>= 3 contiguous grid values) and sweepable. The
+    # retired time_stop / pct_stop entries above are UNCHANGED: chained
+    # schemas are immutable, so they are refused by policy (RETIRED_TYPES),
+    # never edited or deleted.
+    ("stop", "swing_stop"): {
+        "lookback": {"type": "int", "grid": [10, 20, 40]},
+    },
+    ("stop", "ma_stop"): {
+        "ma_len": {"type": "int", "grid": [20, 50, 100]},
+    },
+    ("stop", "channel_stop"): {
+        "lookback": {"type": "int", "grid": [20, 55, 100]},
+    },
+    ("stop", "band_stop"): {
+        "lookback": {"type": "int", "grid": [20, 40, 60]},
+        "mult": {"type": "float", "grid": [1.5, 2.0, 2.5, 3.0]},
+    },
+    ("exit", "ma_crossunder"): {
+        "fast": {"type": "int", "grid": [5, 8, 13, 20, 34]},
+        "slow": {"type": "int", "grid": [50, 80, 130, 200]},
+    },
+    ("exit", "channel_exit"): {
+        "lookback": {"type": "int", "grid": [10, 20, 40]},
+    },
+    ("exit", "zscore_revert"): {
+        "lookback": {"type": "int", "grid": [20, 40, 60, 90]},
+        "z_exit": {"type": "float", "grid": [0.0, 0.5, 1.0]},
+    },
+    ("exit", "tstat_decay"): {
+        "max_lookback": {"type": "int", "grid": [60, 90, 120]},
+        "t_exit": {"type": "float", "grid": [0.0, 0.5, 1.0]},
+    },
+    ("exit", "regime_flip"): {
+        "ma_len": {"type": "int", "grid": [50, 100, 150, 200, 250]},
+    },
 }
 
 # Cross-param constraints, keyed like BLOCK_TYPES. Return list of error strings.
@@ -133,13 +173,32 @@ CONSTRAINTS = {
     ("entry", "ma_cross_dense"):
         lambda p: ["ma_cross_dense: fast must be < slow"] if p["fast"] >= p["slow"] else [],
 }
+CONSTRAINTS[("exit", "ma_crossunder")] = (
+    lambda p: ["ma_crossunder: fast must be < slow"] if p["fast"] >= p["slow"] else [])
+
+# D15 (2026-09-03): retired for NEW registrations (version >= 2). The entries
+# stay in BLOCK_TYPES because their chained block_type_registered schemas are
+# immutable and ~5,000 legacy registrations cite them; the engine keeps
+# executing them for version-1 specs. Reasons are the chained note's words.
+RETIRED_TYPES: dict[tuple[str, str], str] = {
+    ("exit", "time_stop"): "D15 exit-rules-v7: exits on the calendar, not the market",
+    ("stop", "pct_stop"): "D15 exit-rules-v7: a fixed percent is not an indicator-placed stop",
+}
 
 
-def validate_block(role: str, btype: str, params: dict) -> list[str]:
-    """Return error strings; empty list = valid."""
+def retired_reason(role: str, btype: str) -> str | None:
+    return RETIRED_TYPES.get((role, btype))
+
+
+def validate_block(role: str, btype: str, params: dict, *, version: int = 1) -> list[str]:
+    """Return error strings; empty list = valid. `version` is the spec's
+    registration version: retired types are errors for version >= 2 and
+    valid (legacy) for version 1."""
     key = (role, btype)
     if key not in BLOCK_TYPES:
         return [f"unknown block type {role}/{btype}"]
+    if version >= 2 and key in RETIRED_TYPES:
+        return [f"{role}/{btype} retired: {RETIRED_TYPES[key]}"]
     schema = BLOCK_TYPES[key]
     errors = []
     for p in params:

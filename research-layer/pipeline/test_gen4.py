@@ -46,8 +46,22 @@ EXPECTED_BLOCK_TYPES = frozenset({
     ("target", "r_multiple_dense"),
     ("filter", "vol_percentile_dense"),
     ("regime", "regime_ma_short_dense"),
+    # D15 exit rules v7: indicator-placed stops + indicator-event signal exits.
+    # time_stop / pct_stop above STAY (retired by policy, schemas immutable).
+    ("stop", "swing_stop"),
+    ("stop", "ma_stop"),
+    ("stop", "channel_stop"),
+    ("stop", "band_stop"),
+    ("exit", "ma_crossunder"),
+    ("exit", "channel_exit"),
+    ("exit", "zscore_revert"),
+    ("exit", "tstat_decay"),
+    ("exit", "regime_flip"),
 })
 
+# D15: the new indicator-placed stops and signal exits are dense-by-design
+# (every grid >= 3 contiguous values) and have NO coarse twin; the twin
+# invariant does not apply to them. Pinned by test_exit_rules_v7.py instead.
 # Each dense entry twin next to the coarse/direction-capable twin it must
 # stay behaviourally and schema-identical to (see composer.preflight_block_types
 # for why the coarse side can never move).
