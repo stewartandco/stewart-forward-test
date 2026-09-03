@@ -43,9 +43,18 @@ list of values the Composer may sweep over. All computable from daily OHLCV.
 | regime | `regime_ma` | ma_len {100,200} (long-only above MA) |
 | filter | `vol_percentile` | lookback {90,180}, max_pctile {0.8,0.9,1.0} |
 | stop | `atr_stop` | atr_len {14}, mult {1.5,2.0,3.0} |
-| stop | `pct_stop` | pct {0.05,0.10,0.15} |
+| stop | `pct_stop` | pct {0.05,0.10,0.15}. **RETIRED** (D15, 2026-09-03): a fixed percent is not an indicator-placed stop. Refused for `version >= 2`; executed unchanged for legacy `version: 1` specs; the chained schema is immutable so the entry stays here |
+| stop | `swing_stop` | lookback {10,20,40} (v7, D15 2026-09-03): stop = lowest low (long) / highest high (short) over the `lookback` bars before the signal bar |
+| stop | `ma_stop` | ma_len {20,50,100} (v7): stop = SMA(close, ma_len) at the signal bar |
+| stop | `channel_stop` | lookback {20,55,100} (v7): stop = lower channel (long) / upper channel (short) over the `lookback` bars before the signal bar |
+| stop | `band_stop` | lookback {20,40,60}, mult {1.5,2.0,2.5,3.0} (v7): stop = SMA - mult x stdev (long) / SMA + mult x stdev (short) at the signal bar |
 | target | `r_multiple` | r {1.0,1.5,2.0,3.0} |
-| exit | `time_stop` | max_bars {10,20,40} |
+| exit | `time_stop` | max_bars {10,20,40}. **RETIRED** (D15, 2026-09-03): exits on the calendar, not the market. Refused for `version >= 2`; executed unchanged for legacy `version: 1` specs; the chained schema is immutable so the entry stays here |
+| exit | `ma_crossunder` | fast {5,8,13,20,34}, slow {50,80,130,200}; constraint fast < slow (v7): exit when fast SMA is below slow at close t (long) / above (short); a state test, filled at open t+1 |
+| exit | `channel_exit` | lookback {10,20,40} (v7): exit when close t < lowest low over the prior `lookback` bars (long) / > highest high (short) |
+| exit | `zscore_revert` | lookback {20,40,60,90}, z_exit {0.0,0.5,1.0} (v7): exit when z(close) >= -z_exit (long) / <= +z_exit (short) |
+| exit | `tstat_decay` | max_lookback {60,90,120}, t_exit {0.0,0.5,1.0} (v7): exit when the best t-stat over windows 20..max_lookback (largest magnitude, like the entry) falls to <= t_exit (long) / rises to >= -t_exit (short) |
+| exit | `regime_flip` | ma_len {50,100,150,200,250} (v7): exit when close t is below SMA(ma_len) (long) / above (short); a state test, not a cross |
 | risk | `fixed_fraction` | f {0.01,0.02} |
 | risk | `vol_target` | ann_vol {0.20,0.40}, lookback {30} |
 
@@ -54,6 +63,14 @@ entry (`{role, type, params_schema}`) for each grammar type not already in
 the registry — idempotent, so run 1 registers 12 and later runs register only
 grammar additions. Grammar changes happen ONLY by editing `blocks.py`, which
 makes them auditable through the chain.
+
+Rows marked **RETIRED** and **(v7)** are the D15 exit rules v7 change of
+2026-09-03 (`docs/2026-09-03-exit-rules-v7-design.md`; chained note
+`docs/notes/exit-rules-v7.md`): `time_stop` and `pct_stop` stay in
+`BLOCK_TYPES` because their chained schemas are immutable, and are refused by
+policy (`blocks.RETIRED_TYPES`) for `version >= 2` specs; the nine new
+indicator-placed stops and indicator-event signal exits are sweepable and
+are chained by the same first-real-run path when the Composer next runs.
 
 ## 2. Composer flow (`pipeline/composer.py`)
 

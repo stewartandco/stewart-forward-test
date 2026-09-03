@@ -27,13 +27,15 @@ New block types (all sweepable; every param grid has ≥ 3 contiguous values; al
 | `("stop","ma_stop")` | `ma_len` int [20, 50, 100] | stop = SMA(close, `ma_len`) at the signal bar |
 | `("stop","channel_stop")` | `lookback` int [20, 55, 100] | stop = lower channel (long) / upper channel (short) over `[i-lookback, i)` at signal time |
 | `("stop","band_stop")` | `lookback` int [20, 40, 60], `mult` float [1.5, 2.0, 2.5, 3.0] | stop = SMA − mult·stdev (long) / SMA + mult·stdev (short) at the signal bar |
-| `("exit","ma_crossunder")` | `fast` int [5, 8, 13, 20, 34], `slow` int [50, 80, 130, 200] | exit when the fast SMA is below the slow SMA at a close while long (above while short); evaluated on close `t`, filled at open `t+1` like entries |
+| `("exit","ma_crossunder")` | `fast` int [5, 8, 13, 20, 34], `slow` int [50, 80, 130, 200] | exit when the fast SMA is below the slow SMA at close `t` (long) / above (short); a state test, not a cross; evaluated on close `t`, filled at open `t+1` like entries |
 | `("exit","channel_exit")` | `lookback` int [10, 20, 40] | exit when close `t` < lowest low over `[t-lookback, t)` (long) / > highest high (short) |
 | `("exit","zscore_revert")` | `lookback` int [20, 40, 60, 90], `z_exit` float [0.0, 0.5, 1.0] | exit when z(close) ≥ −`z_exit` (long entered on a negative z) / ≤ +`z_exit` (short) |
-| `("exit","tstat_decay")` | `max_lookback` int [60, 90, 120], `t_exit` float [0.0, 0.5, 1.0] | exit when the best t-stat over windows 20..`max_lookback` (step 10), in the trade's direction, falls to ≤ `t_exit` |
-| `("exit","regime_flip")` | `ma_len` int [50, 100, 150, 200, 250] | exit when close `t` crosses the SMA(`ma_len`) against the position |
+| `("exit","tstat_decay")` | `max_lookback` int [60, 90, 120], `t_exit` float [0.0, 0.5, 1.0] | exit when the best t-stat over windows 20..`max_lookback` (step 10; largest magnitude, like the entry) falls to ≤ `t_exit` for a long / rises to ≥ −`t_exit` for a short |
+| `("exit","regime_flip")` | `ma_len` int [50, 100, 150, 200, 250] | exit when close `t` is BELOW the SMA(`ma_len`) (long) / ABOVE (short); a state test evaluated at each close, not a cross |
 
 Stop rules shared by ALL stop types (existing and new): the stop is fixed at entry (no trailing — a separate decision if ever wanted); a stop that lands on the wrong side of (or exactly at) the entry price makes the signal **ineligible** (no trade, counted in metrics as `stop_invalid`), exactly as today's `abs(entry_px - stop) > 0` rule; with several stop blocks the tightest wins (unchanged). `atr_stop` / `atr_stop_dense` stay (an ATR is an indicator).
+
+`stop_invalid` counts signal-bars, not distinct opportunities: a signal that stays lit across consecutive bars while the stop level is on the wrong side is counted once per bar.
 
 `SWEEPABLE_TYPES` gains every new type above. `CONSTRAINTS` gains `ma_crossunder: fast < slow`.
 

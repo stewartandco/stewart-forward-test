@@ -65,15 +65,30 @@ log returns over `lookback`; entries allowed while its percentile rank over
 the trailing 365 bars ≤ max_pctile.
 
 **Exits.**
-- `atr_stop`: stop = entry ∓ mult × ATR(atr_len) at entry (Wilder ATR).
-  `pct_stop`: stop = entry × (1 ∓ pct). If a spec carries multiple stops, the
-  tightest applies.
+- `atr_stop`: stop = entry ∓ mult × ATR(atr_len) at entry (Wilder ATR). If a
+  spec carries multiple stops, the tightest applies.
 - `r_multiple`: target = entry ± r × |entry − stop|.
 - Barrier checks each bar against high/low. Same-bar stop AND target touch →
   **stop fills** (conservative). Open gaps through a barrier fill at the open
   price, not the barrier price.
-- `time_stop`: position closes at open of (entry_bar + max_bars) if still open.
-- Signal exits (ma_cross cross-down) fill at next open.
+- **Exit rules v7** (D15, 2026-09-03; `version: 2` specs; full semantics in
+  `docs/2026-09-03-exit-rules-v7-design.md`, chained note
+  `docs/notes/exit-rules-v7.md`): no time stop of any kind (`time_stop`
+  retired) and no implicit exit. Every stop is a LEVEL placed by an indicator
+  at the signal bar (`atr_stop`/`atr_stop_dense`, `swing_stop`, `ma_stop`,
+  `channel_stop`, `band_stop`; `pct_stop` retired), fixed at entry, no
+  trailing; a level not strictly on the adverse side of the entry makes the
+  signal ineligible (counted as `stop_invalid`). Declared `exit` blocks
+  (`ma_crossunder`, `channel_exit`, `zscore_revert`, `tstat_decay`,
+  `regime_flip`) are evaluated on close t and fill at open t+1, after the
+  barrier checks at that bar. `exit_reason` is `stop`, `target` or
+  `signal:<type>`; an open position at sample end is never a trade
+  (`open_at_end`). Metrics record `exit_reasons`, `open_at_end`,
+  `stop_invalid`; no gate reads them.
+- Legacy (`version: 1`) semantics unchanged, frozen by the golden in
+  `pipeline/test_exit_rules_v7.py`: `pct_stop` = entry × (1 ∓ pct);
+  `time_stop` closes at the open of (entry_bar + max_bars); `ma_cross*`
+  entries carry an implicit cross-down signal exit filled at next open.
 
 **Sizing** (`risk` role): `fixed_fraction` risks f of current equity per
 trade: notional = f × equity / stop_distance_pct. `vol_target`: notional =
@@ -89,8 +104,9 @@ equity × (ann_vol / realized_ann_vol(lookback)). Both capped at 1.0 × equity
   fresh cross is required. Gate-blocked signals are lost, not queued.
 - Barriers do not apply on the entry fill bar itself (checks start the
   following bar) — conservative for daily bars with unknown intrabar order.
-- If a time-stop deadline coincides with a same-bar gap through the stop,
-  the exit price is the open either way; `exit_reason` records `time`.
+- (Legacy `version: 1` only.) If a time-stop deadline coincides with a
+  same-bar gap through the stop, the exit price is the open either way;
+  `exit_reason` records `time`.
 - A zero stop distance (degenerate flat data) skips the entry rather than
   sizing it.
 
