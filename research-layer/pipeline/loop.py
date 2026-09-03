@@ -13,7 +13,7 @@ are reported to status; only the former decides.
 Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
 \\StewartCo\\25_PipelineLoop (~3x daily) as `python -m pipeline.loop --once`.
 
-Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_lock |
+Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_cycle_budget | deferred_lock |
         deferred_budget | deferred_instance | dry_run_would_fire
         (distinguished in logs/pipeline_status.json items.outcome)
 Exit 1: stage_failed | chain_invalid | gauntlet_orphan | loop_crashed
@@ -39,6 +39,7 @@ import subprocess
 import sys
 import traceback
 
+from . import allowance as _allowance
 from . import deadline as _deadline
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +67,14 @@ Runner = Callable[..., object]
 # trigger (see the note at the watermark advance). A limit far below the
 # backlog therefore STRANDS cards behind the watermark rather than queueing
 # them for the next cycle -- the backlog only moves as new cards arrive.
-TRIAGE_LIMIT = 200
+TRIAGE_CEILING = 200
+# Phase 3 step 5 (2026-09-03): the number actually passed as --limit is DERIVED
+# each cycle from the spend allowance (pipeline/allowance.py) -- what this
+# cycle's money buys after the composer pair -- and clamped to this ceiling,
+# which is the window-fit maximum steps 1-3 guard. TRIAGE_LIMIT remains as the
+# ceiling's alias so the Gate-2 window test (and any monkeypatch of it) keeps
+# governing the maximum.
+TRIAGE_LIMIT = TRIAGE_CEILING
 
 # Cycle-time model, kept in ONE place. MIN_TASK_WINDOW_S is DERIVED from
 # TRIAGE_LIMIT deliberately: the two drifting apart is its own bug. At limit
@@ -1104,8 +1112,29 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         (logs_dir / TRIAGE_RESULT_NAME).unlink()
     except FileNotFoundError:
         pass
+    # Phase 3 step 5: how much may THIS cycle cost, and how many cards does
+    # that buy? Cap and reserve are Coen's (D39, 0.15); expected cycles come
+    # from the trailing 30 days of state["cycles"]; the two unit costs are the
+    # loop's own measured spend deltas (priors until the first samples).
+    calib = _allowance.Calibration.from_state(state)
+    expected_cycles = _allowance.expected_cycles(state)
+    cycle_allowance = _allowance.cycle_allowance(PIPELINE_CAP_USD, _allowance.RESERVE,
+                                                 expected_cycles)
+    triage_limit_used = _allowance.triage_count(cycle_allowance, calib.composer_pair_usd,
+                                                calib.usd_per_card, TRIAGE_LIMIT)
+    spent_at_start = _spent(logs_dir)
+    allowance_items = {
+        "cycle_usd_allowance": f"{cycle_allowance:.2f}",
+        "expected_cycles": str(expected_cycles),
+        "triage_limit_used": str(triage_limit_used),
+        "usd_per_card": f"{calib.usd_per_card:.4f}",
+        "composer_pair_usd": f"{calib.composer_pair_usd:.2f}",
+    }
+    print(f"loop: allowance USD {cycle_allowance:.2f} this cycle "
+          f"({expected_cycles} expected cycles/month) -> triage limit "
+          f"{triage_limit_used} (ceiling {TRIAGE_LIMIT})", flush=True)
     triage_argv = [py, "-m", "pipeline.triage_batch", *reg_argv, "--apply",
-                   "--limit", str(TRIAGE_LIMIT)]
+                   "--limit", str(triage_limit_used)]
     rc, lock_lost = _lock_and_run("pipeline.triage_batch", triage_argv)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.triage_batch")
@@ -1166,6 +1195,15 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         unseen = max(0, pending_routable_before - n_reviewed - n_skipped)
         watermark_after_triage = triggerable_after_triage - unseen
 
+    # Phase 3 step 5: this cycle's triage spend, as a calibration sample and
+    # as the per-cycle allowance check. Measured from the ledger, not modelled.
+    spent_after_triage = _spent(logs_dir)
+    triage_delta = spent_after_triage - spent_at_start
+    if reviewed is not None:
+        calib.record_triage(spent_delta=triage_delta, reviewed=reviewed[0])
+    cycle_spent = max(0.0, triage_delta)
+    allowance_items["cycle_spent"] = f"{cycle_spent:.2f}"
+
     # 4a-bis. "No new information, no new trials" (spec Decision 2). The
     # accepted+pending trigger basis means a class can fire on pending cards
     # that triage then rejects or escalates wholesale -- leaving the composer
@@ -1217,9 +1255,10 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         loop_state.record_generation(state, asset_class, run_id=run_id,
                                      watermark_count=watermark_after_triage,
                                      ts_utc=_now_utc())
+        calib.save(state)
         loop_state.save(state_path, state)
         _write_status(logs_dir, "no_new_accepted_cards",
-                      extra={"asset_class": asset_class,
+                      extra={**allowance_items, "asset_class": asset_class,
                              "watermark": str(watermark_after_triage),
                              "run_id": run_id,
                              "routable_before": str(routable_before_triage),
@@ -1236,15 +1275,50 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if not pipeline_budget.may_start_batch(spent):
         msg = (f"deferred_budget: pipeline spend USD {spent:.2f} is at/above "
                f"the batch-start threshold after triage -- parking before "
-               f"the {asset_class} composer run")
+               f"the {asset_class} composer run; watermark advanced to "
+               f"{watermark_after_triage}")
         print(msg, flush=True)
+        # Bank what triage reviewed (found 2026-09-03: this park recorded a
+        # park and never banked, so the cards it had just paid for were
+        # re-paid on the next fire).
+        loop_state.record_generation(state, asset_class, run_id=run_id,
+                                     watermark_count=watermark_after_triage,
+                                     ts_utc=_now_utc())
         loop_state.record_park(state, asset_class, ts_utc=_now_utc())
+        calib.save(state)
         loop_state.save(state_path, state)
         _write_status(logs_dir, "deferred_budget", overall="WARN",
                       extra={"asset_class": asset_class},
                       spent=spent, escalations=_budget_escalations(spent), state=state,
                       counts=_fresh_counts())
         return 0
+
+    # Per-cycle allowance (Phase 3 step 5), checked AFTER the monthly line above:
+    # when both would park, the month-level batch-stop is the stronger fact
+    # (WARN, budget_cap semantics); this one is a routine OK park.
+    if cycle_spent + calib.composer_pair_usd > cycle_allowance:
+        # Park at zero further spend. This is the clean-day park Coen
+        # sanctioned (overall OK): the cycle did its triage within the money
+        # it had and stops before the composer pair would exceed it. The
+        # cards triage just paid for are BANKED (Phase 1's rule) so they are
+        # never re-paid; the class rotates to the back as every park does.
+        print(f"deferred_cycle_budget: triage cost USD {cycle_spent:.2f} and the "
+              f"composer pair (~{calib.composer_pair_usd:.2f}) would exceed this "
+              f"cycle's allowance USD {cycle_allowance:.2f} -- parking {asset_class} "
+              f"before the composer; watermark advanced to {watermark_after_triage}",
+              flush=True)
+        loop_state.record_generation(state, asset_class, run_id=run_id,
+                                     watermark_count=watermark_after_triage,
+                                     ts_utc=_now_utc())
+        loop_state.record_park(state, asset_class, ts_utc=_now_utc())
+        calib.save(state)
+        loop_state.save(state_path, state)
+        _write_status(logs_dir, "deferred_cycle_budget", overall="OK",
+                      extra={**allowance_items, "asset_class": asset_class,
+                             "watermark": str(watermark_after_triage)},
+                      spent=spent_after_triage, state=state, counts=_fresh_counts())
+        return 0
+
 
     # 4b-pre. D6 sweep rotation: this generation's window of the class's
     # ACTIVE assets. `rotates` False (every class, today) means the window is
@@ -1290,6 +1364,11 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if rc != 0:
         return _composer_rc_or_park(logs_dir, state, asset_class, "pipeline.composer", rc,
                                     state_path, _fresh_counts())
+
+    # Phase 3 step 5: the composer pair's cost, as a calibration sample.
+    spent_after_composer = _spent(logs_dir)
+    calib.record_composer(spent_delta=spent_after_composer - spent_after_triage)
+    allowance_items["cycle_spent"] = f"{max(0.0, spent_after_composer - spent_at_start):.2f}"
 
     # 4d. screen (chain-writing)
     deadline_argv = (["--deadline-utc", args.deadline_utc]
@@ -1344,6 +1423,11 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                                  ts_utc=_now_utc(),
                                  routable_at_generation=_routable_counts(
                                      registry)[asset_class])
+    # Phase 3 step 5: this completed cycle counts toward next month's
+    # expected-cycles denominator, and the measured unit costs persist.
+    state.setdefault("cycles", []).append(
+        {"run_id": run_id, "ts_utc": _now_utc(), "asset_class": asset_class})
+    calib.save(state)
     # D6: the cursor moves ONLY on a completed generation, and only when a
     # window was ACTUALLY EMITTED. A parked, failed or deferred cycle leaves it
     # exactly where it was -- advancing past a window that was never swept
@@ -1368,7 +1452,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     print(f"cycle_complete: {asset_class} watermark now {watermark_after_triage}",
          flush=True)
     _write_status(logs_dir, "cycle_complete",
-                  extra={**_deadline_items(registry_path), "asset_class": asset_class,
+                  extra={**allowance_items, **_deadline_items(registry_path), "asset_class": asset_class,
                          "watermark": str(watermark_after_triage),
                          "run_id": run_id,
                          "chain_growth": str(chain_growth)},

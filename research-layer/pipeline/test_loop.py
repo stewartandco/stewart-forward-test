@@ -344,8 +344,16 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     # scheduled task's ExecutionTimeLimit (see loop.TRIAGE_LIMIT), so a change
     # here must be a deliberate edit of that constant, and the window-fit test
     # below is what actually guards the number.
+    # Phase 3 step 5: --limit is DERIVED from the spend allowance each cycle
+    # and clamped to loop.TRIAGE_LIMIT (the ceiling). Fresh state, priors:
+    # (40 x 0.85 / 10) - 0.64) / 0.018 = 153 -- under the ceiling.
+    from . import allowance as _al
+    from .budget import PIPELINE_CAP_USD as _cap
+    _expect = _al.triage_count(_al.cycle_allowance(_cap, _al.RESERVE, _al.CYCLES_FLOOR),
+                               _al.PRIOR_COMPOSER_PAIR_USD, _al.PRIOR_USD_PER_CARD,
+                               loop.TRIAGE_LIMIT)
     assert ("--limit" in triage_call
-            and triage_call[triage_call.index("--limit") + 1] == str(loop.TRIAGE_LIMIT))
+            and triage_call[triage_call.index("--limit") + 1] == str(_expect))
     # composer appears twice: --dry-run preflight then the real run.
     # Narrowed to python calls (argv[0] == sys.executable) -- a plain "-m"
     # in c would also catch `git commit -q -m ...`, and picking this by
@@ -480,7 +488,10 @@ def test_budget_recheck_after_triage_parks_before_composer(tmp_path):
     assert status["items"]["outcome"] == "deferred_budget"
     assert status["overall"] == "WARN"
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert "watermark" not in st.get("classes", {}).get("fx", {})           # watermark NOT advanced
+    # 2026-09-03: this park now BANKS what triage reviewed. Before, it recorded
+    # a park and left no watermark, so the cards triage had just paid for were
+    # re-paid on the next fire. The 30 accepted cards were all "seen".
+    assert st["classes"]["fx"]["watermark"] == 30
 
 
 def test_composer_cap_refusal_parks_not_fails(tmp_path):
@@ -1859,3 +1870,129 @@ def test_the_startup_window_check_is_wired_into_run(tmp_path, monkeypatch):
                         lambda *a, **k: calls.append(1) or 3600)
     loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())
     assert calls, "run() never consulted the live task window"
+
+
+# ---------------- Phase 3 step 5: the spend allowance, wired -----------------
+
+def _ledger_month():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+class SpendingRunner(FakeRunner):
+    """FakeRunner that also SPENDS: appends ledger rows when triage and the
+    composer run, so the loop's own spend deltas -- the calibration inputs
+    and the per-cycle park -- are observable. Amounts per call are the
+    test's to choose."""
+    def __init__(self, layer, *, triage_usd=0.0, composer_usd=0.0,
+                 accept=None, reg=None, **kw):
+        super().__init__(**kw)
+        self.ledger = layer / "logs" / "budget_ledger.jsonl"
+        self.triage_usd, self.composer_usd = triage_usd, composer_usd
+        # accept=[card ids]: what the real panel does to routable growth --
+        # mark them accepted on the triage call, through the Registry.
+        self.accept, self.reg = list(accept or []), reg
+
+    def _spend(self, usd, purpose):
+        if usd <= 0:
+            return
+        with self.ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts_utc": f"{_ledger_month()}-02T00:00:00+00:00",
+                                "usd": usd, "purpose": purpose, "agent": "pipeline",
+                                "model": "m"}) + "\n")
+
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if argv[0] == sys.executable and "-m" in argv:
+            mod = argv[argv.index("-m") + 1]
+            if mod == "pipeline.triage_batch":
+                self._spend(self.triage_usd, "triage")
+                for cid in self.accept:
+                    self.reg.review_card(cid, "accepted", "auto-test")
+            elif mod == "pipeline.composer":
+                self._spend(self.composer_usd, "composer")     # each of the pair
+        return r
+
+
+def test_triage_limit_is_derived_from_the_allowance_not_declared(tmp_path):
+    """Fresh state, no calibration: the priors rule. cap 40 x 0.85 / floor 10
+    cycles = USD 3.40; (3.40 - 0.64) / 0.018 = 153 cards -- below the 200
+    ceiling, so the ceiling is NOT what gets passed."""
+    from . import allowance as al
+    from .budget import PIPELINE_CAP_USD
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    c = _stage_call(fr, "pipeline.triage_batch")
+    expect = al.triage_count(al.cycle_allowance(PIPELINE_CAP_USD, al.RESERVE, al.CYCLES_FLOOR),
+                             al.PRIOR_COMPOSER_PAIR_USD, al.PRIOR_USD_PER_CARD, loop.TRIAGE_CEILING)
+    assert c[c.index("--limit") + 1] == str(expect)
+    assert expect < loop.TRIAGE_CEILING
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["triage_limit_used"] == str(expect)
+    assert status["items"]["expected_cycles"] == str(al.CYCLES_FLOOR)
+    assert float(status["items"]["cycle_usd_allowance"]) == pytest.approx(3.40)
+
+
+def test_a_completed_cycle_records_itself_and_calibrates_from_its_own_spend(tmp_path):
+    """After cycle_complete: state["cycles"] carries this run, and the
+    calibration holds one triage sample (spend / reviewed) and one composer
+    sample (the pair's total)."""
+    from . import allowance as al
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = SpendingRunner(layer, triage_usd=1.00, composer_usd=0.35, triage_reviewed=50)
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert len(st["cycles"]) == 1 and st["cycles"][0]["asset_class"] == "fx"
+    c = al.Calibration.from_state(st)
+    assert c.usd_per_card == pytest.approx(1.00 / 50)
+    assert c.composer_pair_usd == pytest.approx(0.70)
+
+
+def test_spend_past_the_allowance_parks_before_the_composer_and_banks_the_reviewed_cards(tmp_path):
+    """The park Coen said counts as a clean day. Triage alone costs more than
+    the allowance leaves for the composer pair: stop at zero further spend,
+    outcome deferred_cycle_budget, overall OK, composer never called -- and
+    the cards triage just paid for are BANKED, never re-paid."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _add_cards(reg, 100, status="pending", asset_classes=["fx"], prefix="pend")
+    _seed_crypto_caught_up(layer, 130)
+    # Triage reviews 10 of the 100 pending and accepts them (routable 30 -> 40,
+    # so the no_new_accepted_cards guard does not apply) at USD 3.30 -- more
+    # than the USD 3.40 allowance leaves for a USD 0.64 composer pair.
+    fr = SpendingRunner(layer, triage_usd=3.30, composer_usd=0.35, triage_reviewed=10,
+                        accept=[f"pend{i:04d}" for i in range(10)], reg=reg)
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert not any(c[0] == sys.executable and "-m" in c and c[c.index("-m") + 1] == "pipeline.composer"
+                   for c in fr.calls)
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_cycle_budget"
+    assert status["overall"] == "OK"
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["fx"]["watermark"] == 40         # 130 - (100 - 10 reviewed) = 40, banked
+
+
+def test_the_monthly_batch_stop_park_after_triage_also_banks_the_reviewed_cards(tmp_path):
+    """Defect found 2026-09-03: the existing post-triage deferred_budget park
+    recorded a park and never banked, so the cards triage had just paid for
+    were re-paid on the next fire. It banks now."""
+    from .budget import PIPELINE_CAP_USD
+    # Accepted-driven fire (no pending cards): the no_new_accepted_cards guard
+    # does not apply, so the cycle reaches the monthly park after triage.
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    # Just under the batch-stop line before triage; triage pushes it over.
+    ledger = layer / "logs" / "budget_ledger.jsonl"
+    ledger.write_text(json.dumps({"ts_utc": f"{_ledger_month()}-01T00:00:00+00:00",
+                                  "usd": PIPELINE_CAP_USD * 0.79, "purpose": "triage",
+                                  "agent": "pipeline", "model": "m"}) + "\n", encoding="utf-8")
+    fr = SpendingRunner(layer, triage_usd=PIPELINE_CAP_USD * 0.02)
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "deferred_budget"
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    assert st["classes"]["fx"]["watermark"] == 30          # banked (was: no watermark at all)
+
+
