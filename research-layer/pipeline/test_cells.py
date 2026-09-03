@@ -329,8 +329,11 @@ def test_excluded_block_types_declared_per_class():
     # T4-rider-3 (addendum): every class carries its own excluded_block_types
     # rather than composer inferring "any non-crypto class" from asset_class.
     assert cells.CLASSES["crypto"]["excluded_block_types"] == frozenset()
+    # D15 exit rules v7 (2026-09-03): swing_stop / channel_stop / channel_exit
+    # read highs/lows, so they join the four range-requiring types.
     assert cells.CLASSES["fx"]["excluded_block_types"] == frozenset(
-        {"channel_breakout", "channel_breakout_dense", "atr_stop", "atr_stop_dense"})
+        {"channel_breakout", "channel_breakout_dense", "atr_stop", "atr_stop_dense",
+         "swing_stop", "channel_stop", "channel_exit"})
     # equity_etf carries REAL OHLC bars (bar_kind "ohlcv"), unlike fx's
     # single-fix bars, so no block type is excluded on range grounds.
     assert cells.CLASSES["equity_etf"]["excluded_block_types"] == frozenset()

@@ -30,7 +30,8 @@ def _register_accepted(reg: Registry, **card_overrides) -> str:
 
 
 def bond_family(**overrides):
-    """A minimal bond_etf family: ma_cross_dense (sweepable) entry, pct_stop,
+    """A minimal bond_etf family: ma_cross_dense (sweepable) entry, ma_stop
+    (pct_stop until D15 exit rules v7 retired it for version-2 specs),
     r_multiple target, fixed_fraction risk -- the same shape as
     test_composer_equity.py's equity_family(), reused deliberately."""
     fam = {
@@ -41,7 +42,7 @@ def bond_family(**overrides):
         "blocks": [
             {"role": "entry", "type": "ma_cross_dense",
              "params": {"fast": 13, "slow": 50, "direction": "long"}},
-            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "stop", "type": "ma_stop", "params": {"ma_len": 50}},
             {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
             {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
         ],
@@ -63,7 +64,7 @@ def metal_family(**overrides):
         "blocks": [
             {"role": "entry", "type": "ma_cross_dense",
              "params": {"fast": 13, "slow": 50, "direction": "long"}},
-            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "stop", "type": "ma_stop", "params": {"ma_len": 50}},
             {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
             {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
         ],

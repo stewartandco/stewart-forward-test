@@ -47,9 +47,11 @@ def _register_accepted(reg: Registry, **card_overrides) -> str:
 
 
 def fx_family(**overrides):
-    """A minimal fx family: ma_cross_dense (sweepable) entry, pct_stop (the
-    one stop RANGE_REQUIRING does not exclude), r_multiple target,
-    fixed_fraction risk.
+    """A minimal fx family: ma_cross_dense (sweepable) entry, ma_stop (a
+    close-only stop RANGE_REQUIRING does not exclude; pct_stop, the stop this
+    fixture carried before D15 exit rules v7, is retired for version-2 specs
+    and validate_family now refuses it), r_multiple target, fixed_fraction
+    risk.
 
     "assets" is real now (real-fx-generation finding, task 6b follow-up):
     validate_family checks it against cells.CLASSES[asset_class]["assets"]
@@ -73,7 +75,7 @@ def fx_family(**overrides):
         "blocks": [
             {"role": "entry", "type": "ma_cross_dense",
              "params": {"fast": 13, "slow": 50, "direction": "long"}},
-            {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+            {"role": "stop", "type": "ma_stop", "params": {"ma_len": 50}},
             {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
             {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
         ],
@@ -117,6 +119,10 @@ def test_default_flag_is_byte_identical(tmp_path, monkeypatch):
     card id, and everything hashed from it, would drift every real second.
     Every branch this task adds is guarded on asset_class != "crypto"; this
     pins that guard.
+
+    Re-captured 2026-09-03 (D15 exit rules v7, plan Task 3): every spec the
+    composer builds now carries version 2, and strategy_id hashes the spec,
+    so all nine ids moved. Nothing else in the record changed.
     """
     monkeypatch.setattr(composer, "datetime", _FixedDatetime)
     monkeypatch.setattr(reader, "datetime", _FixedDatetime)
@@ -131,9 +137,9 @@ def test_default_flag_is_byte_identical(tmp_path, monkeypatch):
         "n_specs": 9,
         "run_id": "fixed-run",
         "strategy_ids": [
-            "c91e0aba31a02fc3", "4884f3367a5ea660", "9f9baba815e2c85c",
-            "173c9d1780c69994", "eb6cb5d485c2e3ea", "553a02e81372fd19",
-            "673190978df1d299", "04b7a1df5069427a", "f02ab8fd383c1a4c",
+            "bb64bdbf67d9be80", "5e065f24d2d38caa", "855366f19eb21955",
+            "a52e18c8a72af968", "d5b971f49603484a", "eb84a4c901b2ed19",
+            "fe3512d82cc2116b", "6a739e2e88738f02", "0c6accd7ea3c370b",
         ],
     }
 
@@ -320,7 +326,10 @@ def test_fx_specs_validate_against_schema(tmp_path):
 # proposal_schema_for must return these two objects BY IDENTITY on
 # asset_class="crypto" (identity, not reconstruction), so this pin is the
 # byte-for-byte guarantee that a real crypto model call never changed.
-CRYPTO_SYSTEM_PROMPT_SHA256 = "1235a1bf292d3434fbeb38cb3e24713e3a80d9b4f8ebb384776af2e1e0c2c1d7"
+# Re-pinned 2026-09-03 (D15 exit rules v7, plan Task 3): SYSTEM_PROMPT gained
+# the EXITS rule paragraph. The pin's purpose is unchanged -- the fx branch
+# must never alter the crypto prompt -- so it moves with the crypto prompt.
+CRYPTO_SYSTEM_PROMPT_SHA256 = "3cf8b69dcae1f2b5bf181f62c09a353778163defc87547ef549ba49bbda039ea"
 CRYPTO_PROPOSAL_SCHEMA_SHA256 = "8345ffec2e7f2c20b80695acd50bad53df1b9fa32e6a07c5707f5b38750c48ce"
 
 
