@@ -13,12 +13,15 @@ provably predate every verdict.
 from __future__ import annotations
 
 import csv
+import os
 import sys
+import time
 import json
 import hashlib
 import argparse
 from pathlib import Path
 
+from . import deadline as _deadline
 from .cells import CLASSES, cell_id
 from .parallel import run_all, CellError
 from .registry import Registry
@@ -27,6 +30,12 @@ from .engine import run_spec
 PROTOCOL = "screen-protocol-v1"
 GATE_MIN_TRADES = 40
 DEFAULT_CUTOFF = "2023-12-31"
+
+# Phase 3 step 1 deadline tuning (see pipeline/deadline.py). The prior is
+# judged only until the first chunk has run; the 2026-09-01 fx cycle screened
+# 1,260 specs in ~25 min wall (~1.2 s each) -- 2 s is that, rounded up.
+SCREEN_PRIOR_S_PER_SPEC = 2.0
+SCREEN_CHUNK_PER_WORKER = 8
 
 
 def load_bars(data_dir: Path, asset: str, cutoff: str,
@@ -266,6 +275,11 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=0,
                     help="fan-out width; 0 = cpu_count-1, 1 = serial")
     ap.add_argument("--dry-run", action="store_true")
+    # Phase 3 step 1: stop BEFORE starting specs this run cannot finish by the
+    # deadline; they stay 'proposed', which is exactly what the next run
+    # selects. Absent = today's behaviour, byte for byte.
+    ap.add_argument("--deadline-utc", default=None,
+                    help="ISO-8601 instant; defer specs that cannot finish by then")
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
@@ -292,6 +306,21 @@ def run(argv: list[str] | None = None) -> int:
              and states.get(e["payload"]["strategy_id"]) == "proposed"]
     if not specs:
         print("No strategies in 'proposed' state.")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "screen", evaluated=0, deferred=0,
+                                   deadline_utc=args.deadline_utc, stopped_at_deadline=False)
+        return 0
+
+    budget = _deadline.DeadlineBudget(args.deadline_utc)
+    n_specs_total = len(specs)
+    if budget.active and not budget.fits(1, SCREEN_PRIOR_S_PER_SPEC):
+        print(f"DEADLINE: {budget.remaining_s():.0f}s remain before {args.deadline_utc}; "
+              f"not even one spec fits -- deferring all {n_specs_total} (they stay "
+              f"'proposed' and the next run screens them).")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "screen", evaluated=0,
+                                   deferred=n_specs_total, deadline_utc=args.deadline_utc,
+                                   stopped_at_deadline=True)
         return 0
 
     # A CELL is (asset, timeframe) — the unit that is loaded and hashed. Keying
@@ -309,8 +338,33 @@ def run(argv: list[str] | None = None) -> int:
         jobs.append((spec, {a: bars_by_cell[(a, tf)]
                             for a in spec["universe"]["assets"]}))
 
-    # ordered results; the engine is pure, so fan-out changes scheduling only
-    evaluated = run_all(SpecJob(GATE_MIN_TRADES), jobs, workers=args.workers)
+    # ordered results; the engine is pure, so fan-out changes scheduling only.
+    # Chunked so the budget is asked before EACH chunk whether it can still
+    # finish; a spec that is never started stays 'proposed' for the next run.
+    workers_eff = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+    chunk_size = max(1, workers_eff * SCREEN_CHUNK_PER_WORKER)
+    evaluated = []
+    stopped_at_deadline = False
+    for chunk in _deadline.chunks(jobs, chunk_size):
+        if budget.active and not budget.fits(len(chunk), budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)):
+            stopped_at_deadline = True
+            break
+        t_c0 = time.time()
+        evaluated.extend(run_all(SpecJob(GATE_MIN_TRADES), chunk, workers=args.workers))
+        budget.record(len(chunk), time.time() - t_c0)
+    deferred = specs[len(evaluated):]
+    specs = specs[:len(evaluated)]
+    if stopped_at_deadline:
+        print(f"DEADLINE: stopped before starting {len(deferred)} of {n_specs_total} "
+              f"specs ({budget.remaining_s():.0f}s left, measured "
+              f"{budget.rate_s(SCREEN_PRIOR_S_PER_SPEC):.2f}s per spec); they stay "
+              f"'proposed' and the next run screens them.", flush=True)
+    if not specs:
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "screen", evaluated=0,
+                                   deferred=len(deferred), deadline_utc=args.deadline_utc,
+                                   stopped_at_deadline=True)
+        return 0
 
     results = []
     for spec, outcome in zip(specs, evaluated):
@@ -351,8 +405,12 @@ def run(argv: list[str] | None = None) -> int:
               f"re-running.", file=sys.stderr)
         raise
 
+    _deadline.write_result(args.registry, "screen", evaluated=len(results),
+                           deferred=len(deferred), deadline_utc=args.deadline_utc,
+                           stopped_at_deadline=stopped_at_deadline)
     print(f"\n{len(results)} screened: {n_pass} -> gauntlet, "
-          f"{len(results) - n_pass} -> graveyard.")
+          f"{len(results) - n_pass} -> graveyard"
+          + (f", {len(deferred)} deferred to the next run." if deferred else "."))
     return 0
 
 

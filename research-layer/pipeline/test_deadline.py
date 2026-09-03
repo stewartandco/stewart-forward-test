@@ -139,13 +139,15 @@ def test_gauntlet_with_a_far_deadline_is_byte_identical_to_no_deadline(tmp_path)
         base.mkdir()
         reg, _ = v4_sweep_registry(base)
         data = write_data_dir(base, {"BTCUSD": dated_target_hit_bars()})
+        n_before = sum(1 for _ in reg.entries())
         rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
                            "--artifacts-dir", str(base / "art"), *extra])
         assert rc == 0
         out = []
-        for e in Registry(reg.log_path).entries():
+        for e in list(Registry(reg.log_path).entries())[n_before:]:   # appended only
             e = dict(e); e.pop("ts_utc", None); e.pop("prev_entry_hash", None)
             out.append(json.dumps(e, sort_keys=True))
+        assert out, "the run appended nothing -- the comparison would be vacuous"
         return out, base
 
     plain, _ = _run("plain", [])
@@ -155,3 +157,95 @@ def test_gauntlet_with_a_far_deadline_is_byte_identical_to_no_deadline(tmp_path)
                         .read_text(encoding="utf-8"))
     assert result["stopped_at_deadline"] is False
     assert result["deferred"] == 0
+
+
+# ---------------- screen end to end ----------------------------------------
+
+from .screen import run as screen_run
+from .test_screen import screening_registry, chain_protocol_note
+from .common import content_id
+
+
+def _proposed_registry(base, lookbacks=(20, 25, 30)):
+    """screening_registry gives one proposed spec; clone it into a small
+    family so deferral has something to defer. Same grammar, same card, a
+    different lookback each so every strategy_id is distinct."""
+    reg, spec = screening_registry(base)
+    for lb in lookbacks[1:]:
+        clone = json.loads(json.dumps(spec))
+        clone["strategy_id"] = None
+        clone["blocks"][0]["params"]["lookback"] = lb
+        clone["strategy_id"] = content_id(clone, "strategy_id")
+        reg.register_strategy(clone)
+    chain_protocol_note(reg)
+    return reg
+
+
+def test_screen_defers_everything_when_the_deadline_has_passed(tmp_path):
+    """Mirror of the gauntlet case one stage earlier. Not started means
+    still 'proposed', which is exactly what the next screen run selects;
+    screen's own orphan rule fires only on 'screened', so it stays green."""
+    reg = _proposed_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    art = tmp_path / "art"
+    before = _chain(reg)
+    n = sum(1 for st in reg.strategy_states().values() if st == "proposed")
+    assert n == 3
+
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art),
+                     "--deadline-utc", "2000-01-01T00:00:00Z"])
+    assert rc == 0
+    reg2 = Registry(reg.log_path)
+    assert _chain(reg2) == before
+    assert all(st == "proposed" for st in reg2.strategy_states().values())
+    result = json.loads((reg.log_path.parent / "logs" / "screen_result.json")
+                        .read_text(encoding="utf-8"))
+    assert (result["evaluated"], result["deferred"], result["stopped_at_deadline"]) == (0, n, True)
+    assert not art.exists() or not any(art.iterdir())
+
+    rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(art)])
+    assert rc == 0
+    reg3 = Registry(reg.log_path)
+    verdicts = [e for e in reg3.entries() if e["entry_type"] == "verdict"
+                and e["payload"]["stage"] == "screened"]
+    assert len(verdicts) == n
+    assert not any(st == "proposed" for st in reg3.strategy_states().values())
+    result = json.loads((reg.log_path.parent / "logs" / "screen_result.json")
+                        .read_text(encoding="utf-8"))
+    assert (result["evaluated"], result["deferred"], result["stopped_at_deadline"]) == (n, 0, False)
+
+
+def test_screen_with_a_far_deadline_is_byte_identical_to_no_deadline(tmp_path):
+    """One seeded registry, copied to two dirs, so the only variable is the
+    flag. (Building two fixtures independently is not an identity test:
+    make_card() stamps the wall clock into the card id, which flows into
+    every strategy_id.)"""
+    import shutil
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _proposed_registry(seed)
+    write_data_dir(seed, {"BTCUSD": dated_target_hit_bars()})
+
+    def _run(sub, extra):
+        base = tmp_path / sub
+        shutil.copytree(seed, base)
+        reg = Registry(base / "reg.jsonl")
+        data = base / "data"
+        n_before = sum(1 for _ in reg.entries())
+        rc = screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                         "--artifacts-dir", str(base / "art"), *extra])
+        assert rc == 0
+        out = []
+        for e in list(Registry(reg.log_path).entries())[n_before:]:   # appended only
+            e = dict(e); e.pop("ts_utc", None); e.pop("prev_entry_hash", None)
+            out.append(json.dumps(e, sort_keys=True))
+        assert out, "the run appended nothing -- the comparison would be vacuous"
+        return out, base
+
+    plain, _ = _run("plain", [])
+    dated, base = _run("dated", ["--deadline-utc", "2099-01-01T00:00:00Z"])
+    assert dated == plain
+    result = json.loads((base / "logs" / "screen_result.json").read_text(encoding="utf-8"))
+    assert result["stopped_at_deadline"] is False and result["deferred"] == 0
