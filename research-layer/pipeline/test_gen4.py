@@ -322,7 +322,13 @@ def test_sweepable_set_is_exactly_the_dense_types():
                                ("stop", "atr_stop_dense"),
                                ("target", "r_multiple_dense"),
                                ("filter", "vol_percentile_dense"),
-                               ("regime", "regime_ma_short_dense")}
+                               ("regime", "regime_ma_short_dense"),
+                               # D15 exit rules v7: dense by design, no coarse twin
+                               ("stop", "swing_stop"), ("stop", "ma_stop"),
+                               ("stop", "channel_stop"), ("stop", "band_stop"),
+                               ("exit", "ma_crossunder"), ("exit", "channel_exit"),
+                               ("exit", "zscore_revert"), ("exit", "tstat_decay"),
+                               ("exit", "regime_flip")}
 
 
 def test_sibling_cap_is_sixty():

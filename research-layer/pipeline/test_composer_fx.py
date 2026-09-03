@@ -227,7 +227,9 @@ def test_fx_block_exclusions():
     # against cells.CLASSES["fx"]["assets"] rather than the crypto-only
     # ALLOWED_ASSETS these calls used to rely on by omission.
     assert composer.RANGE_REQUIRING == {"channel_breakout", "channel_breakout_dense",
-                                        "atr_stop", "atr_stop_dense"}
+                                        "atr_stop", "atr_stop_dense",
+                                        # D15 exit rules v7: read highs/lows
+                                        "swing_stop", "channel_stop", "channel_exit"}
 
     good = fx_family()
     assert composer.validate_family(

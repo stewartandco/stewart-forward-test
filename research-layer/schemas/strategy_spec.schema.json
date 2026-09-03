@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "strategy_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
-    "version": {"const": 1},
+    "version": {"enum": [1, 2]},
     "created_utc": {"type": "string", "format": "date-time"},
     "name": {"type": "string", "minLength": 1, "maxLength": 120},
     "family": {"type": "string", "pattern": "^[a-z0-9_]+$"},

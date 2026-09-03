@@ -78,9 +78,14 @@ FX_ERAS = (("pre_gfc", "1999-01-01", "2007-12-31"), ("gfc_zirp", "2008-01-01", "
 # silently fed a degenerate input rather than erroring. Track 2a's addendum
 # (T4-rider-3) moves this from composer.py's "any non-crypto class" coupling
 # to a per-class declaration here; composer.RANGE_REQUIRING carries the same
-# four values (test-pinned equal, never re-declared independently).
+# seven values (test-pinned equal, never re-declared independently).
+# D15 exit rules v7 (2026-09-03): swing_stop, channel_stop and channel_exit
+# read highs/lows, so they join the set; pct_stop (fx's old stop) is retired
+# for version-2 specs, and fx families now stop on ma_stop / band_stop, which
+# are close-only and stay allowed (as do the close-based signal exits).
 FX_EXCLUDED_BLOCK_TYPES = frozenset({"channel_breakout", "channel_breakout_dense",
-                                      "atr_stop", "atr_stop_dense"})
+                                      "atr_stop", "atr_stop_dense",
+                                      "swing_stop", "channel_stop", "channel_exit"})
 
 # Track 2a (SP4 addendum docs/2026-08-24-sp4-track2a-addendum.md): the second
 # non-crypto class, declared but NOT activated (see LIVE_CLASSES below).

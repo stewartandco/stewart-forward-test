@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from .common import content_id
 from .registry import Registry
-from .blocks import BLOCK_TYPES, validate_block, block_type_payload
+from .blocks import BLOCK_TYPES, RETIRED_TYPES, validate_block, block_type_payload
 from . import cells, loop_state
 
 PIPELINE_VERSION = "g1.0.0"
@@ -60,7 +60,14 @@ SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
                    ("stop", "atr_stop_dense"),
                    ("target", "r_multiple_dense"),
                    ("filter", "vol_percentile_dense"),
-                   ("regime", "regime_ma_short_dense")}
+                   ("regime", "regime_ma_short_dense"),
+                   # D15 exit rules v7 (2026-09-03): dense by design (every grid
+                   # >= 3 contiguous values), no coarse twin, so sweepable as is.
+                   ("stop", "swing_stop"), ("stop", "ma_stop"),
+                   ("stop", "channel_stop"), ("stop", "band_stop"),
+                   ("exit", "ma_crossunder"), ("exit", "channel_exit"),
+                   ("exit", "zscore_revert"), ("exit", "tstat_decay"),
+                   ("exit", "regime_flip")}
 ALLOWED_ASSETS = ("BTCUSD", "ETHUSD")
 UNIVERSE_BASE = {"asset_class": "crypto", "timeframe": "1d", "session": "24x7"}
 COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
@@ -110,13 +117,29 @@ BOND_ETF_PROXY_TAGS = frozenset({"rates"})
 # so any block whose semantics require a real intrabar range distinct from
 # close would be silently fed degenerate inputs rather than erroring. These
 # types are excluded from families proposed for a non-crypto, single-fix
-# class instead. pct_stop is the remaining stop for fx families. Kept as a
-# standalone module constant (not renamed/removed -- pinned by
-# test_composer_fx.py) even though the authoritative source for exclusion is
-# now cells.CLASSES[cls]["excluded_block_types"] (T4-rider-3, track 2a): the
-# fx entry there carries these exact four values, test-pinned equal.
+# class instead. Kept as a standalone module constant (not renamed/removed --
+# pinned by test_composer_fx.py) even though the authoritative source for
+# exclusion is now cells.CLASSES[cls]["excluded_block_types"] (T4-rider-3,
+# track 2a): the fx entry there carries these exact seven values, test-pinned
+# equal.
+#
+# D15 exit rules v7 (2026-09-03): pct_stop -- which used to be "the remaining
+# stop for fx families" -- is RETIRED for version-2 specs, and the three new
+# types that read highs/lows (swing_stop, channel_stop, channel_exit) join
+# this set. ma_stop and band_stop are close-only and stay ALLOWED, so they are
+# what an fx family stops on now; the close-based signal exits (ma_crossunder,
+# zscore_revert, tstat_decay, regime_flip) stay allowed too.
 RANGE_REQUIRING = {"channel_breakout", "channel_breakout_dense",
-                   "atr_stop", "atr_stop_dense"}
+                   "atr_stop", "atr_stop_dense",
+                   "swing_stop", "channel_stop", "channel_exit"}
+
+# D15 exit rules v7 (docs/2026-09-03-exit-rules-v7-design.md s2): the
+# registration marker every spec the composer builds carries from 2026-09-03.
+# version 2 = engine exit-rules-v7 (no implicit crossunder exit on ma_cross*,
+# no retired block types); version 1 = the legacy engine path, frozen by
+# golden. The SAME block list under a different version is a different trial
+# (composition_fingerprint). validate_family validates at THIS version.
+SPEC_VERSION = 2
 
 # Track 2a addendum s"Routing": the futures->equity_etf PROXY lane (spec
 # s10.8). A futures-tagged card routes to equity_etf ONLY when its topics
@@ -233,9 +256,29 @@ def composition_fingerprint(spec: dict) -> str:
             "asset_class": u.get("asset_class"),
             "session": u.get("session"),
             "blocks": blocks}
+    # D15 exit rules v7: the same blocks under a different engine version are
+    # a different trial, so the version is part of the identity -- but it
+    # enters `core` ONLY when it is not 1, so every chained version-1
+    # fingerprint (6,050 registrations on 2026-09-03) is byte-for-byte
+    # unchanged and D9's buried-priors lookups keep resolving.
+    if spec.get("version", 1) != 1:
+        core["version"] = spec["version"]
     return hashlib.sha256(
         json.dumps(core, sort_keys=True, separators=(",", ":"),
                    ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def v7_compliant_as_is(spec: dict) -> bool:
+    """D15(b): a legacy (version-1) composition whose engine behaviour is
+    UNCHANGED under exit-rules-v7 -- no retired block type and an entry that
+    never had the implicit crossunder exit (ma_cross*) -- is compliant as
+    registered and must NOT be re-registered as a version-2 trial (it would
+    be a duplicate: same blocks, same behaviour, a second N). Read by the
+    re-trial classification tool (plan Task 5); it decides nothing here."""
+    if any((b["role"], b["type"]) in RETIRED_TYPES for b in spec["blocks"]):
+        return False
+    entry = next(b for b in spec["blocks"] if b["role"] == "entry")
+    return not entry["type"].startswith("ma_cross")
 
 
 def registered_fingerprints(registry: Registry) -> dict[str, str]:
@@ -682,6 +725,13 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     class -- empty by default so every existing crypto caller is unchanged.
     fx families are validated with excluded_types=RANGE_REQUIRING.
 
+    D15 exit rules v7: every block is validated at SPEC_VERSION, so a retired
+    type (blocks.RETIRED_TYPES: exit/time_stop, stop/pct_stop) is an error
+    here -- one error per retired block, from validate_block, which is the
+    single place the retirement rule lives. An `exit` block may appear zero
+    or many times (signal exits are optional and additive); the role checks
+    below are unchanged.
+
     asset_class (real-fx-generation finding, task 6b follow-up): which
     class's declared assets fam["assets"] is checked against. Defaults to
     "crypto" so every existing caller -- none of which passes this
@@ -723,7 +773,8 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
         errors.append("cannot combine regime_ma and regime_ma_short — the "
                       "gate AND is empty, so the spec would never trade")
     for b in blocks:
-        errors.extend(validate_block(b.get("role"), b.get("type"), b.get("params", {})))
+        errors.extend(validate_block(b.get("role"), b.get("type"), b.get("params", {}),
+                                     version=SPEC_VERSION))
         if b.get("type") in excluded_types:
             # Named the CLASS, not a hardcoded bar_kind (track 2a review
             # nit): fx is the only class with a non-empty excluded_types
@@ -851,7 +902,7 @@ def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[
         _snap_to_grid(blocks)
         spec = {
             "strategy_id": None,
-            "version": 1,
+            "version": SPEC_VERSION,
             "created_utc": created_utc,
             "name": _build_name(assets, fam["family"], blocks),
             "family": fam["family"],
@@ -978,7 +1029,7 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
             provenance["proxy_card_ids"] = fam_proxy_card_ids
         base = {
             "strategy_id": None,
-            "version": 1,
+            "version": SPEC_VERSION,
             "created_utc": created_utc,
             "name": "",   # recomputed per cell below, once its asset is known
             "family": fam["family"],
@@ -1140,6 +1191,13 @@ Rules:
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- EXITS (D15, 2026-09-03): a position closes ONLY through (a) a stop-loss whose
+  LEVEL is indicator-placed (atr_stop*, swing_stop, ma_stop, channel_stop,
+  band_stop), (b) an R-multiple target (optional), (c) declared indicator-EVENT
+  exit blocks (optional, zero or more: ma_crossunder, channel_exit,
+  zscore_revert, tstat_decay, regime_flip). NEVER a time stop of any kind --
+  exiting on the calendar is forbidden. An exit block MAY reuse the entry's
+  indicator (crossover in, crossunder out is the canonical example).
 - Every family must state a regime_hypothesis: which market conditions it
   expects to work in, and why it is not merely levered exposure to an upward
   drift. A family whose edge disappears when drift and volatility fall should
@@ -1248,6 +1306,15 @@ Rules:
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- EXITS (D15, 2026-09-03): a position closes ONLY through (a) a stop-loss whose
+  LEVEL is indicator-placed -- for this single-fix class that means ma_stop or
+  band_stop (atr_stop*, swing_stop and channel_stop read a real high/low and
+  are EXCLUDED here), (b) an R-multiple target (optional), (c) declared
+  indicator-EVENT exit blocks (optional, zero or more: ma_crossunder,
+  zscore_revert, tstat_decay, regime_flip; channel_exit reads a high/low and
+  is EXCLUDED here). NEVER a time stop of any kind -- exiting on the calendar
+  is forbidden. An exit block MAY reuse the entry's indicator (crossover in,
+  crossunder out is the canonical example).
 - Every family must state a regime_hypothesis: which market conditions it
   expects to work in, and why it is not merely levered exposure to an upward
   drift. A family whose edge disappears when drift and volatility fall should
@@ -1321,6 +1388,13 @@ Rules:
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- EXITS (D15, 2026-09-03): a position closes ONLY through (a) a stop-loss whose
+  LEVEL is indicator-placed (atr_stop*, swing_stop, ma_stop, channel_stop,
+  band_stop), (b) an R-multiple target (optional), (c) declared indicator-EVENT
+  exit blocks (optional, zero or more: ma_crossunder, channel_exit,
+  zscore_revert, tstat_decay, regime_flip). NEVER a time stop of any kind --
+  exiting on the calendar is forbidden. An exit block MAY reuse the entry's
+  indicator (crossover in, crossunder out is the canonical example).
 - Every family must state a regime_hypothesis: which market conditions it
   expects to work in, and why it is not merely levered exposure to an upward
   drift. A family whose edge disappears when drift and volatility fall should
@@ -1395,6 +1469,13 @@ Rules:
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- EXITS (D15, 2026-09-03): a position closes ONLY through (a) a stop-loss whose
+  LEVEL is indicator-placed (atr_stop*, swing_stop, ma_stop, channel_stop,
+  band_stop), (b) an R-multiple target (optional), (c) declared indicator-EVENT
+  exit blocks (optional, zero or more: ma_crossunder, channel_exit,
+  zscore_revert, tstat_decay, regime_flip). NEVER a time stop of any kind --
+  exiting on the calendar is forbidden. An exit block MAY reuse the entry's
+  indicator (crossover in, crossunder out is the canonical example).
 - Every family must state a regime_hypothesis: which market conditions it
   expects to work in, and why it is not merely levered exposure to an upward
   drift. A family whose edge disappears when drift and volatility fall should
@@ -1474,6 +1555,13 @@ Rules:
 - Every family must cite the card_ids that motivate it. Cite only cards that
   genuinely inform the composition; do not decorate with irrelevant citations.
 - Exactly one entry block; at least one stop and one risk block per family.
+- EXITS (D15, 2026-09-03): a position closes ONLY through (a) a stop-loss whose
+  LEVEL is indicator-placed (atr_stop*, swing_stop, ma_stop, channel_stop,
+  band_stop), (b) an R-multiple target (optional), (c) declared indicator-EVENT
+  exit blocks (optional, zero or more: ma_crossunder, channel_exit,
+  zscore_revert, tstat_decay, regime_flip). NEVER a time stop of any kind --
+  exiting on the calendar is forbidden. An exit block MAY reuse the entry's
+  indicator (crossover in, crossunder out is the canonical example).
 - Every family must state a regime_hypothesis: which market conditions it
   expects to work in, and why it is not merely levered exposure to an upward
   drift. A family whose edge disappears when drift and volatility fall should
@@ -1571,10 +1659,18 @@ def expand_universe(spec: dict, cells: list[tuple[str, str]]) -> list[dict]:
 
 
 def grammar_summary() -> str:
+    """The grammar as the model sees it: live types only. Retired types
+    (D15 exit rules v7) stay in BLOCK_TYPES because their chained schemas are
+    immutable, but they are omitted from the listing and named on one closing
+    line so the model is told, not left to guess, why they are missing."""
     lines = []
     for (role, btype), schema in BLOCK_TYPES.items():
+        if (role, btype) in RETIRED_TYPES:
+            continue
         params = ", ".join(f"{p} in {s['grid']}" for p, s in schema.items())
         lines.append(f"- {role}/{btype}: {params or '(no params)'}")
+    lines.append("- retired (never use): " + ", ".join(
+        f"{r}/{ty} ({why})" for (r, ty), why in RETIRED_TYPES.items()))
     return "\n".join(lines)
 
 
