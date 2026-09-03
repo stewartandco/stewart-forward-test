@@ -301,3 +301,47 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real
   defect (Sentinel FAILs the digest).
+
+## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
+- `python -m pipeline.livegate` judges BOTH arms of the chained
+  `quarantine-live-protocol-v1` and, when not `--dry-run`, chains a
+  `live_gate` verdict plus a state change for every strategy it moves
+  (quarantine -> live, or -> graveyard); a HOLD writes nothing. It takes
+  `logs/chain.lock` only when there is a verdict to chain and defers politely
+  (`deferred_lock`, exit 0) when it is held -- the quarantine daily's rule.
+- `--report DIR` writes `<UTC date>-livegate-assessment.md` (every quarantined
+  strategy, cohort size, verdicts) -- Coen's quarterly read. Written on a dry
+  run too; it is not a chain write.
+- `tasks/run_livegate.bat` = `\StewartCo\26_LiveGateWeekly`, **Sunday 09:10**,
+  exit code load-bearing. Weekly, not daily: the note charges
+  Benjamini-Hochberg over "the eligible strategies at each assessment" and
+  fixes no cadence; weekly keeps the kill arm prompt without re-asking a
+  barely-changed record daily. Change the cadence here AND in
+  `quant/tasks/setup_scheduler.bat` in the same pass.
+- **LIVE is a lifecycle state, not capital** (the note's own words). Money at
+  risk stays Coen's separate decision; nothing here can construct a
+  `RouterConfig(mode="live")` in trading-systems, and nothing should.
+- Reachability, from the note: graduation is a MULTI-YEAR proposition
+  (Sharpe 1.3 ~ 587 days best case). Do not read a slow record as a weak
+  strategy; it may be a large cohort.
+
+## Triage escalations carry their reasons; `--queue` groups them (2026-09-03)
+- Each dissenting reviewer's one-sentence reason is now stored on the
+  skip-set entry (`dissent_reasons`, advisory, additive) and carried across
+  sightings; a `--no-skip-escalated` re-review replaces them with the newer
+  panel's objections. Before this the reasons were read once and discarded.
+- `python -m pipeline.triage_batch --queue [--escalated-state PATH]` prints
+  Coen's T3 backlog grouped by reason, most common first, with times_seen and
+  first-escalation date. Read-only: returns before Registry is constructed.
+  Cards escalated before 2026-09-03 show `(no reason recorded)` until
+  re-reviewed (a one-off `--no-skip-escalated` pass over 331 cards costs
+  ~USD 6 -- Coen's call).
+
+## Budget lines (D39, 2026-09-03): pipeline 40, Reader 20, one constant
+- `pipeline/budget.py` `PIPELINE_CAP_USD` is THE pipeline cap;
+  `pipeline_budget.MONTHLY_USD` imports it. Batch-stop = 80% = 32. The
+  Reader's default meter cap and `scanner --cap` default are 20. Tests derive
+  every threshold from the constants -- never pin a literal dollar figure.
+- `BudgetMeter.state()` judges the CURRENT calendar month. A test that
+  stamps rows in a fixed month goes silent when the month turns (that is what
+  broke test_pipeline_budget on 2026-09-01); use a this-month timestamp.
