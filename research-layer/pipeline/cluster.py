@@ -327,6 +327,18 @@ def _sample_variance(xs: list[float]) -> float:
     return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
 
 
+def _row(rets) -> list[float]:
+    """A series as the Python list the pure-Python helpers were written
+    for. Since 2026-09-03 the gauntlet hands this module numpy rows
+    (simcache.Series, docs/plans/2026-09-03-simcache-arrays.md); the same
+    float64s come back out, so every sum below is bit-identical."""
+    return rets.tolist() if hasattr(rets, "tolist") else rets
+
+
+def _as_lists(returns_by_id: dict) -> dict[str, list[float]]:
+    return {k: _row(v) for k, v in returns_by_id.items()}
+
+
 def _reps_variance(returns_by_id: dict[str, list[float]], ids: list[str],
                    labels: dict[str, int]) -> float:
     """Sample variance across cluster representatives (mean member daily
@@ -335,7 +347,7 @@ def _reps_variance(returns_by_id: dict[str, list[float]], ids: list[str],
     groups: dict[int, list[str]] = {}
     for i in ids:
         groups.setdefault(labels[i], []).append(i)
-    reps = [sum(_sharpe(returns_by_id[i]) for i in g) / len(g)
+    reps = [sum(_sharpe(_row(returns_by_id[i])) for i in g) / len(g)
             for g in groups.values()]
     return _sample_variance(reps)
 
@@ -481,8 +493,8 @@ def effective_trials(returns_by_id: dict[str, list[float]]):
     ids = sorted(returns_by_id)
     n = len(ids)
     if n <= 2:
-        return _effective_trials_ref(returns_by_id)
+        return _effective_trials_ref(_as_lists(returns_by_id))
     ids2, X = _returns_matrix(returns_by_id)
     if X is None:
-        return _effective_trials_ref(returns_by_id)
+        return _effective_trials_ref(_as_lists(returns_by_id))
     return _effective_trials_np(returns_by_id, ids2, X)

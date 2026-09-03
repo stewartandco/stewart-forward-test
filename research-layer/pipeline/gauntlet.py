@@ -54,12 +54,14 @@ import hashlib
 import argparse
 from pathlib import Path
 import contextlib
+import numpy as np
 import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from . import cells
 from . import deadline as _deadline
 from . import simcache
+from .simcache import Series
 from .registry import Registry
 from .engine import run_spec, ENGINE_REV
 from .stats import (moments, sharpe, percentile, psr, expected_max_sharpe,
@@ -556,21 +558,27 @@ def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
     effective_trials clusters on dates every strategy actually shares --
     the INTERSECTION calendar (spec s10.6), not a native one that would
     silently correlate different dates index-by-index."""
-    common: set[str] | None = None
-    for rows in dated_by_id.values():
-        dates = {d for d, _ in rows}
-        common = dates if common is None else (common & dates)
-    common_sorted = sorted(common or set())
-    # TRAP: dict(rows) is O(days) to build. Building it INSIDE the per-date
-    # comprehension below (once per common date, not once per series) makes
-    # this whole function O(specs x days x len) instead of O(specs x days) --
-    # silent at fixture scale, an hour-long stall at the first real mixed run
-    # (155 registered specs, ~7000 fx common days). Hoist it: one dict build
-    # per series, not one per (series, date) pair.
+    # Arrays since 2026-09-03 (docs/plans/2026-09-03-simcache-arrays.md): the
+    # same intersection over int32 day ordinals, the same gather. The legacy
+    # gather was `dict(rows)[d]`, where a date repeated within one series
+    # (an intraday spec's per-bar steps share a date) resolved to the LAST
+    # row -- searchsorted(side="right") - 1 over a stable sort keeps that.
+    series = {sid: (rows if isinstance(rows, Series) else Series.from_pairs(rows))
+              for sid, rows in dated_by_id.items()}
+    common = None
+    for ser in series.values():
+        dates = np.unique(ser.dates)
+        common = dates if common is None else np.intersect1d(common, dates,
+                                                            assume_unique=True)
+    if common is None:
+        common = np.zeros(0, dtype=np.int32)
     out = {}
-    for sid, rows in dated_by_id.items():
-        m = dict(rows)
-        out[sid] = [m[d] for d in common_sorted]
+    for sid, ser in series.items():
+        order = np.argsort(ser.dates, kind="stable")
+        sorted_dates = ser.dates[order]
+        idx = np.searchsorted(sorted_dates, common, side="right") - 1
+        out[sid] = ser.rets[order][idx]
+    common_sorted = [simcache._iso(o) for o in common.tolist()]
     return out, common_sorted
 
 
@@ -739,6 +747,13 @@ def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
             "buy_hold_net": buy_hold_net,
             "excess": strategy_net - buy_hold_net,
             "basis": BENCHMARK_BASIS.get(asset_class, _DEFAULT_BASIS)}
+
+
+def _as_list(rets) -> list[float]:
+    """A worker payload carries plain data only (see _evaluate_candidate):
+    an array row from the clustering pass becomes the list it stands for --
+    the same float64s, so the worker's sums are unchanged."""
+    return rets.tolist() if hasattr(rets, "tolist") else list(rets)
 
 
 def _candidate_payload(s: dict, spec_bars: dict, res: dict,
@@ -1098,7 +1113,7 @@ def run(argv: list[str] | None = None) -> int:
     cache = simcache.SimCache(simcache_dir)
     t_cluster0 = time.time()      # SP4 Task P5: covers sim-cache + clustering
     full_results: dict[str, dict] = {}          # candidates only (need trades)
-    dated_returns_by_sid: dict[str, list[tuple[str, float]]] = {}
+    dated_returns_by_sid: dict[str, Series] = {}
     equity_len_by_sid: dict[str, int] = {}
     sim_cache_hits = sim_cache_misses = 0
     for s in all_specs:
@@ -1106,7 +1121,8 @@ def run(argv: list[str] | None = None) -> int:
         if sid in candidate_sids:
             res = run_spec(s, _spec_bars(bars_by_cell, s))
             full_results[sid] = res
-            dated_returns_by_sid[sid] = daily_returns_with_dates(res["equity"])
+            dated_returns_by_sid[sid] = Series.from_pairs(
+                daily_returns_with_dates(res["equity"]))
             equity_len_by_sid[sid] = len(res["equity"])
             continue
         tf = s["universe"].get("timeframe", "1d")
@@ -1128,7 +1144,7 @@ def run(argv: list[str] | None = None) -> int:
             sim_cache_hits += 1
         else:
             res = run_spec(s, _spec_bars(bars_by_cell, s))
-            series = daily_returns_with_dates(res["equity"])
+            series = Series.from_pairs(daily_returns_with_dates(res["equity"]))
             dated_returns_by_sid[sid] = series
             equity_len_by_sid[sid] = len(res["equity"])
             cache.put(key, series, len(res["equity"]))
@@ -1182,7 +1198,7 @@ def run(argv: list[str] | None = None) -> int:
         # Same values daily_returns_from_curve(equity) would give: stripping
         # the (already date-normalised) date off each entry of the exact
         # series that function's own formula produces.
-        returns_by_id = {sid: [r for _, r in series]
+        returns_by_id = {sid: series.rets
                          for sid, series in dated_returns_by_sid.items()}
         trials_alignment, trials_common_days = "native", None
     group_n: dict[str, int] = {}
@@ -1219,23 +1235,14 @@ def run(argv: list[str] | None = None) -> int:
         and e["payload"].get("to") == "graveyard"
         and e["payload"].get("reason") == "trade_count"}
 
-    # Train slices survive the release of the dated series below: PBO walks
-    # EVERY family through train_returns() after the worker pool, and a
-    # float list per strategy is ~1/10th of the [date, return] pairs it is
-    # sliced from.
-    train_cache: dict[str, list[float]] = {}
-
     def train_returns(sid):
         """Train-window (date <= cutoff) daily returns, sliced from the
         per-spec dated-returns series -- real or simcache-served -- rather
         than from an equity curve a non-candidate spec may not have this
         pass. See _annualized_sharpe_from_returns for the exact equivalence
-        to the pre-P1 equity-curve computation."""
-        cached = train_cache.get(sid)
-        if cached is not None:
-            return cached
-        return [r for d, r in dated_returns_by_sid[sid]
-               if _date_le(d, args.cutoff)]
+        to the pre-P1 equity-curve computation. Series.train applies the
+        same date-only compare _date_le does, on the ordinal arrays."""
+        return dated_returns_by_sid[sid].train(args.cutoff)
 
     train_sharpe = {s["strategy_id"]: _annualized_sharpe_from_returns(
         train_returns(s["strategy_id"])) for s in all_specs}
@@ -1293,7 +1300,7 @@ def run(argv: list[str] | None = None) -> int:
     payloads = [
         _candidate_payload(
             s, _spec_bars(bars_by_cell, s), full_results[s["strategy_id"]],
-            returns_by_id[s["strategy_id"]], group_n[group_of[s["strategy_id"]]],
+            _as_list(returns_by_id[s["strategy_id"]]), group_n[group_of[s["strategy_id"]]],
             registered_n, train_sharpe[s["strategy_id"]], trials_n, trials_var,
             next(x for x in family_by_group[group_of[s["strategy_id"]]]
                 if x["sid"] == s["strategy_id"]),
@@ -1302,18 +1309,13 @@ def run(argv: list[str] | None = None) -> int:
             args.cutoff, args.perturb, trials_alignment, trials_common_days,
             sim_cache_hits, sim_cache_misses)
         for s in candidates]
-    # Release the clustering inputs BEFORE the pool spawns. Every payload
-    # above already carries what its candidate needs (its own bars, trades
-    # and return series); after this point only PBO reads the registry-wide
-    # series, and only their train-window slices, which are cached here
-    # first. The dated series, the equity lengths, the bars and the
-    # candidates' full results are the bulk of the parent's commit
-    # (2026-09-03: 9.6 GB during clustering); holding them across the pool
-    # is what left no room for the workers.
-    for sid in dated_returns_by_sid:
-        if sid not in train_cache:
-            train_cache[sid] = train_returns(sid)
-    dated_returns_by_sid.clear()
+    # Release what the pool phase no longer needs BEFORE the workers spawn.
+    # Every payload above already carries what its candidate needs (its own
+    # bars, trades and return list). The registry-wide series stay: PBO
+    # reads their train slices afterwards, and as arrays (simcache.Series,
+    # 2026-09-03) they are ~12 bytes a point rather than the ~150 the
+    # [date, ret] pairs cost -- the representation that put this parent at
+    # 9.6 GB of commit and starved the workers.
     returns_by_id.clear()
     equity_len_by_sid.clear()
     full_results.clear()

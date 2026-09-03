@@ -107,7 +107,8 @@ def test_intersect_returns_empty_when_no_shared_dates():
     dated = {"A": [("2026-01-01", 0.01)], "B": [("2026-02-01", 0.02)]}
     aligned, common = intersect_returns(dated)
     assert common == []
-    assert aligned == {"A": [], "B": []}
+    # arrays since 2026-09-03 (simcache.Series); the values are what matter
+    assert {k: list(v) for k, v in aligned.items()} == {"A": [], "B": []}
 
 
 def test_date_key_normalisation_fixes_the_real_run_mismatch():
@@ -543,29 +544,44 @@ def test_ragged_intersection_below_minimum_raises_through_run(tmp_path):
     assert long_lived["strategy_id"] in msg and short_lived["strategy_id"] in msg
 
 
-def test_too_short_intersection_hints_key_format_mismatch_when_ranges_overlap():
-    """Breadcrumb for the next person: if the actual intersection came up
-    empty/short but each series' own [min, max] date span overlaps
-    generously, that combination is the signature of a key-format mismatch
-    (exactly the 2026-08-24 real-run shape) rather than a genuine data gap,
-    so the error message should say so. Built by deliberately NOT calling
-    daily_returns_with_dates -- simulating a hypothetical caller that
-    bypassed the normalisation fix -- so this stays meaningful even though
-    the fix makes it unreachable through the real run() path today."""
+def test_key_format_mismatch_can_no_longer_empty_the_intersection():
+    """The 2026-08-24 real-run shape -- bare `YYYY-MM-DD` keys on one side,
+    `YYYY-MM-DD HH:MM:SS` on the other, intersecting to 0 days -- is
+    unreachable at this layer since 2026-09-03: intersect_returns keys on
+    day ORDINALS (simcache.Series), so a caller that bypassed
+    daily_returns_with_dates' normalisation still intersects correctly."""
     days = [(datetime.date(2020, 1, 1) + datetime.timedelta(days=i)).isoformat()
            for i in range(150)]           # >> MIN_TRIALS_COMMON_DAYS
     mismatched = {
         "crypto1": [(d, 0.001) for d in days],           # bare, unsuffixed
         "fx1": [(f"{d} 00:00:00", 0.001) for d in days],  # timestamped
     }
-    _, common = intersect_returns(mismatched)
-    assert common == []                  # reproduces the real 0-day result
+    aligned, common = intersect_returns(mismatched)
+    assert common == days
+    assert all(len(v) == 150 for v in aligned.values())
+
+
+def test_too_short_intersection_hints_when_spans_overlap_but_dates_interleave():
+    """Breadcrumb for the next person: if the actual intersection came up
+    empty/short but each series' own [min, max] date span overlaps
+    generously, the error message says so (a formatting-style mismatch is
+    one way that shape arises; interleaved calendars are another). Built
+    from two series on alternating days so the spans overlap for ~300 days
+    while the intersection is empty."""
+    base = datetime.date(2020, 1, 1)
+    odd = [((base + datetime.timedelta(days=i)).isoformat(), 0.001)
+           for i in range(0, 300, 2)]
+    even = [((base + datetime.timedelta(days=i)).isoformat(), 0.001)
+            for i in range(1, 300, 2)]
+    interleaved = {"crypto1": odd, "fx1": even}
+    _, common = intersect_returns(interleaved)
+    assert common == []
 
     with pytest.raises(ValueError, match="key-format mismatch") as exc:
-        _raise_too_short_intersection(mismatched, common)
+        _raise_too_short_intersection(interleaved, common)
     msg = str(exc.value)
     assert "crypto1" in msg and "fx1" in msg
-    assert "150" in msg or "149" in msg   # the overlap figure appears
+    assert "299" in msg or "298" in msg   # the overlap figure appears
 
 
 def test_too_short_intersection_omits_hint_when_ranges_genuinely_disjoint():

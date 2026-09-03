@@ -288,11 +288,17 @@ Three defences in `pipeline/gauntlet.py`, pinned by `test_gauntlet_pool.py`:
 Also fixed: the progress line now reports the whole run (`evaluated 480/974`),
 not the chunk (`24/24` twenty times over hid the real count).
 
-**Not fixed (structural, a decision):** the parent's ~9.6 GB during clustering
-itself. The series should be float32 numpy rows, not lists of `[date, float]`
-(~70 MB for 6,000 x 2,900), which would also cut the ~80-minute cache load
-+ clustering. That is a simcache format change (SP4/SP5 territory) and was
-not made mid-incident.
+**The parent's 9.6 GB itself was fixed the same evening** (`simcache.Series`,
+`docs/plans/2026-09-03-simcache-arrays.md`): the registry-wide series are int32
+day ordinals + float64 returns (12 B/point) in `<key>.npz`, not `[date, ret]`
+Python pairs (~150 B/point; a live entry holds up to 11,450 points, 1981->2026).
+Measured on 200 live entries: 17 MB vs 205 MB. Values are the same float64s,
+verdicts byte-identical (test_simcache's hit-vs-miss proof). Legacy `.json`
+entries migrate on read; run `python -m pipeline.simcache migrate simcache`
+once after deploying (minutes). The 15:30 re-run's "released" line printed
+`parent commit 9008 MB` AFTER the release -- the pairs' floats were pinned by
+PBO's train cache -- which is why the representation, not the release, is the
+fix; the release block now only drops what the pool phase no longer needs.
 
 ## Triage cost controls (loop stage 4a)
 - **`--limit` is DERIVED each cycle from the spend allowance (Phase 3 step 5,

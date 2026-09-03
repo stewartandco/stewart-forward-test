@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import shutil
 
-from .simcache import SimCache, cache_key
+import numpy as np
+
+from .simcache import SimCache, Series, cache_key, date_ordinal
 from .engine import ENGINE_REV
 from .registry import Registry
 from .gauntlet import run as gauntlet_run
@@ -107,9 +109,11 @@ def test_poisoned_entry_is_a_miss_and_self_heals(tmp_path):
     path = cache._path(key)
     assert path.exists()
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["series"] = [["2099-01-01", 999.0]]      # sha no longer matches
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    with np.load(path) as z:
+        parts = {k: z[k] for k in z.files}
+    parts["rets"] = np.array([999.0, 999.0, 999.0])   # sha no longer matches
+    with open(path, "wb") as f:
+        np.savez(f, **parts)
 
     assert cache.get(key) is None       # poisoned -> treated as a miss
     assert not path.exists()            # self-healed: the bad file is gone
@@ -120,12 +124,12 @@ def test_poisoned_entry_is_a_miss_and_self_heals(tmp_path):
     assert [tuple(row) for row in hit["series"]] == SERIES
 
 
-def test_malformed_json_is_also_a_miss_and_self_heals(tmp_path):
+def test_malformed_file_is_also_a_miss_and_self_heals(tmp_path):
     cache = SimCache(tmp_path / "simcache")
     key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     path = cache._path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not valid json", encoding="utf-8")
+    path.write_bytes(b"{not an npz at all")
 
     assert cache.get(key) is None
     assert not path.exists()
@@ -136,7 +140,9 @@ def test_missing_expected_field_is_also_a_miss(tmp_path):
     key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
     path = cache._path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"series": SERIES}), encoding="utf-8")  # no sha
+    ser = Series.from_pairs(SERIES)
+    with open(path, "wb") as f:
+        np.savez(f, dates=ser.dates, rets=ser.rets, equity_len=np.int64(4))  # no sha
 
     assert cache.get(key) is None
     assert not path.exists()
@@ -222,3 +228,116 @@ def test_cache_hit_vs_miss_verdicts_are_byte_identical(tmp_path):
             "fail" if sid == by_lb[75] else "pass")
         assert cache0 == {"hits": 0, "misses": 1}
         assert cache1 == {"hits": 1, "misses": 0}
+
+
+# ---------------- arrays (2026-09-03): Series, legacy migration ------------
+
+def _legacy_write(cache: SimCache, key: str, series, equity_len: int) -> None:
+    """Write an entry exactly the way the pre-2026-09-03 module did."""
+    import hashlib
+    cache.cache_dir.mkdir(parents=True, exist_ok=True)
+    rows = [list(r) for r in series]
+    sha = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":"))
+                         .encode("utf-8")).hexdigest()
+    cache._legacy_path(key).write_text(
+        json.dumps({"series": rows, "series_sha256": sha, "equity_len": equity_len},
+                   sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+
+def test_series_iterates_as_the_pairs_it_replaced_and_keeps_every_float():
+    ser = Series.from_pairs(SERIES)
+    assert len(ser) == 3
+    assert list(ser) == SERIES
+    assert ser.rets.dtype == np.float64 and ser.dates.dtype == np.int32
+    assert ser.rets.tolist() == [r for _, r in SERIES]      # bit-identical floats
+
+
+def test_series_train_matches_the_date_only_slice():
+    from .gauntlet import _date_le
+    pairs = [("2024-01-01", 0.01), ("2024-01-02 00:00:00", -0.005),
+             ("2024-01-03", 0.02), ("2024-01-03", 0.03), ("2024-01-04", 0.1)]
+    ser = Series.from_pairs(pairs)
+    for cutoff in ("2023-12-31", "2024-01-02", "2024-01-03 12:00:00", "2024-01-09"):
+        assert ser.train(cutoff) == [r for d, r in pairs if _date_le(d, cutoff)], cutoff
+
+
+def test_legacy_json_entry_is_served_once_then_lives_on_as_npz(tmp_path):
+    cache = SimCache(tmp_path / "simcache")
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
+    _legacy_write(cache, key, SERIES, equity_len=4)
+    assert cache._legacy_path(key).exists() and not cache._path(key).exists()
+
+    hit = cache.get(key)
+    assert hit is not None
+    assert list(hit["series"]) == SERIES and hit["equity_len"] == 4
+    assert cache._path(key).exists() and not cache._legacy_path(key).exists()
+
+    again = cache.get(key)                       # now from the npz
+    assert again["series"] == hit["series"] and again["equity_len"] == 4
+
+
+def test_legacy_entry_failing_its_own_self_check_is_poisoned_not_converted(tmp_path):
+    cache = SimCache(tmp_path / "simcache")
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
+    _legacy_write(cache, key, SERIES, equity_len=4)
+    legacy = cache._legacy_path(key)
+    payload = json.loads(legacy.read_text(encoding="utf-8"))
+    payload["series"] = [["2099-01-01", 999.0]]
+    legacy.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cache.get(key) is None
+    assert not legacy.exists() and not cache._path(key).exists()
+
+
+def test_bulk_migrate_converts_every_legacy_entry_and_reports(tmp_path):
+    cache = SimCache(tmp_path / "simcache")
+    keys = [cache_key(f"sid{i}", {"BTCUSD": "aaa"}, ENGINE_REV, 365) for i in range(3)]
+    for k in keys:
+        _legacy_write(cache, k, SERIES, equity_len=4)
+    cache.put("already", SERIES, equity_len=4)
+    counts = cache.migrate(verbose=False)
+    assert counts == {"migrated": 3, "poisoned": 0, "already": 1}
+    assert not list(cache.cache_dir.glob("*.json"))
+    for k in keys:
+        assert list(cache.get(k)["series"]) == SERIES
+
+
+def test_put_of_a_key_supersedes_its_legacy_entry(tmp_path):
+    cache = SimCache(tmp_path / "simcache")
+    key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
+    _legacy_write(cache, key, [("2000-01-01", 0.5)], equity_len=2)
+    cache.put(key, SERIES, equity_len=4)
+    assert not cache._legacy_path(key).exists()
+    assert list(cache.get(key)["series"]) == SERIES
+
+
+def test_intersect_returns_on_arrays_matches_the_dict_gather_it_replaced():
+    """The pre-2026-09-03 gather was `dict(rows)[d]` over the sorted common
+    date strings: a date repeated within a series resolved to its LAST row.
+    The array version must give the same values, in the same order,
+    including on unsorted input."""
+    from .gauntlet import intersect_returns
+    a = [("2024-01-01", 0.1), ("2024-01-02", 0.2), ("2024-01-02", 0.25),
+         ("2024-01-03", 0.3), ("2024-01-05", 0.5)]
+    b = [("2024-01-05", 1.5), ("2024-01-02", 1.2), ("2024-01-03", 1.3),
+         ("2024-01-04", 1.4)]
+    dated = {"a": Series.from_pairs(a), "b": Series.from_pairs(b)}
+
+    def reference(dated_by_id):
+        common = None
+        for rows in dated_by_id.values():
+            dates = {d for d, _ in rows}
+            common = dates if common is None else (common & dates)
+        common_sorted = sorted(common or set())
+        return ({sid: [dict(rows)[d] for d in common_sorted]
+                 for sid, rows in dated_by_id.items()}, common_sorted)
+
+    got, common = intersect_returns(dated)
+    want, want_common = reference({"a": a, "b": b})
+    assert common == want_common == ["2024-01-02", "2024-01-03", "2024-01-05"]
+    assert {k: v.tolist() for k, v in got.items()} == want
+    assert want["a"] == [0.25, 0.3, 0.5]            # the duplicate's LAST row
+
+
+def test_date_ordinal_ignores_a_time_suffix():
+    assert date_ordinal("2024-01-02 23:59:59") == date_ordinal("2024-01-02")
