@@ -485,3 +485,13 @@ def test_retrial_tool_dry_run_writes_only_the_report_and_fire_is_refused(tmp_pat
     r = _sp.run([_sys.executable, str(_TOOL), "--registry", str(log)], cwd=str(_TOOL.parent),
                 capture_output=True, text=True)
     assert r.returncode != 0                                            # --dry-run is the only mode
+
+
+def test_engine_retired_sets_equal_the_grammar_table():
+    """The engine keeps its own retired sets (it imports cells, not blocks) --
+    a third retirement must land in BOTH places or this pins the drift."""
+    from .blocks import RETIRED_TYPES
+    from .engine import RETIRED_STOP_TYPES, RETIRED_EXIT_TYPES
+    assert RETIRED_STOP_TYPES == {t for (r, t) in RETIRED_TYPES if r == "stop"}
+    assert RETIRED_EXIT_TYPES == {t for (r, t) in RETIRED_TYPES if r == "exit"}
+    assert {r for (r, _) in RETIRED_TYPES} <= {"stop", "exit"}
