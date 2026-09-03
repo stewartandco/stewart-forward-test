@@ -164,3 +164,28 @@ def test_every_prompt_carries_the_d15_exit_rule():
     assert "ma_stop" in prompts["fx"] and "band_stop" in prompts["fx"]
     for excluded in ("swing_stop", "channel_stop", "channel_exit"):
         assert excluded in prompts["fx"]          # named as EXCLUDED, not offered
+
+
+def test_registered_fingerprints_records_the_v2_form_of_a_compliant_as_is_legacy_spec(tmp_path):
+    """D15(b), design s2: a version-2 proposal of the SAME blocks as a compliant-as-is
+    legacy registration must collide (same trial); a non-compliant legacy spec
+    (retired type / ma_cross entry) gets no v2 form (its re-trial is a new engine run)."""
+    from .composer import registered_fingerprints, composition_fingerprint
+    from .registry import Registry
+    import json
+    base_u = {"assets": ["BTCUSD"], "timeframe": "1d", "asset_class": "crypto", "session": "24x7"}
+    ok = {"strategy_id": "1" * 16, "version": 1, "universe": base_u,
+          "blocks": [{"role": "entry", "type": "trend_scan_dense", "params": {"max_lookback": 60, "t_min": 2.0, "direction": "long"}},
+                     {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 2.0}},
+                     {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}]}
+    bad = {"strategy_id": "2" * 16, "version": 1, "universe": base_u,
+           "blocks": [{"role": "entry", "type": "ma_cross_dense", "params": {"fast": 8, "slow": 80, "direction": "long"}},
+                      {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 2.0}},
+                      {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}]}
+    log = tmp_path / "registry_log.jsonl"
+    log.write_text("".join(json.dumps({"entry_type": "strategy_registered", "payload": p}) + "\n" for p in (ok, bad)), encoding="utf-8")
+    fps = registered_fingerprints(Registry(log))
+    assert fps[composition_fingerprint(ok)] == ok["strategy_id"]
+    assert fps[composition_fingerprint({**ok, "version": 2})] == ok["strategy_id"]        # v2 form recorded
+    assert fps[composition_fingerprint(bad)] == bad["strategy_id"]
+    assert composition_fingerprint({**bad, "version": 2}) not in fps                       # re-trial stays admissible

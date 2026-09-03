@@ -405,3 +405,83 @@ def test_gauntlet_verdict_metrics_record_exit_reasons_is_and_oos(tmp_path):
     assert (sum(m["exit_reasons_is"].values())
             + sum(m["exit_reasons_oos"].values())) == len(res["trades"])
     assert m["open_at_end"] == res["metrics"]["open_at_end"]
+
+
+# ---------------- Task 5b: re-trial classification tool (dry run only) ------
+
+import json as _json
+import subprocess as _sp
+import sys as _sys
+from pathlib import Path as _Path
+
+_TOOL = _Path(__file__).resolve().parent.parent / "tools_retrial_families_v7.py"
+
+
+def _reg_entry(sid, family, blocks, version=1):
+    return {"entry_type": "strategy_registered",
+            "payload": {"strategy_id": sid, "family": family, "version": version,
+                        "universe": {"assets": ["X"], "timeframe": "1d"}, "blocks": blocks}}
+
+
+def _state(sid, to):
+    return {"entry_type": "state_change", "payload": {"strategy_id": sid, "to": to}}
+
+
+_ENTRY = {"role": "entry", "type": "trend_scan_dense", "params": {"max_lookback": 60, "t_min": 2.0, "direction": "long"}}
+_MA = {"role": "entry", "type": "ma_cross_dense", "params": {"fast": 8, "slow": 80, "direction": "long"}}
+_ATR = {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 2.0}}
+_PCT = {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}}
+_TS = {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}}
+_RISK = {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}
+
+
+def _fixture_entries():
+    return [
+        _reg_entry("a" * 16, "fam_a", [_ENTRY, _ATR, _RISK]),                 # compliant as registered
+        _reg_entry("b" * 16, "fam_a", [_ENTRY, _ATR, _TS, _RISK]),            # time stop
+        _reg_entry("c" * 16, "fam_b", [_ENTRY, _PCT, _RISK]),                 # pct stop
+        _reg_entry("d" * 16, "fam_b", [_MA, _ATR, _RISK]),                    # implicit ma_cross exit
+        _reg_entry("e" * 16, "fam_b", [_MA, _PCT, _TS, _RISK]),               # all three
+        _state("b" * 16, "graveyard"), _state("c" * 16, "quarantine"),
+    ]
+
+
+def test_retrial_tool_classifies_compliant_vs_retrial_with_reasons_and_states():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tools_retrial_families_v7", _TOOL)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    out = mod.classify(_fixture_entries())
+    assert out["fam_a"]["compliant"] == ["a" * 16] and out["fam_a"]["retrial"] == ["b" * 16]
+    assert out["fam_a"]["reasons"]["b" * 16] == ["exit/time_stop"]
+    assert out["fam_b"]["compliant"] == [] and out["fam_b"]["retrial"] == ["c" * 16, "d" * 16, "e" * 16]
+    assert out["fam_b"]["reasons"]["c" * 16] == ["stop/pct_stop"]
+    assert out["fam_b"]["reasons"]["d" * 16] == [mod.IMPLICIT_EXIT_REASON]
+    assert out["fam_b"]["reasons"]["e" * 16] == ["stop/pct_stop", "exit/time_stop", mod.IMPLICIT_EXIT_REASON]
+    assert out["fam_a"]["states"]["b" * 16] == "graveyard" and out["fam_b"]["states"]["c" * 16] == "quarantine"
+    assert out["fam_a"]["states"]["a" * 16] == "registered"
+    # a version-2 registration is compliant by construction
+    v2 = mod.classify([_reg_entry("f" * 16, "fam_c", [_MA, _ATR, _RISK], version=2)])
+    assert v2["fam_c"]["compliant"] == ["f" * 16]
+
+
+def test_retrial_tool_dry_run_writes_only_the_report_and_fire_is_refused(tmp_path):
+    log = tmp_path / "registry_log.jsonl"
+    log.write_text("".join(_json.dumps(e) + "\n" for e in _fixture_entries()), encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "runs" / "plan.md"
+    r = _sp.run([_sys.executable, str(_TOOL), "--dry-run", "--registry", str(log), "--out", str(out)],
+                cwd=str(_TOOL.parent), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert log.read_bytes() == before                                  # chain byte-identical
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["registry_log.jsonl", "runs"]
+    assert [p.name for p in out.parent.iterdir()] == ["plan.md"]
+    text = out.read_text(encoding="utf-8")
+    assert "- registrations: 5" in text and "- compliant as registered: 1" in text
+    assert "- needs version-2 re-trial: 4" in text and "Coen-gated" in text
+    assert "| fam_b | 0 | 3 |" in text
+    r = _sp.run([_sys.executable, str(_TOOL), "--fire", "--registry", str(log)],
+                cwd=str(_TOOL.parent), capture_output=True, text=True)
+    assert r.returncode != 0 and "Coen-gated" in (r.stderr + r.stdout)
+    r = _sp.run([_sys.executable, str(_TOOL), "--registry", str(log)], cwd=str(_TOOL.parent),
+                capture_output=True, text=True)
+    assert r.returncode != 0                                            # --dry-run is the only mode

@@ -287,8 +287,19 @@ def registered_fingerprints(registry: Registry) -> dict[str, str]:
     out = {}
     for e in registry.entries():
         if e["entry_type"] == "strategy_registered":
-            out.setdefault(composition_fingerprint(e["payload"]),
-                           e["payload"]["strategy_id"])
+            p = e["payload"]
+            out.setdefault(composition_fingerprint(p), p["strategy_id"])
+            # D15(b) (design s2): a legacy version-1 composition whose engine
+            # behaviour is UNCHANGED under exit-rules-v7 is compliant AS
+            # REGISTERED, so its version-2 form is the SAME trial -- record
+            # that form too, so a fresh version-2 proposal of the same blocks
+            # collides with the strategy already under test instead of
+            # registering a duplicate that charges N twice. A non-compliant
+            # legacy composition (retired type / implicit ma_cross exit) gets
+            # no v2 form: its v2 re-trial is a genuinely different engine run.
+            if p.get("version", 1) == 1 and v7_compliant_as_is(p):
+                out.setdefault(composition_fingerprint({**p, "version": 2}),
+                               p["strategy_id"])
     return out
 
 
