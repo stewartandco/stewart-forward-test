@@ -53,6 +53,8 @@ import time
 import hashlib
 import argparse
 from pathlib import Path
+import contextlib
+import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from . import cells
@@ -144,6 +146,102 @@ FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
 # fx cycle's observed wall per candidate (~150 min / 499), rounded up.
 GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
+# Memory envelope for the worker pool (2026-09-03 incident: a worker died
+# with "OpenBLAS error: Memory allocation still failed after 10 retries" and
+# the pool reported BrokenProcessPool; Windows had logged the parent at 9.6 GB
+# of commit during clustering, on a box already ~52 GB into a 64 GB commit
+# limit). Measured the same day: a spawned worker commits 279 MB at import
+# with OpenBLAS's default 8 threads and 54 MB with 1 (341 vs 116 MB after
+# its first BLAS call). One candidate at a time on small arrays gains nothing
+# from a BLAS thread pool, so workers get one thread each; the count of
+# workers is bounded by the commit actually available, not only by cores.
+WORKER_COMMIT_MB = 512       # per-worker envelope: 116 MB baseline + one run_spec
+WORKER_COMMIT_HEADROOM_MB = 2048   # left for the parent (PBO, verdict writes) + the box
+WORKER_BLAS_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
+                   "MKL_NUM_THREADS": "1"}
+
+
+def worker_count(n_cpu: int, avail_commit_mb: int | None) -> int:
+    """Workers = cpu_count - 2 (two cores stay free for the hub, the dashes
+    and gbp -- the workspace's standing hazard), then no more than the
+    available commit can carry at WORKER_COMMIT_MB each after the headroom.
+    Never fewer than 1: max_workers <= 1 is the serial reference path."""
+    base = max(1, n_cpu - 2)
+    if avail_commit_mb is None:
+        return base
+    fits = (avail_commit_mb - WORKER_COMMIT_HEADROOM_MB) // WORKER_COMMIT_MB
+    return max(1, min(base, fits))
+
+
+def available_commit_mb() -> int | None:
+    """Commit the OS can still hand out (Windows: GlobalMemoryStatusEx
+    ullAvailPageFile, i.e. commit limit minus commit charge). None where
+    that is unknowable; callers then fall back to the core count alone."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                        ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                        ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                        ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+        m = _MS()
+        m.dwLength = ctypes.sizeof(m)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            return None
+        return int(m.ullAvailPageFile // 2**20)
+    except Exception:
+        return None
+
+
+def private_commit_mb() -> int | None:
+    """This process's private commit (Windows PROCESS_MEMORY_COUNTERS_EX
+    PrivateUsage -- the figure the Resource-Exhaustion-Detector reports).
+    None where unknowable. Diagnostic only."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32)] + [
+                (n, ctypes.c_size_t) for n in (
+                    "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                    "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                    "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
+                    "PrivateUsage")]
+        k32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PMC),
+                                               ctypes.c_uint32]
+        m = _PMC()
+        m.cb = ctypes.sizeof(m)
+        if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(m), m.cb):
+            return None
+        return int(m.PrivateUsage // 2**20)
+    except Exception:
+        return None
+
+
+@contextlib.contextmanager
+def worker_env():
+    """Set WORKER_BLAS_ENV for the duration of a pool. Spawned workers read
+    these at THEIR numpy import, so inheriting the environment is the only
+    reliable way in; the parent's own BLAS loaded long ago and is unaffected.
+    Restored afterwards so nothing leaks into the caller's process."""
+    prev = {k: os.environ.get(k) for k in WORKER_BLAS_ENV}
+    os.environ.update(WORKER_BLAS_ENV)
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 GAUNTLET_RESERVE_FRAC = 0.25           # of the budget left when candidates begin
 GAUNTLET_RESERVE_MIN_S = 60.0          # ...never less than this, for PBO + writes
 
@@ -783,7 +881,8 @@ def _evaluate_candidate(payload: dict) -> dict:
 
 
 def _run_candidates(payloads: list[dict], max_workers: int,
-                    progress_every: int = 25) -> dict[str, dict]:
+                    progress_every: int = 25, *, offset: int = 0,
+                    total: int | None = None) -> dict[str, dict]:
     """Evaluate every candidate (SP4 Task P2), returning {sid: result}.
 
     Each candidate is evaluated STANDALONE, so nothing here depends on the
@@ -803,12 +902,17 @@ def _run_candidates(payloads: list[dict], max_workers: int,
     n = len(payloads)
     results: dict[str, dict] = {}
     done = 0
+    # Progress is reported against the WHOLE run, not this chunk: run() feeds
+    # chunks of workers x GAUNTLET_CHUNK_PER_WORKER, and "evaluated 24/24"
+    # twenty times over (2026-09-03) hid that ~974 candidates were in flight.
+    grand_total = n if total is None else total
 
     def _tick():
         nonlocal done
         done += 1
-        if done % progress_every == 0 or done == n:
-            print(f"[gauntlet] evaluated {done}/{n} candidates", flush=True)
+        if (offset + done) % progress_every == 0 or done == n:
+            print(f"[gauntlet] evaluated {offset + done}/{grand_total} candidates",
+                  flush=True)
 
     if max_workers <= 1 or n <= 1:
         for p in payloads:
@@ -817,7 +921,7 @@ def _run_candidates(payloads: list[dict], max_workers: int,
             _tick()
         return results
 
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
+    with worker_env(), ProcessPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_evaluate_candidate, p) for p in payloads]
         for fut in as_completed(futures):
             r = fut.result()
@@ -1115,12 +1219,21 @@ def run(argv: list[str] | None = None) -> int:
         and e["payload"].get("to") == "graveyard"
         and e["payload"].get("reason") == "trade_count"}
 
+    # Train slices survive the release of the dated series below: PBO walks
+    # EVERY family through train_returns() after the worker pool, and a
+    # float list per strategy is ~1/10th of the [date, return] pairs it is
+    # sliced from.
+    train_cache: dict[str, list[float]] = {}
+
     def train_returns(sid):
         """Train-window (date <= cutoff) daily returns, sliced from the
         per-spec dated-returns series -- real or simcache-served -- rather
         than from an equity curve a non-candidate spec may not have this
         pass. See _annualized_sharpe_from_returns for the exact equivalence
         to the pre-P1 equity-curve computation."""
+        cached = train_cache.get(sid)
+        if cached is not None:
+            return cached
         return [r for d, r in dated_returns_by_sid[sid]
                if _date_le(d, args.cutoff)]
 
@@ -1172,7 +1285,11 @@ def run(argv: list[str] | None = None) -> int:
     # gauntlet pass must always leave two cores free for them rather than
     # claiming the whole box.
     n_cpu = os.cpu_count() or 3
-    max_workers = max(1, n_cpu - 2)
+    avail_commit = available_commit_mb()
+    max_workers = worker_count(n_cpu, avail_commit)
+    if max_workers < max(1, n_cpu - 2):
+        print(f"[gauntlet] workers {max_workers} (not {max(1, n_cpu - 2)}): only "
+              f"{avail_commit} MB of commit available on the box", flush=True)
     payloads = [
         _candidate_payload(
             s, _spec_bars(bars_by_cell, s), full_results[s["strategy_id"]],
@@ -1185,6 +1302,26 @@ def run(argv: list[str] | None = None) -> int:
             args.cutoff, args.perturb, trials_alignment, trials_common_days,
             sim_cache_hits, sim_cache_misses)
         for s in candidates]
+    # Release the clustering inputs BEFORE the pool spawns. Every payload
+    # above already carries what its candidate needs (its own bars, trades
+    # and return series); after this point only PBO reads the registry-wide
+    # series, and only their train-window slices, which are cached here
+    # first. The dated series, the equity lengths, the bars and the
+    # candidates' full results are the bulk of the parent's commit
+    # (2026-09-03: 9.6 GB during clustering); holding them across the pool
+    # is what left no room for the workers.
+    for sid in dated_returns_by_sid:
+        if sid not in train_cache:
+            train_cache[sid] = train_returns(sid)
+    dated_returns_by_sid.clear()
+    returns_by_id.clear()
+    equity_len_by_sid.clear()
+    full_results.clear()
+    bars_by_cell.clear()
+    gc.collect()
+    print(f"[gauntlet] clustering inputs released before the pool "
+          f"(parent commit {private_commit_mb()} MB, "
+          f"{available_commit_mb()} MB available on the box)", flush=True)
     # Evaluate in chunks, and ask the budget before EACH chunk whether it can
     # still finish. The first chunk is judged at a conservative prior; every
     # later one at the rate the finished chunks actually ran at. A reserve is
@@ -1205,7 +1342,8 @@ def run(argv: list[str] | None = None) -> int:
             stopped_at_deadline = True
             break
         t_c0 = time.time()
-        results_by_sid.update(_run_candidates(chunk, max_workers))
+        results_by_sid.update(_run_candidates(chunk, max_workers,
+                                              offset=n_started, total=len(payloads)))
         budget.record(len(chunk), time.time() - t_c0)
         n_started += len(chunk)
     deferred = candidates[n_started:]
