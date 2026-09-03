@@ -286,8 +286,10 @@ def observe_day(spec: dict, bars_by_asset: dict[str, list[dict]], date: str,
         # the funnel's endpoint, the stage nothing downstream re-checks.
         periods_per_year = cells.SESSION_PERIODS.get(
             spec["universe"].get("session"), 365)
+        # D15: the spec's registration version selects the engine path; a
+        # legacy sid (no key) keeps the byte-identical version-1 path.
         book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
-                              periods_per_year)
+                              periods_per_year, version=spec.get("version", 1))
         pos = book["position"]
         exited = [t for t in book["trades"] if t["exit_date"] == date]
         if exited:

@@ -509,7 +509,11 @@ def test_screen_full_run_chains_and_verifies(tmp_path):
     verdicts = [e for e in reg.entries() if e["entry_type"] == "verdict"]
     v = verdicts[0]["payload"]
     assert v["verdict"] == "fail" and v["metrics"]["trades"] == 1
-    assert set(v["metrics"]) == {"trades", "net_pnl", "win_rate", "max_dd"}
+    assert set(v["metrics"]) == {"trades", "net_pnl", "win_rate", "max_dd",
+                                 "exit_reasons", "open_at_end", "stop_invalid"}
+    # D15: the one trade (dated_target_hit_bars) closes on its target
+    assert v["metrics"]["exit_reasons"] == {"target": 1}
+    assert v["metrics"]["open_at_end"] is False and v["metrics"]["stop_invalid"] == 0
     # graveyard reason is trade_count (pnl is positive)
     gy = [e["payload"] for e in reg.entries() if e["entry_type"] == "state_change"
           and e["payload"]["to"] == "graveyard"]

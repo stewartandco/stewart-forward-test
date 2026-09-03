@@ -248,13 +248,161 @@ def _tightest_stop(stops: list[dict], entry_px: float, side: int,
     return entry_px - side * min(candidates)
 
 
+# ---------------- D15 exit rules v7 (spec version >= 2) --------------------
+#
+# docs/2026-09-03-exit-rules-v7-design.md §1/§3. Retired types stay in the
+# grammar (chained schemas are immutable) and are refused HERE for version
+# >= 2; version 1 runs them unchanged -- the quarantine forward runner
+# re-simulates every legacy sid daily and their record must not move.
+RETIRED_STOP_TYPES = {"pct_stop"}
+RETIRED_EXIT_TYPES = {"time_stop"}
+
+# Sentinel returned by _stop_price when an indicator-placed level is not on
+# the adverse side of the entry: the signal is ineligible and the caller
+# counts it (metrics `stop_invalid`) instead of silently skipping it.
+STOP_INVALID = "invalid"
+
+# Indicator series each new stop / exit type reads, keyed ("sma"|"stdev", n);
+# computed once per simulate_asset call (v2 only) and shared across blocks.
+_IND_SERIES_NEEDS = {
+    "ma_stop":       lambda p: [("sma", p["ma_len"])],
+    "band_stop":     lambda p: [("sma", p["lookback"]), ("stdev", p["lookback"])],
+    "ma_crossunder": lambda p: [("sma", p["fast"]), ("sma", p["slow"])],
+    "zscore_revert": lambda p: [("sma", p["lookback"]), ("stdev", p["lookback"])],
+    "regime_flip":   lambda p: [("sma", p["ma_len"])],
+}
+
+
+def _indicator_series(blocks: list[dict], closes: list[float]) -> dict:
+    out: dict = {}
+    for b in blocks:
+        for key, n in _IND_SERIES_NEEDS.get(b["type"], lambda p: [])(b["params"]):
+            if (key, n) not in out:
+                out[(key, n)] = sma(closes, n) if key == "sma" else stdev(closes, n)
+    return out
+
+
+def _indicator_stop(s: dict, bars: list[dict], i: int, side: int,
+                    series: dict) -> float | None:
+    """D15 indicator-placed stop LEVEL at signal bar i (fixed at entry, no
+    trailing). None while the indicator is warming up. The caller decides
+    eligibility (the level must be on the adverse side of the entry)."""
+    p, t = s["params"], s["type"]
+    if t in ("swing_stop", "channel_stop"):
+        # both = the extreme of the `lookback` bars BEFORE the signal bar,
+        # [i-lookback, i); they differ only in the grid they sweep (design §1)
+        lb = p["lookback"]
+        if i < lb:
+            return None
+        window = bars[i - lb:i]
+        return min(b["low"] for b in window) if side == 1 else max(b["high"] for b in window)
+    if t == "ma_stop":
+        return series[("sma", p["ma_len"])][i]
+    if t == "band_stop":
+        ma = series[("sma", p["lookback"])][i]
+        sd = series[("stdev", p["lookback"])][i]
+        if ma is None or sd is None:
+            return None
+        return ma - p["mult"] * sd if side == 1 else ma + p["mult"] * sd
+    raise ValueError(f"no executor for stop type {t!r}")
+
+
+def _stop_price(stops: list[dict], bars: list[dict], entry_px: float, side: int,
+                atr_series: dict, ind_series: dict, i: int, version: int):
+    """Stop price for a position entered at entry_px from signal bar i.
+    version 1: today's _tightest_stop (pct/atr distances) unchanged.
+    version 2: every stop type as a LEVEL; None while any indicator warms
+    up; a level not strictly on the adverse side of the entry (wrong side
+    or exactly at it) makes the signal ineligible -> STOP_INVALID; with
+    several stops the tightest adverse level wins."""
+    if version < 2:
+        return _tightest_stop(stops, entry_px, side, atr_series, i)
+    levels = []
+    for s in stops:
+        if s["type"] in ("atr_stop", "atr_stop_dense"):
+            atr = atr_series[(s["params"]["atr_len"],)][i]
+            if atr is None:
+                return None
+            levels.append(entry_px - side * s["params"]["mult"] * atr)
+        else:
+            lvl = _indicator_stop(s, bars, i, side, ind_series)
+            if lvl is None:
+                return None
+            levels.append(lvl)
+    if any(side * (entry_px - lvl) <= 0 for lvl in levels):
+        return STOP_INVALID
+    return max(levels) if side == 1 else min(levels)      # tightest
+
+
+def signal_exit(block: dict, bars: list[dict], closes: list[float], i: int,
+                side: int, series: dict) -> bool:
+    """D15 indicator-EVENT exit evaluated on close i for a position of `side`.
+    True means: exit at the open of bar i+1 (the caller fills it). False
+    during the indicator's warmup."""
+    p, t = block["params"], block["type"]
+    if t == "ma_crossunder":
+        f = series[("sma", p["fast"])][i]
+        s = series[("sma", p["slow"])][i]
+        if f is None or s is None:
+            return False
+        return f < s if side == 1 else f > s
+    if t == "channel_exit":
+        lb = p["lookback"]
+        if i < lb:
+            return False
+        window = bars[i - lb:i]
+        return (closes[i] < min(b["low"] for b in window)) if side == 1 \
+            else (closes[i] > max(b["high"] for b in window))
+    if t == "zscore_revert":
+        ma = series[("sma", p["lookback"])][i]
+        sd = series[("stdev", p["lookback"])][i]
+        if ma is None or sd is None or sd == 0:
+            return False
+        z = (closes[i] - ma) / sd
+        return z >= -p["z_exit"] if side == 1 else z <= p["z_exit"]
+    if t == "tstat_decay":
+        windows = list(range(20, p["max_lookback"] + 1, 10))
+        if i < max(windows) - 1:
+            return False
+        best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows), key=abs)
+        return (best <= p["t_exit"]) if side == 1 else (best >= -p["t_exit"])
+    if t == "regime_flip":
+        ma = series[("sma", p["ma_len"])][i]
+        if ma is None:
+            return False
+        return closes[i] < ma if side == 1 else closes[i] > ma
+    raise ValueError(f"no executor for exit type {t!r}")
+
+
+def exit_reason_counts(trades: list[dict]) -> dict[str, int]:
+    """{exit_reason: n} over closed trades; empty dict for none. RECORDED,
+    never gated (design §3/§4)."""
+    out: dict[str, int] = {}
+    for t in trades:
+        out[t["exit_reason"]] = out.get(t["exit_reason"], 0) + 1
+    return dict(sorted(out.items()))
+
+
 def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
-                   periods_per_year: int = 365) -> dict:
+                   periods_per_year: int = 365, *, version: int = 1) -> dict:
     """Run one asset's book.
 
-    Returns {trades, equity, position}:
-      * trades   — closed round trips
+    `version` is the spec's registration version (D15 exit rules v7):
+      * 1 (default, and every spec without the key) -- the legacy path, kept
+        byte-for-byte: deadline time stop, pct_stop, and the implicit
+        ma_cross* crossunder exit. Frozen by the golden in
+        test_exit_rules_v7.py.
+      * >= 2 -- no deadline, no implicit exit; retired block types raise;
+        indicator-placed stops (swing/ma/channel/band + atr) and declared
+        `exit` blocks evaluated on close t and filled at open t+1, AFTER the
+        barrier checks (gap stop, gap target, intrabar stop, intrabar target).
+
+    Returns {trades, equity, position, stop_invalid}:
+      * trades   — closed round trips; an open position at sample end is
+                   NEVER a trade (it is marked to market in `equity`)
       * equity   — daily mark-to-market curve, starting at 1.0
+      * stop_invalid — signals dropped because the stop level was not on the
+                   adverse side of the entry (v2; always 0 on the legacy path)
       * position — the OPEN position at the end of the run, or None if flat.
         A copy, so mutating it cannot corrupt a finished book. Its fields:
           side          +1 long / -1 short
@@ -262,7 +410,10 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
           entry_i       index into the `bars` list PASSED TO THIS CALL, and
                         meaningless against any other list
           stop, target  prices (target None if the spec has no target block)
-          deadline      time-stop bar index, or None
+          deadline      time-stop bar index, or None (always None under v2)
+          exit_pending  "signal:<type>" when a declared exit fired on the
+                        last close and would fill at the next open (v2;
+                        always None on the legacy path)
           notional      absolute capital at risk
           notional_frac notional as a fraction of equity at entry
     """
@@ -273,8 +424,23 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
     gates = by_role.get("regime", []) + by_role.get("filter", [])
     stops = by_role["stop"]
     targets = by_role.get("target", [])
-    time_stops = by_role.get("exit", [])
+    exits = by_role.get("exit", [])
     risk = by_role["risk"][0]
+    legacy = version < 2
+    if legacy:
+        time_stops = exits                       # today's semantics, untouched
+        signal_exits: list[dict] = []
+    else:
+        for s in stops:
+            if s["type"] in RETIRED_STOP_TYPES:
+                raise ValueError(f"stop type {s['type']!r} is retired under "
+                                 f"exit-rules-v7 (spec version {version})")
+        for x in exits:
+            if x["type"] in RETIRED_EXIT_TYPES:
+                raise ValueError(f"exit type {x['type']!r} is retired under "
+                                 f"exit-rules-v7 (spec version {version})")
+        time_stops = []
+        signal_exits = exits
 
     sig, state = entry_signals(entry, bars)
     mask = gate_mask(gates, bars) if gates else [True] * len(bars)
@@ -283,6 +449,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
         if s["type"] in ("atr_stop", "atr_stop_dense"):
             atr_series[(s["params"]["atr_len"],)] = atr_wilder(bars, s["params"]["atr_len"])
     closes = [b["close"] for b in bars]
+    # D15: the sma/stdev series the new stops and exits read, once per spec
+    ind_series = {} if legacy else _indicator_series(stops + signal_exits, closes)
     vol_series = (realized_ann_vol(closes, risk["params"]["lookback"], periods_per_year)
                   if risk["type"] == "vol_target" else None)
 
@@ -299,7 +467,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
     # observe_day), never by trusting this default.
     fin_per_bar = cost_model.get("short_financing_per_year", 0.0) / periods_per_year
     equity, curve, trades = 1.0, [], []
-    pos = None  # {side, entry_px, entry_i, stop, target, deadline, notional}
+    stop_invalid = 0
+    pos = None  # {side, entry_px, entry_i, stop, target, deadline, notional, exit_pending}
 
     for i, b in enumerate(bars):
         was_flat = pos is None      # flat at the close of bar i-1 (signal time)
@@ -321,9 +490,11 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
                     (side == 1 and b["high"] >= pos["target"]) or
                     (side == -1 and b["low"] <= pos["target"])):
                 exit_px, exit_reason = pos["target"], "target"
-            elif (entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_dense")
-                  and state[i - 1] != pos["side"]):
-                exit_px, exit_reason = b["open"], "signal"       # cross-down exit
+            elif legacy and entry["type"] in ("ma_cross", "ma_cross_ds", "ma_cross_dense") \
+                    and state[i - 1] != pos["side"]:
+                exit_px, exit_reason = b["open"], "signal"       # legacy implicit cross-down exit
+            elif not legacy and pos["exit_pending"] is not None:
+                exit_px, exit_reason = b["open"], pos["exit_pending"]   # declared exit, open t+1
             if exit_px is not None:
                 gross = pos["side"] * (exit_px / pos["entry_px"] - 1)
                 net = gross - 2 * per_side
@@ -345,7 +516,11 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
         # ignored, not queued) — prevents same-bar exit->reenter
         if was_flat and pos is None and i > 0 and sig[i - 1] != 0 and mask[i - 1]:
             side, entry_px = sig[i - 1], b["open"]
-            stop = _tightest_stop(stops, entry_px, side, atr_series, i - 1)
+            stop = _stop_price(stops, bars, entry_px, side, atr_series, ind_series,
+                               i - 1, version)
+            if stop is STOP_INVALID:
+                stop_invalid += 1
+                stop = None
             if stop is not None and abs(entry_px - stop) > 0:
                 dist = abs(entry_px - stop)
                 target = None
@@ -366,7 +541,7 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
                     pos = {"side": side, "entry_px": entry_px, "entry_i": i,
                            "stop": stop, "target": target,
                            "deadline": deadline, "notional": frac * equity,
-                           "notional_frac": frac}
+                           "notional_frac": frac, "exit_pending": None}
 
         # --- daily mark-to-market
         mtm = equity
@@ -377,12 +552,24 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
             mtm = equity + pos["notional"] * unreal
         curve.append(mtm)
 
+        # --- D15: declared signal exits are evaluated on THIS close and
+        # filled at the next open, exactly like entries (a position opened at
+        # this bar's open is eligible on this close). First declared exit
+        # that fires wins; barriers at the next bar still take precedence.
+        if not legacy and pos is not None:
+            pos["exit_pending"] = None
+            for x in signal_exits:
+                if signal_exit(x, bars, closes, i, pos["side"], ind_series):
+                    pos["exit_pending"] = f"signal:{x['type']}"
+                    break
+
     # An open position never appears in `trades` (those are closed round
     # trips), so the quarantine forward runner has no other way to read the
     # current size without re-deriving the entry/stop/sizing logic here.
     # Copied out so callers cannot reach into the simulator's live state.
     return {"trades": trades, "equity": curve,
-            "position": dict(pos) if pos is not None else None}
+            "position": dict(pos) if pos is not None else None,
+            "stop_invalid": stop_invalid}
 
 
 # ---------------- spec runner + metrics ------------------------------------
@@ -404,10 +591,13 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
     # session via the class registry (crypto 24x7 -> 365, fx_5d -> 261);
     # an unrecognised/missing session falls back to 365 (today's behaviour).
     periods_per_year = cells.SESSION_PERIODS.get(spec["universe"].get("session"), 365)
+    # D15: a spec without `version` is a legacy (version 1) registration
+    version = spec.get("version", 1)
     books = {}
     for asset in spec["universe"]["assets"]:
         books[asset] = simulate_asset(spec["blocks"], bars_by_asset[asset],
-                                      spec["cost_model"], periods_per_year)
+                                      spec["cost_model"], periods_per_year,
+                                      version=version)
     n = min(len(bars_by_asset[a]) for a in books)
     dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
     for a in books:
@@ -426,6 +616,13 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
         "net_pnl": combined[-1] - 1 if combined else 0.0,
         "win_rate": wins / len(trades) if trades else 0.0,
         "max_dd": -max_drawdown(combined) if combined else 0.0,
+        # D15: RECORDED, never gated -- why trades closed, whether any book
+        # ended with a position still open (marked to market in equity, never
+        # a closed trade), and how many signals were dropped because the
+        # indicator-placed stop was not on the adverse side of the entry.
+        "exit_reasons": exit_reason_counts(trades),
+        "open_at_end": any(books[a]["position"] is not None for a in books),
+        "stop_invalid": sum(books[a]["stop_invalid"] for a in books),
     }
     return {"trades": trades, "equity": list(zip(dates, combined)),
             "metrics": metrics}
