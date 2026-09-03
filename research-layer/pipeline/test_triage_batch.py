@@ -4,6 +4,7 @@ Three reviewers must agree unanimously before a card is accepted without Coen.
 Dissent is the signal - a card one reviewer doubts is exactly the one worth his
 attention - so dissent leaves the card PENDING, never rejected.
 """
+import json
 import pytest
 
 from pipeline import triage_batch as tb
@@ -576,3 +577,62 @@ def test_times_seen_counts_cycles_a_card_has_been_waiting(tmp_path, monkeypatch)
     first = _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"]
     tb.run(argv)
     assert _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"] == first
+
+
+# ---------------- dissent reasons are kept, not discarded (2026-09-03) ------
+
+def test_escalations_carry_every_dissenting_reviewers_reason(monkeypatch):
+    """Coen's T3 queue held 331 cards on 2026-09-03, every one 'dissent', and
+    the reason each dissenting reviewer gave -- which the vote schema REQUIRES
+    -- had been thrown away, so the only way through the queue was to read
+    331 cards. build_decisions now returns the dissenting votes' reasons per
+    escalated card, in reviewer order."""
+    votes = [{"accept": True, "reason": "faithful"},
+             {"accept": False, "reason": "claim is about factor timing, not a tradable rule"},
+             {"accept": False, "reason": "quote does not support the stated magnitude"}]
+    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None: votes)
+    out = tb.build_decisions(None, "m", {"p1": {"claim": "x", "quote": "q", "source": {}}},
+                             {}, _Meter())
+    assert out["escalated"] == {"p1": "dissent"}
+    assert out["dissent_reasons"]["p1"] == [
+        "claim is about factor timing, not a tradable rule",
+        "quote does not support the stated magnitude"]
+
+
+def test_the_skip_set_persists_dissent_reasons_and_keeps_them_across_sightings(tmp_path):
+    """save_escalated stores the reasons on the entry; a later sighting bumps
+    times_seen and must NOT lose them (retained entries are copied whole)."""
+    p = tmp_path / "triage_escalated.json"
+    tb.save_escalated(p, {}, {"p1": "dissent"},
+                      dissent_reasons={"p1": ["not testable on daily bars"]})
+    first = tb.load_escalated(p).entries
+    assert first["p1"]["reason"] == "dissent"
+    assert first["p1"]["dissent_reasons"] == ["not testable on daily bars"]
+    tb.save_escalated(p, first, {})                      # next cycle: sighted again
+    again = tb.load_escalated(p).entries
+    assert again["p1"]["times_seen"] == 2
+    assert again["p1"]["dissent_reasons"] == ["not testable on daily bars"]
+
+
+def test_the_queue_view_groups_the_backlog_by_reason(tmp_path, capsys):
+    """`python -m pipeline.triage_batch --queue` reads the skip-set and prints
+    the backlog grouped by dissent reason, most common first, with the card
+    ids -- so Coen can accept or reject a whole reason at once. Read-only."""
+    p = tmp_path / "triage_escalated.json"
+    entries = {
+        "a1": {"reason": "dissent", "times_seen": 3, "first_escalated_utc": "2026-08-31T00:00:00+00:00",
+               "dissent_reasons": ["not a tradable rule"]},
+        "b2": {"reason": "dissent", "times_seen": 1, "first_escalated_utc": "2026-09-01T00:00:00+00:00",
+               "dissent_reasons": ["not a tradable rule", "magnitude unsupported"]},
+        "c3": {"reason": "dissent", "times_seen": 5, "first_escalated_utc": "2026-08-31T00:00:00+00:00"},
+    }
+    p.write_text(json.dumps(entries), encoding="utf-8")
+    rc = tb.run(["--queue", "--escalated-state", str(p),
+                 "--registry", str(tmp_path / "nonexistent.jsonl")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 card(s) awaiting Coen" in out
+    assert out.index("not a tradable rule") < out.index("magnitude unsupported")   # most common first
+    assert "(no reason recorded)" in out                  # c3 predates persistence
+    assert "a1" in out and "b2" in out and "c3" in out
+    assert not (tmp_path / "triage_escalated.json.tmp").exists()   # read-only

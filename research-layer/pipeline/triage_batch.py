@@ -174,6 +174,11 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     decisions: dict[str, tuple[str, str | None]] = {
         cid: ("rejected", "duplicate") for cid in dupes}
     escalated: dict[str, str] = {}
+    # Every dissenting reviewer's one-sentence reason, in reviewer order. The
+    # vote schema has always REQUIRED a reason; until 2026-09-03 it was read
+    # once and thrown away, which left Coen's T3 queue (331 cards that day, all
+    # 'dissent') with nothing to sort by except reading every card.
+    dissent_reasons: dict[str, list[str]] = {}
     stopped = None
 
     for cid, card in pending.items():
@@ -182,16 +187,19 @@ def build_decisions(client, model: str, pending: dict[str, dict],
         if not meter.can_spend():
             stopped = "budget"
             break
-        decision, reason = panel_verdict(
-            review_card(client, model, card, meter, panel_size))
+        votes = review_card(client, model, card, meter, panel_size)
+        decision, reason = panel_verdict(votes)
         if decision == "accepted":
             decisions[cid] = ("accepted", None)
         else:
             escalated[cid] = reason
+            dissent_reasons[cid] = [str(v.get("reason", "")).strip()
+                                    for v in votes if not v.get("accept")]
 
     return {
         "decisions": decisions,
         "escalated": escalated,
+        "dissent_reasons": dissent_reasons,
         "counts": {
             "accepted": sum(1 for v in decisions.values() if v[0] == "accepted"),
             "duplicate": len(dupes),
@@ -244,7 +252,8 @@ def load_escalated(path: Path) -> EscalationState:
 
 
 def save_escalated(path: Path, retained: dict[str, dict],
-                   newly_escalated: dict[str, str]) -> None:
+                   newly_escalated: dict[str, str],
+                   dissent_reasons: dict[str, list[str]] | None = None) -> None:
     """Write the skip-set: `retained` (entries carried forward from the load,
     whose cards are still pending) plus this run's `newly_escalated`.
 
@@ -272,6 +281,13 @@ def save_escalated(path: Path, retained: dict[str, dict],
         else:
             out[cid] = {"reason": reason, "first_escalated_utc": now,
                         "times_seen": 1}
+        # Reasons ride on the entry and are carried forward with it by the
+        # retained copy above, so a later sighting never loses them. A
+        # re-review replaces them: the newer panel's objections are the
+        # current ones.
+        reasons = (dissent_reasons or {}).get(cid)
+        if reasons:
+            out[cid]["dissent_reasons"] = list(reasons)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
@@ -299,6 +315,30 @@ def save_result(path: Path, reviewed: int, skipped_escalated: int = 0) -> None:
                                "skipped_escalated": skipped_escalated},
                               indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def print_queue(state_path: Path) -> int:
+    """The T3 backlog grouped by dissent reason, most common reason first,
+    each with its card ids and how long each card has waited (times_seen).
+    Reads the skip-set only; writes nothing. Entries escalated before reasons
+    were persisted show as '(no reason recorded)'."""
+    entries = load_escalated(state_path).entries
+    if not entries:
+        print("0 card(s) awaiting Coen.")
+        return 0
+    by_reason: dict[str, list[str]] = {}
+    for cid, e in entries.items():
+        reasons = e.get("dissent_reasons") or ["(no reason recorded)"]
+        for r in reasons:
+            by_reason.setdefault(r, []).append(cid)
+    print(f"{len(entries)} card(s) awaiting Coen, {len(by_reason)} distinct dissent reason(s):\n")
+    for r, cids in sorted(by_reason.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        print(f"[{len(cids)}] {r}")
+        for cid in cids:
+            e = entries[cid]
+            print(f"    {cid}  seen x{e.get('times_seen', '?')}  since {str(e.get('first_escalated_utc', ''))[:10]}")
+        print()
+    return 0
 
 
 def _client_and_meter():
@@ -338,7 +378,15 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-skip-escalated", action="store_true",
                     help="ignore the skip-set and re-review escalated cards "
                          "(for a deliberate re-run after a prompt change)")
+    ap.add_argument("--queue", action="store_true",
+                    help="print Coen's T3 backlog grouped by dissent reason; "
+                         "read-only, touches neither the registry nor the skip-set")
     args = ap.parse_args(argv)
+
+    if args.queue:
+        state_path = args.escalated_state or (
+            args.registry.resolve().parent / "logs" / ESCALATED_STATE_NAME)
+        return print_queue(state_path)
 
     registry = Registry(args.registry)
     state_path = args.escalated_state or (
@@ -426,7 +474,8 @@ def run(argv: list[str] | None = None) -> int:
     # would replace real history with this run's fragment. load_escalated has
     # already WARNed about it.
     if loaded.writable:
-        save_escalated(state_path, retained_skips, out["escalated"])
+        save_escalated(state_path, retained_skips, out["escalated"],
+                       dissent_reasons=out.get("dissent_reasons"))
     else:
         print(f"WARN: leaving {state_path.name} untouched this run "
               f"(unreadable at load); {len(out['escalated'])} new escalation(s) "
