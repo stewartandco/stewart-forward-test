@@ -260,6 +260,36 @@ def train_contributions(spec: dict, data_dir, cutoff: str) -> list[float]:
     return contributions([t for t in res["trades"] if t["entry_date"] <= cutoff])
 
 
+def write_report(out_dir, report: dict, min_days: int, q: float):
+    """<out_dir>/<UTC date>-livegate-assessment.md: one row per quarantined
+    strategy, the cohort size the graduation arm judged against, and the
+    protocol name. Markdown, read-only with respect to the chain."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = out_dir / f"{today}-livegate-assessment.md"
+    n_elig = sum(1 for r in report.values() if r["eligible"])
+    cohort = max((r.get("cohort_size") or 0 for r in report.values()), default=0)
+    lines = [f"# Live-gate assessment {today}", "",
+             f"Protocol: `{PROTOCOL}`. Kill arm from {min_days} trading days; "
+             f"graduation = PSR vs 0 with Benjamini-Hochberg at q={q}.", "",
+             f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
+             "| strategy | days | trades | terminal | cone p01 | PSR | verdict |",
+             "|---|---:|---:|---:|---:|---:|---|"]
+    for sid in sorted(report):
+        r = report[sid]
+        cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
+        lines.append(f"| `{sid}` | {r['forward_days']} | {r['forward_trades']} | "
+                     f"{r['terminal']:.4f} | {cone} | {r['psr']:.4f} | "
+                     f"**{r['verdict'].upper()}**{'' if r['eligible'] else ' (not yet eligible)'} |")
+    lines += ["", "HOLD moves nothing. LIVE is a lifecycle state, not capital: "
+                  "money at risk is Coen's separate decision (the note's own words)."]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def run(argv: list[str] | None = None) -> int:
     import argparse
     import sys
@@ -275,6 +305,10 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-days", type=int, default=MIN_TRADING_DAYS)
     ap.add_argument("--q", type=float, default=BH_Q)
     ap.add_argument("--dry-run", action="store_true")
+    # Dated assessment report for Coen's quarterly read. Written whether or
+    # not anything moves, and on a dry run too: it is not a chain write.
+    ap.add_argument("--report", type=Path, default=None,
+                    help="directory for <date>-livegate-assessment.md")
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
@@ -309,9 +343,34 @@ def run(argv: list[str] | None = None) -> int:
 
     n_live = sum(1 for r in report.values() if r["verdict"] == "live")
     n_dead = sum(1 for r in report.values() if r["verdict"] == "graveyard")
+    if args.report is not None:
+        out = write_report(args.report, report, args.min_days, args.q)
+        print(f"report: {out}")
     if args.dry_run:
         print(f"\nDRY RUN - {len(report)} assessed, {n_live} would go live, "
               f"{n_dead} would be buried; nothing written.")
+        return 0
+
+    # Unattended since 2026-09-03 (26_LiveGateWeekly). The write phase below is
+    # the only chain write, so the lock is taken as late as correctness
+    # allows and only when there is a verdict to chain -- the same discipline
+    # as the quarantine daily. Held lock = defer politely, exit 0, write
+    # nothing; next week's run judges the same record plus a week.
+    if n_live + n_dead == 0:
+        print(f"\n{len(report)} assessed: nothing to move.")
+        return 0
+    from .chainlock import ChainLock, ChainLockHeld
+    lock = ChainLock(args.registry.resolve().parent / "logs", holder="livegate",
+                     purpose=f"{PROTOCOL} assessment")
+    try:
+        lock.acquire()
+    except ChainLockHeld:
+        if lock.is_stale():
+            print("WARN: chain.lock is stale (>3h); if no writer is alive, remove "
+                  "logs/chain.lock or let the loop's two-strike rule break it",
+                  file=sys.stderr)
+        print(f"deferred_lock: chain.lock held; {n_live + n_dead} verdict(s) not "
+              f"chained this run, the next assessment will re-judge the same record")
         return 0
 
     written = 0
@@ -340,6 +399,8 @@ def run(argv: list[str] | None = None) -> int:
         print(f"\nPARTIAL WRITE: {written} entries chained before failure.",
               file=sys.stderr)
         raise
+    finally:
+        lock.release()
 
     print(f"\n{len(report)} assessed: {n_live} -> live, {n_dead} -> graveyard.")
     return 0
