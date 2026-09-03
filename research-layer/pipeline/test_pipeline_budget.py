@@ -7,10 +7,11 @@ not stop a machine."""
 import pytest
 
 from pipeline import pipeline_budget as pb
+from pipeline.budget import PIPELINE_CAP_USD
 
 
 def test_the_standing_line_is_declared_not_guessed():
-    assert pb.MONTHLY_USD == 20.0
+    assert pb.MONTHLY_USD == PIPELINE_CAP_USD          # D39: one constant, 40 today
     assert pb.BATCH_STOP_FRACTION == 0.80
 
 
@@ -21,32 +22,45 @@ def test_under_the_line_a_batch_may_start():
 def test_at_eighty_percent_the_next_batch_is_refused():
     """Stopping BETWEEN batches, not mid-batch, so a batch is never half-done
     and half-chained."""
-    assert pb.may_start_batch(spent=16.0) is False
-    assert pb.may_start_batch(spent=15.99) is True
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION) is False
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION - 0.01) is True
 
 
 def test_at_the_cap_nothing_may_spend():
-    assert pb.may_spend(spent=20.0) is False
-    assert pb.may_spend(spent=19.99) is True
+    assert pb.may_spend(spent=pb.MONTHLY_USD) is False
+    assert pb.may_spend(spent=pb.MONTHLY_USD - 0.01) is True
 
 
 def test_a_batch_already_running_is_not_killed_mid_flight():
     """may_spend stays true above the batch line: the stop is a gate on
     STARTING work, not a guillotine on work in progress."""
-    assert pb.may_start_batch(spent=17.0) is False
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION + 1.0) is False
     assert pb.may_spend(spent=17.0) is True
 
 
 def test_state_names_which_limit_was_hit():
     assert pb.state(spent=5.0) == "OK"
-    assert pb.state(spent=16.0) == "BATCH_STOP"
-    assert pb.state(spent=20.0) == "CAP"
+    assert pb.state(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION) == "BATCH_STOP"
+    assert pb.state(spent=pb.MONTHLY_USD) == "CAP"
 
 
 # ---------------- 5c / D36: per-agent attribution on one ledger ----------------
 
+def _this_month_ts() -> str:
+    """A timestamp inside the CURRENT month. BudgetMeter.state() judges the
+    current calendar month, so a row pinned to the month this file was
+    written in goes invisible the moment the month turns -- which is exactly
+    what happened on 2026-09-01."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(day=2, hour=0, minute=0, second=0,
+                                              microsecond=0).isoformat()
+
+
 def _row(meter, purpose, usd, agent=None, ts="2026-08-01T00:00:00Z"):
-    """Append a raw ledger row, bypassing the API-usage shape."""
+    """Append a raw ledger row, bypassing the API-usage shape. The default
+    month is FIXED because the attribution tests query "2026-08" explicitly;
+    a test that judges state() -- which reads the CURRENT month -- must pass
+    ts=_this_month_ts() or it goes silent when the month turns."""
     import json
     r = {"ts_utc": ts, "model": "m", "purpose": purpose, "usd": usd,
          "input_tokens": 0, "output_tokens": 0,
@@ -124,8 +138,10 @@ def test_state_is_judged_against_the_meters_own_agent(tmp_path):
     stopping on someone else's bill."""
     from .budget import BudgetMeter
     m = BudgetMeter(tmp_path / "l.jsonl")
-    _row(m, "triage", 30.0, agent="pipeline")
-    _row(m, "screen", 1.0, agent="reader")
+    # state() judges the CURRENT month: stamp this month, or the rows are
+    # invisible from the next month on (this test broke on 2026-09-01 exactly so).
+    _row(m, "triage", 30.0, agent="pipeline", ts=_this_month_ts())
+    _row(m, "screen", 1.0, agent="reader", ts=_this_month_ts())
 
     reader = BudgetMeter(tmp_path / "l.jsonl", monthly_cap_usd=35.0,
                          agent="reader")

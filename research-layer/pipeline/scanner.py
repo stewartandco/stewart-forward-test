@@ -623,7 +623,7 @@ def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--once", action="store_true", help="one cycle, then exit")
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--cap", type=float, default=35.0,
+    ap.add_argument("--cap", type=float, default=20.0,   # D39: Reader 20
                     help="monthly USD cap (D33: 50 -> 35, fitting Reader plus "
                          "the pipeline's 20 inside D28's Intelligence band)")
     ap.add_argument("--watchlist", type=Path,

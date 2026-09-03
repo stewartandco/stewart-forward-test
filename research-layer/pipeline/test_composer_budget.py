@@ -62,7 +62,7 @@ class FakeClient:
 
 def test_the_cap_is_the_d33_figure_and_lives_in_one_place():
     """Two copies of a number that must agree will eventually disagree."""
-    assert PIPELINE_CAP_USD == 20.0
+    assert PIPELINE_CAP_USD == 40.0     # D39 (2026-09-03): Reader 20, pipeline 40
     from .triage_batch import PIPELINE_CAP_USD as triage_copy
     assert triage_copy is PIPELINE_CAP_USD
 

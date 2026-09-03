@@ -2,7 +2,7 @@
 
 Two limits, deliberately different in kind:
 
-* CAP (USD 20/month) is a hard stop. Nothing spends past it. The 2026-08-15
+* CAP (pipeline/budget.py PIPELINE_CAP_USD -- USD 40/month since D39) is a hard stop. Nothing spends past it. The 2026-08-15
   scanner runaway - billing errors retried forever, 105,565 logged decisions in
   two hours - is why this is a stop and not an alert.
 * BATCH STOP (80% of cap) refuses to START new work while allowing work in
@@ -16,7 +16,7 @@ so this line covers Composer generation and any future metered stage only.
 """
 from __future__ import annotations
 
-MONTHLY_USD = 20.0
+from .budget import PIPELINE_CAP_USD as MONTHLY_USD   # ONE constant (D39: 40); a second copy of this number sat here at 20 and would have disagreed
 BATCH_STOP_FRACTION = 0.80
 
 

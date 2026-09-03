@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from .budget import PIPELINE_CAP_USD
 import time
 from pathlib import Path
 
@@ -392,7 +393,7 @@ def test_budget_cap_parks_before_spending(tmp_path):
     from datetime import datetime, timezone
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                  "usd": 20.0, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD, "purpose": "triage",
                                   "model": "claude-sonnet-5"}) + "\n",
                       encoding="utf-8")
     fr = FakeRunner()
@@ -414,7 +415,7 @@ def test_budget_batch_stop_zone_defers_without_cap_escalation(tmp_path):
     from datetime import datetime, timezone
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                  "usd": 17.0, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD * 0.85, "purpose": "triage",
                                   "model": "claude-sonnet-5"}) + "\n",
                       encoding="utf-8")
     fr = FakeRunner()
@@ -466,7 +467,7 @@ def test_budget_recheck_after_triage_parks_before_composer(tmp_path):
                 month = datetime.now(timezone.utc).strftime("%Y-%m")
                 with ledger.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                        "usd": 17.0, "purpose": "triage",
+                                        "usd": PIPELINE_CAP_USD * 0.85, "purpose": "triage",
                                         "model": "claude-sonnet-5",
                                         "agent": "pipeline"}) + "\n")
             return r
@@ -500,7 +501,7 @@ def test_composer_cap_refusal_parks_not_fails(tmp_path):
                 month = datetime.now(timezone.utc).strftime("%Y-%m")
                 with ledger.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                        "usd": 20.0, "purpose": "composer",
+                                        "usd": PIPELINE_CAP_USD, "purpose": "composer",
                                         "model": "claude-sonnet-5",
                                         "agent": "pipeline"}) + "\n")
                 self.calls.append(list(argv))
@@ -537,7 +538,7 @@ def test_composer_dry_run_cap_refusal_also_parks_not_fails(tmp_path):
                 month = datetime.now(timezone.utc).strftime("%Y-%m")
                 with ledger.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                        "usd": 20.0, "purpose": "composer",
+                                        "usd": PIPELINE_CAP_USD, "purpose": "composer",
                                         "model": "claude-sonnet-5",
                                         "agent": "pipeline"}) + "\n")
                 self.calls.append(list(argv))
@@ -575,7 +576,7 @@ def test_composer_failure_in_batch_stop_band_without_cap_crossing_stays_stage_fa
                 month = datetime.now(timezone.utc).strftime("%Y-%m")
                 with ledger.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                        "usd": 17.0, "purpose": "composer",
+                                        "usd": PIPELINE_CAP_USD * 0.85, "purpose": "composer",
                                         "model": "claude-sonnet-5",
                                         "agent": "pipeline"}) + "\n")
                 self.calls.append(list(argv))
@@ -1610,7 +1611,7 @@ def test_budget_park_records_state_and_rotates_the_class_to_the_back(tmp_path):
     from datetime import datetime, timezone
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                  "usd": 17.0, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD * 0.85, "purpose": "triage",
                                   "model": "claude-sonnet-5"}) + "\n",
                       encoding="utf-8")
 
@@ -1640,7 +1641,7 @@ def test_budget_state_item_distinguishes_cap_from_batch_stop(tmp_path):
     from datetime import datetime, timezone
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                  "usd": 20.0, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD, "purpose": "triage",
                                   "model": "claude-sonnet-5"}) + "\n",
                       encoding="utf-8")
     loop.run(["--once", "--layer", str(layer)], runner=FakeRunner())

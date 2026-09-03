@@ -52,11 +52,12 @@ PURPOSE_AGENT = {
 }
 UNATTRIBUTED = "unattributed"
 
-# D33 gave the pipeline agent USD 20 of the D28 Intelligence band, and D36 made
+# D33 gave the pipeline agent USD 20 of the D28 Intelligence band; D39
+# (2026-09-03) re-split the same band on measured burn to Reader 20 / pipeline 40, and D36 made
 # it enforceable by scoping a meter to that agent's own attributed rows. It
 # lives HERE rather than in one of the two agents that spend against it,
 # because two copies of a number that must agree will eventually disagree.
-PIPELINE_CAP_USD = 20.0
+PIPELINE_CAP_USD = 40.0     # D39 (2026-09-03): Intelligence band re-split, Reader 20 / pipeline 40
 
 
 def agent_of(row: dict) -> str:
@@ -65,7 +66,7 @@ def agent_of(row: dict) -> str:
 
 
 class BudgetMeter:
-    def __init__(self, ledger_path: str | Path, monthly_cap_usd: float = 35.0,
+    def __init__(self, ledger_path: str | Path, monthly_cap_usd: float = 20.0,     # Reader's line per D39 (was 35 under D33)
                  warn_frac: float = 0.8, agent: str | None = None):
         """`agent` scopes this meter's cap to one agent's spend.
 
