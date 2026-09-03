@@ -206,14 +206,60 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   cell dating) but it means a hand run against a tmp registry silently gets a
   tmp data dir, which is the intended test isolation.
 
+## Cycle deadline (Phase 3 steps 1-3, 2026-09-03) -- no stage may run into the PT4H wall
+- **Why:** 2026-09-01 21:30 the loop cycle was hard-killed by Task Scheduler at
+  exactly the PT4H ExecutionTimeLimit -- work discarded, composer spend not,
+  and a hard kill leaves no terminator in any log. TRIAGE_LIMIT bounds triage
+  only; the gauntlet was ~150 of that cycle's 237 min with no bound at all.
+- **Mechanism (`pipeline/deadline.py`, one helper shared by all three).** The
+  loop derives `deadline = cycle start + live task window - SAFETY_MARGIN_S
+  (15 min)` -- ONLY when the window is known; no registered task means no
+  deadline and byte-identical stage argv -- and passes `--deadline-utc` to
+  screen and gauntlet. Each stage evaluates in chunks and asks
+  `DeadlineBudget.fits(n, rate)` BEFORE each chunk: a conservative prior until
+  the first chunk has run (gauntlet 20 s/candidate, screen 2 s/spec), the
+  measured rate after. **Nothing is abandoned mid-flight; what is not started
+  is simply not started.**
+- **Resumable states, and why the orphan preflights stay green.** A deferred
+  screen spec stays `proposed` (screen's orphan rule fires only on
+  `screened`). A deferred gauntlet candidate stays in state `gauntlet` WITH NO
+  VERDICT -- that is the normal pre-run state (screen advances a passer to
+  `gauntlet`; only the gauntlet's own verdict moves it on), and
+  `_gauntlet_orphans` fires only on `gauntlet` PLUS a verdict. Deferral is
+  protocol-legal at candidate granularity: protocol-v6 judges every edge
+  standalone, PBO family series come from the registry-wide simulation, and
+  the null is seeded off the group id, so a sibling judged next pass sees the
+  same family, same null, same verdict.
+- **Reporting.** Every completed non-dry stage run writes
+  `logs/<stage>_result.json` (`evaluated`, `deferred`, `deadline_utc`,
+  `stopped_at_deadline`) -- the triage_result.json convention; an absent file
+  means "did not report", never "deferred nothing". The loop UNLINKS both
+  before each stage and reads them on cycle_complete into status items
+  `deferred_screen`, `deferred_gauntlet`, and `stopped_at_deadline=<stage>`.
+  **`stopped_at_deadline` is an OK outcome** (overall OK, cycle_complete): a
+  cycle that chose to stop is routine; one killed at the wall is the defect.
+  When the Sentinel is pointed at pipeline_status.json, treat it so.
+- **Known approximation, stated.** In the gauntlet the registry-wide
+  simulation and clustering run BEFORE any candidate and are not chunked
+  (simcache-bounded after the first pass); PBO runs AFTER and scales with the
+  live groups the candidates leave. A reserve (25% of what is left when
+  candidates begin, floor 60 s) is held back for it; `t_pbo` is printed every
+  run so the reserve can be calibrated from real cycles. The PT4H task limit
+  remains the backstop -- hitting it is now evidence of a bug, not weather.
+- Tuning constants: `gauntlet.GAUNTLET_PRIOR_S_PER_CANDIDATE / _CHUNK_PER_WORKER /
+  _RESERVE_FRAC / _RESERVE_MIN_S`, `screen.SCREEN_PRIOR_S_PER_SPEC /
+  _CHUNK_PER_WORKER`, `loop.SAFETY_MARGIN_S`. Tests: `pipeline/test_deadline.py`
+  (fake-clock unit tests + both stages end to end) and the four
+  `*deadline*` / `stale_stage` tests in test_loop.py.
+
 ## Triage cost controls (loop stage 4a)
-- `--limit` comes from `loop.TRIAGE_LIMIT` (40, not 200). It is sized to fit
-  the scheduled task's ExecutionTimeLimit alongside the rest of the cycle:
-  ~3.85 s/reviewer-call x 3-reviewer panel, so 40 cards is ~7.7 min against a
-  75-90 min cycle. **Raising it without raising the task's ExecutionTimeLimit
-  re-creates a mid-flight kill loop**: Windows kills the cycle, the watermark
-  never advances, and the class re-fires forever paying full freight. Pinned
-  by test_triage_limit_fits_the_scheduled_execution_window.
+- `--limit` comes from `loop.TRIAGE_LIMIT` (200 since 2026-08-31, Coen; was
+  40). `MIN_TASK_WINDOW_S` is DERIVED from it. ~3.85 s/reviewer-call x
+  3-reviewer panel, so 200 cards is ~38 min. **It bounds triage only** -- one
+  stage of five, ~60% of the money and ~30% of the clock; the composer sweep
+  and the gauntlet scale with the class, not with this number (the
+  2026-09-01 fx cycle: triage 38 min of 237). The window-fit test now asserts
+  the cycle fits even with the panel at HALF its measured speed.
 - **ExecutionTimeLimit lives in TWO places and the second one wins.**
   `quant/tasks/xml/25_PipelineLoop.xml` declares it, but
   `quant/tasks/apply_retry_settings.ps1` re-stamps every `$RETRY_TASKS` entry
