@@ -99,7 +99,7 @@ class FakeRunner:
     without disturbing every existing assertion that treats fr.calls as a
     plain list of argv lists."""
     def __init__(self, codes=None, triage_reviewed=None, triage_skipped=0,
-                 triage_reports=True):
+                 triage_reports=True, stage_results=None, stage_reports=True):
         self.calls = []
         self.call_kwargs = []
         self.codes = codes or {}
@@ -114,6 +114,13 @@ class FakeRunner:
         self.triage_skipped = triage_skipped
         self.triage_reports = triage_reports
         self.pathspecs = {}            # call index -> list[str] from --pathspec-from-file
+        # Phase 3: screen/gauntlet write logs/<stage>_result.json. Default is
+        # "ran everything, deferred nothing"; a test wanting a deadline stop
+        # passes stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
+        # "stopped_at_deadline": True}}. stage_reports=False simulates a stage
+        # that did not report at all.
+        self.stage_results = dict(stage_results or {})
+        self.stage_reports = stage_reports
 
     def _report_triage(self, argv):
         """Derive the logs dir from triage's own --registry argument, exactly
@@ -139,6 +146,16 @@ class FakeRunner:
             if isinstance(tok, str) and tok.startswith("--pathspec-from-file="):
                 self.pathspecs[len(self.calls) - 1] = Path(
                     tok.split("=", 1)[1]).read_text(encoding="utf-8").splitlines()
+        if (self.stage_reports and argv[0] == sys.executable and "-m" in argv
+                and argv[argv.index("-m") + 1] in ("pipeline.screen", "pipeline.gauntlet")
+                and "--registry" in argv):
+            stage = argv[argv.index("-m") + 1].split(".")[-1]
+            reg = Path(argv[argv.index("--registry") + 1])
+            body = {"stage": stage, "evaluated": 1, "deferred": 0,
+                    "deadline_utc": None, "stopped_at_deadline": False}
+            body.update(self.stage_results.get(stage, {}))
+            (reg.resolve().parent / "logs" / f"{stage}_result.json").write_text(
+                json.dumps(body), encoding="utf-8")
         if (self.triage_reports and argv[0] == sys.executable and "-m" in argv
                 and argv[argv.index("-m") + 1] == "pipeline.triage_batch"
                 and "--registry" in argv):
@@ -1058,6 +1075,75 @@ def test_commit_pathspecs_travel_by_file_not_command_line(tmp_path):
         assert len(" ".join(c)) <= loop._PATHSPEC_ARGV_BUDGET + 200, len(" ".join(c))
     seen = [t for _, c in diffs for t in c[c.index("--") + 1:]]
     assert seen == expected                              # every path, once, in order
+
+
+def _stage_call(fr, module):
+    return next(c for c in fr.calls if c[0] == sys.executable and "-m" in c
+                and c[c.index("-m") + 1] == module)
+
+
+def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(tmp_path, monkeypatch):
+    """Phase 3 step 3. With a live task window the loop derives
+    start + window - SAFETY_MARGIN_S and hands it to both chain-writing
+    stages as --deadline-utc, so neither can run into the PT4H kill."""
+    from . import deadline as dl
+    monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: 4 * 3600)
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    t0 = dl._wall_now_utc()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    for module in ("pipeline.screen", "pipeline.gauntlet"):
+        c = _stage_call(fr, module)
+        assert "--deadline-utc" in c, c
+        d = dl._parse_iso(c[c.index("--deadline-utc") + 1])
+        ahead = (d - t0).total_seconds()
+        expect = 4 * 3600 - loop.SAFETY_MARGIN_S
+        assert abs(ahead - expect) < 30, (ahead, expect)
+
+
+def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path):
+    """No registered task (tests, a hand run, a fresh clone): the stages get
+    exactly today's argv. The module-wide stub already returns None."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    for module in ("pipeline.screen", "pipeline.gauntlet"):
+        assert "--deadline-utc" not in _stage_call(fr, module)
+
+
+def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_path):
+    """A cycle that CHOSE to stop is routine, not a failure: outcome stays
+    cycle_complete, overall OK, and the status names the stage and count so
+    the digest can tell it from a cycle that ran everything."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner(stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
+                                                "stopped_at_deadline": True}})
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["overall"] == "OK"
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert status["items"]["stopped_at_deadline"] == "gauntlet"
+    assert status["items"]["deferred_gauntlet"] == "3"
+    assert status["items"]["deferred_screen"] == "0"
+
+
+def test_a_stale_stage_result_is_cleared_before_the_stage_runs(tmp_path):
+    """A leftover result file from a previous cycle must never be read as
+    this cycle's report -- the same rule the triage result already follows."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    (layer / "logs" / "gauntlet_result.json").write_text(json.dumps(
+        {"stage": "gauntlet", "evaluated": 0, "deferred": 99,
+         "deadline_utc": None, "stopped_at_deadline": True}), encoding="utf-8")
+    fr = FakeRunner(stage_reports=False)          # this cycle's stages report nothing
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert "stopped_at_deadline" not in status["items"]
+    assert not (layer / "logs" / "gauntlet_result.json").exists()
 
 
 def test_zero_delta_cycle_makes_no_commit_and_no_warning(tmp_path, capsys):

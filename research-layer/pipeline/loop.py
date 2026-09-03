@@ -38,6 +38,8 @@ import re
 import subprocess
 import sys
 import traceback
+
+from . import deadline as _deadline
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -119,6 +121,14 @@ ROTATION_CLASSES = ("crypto",)
 # overwriting it), which is exactly that trap.
 TASK_NAME = r"\StewartCo\25_PipelineLoop"
 MIN_TASK_WINDOW_S = int(TRIAGE_LIMIT * _TRIAGE_S_PER_CARD + _REST_OF_CYCLE_S)
+
+# Phase 3 step 3: the cycle's deadline is start + the live task's window minus
+# this margin, handed to screen and gauntlet as --deadline-utc so each stops
+# BEFORE starting work it cannot finish (pipeline/deadline.py). The margin
+# covers the post-gauntlet verify + commit and one gauntlet chunk of slack.
+# The task's ExecutionTimeLimit stays the backstop; with the deadline inside
+# it, hitting the wall becomes evidence of a bug rather than weather.
+SAFETY_MARGIN_S = 15 * 60
 FIX_WINDOW_CMD = (
     'schtasks /Create /TN "StewartCo\\25_PipelineLoop" /XML '
     '"E:\\Users\\Coen\\Claude\\quant\\tasks\\xml\\25_PipelineLoop.xml" /F'
@@ -566,6 +576,25 @@ def _sweep_window(state: dict, asset_class: str) -> tuple[list[str], bool]:
     return window, window != assets
 
 
+def _deadline_items(registry_path: Path) -> dict[str, str]:
+    """Status items from the stages' deadline reports. A stage that reported
+    contributes deferred_<stage>; any stage that stopped at its deadline sets
+    stopped_at_deadline to the stage name(s). A stage that did not report
+    contributes nothing -- absence is not a claim either way."""
+    items: dict[str, str] = {}
+    stopped: list[str] = []
+    for stage in ("screen", "gauntlet"):
+        r = _deadline.read_result(registry_path, stage)
+        if r is None:
+            continue
+        items[f"deferred_{stage}"] = str(int(r.get("deferred", 0)))
+        if r.get("stopped_at_deadline"):
+            stopped.append(stage)
+    if stopped:
+        items["stopped_at_deadline"] = ",".join(stopped)
+    return items
+
+
 def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
                   extra: dict[str, str] | None = None, spent: float = 0.0,
                   escalations: list[str] | None = None,
@@ -789,6 +818,18 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     # Window check BEFORE the cycle: a killed cycle leaves no evidence, so
     # the only place this can be said is up front, in the run log.
     _warn_if_task_window_too_short()
+
+    # Deadline for this cycle's chain-writing stages (Phase 3 step 3). Only
+    # when the live task window is known: no task (tests, a hand run, a
+    # fresh clone) means no deadline and byte-identical stage argv.
+    args.deadline_utc = None
+    window_s = _live_task_window_s()
+    if window_s is not None and window_s > SAFETY_MARGIN_S:
+        from datetime import timedelta
+        d = _deadline._wall_now_utc() + timedelta(seconds=window_s - SAFETY_MARGIN_S)
+        args.deadline_utc = d.replace(microsecond=0).isoformat()
+        print(f"loop: cycle deadline {args.deadline_utc} (task window "
+              f"{window_s // 60} min - {SAFETY_MARGIN_S // 60} min margin)", flush=True)
 
     try:
         return _run_cycle(args, runner, layer, logs_dir, registry_path, state_path)
@@ -1251,7 +1292,12 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                                     state_path, _fresh_counts())
 
     # 4d. screen (chain-writing)
-    screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv]
+    deadline_argv = (["--deadline-utc", args.deadline_utc]
+                     if getattr(args, "deadline_utc", None) else [])
+    # A leftover result from a previous cycle must never read as this one's.
+    for stage in ("screen", "gauntlet"):
+        _deadline.result_path(registry_path, stage).unlink(missing_ok=True)
+    screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv, *deadline_argv]
     rc, lock_lost = _lock_and_run("pipeline.screen", screen_argv)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.screen")
@@ -1260,7 +1306,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                                    _fresh_counts())
 
     # 4e. gauntlet (chain-writing)
-    gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv]
+    gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv, *deadline_argv]
     rc, lock_lost = _lock_and_run("pipeline.gauntlet", gauntlet_argv)
     if lock_lost:
         return _defer_midcycle_lock("pipeline.gauntlet")
@@ -1322,7 +1368,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     print(f"cycle_complete: {asset_class} watermark now {watermark_after_triage}",
          flush=True)
     _write_status(logs_dir, "cycle_complete",
-                  extra={"asset_class": asset_class,
+                  extra={**_deadline_items(registry_path), "asset_class": asset_class,
                          "watermark": str(watermark_after_triage),
                          "run_id": run_id,
                          "chain_growth": str(chain_growth)},
