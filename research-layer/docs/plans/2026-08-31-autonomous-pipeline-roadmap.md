@@ -69,6 +69,8 @@ T4 (`bbd32da`) implements exactly that re-trial and queue behaviour and is alrea
 
 ## Phase 3 — Replace card-count limits with a spend rate
 
+**Status 2026-09-03: the TIME half is built and merged (`34c06b9`) — see `2026-09-03-phase3-steps1-3-deadline.md`. Screen and gauntlet take `--deadline-utc`, stop before starting what cannot finish, and report `stopped_at_deadline` as an OK outcome; the loop derives the deadline from the live task window. The SPEND half (steps 4–5 of `2026-09-03-phase3-spend-and-time-throttle.md`) waits on Coen's monthly cap.**
+
 **Why third:** once Phases 1–2 land, `TRIAGE_LIMIT` is the wrong knob. It is a proxy for cost and wall-clock expressed in the wrong unit, and it needs re-deriving every time the window or panel speed changes. It has already rotted twice: the PT2H-era `<= 40` ceiling, and a hardcoded `"120 min"` in a test.
 
 **Change:** the loop triages until it hits a per-cycle spend allowance or the window guard, whichever comes first. `TRIAGE_LIMIT` becomes a derived safety ceiling rather than the control.
