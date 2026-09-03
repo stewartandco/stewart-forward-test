@@ -253,13 +253,26 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `*deadline*` / `stale_stage` tests in test_loop.py.
 
 ## Triage cost controls (loop stage 4a)
-- `--limit` comes from `loop.TRIAGE_LIMIT` (200 since 2026-08-31, Coen; was
-  40). `MIN_TASK_WINDOW_S` is DERIVED from it. ~3.85 s/reviewer-call x
-  3-reviewer panel, so 200 cards is ~38 min. **It bounds triage only** -- one
-  stage of five, ~60% of the money and ~30% of the clock; the composer sweep
-  and the gauntlet scale with the class, not with this number (the
-  2026-09-01 fx cycle: triage 38 min of 237). The window-fit test now asserts
-  the cycle fits even with the panel at HALF its measured speed.
+- **`--limit` is DERIVED each cycle from the spend allowance (Phase 3 step 5,
+  2026-09-03), clamped to `loop.TRIAGE_CEILING` = 200 (`TRIAGE_LIMIT` is its
+  alias; the Gate-2 window test governs the ceiling).** `pipeline/allowance.py`:
+  `expected_cycles = max(10, cycles completed in the trailing 30 days)`
+  (state["cycles"]); `allowance = PIPELINE_CAP_USD x (1 - 0.15) / expected`;
+  `triage_count = clamp(floor((allowance - composer_pair_usd) / usd_per_card), 1, ceiling)`.
+  The two unit costs are the loop's OWN measured spend deltas (trailing means
+  in state["calibration"]; priors 0.018/card and 0.64/pair from 2026-09-01/02).
+  At USD 40 and 20 cycles/month that is ~USD 1.70 a cycle, ~58 cards -- the
+  intended effect of the cap, stated in the plan. Never hand-type a card count
+  into the loop again; change the cap (a decision) or the reserve.
+- **Two parks after triage, both BANK the reviewed cards.** `deferred_budget`
+  = the MONTHLY batch-stop / hard-cap line (WARN, budget_cap semantics),
+  checked first; `deferred_cycle_budget` = this cycle's own allowance would be
+  exceeded by the composer pair (overall OK -- Coen: a park counts as a clean
+  day). Before 2026-09-03 the monthly park recorded a park and never banked,
+  so the cards triage had just paid for were re-paid on the next fire.
+- Status items on every path that reaches triage: `cycle_usd_allowance`,
+  `expected_cycles`, `triage_limit_used`, `usd_per_card`, `composer_pair_usd`,
+  `cycle_spent`. The digest can say WHY a cycle was the size it was.
 - **ExecutionTimeLimit lives in TWO places and the second one wins.**
   `quant/tasks/xml/25_PipelineLoop.xml` declares it, but
   `quant/tasks/apply_retry_settings.ps1` re-stamps every `$RETRY_TASKS` entry

@@ -78,7 +78,7 @@ CYCLE_USD_ALLOWANCE = (monthly_cap × (1 − reserve)) / expected_cycles_per_mon
 Enforcement, in cycle order:
 
 1. **Pre-cycle** (exists): batch-stop / hard-cap gates unchanged.
-2. **Triage limit derived, not declared:** `triage_cards = min(TRIAGE_CEILING, (allowance − composer_pair_usd) / usd_per_card)`. `TRIAGE_LIMIT` becomes `TRIAGE_CEILING` — a safety maximum the window arithmetic sets, no longer the control. Both unit costs come from the ledger's trailing month, not from constants.
+2. **Triage limit derived, not declared:** `triage_cards = min(TRIAGE_CEILING, (allowance − composer_pair_usd) / usd_per_card)`. `TRIAGE_LIMIT` becomes `TRIAGE_CEILING` — a safety maximum the window arithmetic sets, no longer the control. Both unit costs are measured, not constants -- as built (2026-09-03), from the loop's OWN spend deltas around triage and the composer pair, kept as trailing means in `loop_state.json`; the same measurement as a ledger-by-purpose read, without the purpose-string archaeology.
 3. **Post-triage, pre-composer:** if spend so far plus the composer pair's expected cost exceeds the allowance, **park here** with a new outcome `deferred_cycle_budget`, banking the watermark for what triage reviewed (Phase 1's rule already does this correctly). No composer spend. The class re-fires next tick with a fresh allowance.
 
 ### 3.2 Time budget: `CYCLE_DEADLINE`

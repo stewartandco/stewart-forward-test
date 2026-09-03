@@ -69,7 +69,7 @@ T4 (`bbd32da`) implements exactly that re-trial and queue behaviour and is alrea
 
 ## Phase 3 — Replace card-count limits with a spend rate
 
-**Status 2026-09-03: the TIME half is built and merged (`34c06b9`) — see `2026-09-03-phase3-steps1-3-deadline.md`. Screen and gauntlet take `--deadline-utc`, stop before starting what cannot finish, and report `stopped_at_deadline` as an OK outcome; the loop derives the deadline from the live task window. The SPEND half (steps 4–5 of `2026-09-03-phase3-spend-and-time-throttle.md`) waits on Coen's monthly cap.**
+**Status 2026-09-03 (later): PHASE 3 COMPLETE. The time half merged `34c06b9`; the spend half (D39 cap 40, `pipeline/allowance.py`, derived `--limit`, two banking parks) is built -- see `2026-09-03-phase3-steps4-5-spend-allowance.md`. Earlier note:** the TIME half is built and merged (`34c06b9`) — see `2026-09-03-phase3-steps1-3-deadline.md`. Screen and gauntlet take `--deadline-utc`, stop before starting what cannot finish, and report `stopped_at_deadline` as an OK outcome; the loop derives the deadline from the live task window. The SPEND half (steps 4–5 of `2026-09-03-phase3-spend-and-time-throttle.md`) waits on Coen's monthly cap.**
 
 **Why third:** once Phases 1–2 land, `TRIAGE_LIMIT` is the wrong knob. It is a proxy for cost and wall-clock expressed in the wrong unit, and it needs re-deriving every time the window or panel speed changes. It has already rotted twice: the PT2H-era `<= 40` ceiling, and a hardcoded `"120 min"` in a test.
 
