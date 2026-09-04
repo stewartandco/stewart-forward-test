@@ -71,6 +71,28 @@ Stop rules shared by ALL stop types (existing and new): the stop is fixed at ent
 
 `tools_retrial_families_v7.py`: for every distinct family on the chain, classify each of its compositions as **compliant-as-is** (no retired type, entry not `ma_cross*`) or **needs re-trial**. For the latter, propose the v7 exit set through the Composer (one metered LLM call per family, ~55 families) using the family's own cards and blocks, and enqueue the resulting `version: 2` specs as D9 re-trials for the unified re-run (`split_for_cycle` queue). `--dry-run` writes the classification report to `docs/runs/2026-09-03-exit-rules-v7-retrial-plan.md` and nothing else. The real run is a chain write inside a pipeline cycle; it is not part of this branch's ship bar.
 
+### 6.1 Firing plan: TWO TRANCHES, quarantine first (Coen, 2026-09-05)
+
+Costed against the real dry-run report and the budget ledger, not the estimate in s6 above.
+
+**Correction to s6:** it says "~55 families". The actual report classifies **72 families** as needing re-trial (76 family rows, 4 fully compliant) - about 30% more calls than planned.
+
+| | compositions | families | est. cost |
+|---|---|---|---|
+| graveyard (buried) | 5,305 | - | - |
+| **quarantine (live, observing)** | **321** | **36** | **~USD 24** |
+| total needing re-trial | 5,626 | 72 | **~USD 47** |
+
+Cost basis: 72 Composer calls at the ledger's measured average of **USD 0.658/call** (23 calls, USD 15.13 to date). The average rests on only 23 samples - treat +/-30% as live.
+
+**Why it cannot fire now:** September stood at **27.34 of a 40 monthly cap** when this was decided (12.66 to the cap, 4.66 to the 32 batch-stop). The full re-trial at ~47 exceeds an ENTIRE month's cap, and the loop's own running is not cheap - September burned 27.34 in four active days (9.76 / 0.21 / 10.68 / 6.68).
+
+**The plan (Coen's call 2026-09-05):**
+1. **Tranche 1, October: quarantine only** - the 36 families carrying the 321 quarantine compositions, ~USD 24. These are the compositions that are actually live and being observed, so this is the half where the answer changes something today.
+2. **Tranche 2, later: the graveyard** - the remaining families covering 5,305 buried compositions. A buried composition stays buried either way until something unburies it.
+
+**D15(b) is NOT amended.** It still reads "everything is re-trialled under the new grammar inside the unified re-run", and it still will be - the delivery simply arrives in two parts. This section records sequencing, not a scope cut, and the chained note `docs/notes/exit-rules-v7.md` is untouched.
+
 ## 7. Chain events, in order
 
 1. `docs/notes/exit-rules-v7.md` chained as a `note` (Lane A) — ratchet: **TIGHTENS** (a whole class of exits is forbidden; nothing is loosened) — BEFORE any `version: 2` registration.
