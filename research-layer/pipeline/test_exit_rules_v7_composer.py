@@ -125,6 +125,9 @@ def test_fingerprint_includes_version_but_is_unchanged_for_version_1():
                      {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}]}
     legacy_shape = {k: v for k, v in s1.items() if k != "version"}       # every chained spec has version 1
     assert composition_fingerprint(legacy_shape) == composition_fingerprint(s1)
+    # literal pin: the version-1 fingerprint must be byte-for-byte what the chain already holds
+    # (a version leaking into a v1 fingerprint would break every D9 re-trial lookup)
+    assert composition_fingerprint(s1) == "fde922c180e46f62fa4d11af6c9dac832347f49167b5ed81369640296d601426"
     assert composition_fingerprint({**s1, "version": 2}) != composition_fingerprint(s1)
     # the v1 fingerprint is byte-for-byte the pre-D15 core (version never enters it)
     assert composition_fingerprint(s1) == "%s" % composition_fingerprint({**s1, "version": 1})
