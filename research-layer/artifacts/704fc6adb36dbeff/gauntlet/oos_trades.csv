@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+JPY,long,2024-08-05 00:00:00,0.006946856547412296,2024-11-04 00:00:00,0.0065780818313379815,signal,-0.05338512037889768,1.0

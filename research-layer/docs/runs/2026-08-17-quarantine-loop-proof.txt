@@ -1,0 +1,49 @@
+Quarantine loop proof — 2026-08-17, live chain, ZERO writes.
+Entry date 2026-08-17; newest bar on disk 2026-08-14; first forward day is 2026-08-18,
+whose complete daily bar exists only after 00:00 UTC on 2026-08-19.
+
+chain md5 before: ce346436e5b46efa3620df8bbb8dac38
+
+=== a date with a bar but AT/BEFORE entry -> skips ===
+9b6753a48c4d0ccd  skipped: 2026-08-14 is not after its quarantine entry 2026-08-17
+ad654fd8097717bd  skipped: 2026-08-14 is not after its quarantine entry 2026-08-17
+ef7712f41e2188e2  skipped: 2026-08-14 is not after its quarantine entry 2026-08-17
+
+0 decision(s) chained, 0 already present.
+
+=== a date with NO bar -> refuses, rc 1 ===
+REFUSED: no BTCUSD bar for 2026-08-18. A decision is never invented for a non-trading day; backfill the data or pick a real trading day.
+rc=1 (verified unpiped)
+
+=== --review -> writes nothing ===
+9b6753a48c4d0ccd  entered 2026-08-17  days 0/60  NOT YET ELIGIBLE
+  unrecorded bar dates in window: 0
+  partially recorded dates: 0
+  gauntlet MC projection: p25=7.1951 p50=10.3204 p75=14.8947
+  NOTE: that cone is a terminal-equity distribution over the strategy's
+  FULL trade count, so it is NOT directly comparable to a short forward
+  record. The graduation comparison belongs to the quarantine -> live
+  gate, which is pre-declared in its own chained note and cannot bind
+  before 60 trading days accrue.
+ad654fd8097717bd  entered 2026-08-17  days 0/60  NOT YET ELIGIBLE
+  unrecorded bar dates in window: 0
+  partially recorded dates: 0
+  gauntlet MC projection: p25=124.0642 p50=329.0010 p75=898.6548
+  NOTE: that cone is a terminal-equity distribution over the strategy's
+  FULL trade count, so it is NOT directly comparable to a short forward
+  record. The graduation comparison belongs to the quarantine -> live
+  gate, which is pre-declared in its own chained note and cannot bind
+  before 60 trading days accrue.
+ef7712f41e2188e2  entered 2026-08-17  days 0/60  NOT YET ELIGIBLE
+  unrecorded bar dates in window: 0
+  partially recorded dates: 0
+  gauntlet MC projection: p25=3.2094 p50=4.3278 p75=5.8599
+  NOTE: that cone is a terminal-equity distribution over the strategy's
+  FULL trade count, so it is NOT directly comparable to a short forward
+  record. The graduation comparison belongs to the quarantine -> live
+  gate, which is pre-declared in its own chained note and cannot bind
+  before 60 trading days accrue.
+
+Review only — nothing written. Graduation is a separately human-gated decision.
+
+chain md5 after:  ce346436e5b46efa3620df8bbb8dac38

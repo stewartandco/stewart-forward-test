@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+
+# Market data is regenerable, so it is not the record: the run manifest pins
+# the exact bytes by hash, and data_import.py rebuilds the CSVs byte-for-byte
+# from the trading-systems parquet cache. Committing ~29MB of it would add
+# weight to a repo whose trust asset is a hash chain, for no integrity gain.
+# (Coen, 2026-08-18. The recovery path is a re-fetch, which is hours of
+# sequential API calls, not minutes -- see the vault note before relying on it.)
+#
+# BTCUSD_1d.csv and ETHUSD_1d.csv predate this rule and stay tracked; git
+# ignores only untracked files, so they are unaffected. Use `git add -f` if a
+# file here ever genuinely belongs in history.
+data/*.csv
+
+# SP4 Task P1: content-addressed sim cache for gauntlet's registry-wide
+# clustering re-simulations (pipeline/simcache.py). Purely derived -- every
+# entry is reproducible from the registry, the pinned data and engine.py's
+# ENGINE_REV -- and it grows with every gauntlet run, so it is not the record.
+simcache/
