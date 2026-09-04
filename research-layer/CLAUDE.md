@@ -38,6 +38,7 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   direction or the other. loop.py `_triggerable_counts` decides;
   `_routable_counts` (accepted-only) is reported, never compared.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
+- **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
   reader agent); run log logs/pipeline-loop-run.log; instance guard logs/loop.lock.
   Items carry BOTH routable_<cls> (accepted-only) and triggerable_<cls>
