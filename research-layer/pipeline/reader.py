@@ -39,9 +39,12 @@ EXTRACTION_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "claim": {"type": "string"},
+                    # Order matters: structured outputs emit fields in this
+                    # order, so the quote is selected before the claim is
+                    # written, not retrofitted to justify one.
                     "quote": {"type": "string"},
                     "locator": {"type": "string"},
+                    "claim": {"type": "string"},
                     "asset_classes": {
                         "type": "array",
                         "items": {"enum": ["futures", "equities", "crypto", "fx",
@@ -53,7 +56,7 @@ EXTRACTION_SCHEMA = {
                     "data_required": {"type": "array", "items": {"type": "string"}},
                     "notes": {"type": ["string", "null"]},
                 },
-                "required": ["claim", "quote", "locator", "asset_classes", "topics",
+                "required": ["quote", "locator", "claim", "asset_classes", "topics",
                               "horizon", "testability_score", "data_required", "notes"],
                 "additionalProperties": False,
             },
@@ -68,15 +71,32 @@ You are the Reader agent in Stewart & Co.'s quantitative research pipeline. You
 extract testable claims from trading/finance research so they can be turned
 into strategy hypotheses and backtested.
 
-For each distinct, testable claim in the document, produce one entry:
-- claim: one self-contained sentence stating the testable proposition. Include
-  the market/asset class and horizon in the sentence where the source states them.
-- quote: a VERBATIM passage (1-3 sentences) copied character-for-character from
-  the document that supports the claim. Never paraphrase, never stitch together
-  words from different places. If you cannot find a verbatim supporting passage,
-  do not emit the claim at all. Quotes are mechanically checked against the
-  source; a quote that is not an exact substring gets the card rejected.
+For each distinct, testable claim in the document, produce one entry. Choose the
+quote FIRST, then write the claim to fit it - the fields are emitted in that
+order for exactly this reason.
+- quote: a VERBATIM passage copied character-for-character from the document, as
+  ONE continuous span, up to roughly a paragraph (about 6 sentences). Prefer the
+  shortest passage that carries the WHOLE claim, but widen rather than drop
+  detail. Never paraphrase, never stitch together words from different places.
+  If you cannot find a verbatim supporting passage, do not emit the claim at
+  all. Quotes are mechanically checked against the source; a quote that is not
+  an exact substring gets the card rejected.
 - locator: where the quote sits (page, section heading, or chunk position as given).
+- claim: one self-contained sentence stating the testable proposition, drawn
+  ONLY from the quote above. Every specific the claim asserts - asset class,
+  market, horizon, sample window, parameter value, metric, named strategy,
+  condition - must appear in that quote. If a detail you want sits elsewhere in
+  the document, either widen the quote into one continuous span that contains
+  both, or state the claim at the generality the quote alone supports. Do not
+  import scope from the title, abstract, or surrounding sections. A narrower
+  claim the quote fully carries beats a broader one it does not: a claim that
+  outruns its quote is rejected in review and the card is wasted.
+  The most common failure is a back-reference: the passage says "the same
+  signal", "this strategy", "that period" or "these positions", and the claim
+  helpfully fills in the index, universe, position count or date range from
+  elsewhere in the document. Do not fill it in. Either widen the quote to a
+  continuous span that also contains the sentence naming the thing, or carry the
+  back-reference through into the claim exactly as generally as the quote puts it.
 - testability_score: 0-1, how directly this could be turned into a backtestable
   rule with ordinary market data (1.0 = precise rule with named data; 0.2 = vague
   qualitative observation).
