@@ -279,11 +279,20 @@ class ChainUnchanged:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if exc_type is None and self._fingerprint() != self._before:
-            raise RuntimeError(
-                f"chain changed during a shadow run: {self.chain_path} - "
-                "this harness must never write to the chain")
-        return False
+        changed = self._fingerprint() != self._before
+        if not changed:
+            return False                      # clean exit, or propagate exc unchanged
+        message = (
+            f"chain changed during a shadow run: {self.chain_path}. Either this "
+            "harness wrote to the chain (a defect - it must never) or a LEGITIMATE "
+            "writer appended concurrently: the resident scanner's card batch, the "
+            "quarantine daily, or a pipeline cycle, each under its own chain.lock. "
+            "Diff the chain's tail before treating this as a harness defect.")
+        if exc_type is not None:
+            # The run crashed AND the chain moved: report both, chained, never
+            # mask the original error.
+            raise RuntimeError(message) from exc
+        raise RuntimeError(message)
 
 
 def ensure_no_cycle_running(logs_dir: Path) -> None:
@@ -295,14 +304,23 @@ def ensure_no_cycle_running(logs_dir: Path) -> None:
     """
     lock = Path(logs_dir) / "chain.lock"
     if lock.exists():
+        try:
+            held_by = lock.read_text(encoding="utf-8").strip()[:200]
+        except OSError:
+            held_by = "(unreadable)"
         raise RuntimeError(
-            f"a cycle is running ({lock} is held) - rerun when it is free; "
-            "shadow spend inside a cycle would distort the loop's calibration")
+            f"a cycle is running ({lock} is held: {held_by}) - rerun when it is "
+            "free; shadow spend inside a cycle would distort the loop's "
+            "calibration. If the holder pid is dead this is a STALE lock - "
+            "check it the way pipeline.chainlock does before clearing anything.")
 
 
 def spend_guard(start_usd: float, ceiling: float = PILOT_CEILING_USD):
-    """-> predicate(current_usd) that is False once the pilot has spent
-    `ceiling`. The ceiling is enforced, never assumed."""
+    """-> predicate(current_usd) that is False once spend at the START of a
+    document would reach `ceiling`. Checked before each document, so the
+    true total can overshoot by at most one document's cost - fine for a
+    pilot at cents per document, but not an exact stop. Enforced, never
+    assumed."""
     def may_continue(current_usd: float) -> bool:
         return (current_usd - start_usd) < ceiling
     return may_continue

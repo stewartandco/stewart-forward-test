@@ -390,3 +390,40 @@ def test_spend_guard_stops_the_run_at_the_pilot_ceiling():
     guard = spend_guard(start_usd=1.0, ceiling=PILOT_CEILING_USD)
     assert guard(1.5) is True                       # 0.5 spent, keep going
     assert guard(1.0 + PILOT_CEILING_USD) is False  # ceiling reached
+
+
+def test_chain_unchanged_lets_an_exception_propagate_when_the_chain_is_untouched(tmp_path):
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text('{"a": 1}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="the real error"):
+        with ChainUnchanged(chain):
+            raise ValueError("the real error")
+
+
+def test_chain_unchanged_reports_a_write_even_when_the_block_raised(tmp_path):
+    # the run crashed AND the chain moved: both must surface, chained
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text('{"a": 1}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="chain changed") as info:
+        with ChainUnchanged(chain):
+            with chain.open("a", encoding="utf-8") as fh:
+                fh.write('{"b": 2}\n')
+            raise ValueError("the real error")
+    assert isinstance(info.value.__cause__, ValueError)
+
+
+def test_chain_unchanged_message_names_the_benign_causes(tmp_path):
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text('{"a": 1}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="LEGITIMATE writer"):
+        with ChainUnchanged(chain):
+            with chain.open("a", encoding="utf-8") as fh:
+                fh.write('{"b": 2}\n')
+
+
+def test_ensure_no_cycle_running_shows_the_lock_holder(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chain.lock").write_text('{"holder": "scanner", "pid": 4242}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match='"holder": "scanner"'):
+        ensure_no_cycle_running(logs)
