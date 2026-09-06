@@ -261,3 +261,77 @@ def test_classify_claims_never_mutates_the_callers_known_fingerprints():
     classify_claims([{"claim": "Brand new", "quote": text}], text=text,
                     known_fingerprints=known)
     assert known == before
+
+
+from tools.reextract_shadow import aggregate, verdict_for
+
+
+def _result(**kw):
+    base = {"key": "k", "url": "u", "title": "t", "source_type": "blog",
+            "band": "passed", "old_cards": 0, "old_accepted": 0,
+            "old_rejected": 0, "old_pending": 0, "proposed": 0,
+            "dropped_quote_guard": 0, "duplicate_of_existing": 0, "novel": 0,
+            "novel_accepted": 0, "novel_escalated": 0,
+            "escalation_reasons": [], "usd": 0.0, "error": None}
+    base.update(kw)
+    return base
+
+
+def test_aggregate_excludes_pending_from_both_accept_rates():
+    results = [
+        _result(old_accepted=6, old_rejected=2, old_pending=92,
+                novel=10, novel_accepted=9, novel_escalated=1, usd=0.10),
+    ]
+    agg = aggregate(results)
+    # old rate is 6/(6+2), NOT 6/100 - pending is undecided, not a failure
+    assert agg["old_accept_rate"] == pytest.approx(0.75)
+    assert agg["novel_accept_rate"] == pytest.approx(0.9)
+    assert agg["old_pending_share"] == pytest.approx(92 / 100)
+
+
+def test_aggregate_computes_per_document_and_per_dollar_yield():
+    results = [
+        _result(novel=4, novel_accepted=3, usd=0.10),
+        _result(novel=4, novel_accepted=1, usd=0.10),
+    ]
+    agg = aggregate(results)
+    assert agg["documents"] == 2
+    assert agg["novel_accepted_per_doc"] == pytest.approx(2.0)
+    assert agg["novel_accepted_per_usd"] == pytest.approx(20.0)
+    assert agg["usd_total"] == pytest.approx(0.20)
+
+
+def test_aggregate_ignores_errored_documents_in_the_rates_but_reports_them():
+    results = [
+        _result(novel=4, novel_accepted=4, usd=0.10),
+        _result(error="http 403"),
+    ]
+    agg = aggregate(results)
+    assert agg["documents"] == 1
+    assert agg["errors"] == 1
+    assert agg["novel_accepted_per_doc"] == pytest.approx(4.0)
+
+
+def test_aggregate_is_safe_on_an_empty_run():
+    agg = aggregate([])
+    assert agg["documents"] == 0
+    assert agg["novel_accepted_per_doc"] == 0.0
+    assert agg["novel_accept_rate"] is None
+    assert agg["old_accept_rate"] is None
+
+
+def test_verdict_for_applies_the_specs_thresholds():
+    # green needs >= 2 per doc AND a novel rate no worse than the old rate
+    assert verdict_for({"novel_accepted_per_doc": 2.0, "novel_accept_rate": 0.8,
+                        "old_accept_rate": 0.8}) == "green"
+    assert verdict_for({"novel_accepted_per_doc": 3.0, "novel_accept_rate": 0.5,
+                        "old_accept_rate": 0.8}) == "amber"
+    assert verdict_for({"novel_accepted_per_doc": 1.0, "novel_accept_rate": 0.9,
+                        "old_accept_rate": 0.8}) == "amber"
+    assert verdict_for({"novel_accepted_per_doc": 0.4, "novel_accept_rate": 0.9,
+                        "old_accept_rate": 0.8}) == "red"
+
+
+def test_verdict_for_is_amber_when_there_is_no_old_rate_to_compare():
+    assert verdict_for({"novel_accepted_per_doc": 5.0, "novel_accept_rate": 0.9,
+                        "old_accept_rate": None}) == "amber"

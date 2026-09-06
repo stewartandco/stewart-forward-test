@@ -189,3 +189,64 @@ def classify_claims(claims: list[dict], *, text: str,
         seen.add(fp)
         out["novel"].append(raw)
     return out
+
+
+GREEN_PER_DOC = 2.0
+RED_PER_DOC = 0.5
+
+
+def _rate(hits: int, total: int) -> float | None:
+    return (hits / total) if total else None
+
+
+def aggregate(results: list[dict]) -> dict:
+    """Roll per-document results into the spec's headline comparators.
+
+    Errored documents are excluded from every rate and counted separately -
+    a document we could not fetch says nothing about the extractor.
+
+    Both accept rates are accepted / (accepted + rejected): a pending card is
+    undecided, so counting it as a failure would understate the old corpus.
+    The pending share is reported alongside so the exclusion is visible.
+    """
+    ok = [r for r in results if not r.get("error")]
+    old_acc = sum(r["old_accepted"] for r in ok)
+    old_rej = sum(r["old_rejected"] for r in ok)
+    old_pend = sum(r["old_pending"] for r in ok)
+    novel = sum(r["novel"] for r in ok)
+    novel_acc = sum(r["novel_accepted"] for r in ok)
+    usd = sum(r["usd"] for r in ok)
+    return {
+        "documents": len(ok),
+        "errors": len(results) - len(ok),
+        "old_accept_rate": _rate(old_acc, old_acc + old_rej),
+        "old_pending_share": _rate(old_pend, old_acc + old_rej + old_pend),
+        "novel_accept_rate": _rate(novel_acc, novel),
+        "novel": novel,
+        "novel_accepted": novel_acc,
+        "novel_escalated": sum(r["novel_escalated"] for r in ok),
+        "proposed": sum(r["proposed"] for r in ok),
+        "dropped_quote_guard": sum(r["dropped_quote_guard"] for r in ok),
+        "duplicate_of_existing": sum(r["duplicate_of_existing"] for r in ok),
+        "novel_accepted_per_doc": (novel_acc / len(ok)) if ok else 0.0,
+        "novel_accepted_per_usd": (novel_acc / usd) if usd else 0.0,
+        "usd_total": usd,
+    }
+
+
+def verdict_for(agg: dict) -> str:
+    """"green" | "amber" | "red" per the design's decision rule.
+
+    Stated before the run so a disappointing result cannot be re-read as an
+    encouraging one. Green additionally requires an old rate to compare
+    against; with nothing to beat, the honest answer is amber.
+    """
+    per_doc = agg.get("novel_accepted_per_doc") or 0.0
+    new_rate = agg.get("novel_accept_rate")
+    old_rate = agg.get("old_accept_rate")
+    if per_doc < RED_PER_DOC:
+        return "red"
+    if (per_doc >= GREEN_PER_DOC and new_rate is not None
+            and old_rate is not None and new_rate >= old_rate):
+        return "green"
+    return "amber"
