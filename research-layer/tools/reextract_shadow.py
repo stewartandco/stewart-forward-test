@@ -8,6 +8,8 @@ docs/2026-09-06-reextract-shadow-design.md.
 """
 from __future__ import annotations
 
+import random
+
 
 def doc_key(card: dict) -> str:
     """Document identity for a card: its URL, else a title fallback.
@@ -39,3 +41,47 @@ def build_corpus(cards: dict[str, dict]) -> dict[str, dict]:
         if status in ("accepted", "rejected", "pending"):
             doc[f"old_{status}"] += 1
     return docs
+
+
+SAMPLE_SIZE = 10
+BANDS = ("passed", "stalled")
+
+
+def band_of(doc: dict) -> str:
+    """"passed" when most of this document's cards were accepted, else
+    "stalled".
+
+    The denominator includes pending on purpose: a document whose cards are
+    mostly stuck in escalation belongs in the "stalled" band, which is the
+    band that asks whether re-extraction rescues failure. Exactly half is
+    "stalled" - the band is "MOSTLY passed", strictly.
+    """
+    total = doc["old_cards"]
+    return "passed" if total and doc["old_accepted"] / total > 0.5 else "stalled"
+
+
+def sample_documents(corpus: dict[str, dict], n: int = SAMPLE_SIZE,
+                     seed: int = 0) -> list[dict]:
+    """`n` documents drawn reproducibly, split evenly across the two bands.
+
+    Each returned doc carries its `band`. If one band cannot fill its half,
+    the other tops the sample up, so the sample size is honoured even on a
+    lopsided corpus. Sorting by key before shuffling makes the draw depend on
+    the seed alone, not on dict insertion order.
+    """
+    rng = random.Random(seed)
+    by_band: dict[str, list[dict]] = {b: [] for b in BANDS}
+    for key in sorted(corpus):
+        doc = dict(corpus[key])
+        doc["band"] = band_of(doc)
+        by_band[doc["band"]].append(doc)
+    for bucket in by_band.values():
+        rng.shuffle(bucket)
+
+    per_band = n // len(BANDS)
+    picked = [d for b in BANDS for d in by_band[b][:per_band]]
+    if len(picked) < n:
+        chosen = {d["key"] for d in picked}
+        leftovers = [d for b in BANDS for d in by_band[b] if d["key"] not in chosen]
+        picked.extend(leftovers[:n - len(picked)])
+    return picked
