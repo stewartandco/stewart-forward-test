@@ -324,3 +324,62 @@ def spend_guard(start_usd: float, ceiling: float = PILOT_CEILING_USD):
     def may_continue(current_usd: float) -> bool:
         return (current_usd - start_usd) < ceiling
     return may_continue
+
+
+def _blank_result(doc: dict) -> dict:
+    return {
+        "key": doc["key"], "url": doc.get("url"), "title": doc.get("title"),
+        "source_type": doc.get("source_type"), "band": doc.get("band"),
+        "old_cards": doc.get("old_cards", 0),
+        "old_accepted": doc.get("old_accepted", 0),
+        "old_rejected": doc.get("old_rejected", 0),
+        "old_pending": doc.get("old_pending", 0),
+        "proposed": 0, "dropped_quote_guard": 0, "duplicate_of_existing": 0,
+        "novel": 0, "novel_accepted": 0, "novel_escalated": 0,
+        "escalation_reasons": [], "usd": 0.0, "error": None,
+    }
+
+
+def shadow_one_document(doc: dict, *, load_text, extract, panel,
+                        known_fingerprints: set[str], meter,
+                        chunker) -> dict:
+    """One document end to end, returning a DocResult. Never raises.
+
+    `extract(chunk_label, chunk_text) -> [raw claim]` and
+    `panel(cards) -> build_decisions payload` are injected so the wiring is
+    testable without a model. Spend is measured from the meter's own ledger
+    around the work, not estimated.
+
+    The panel is skipped entirely when nothing survives classification: a
+    panel with no cards costs money and answers nothing.
+    """
+    res = _blank_result(doc)
+    before_usd = meter.month_spend()
+    try:
+        text, how = load_text(doc)
+        res["text_source"] = how
+        claims: list[dict] = []
+        for label, chunk in chunker(text):
+            claims.extend(extract(label, chunk))
+        split = classify_claims(claims, text=text,
+                                known_fingerprints=known_fingerprints)
+        res.update(proposed=split["proposed"],
+                   dropped_quote_guard=split["dropped_quote_guard"],
+                   duplicate_of_existing=split["duplicate_of_existing"],
+                   novel=len(split["novel"]))
+        if split["novel"]:
+            cards = {f"shadow-{i}": {"claim": c.get("claim", ""),
+                                     "quote": c.get("quote", ""),
+                                     "source": {"title": doc.get("title")}}
+                     for i, c in enumerate(split["novel"])}
+            out = panel(cards)
+            res["novel_accepted"] = sum(
+                1 for v in out.get("decisions", {}).values() if v[0] == "accepted")
+            res["novel_escalated"] = len(out.get("escalated", {}))
+            res["escalation_reasons"] = [
+                r for reasons in out.get("dissent_reasons", {}).values()
+                for r in reasons]
+    except Exception as exc:
+        res["error"] = str(exc)[:200]
+    res["usd"] = round(meter.month_spend() - before_usd, 6)
+    return res

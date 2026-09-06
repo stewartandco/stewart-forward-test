@@ -427,3 +427,111 @@ def test_ensure_no_cycle_running_shows_the_lock_holder(tmp_path):
     (logs / "chain.lock").write_text('{"holder": "scanner", "pid": 4242}', encoding="utf-8")
     with pytest.raises(RuntimeError, match='"holder": "scanner"'):
         ensure_no_cycle_running(logs)
+
+
+from tools.reextract_shadow import shadow_one_document
+
+
+class _FakeMeter:
+    """Stands in for BudgetMeter: month_spend() is all the harness reads."""
+
+    def __init__(self, spend=0.0):
+        self._spend = spend
+
+    def month_spend(self, month=None, agent=None):
+        return self._spend
+
+    def bump(self, usd):
+        self._spend += usd
+
+
+def test_shadow_one_document_walks_extract_classify_and_panel():
+    doc = {"key": "k", "url": "https://a.example/x", "title": "T",
+           "source_type": "blog", "band": "passed", "old_cards": 3,
+           "old_accepted": 2, "old_rejected": 1, "old_pending": 0}
+    meter = _FakeMeter(1.0)
+
+    def fake_load(d):
+        return "Momentum reverses after large volume shocks.", "fetched"
+
+    def fake_extract(label, chunk):
+        meter.bump(0.02)
+        return [
+            {"claim": "New claim one", "quote": "Momentum reverses after large volume shocks."},
+            {"claim": "Ghost", "quote": "absent from the text"},
+        ]
+
+    def fake_panel(cards):
+        meter.bump(0.03)
+        cid = next(iter(cards))
+        return {"decisions": {cid: ("accepted", None)}, "escalated": {},
+                "dissent_reasons": {},
+                "counts": {"accepted": 1, "duplicate": 0, "escalated": 0},
+                "stopped": None}
+
+    res = shadow_one_document(doc, load_text=fake_load, extract=fake_extract,
+                              panel=fake_panel, known_fingerprints=set(),
+                              meter=meter, chunker=lambda t: [("full document", t)])
+
+    assert res["error"] is None
+    assert res["proposed"] == 2
+    assert res["dropped_quote_guard"] == 1
+    assert res["novel"] == 1
+    assert res["novel_accepted"] == 1
+    assert res["novel_escalated"] == 0
+    assert res["usd"] == pytest.approx(0.05)
+    assert res["old_accepted"] == 2          # chain-side fields carried through
+
+
+def test_shadow_one_document_records_escalation_reasons():
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "stalled", "old_cards": 1, "old_accepted": 0,
+           "old_rejected": 0, "old_pending": 1}
+
+    def fake_panel(cards):
+        cid = next(iter(cards))
+        return {"decisions": {}, "escalated": {cid: "dissent"},
+                "dissent_reasons": {cid: ["claim exceeds the quote"]},
+                "counts": {"accepted": 0, "duplicate": 0, "escalated": 1},
+                "stopped": None}
+
+    res = shadow_one_document(
+        doc, load_text=lambda d: ("the text", "fetched"),
+        extract=lambda label, chunk: [{"claim": "C", "quote": "the text"}],
+        panel=fake_panel, known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("full document", t)])
+
+    assert res["novel_escalated"] == 1
+    assert res["escalation_reasons"] == ["claim exceeds the quote"]
+
+
+def test_shadow_one_document_records_a_load_failure_without_raising():
+    doc = {"key": "k", "url": "https://ssrn.com/x", "title": "T",
+           "source_type": "paper", "band": "passed", "old_cards": 1,
+           "old_accepted": 1, "old_rejected": 0, "old_pending": 0}
+
+    def boom(d):
+        raise RuntimeError("http 403")
+
+    res = shadow_one_document(doc, load_text=boom,
+                              extract=lambda label, chunk: [],
+                              panel=lambda cards: {},
+                              known_fingerprints=set(), meter=_FakeMeter(),
+                              chunker=lambda t: [("full document", t)])
+    assert res["error"] == "http 403"
+    assert res["proposed"] == 0 and res["novel_accepted"] == 0
+
+
+def test_shadow_one_document_skips_the_panel_when_nothing_is_novel():
+    def fail_panel(cards):
+        raise AssertionError("must not pay for a panel with no novel claims")
+
+    res = shadow_one_document(
+        {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+         "band": "passed", "old_cards": 0, "old_accepted": 0,
+         "old_rejected": 0, "old_pending": 0},
+        load_text=lambda d: ("text here", "fetched"),
+        extract=lambda label, chunk: [{"claim": "C", "quote": "missing"}],
+        panel=fail_panel, known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("full document", t)])
+    assert res["novel"] == 0 and res["novel_accepted"] == 0
