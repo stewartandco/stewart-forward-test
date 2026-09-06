@@ -9,6 +9,8 @@ docs/2026-09-06-reextract-shadow-design.md.
 from __future__ import annotations
 
 import hashlib
+import json
+import platform
 import random
 import re
 from pathlib import Path
@@ -407,3 +409,87 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
         res["error"] = str(exc)[:200]
     res["usd"] = round(meter.month_spend() - before_usd, 6)
     return res
+
+
+def _fmt_rate(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.0%}"
+
+
+def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
+                 model: str, date_utc: str) -> tuple[Path, Path]:
+    """Write `<date>-reextract-shadow.md` plus a JSON sidecar; return both.
+
+    The markdown is Coen's read; the JSON is the machine-readable record a
+    later full run compares against. The Python version is recorded beside
+    the seed because `random.shuffle` is only reproducible for a seed within
+    one Python version.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    verdict = verdict_for(agg)
+    py = platform.python_version()
+
+    lines = [
+        f"# Re-extract shadow run {date_utc}",
+        "",
+        f"**Verdict: {verdict.upper()}** "
+        f"({agg['novel_accepted_per_doc']:.2f} novel accepted per document; "
+        f"green needs >= {GREEN_PER_DOC}, red is < {RED_PER_DOC})",
+        "",
+        f"Sample: {agg['documents']} document(s) at seed {seed}, python {py}, "
+        f"model {model}; {agg['errors']} errored, {agg['stopped']} stopped at "
+        f"the budget. Spend USD {agg['usd_total']:.2f}.",
+        "",
+        "| measure | old corpus | this run |",
+        "|---|---:|---:|",
+        f"| accept rate (judged cards only) | {_fmt_rate(agg['old_accept_rate'])} "
+        f"| {_fmt_rate(agg['novel_accept_rate'])} |",
+        f"| undecided (old: pending share / new: unjudged count) | "
+        f"{_fmt_rate(agg['old_pending_share'])} | {agg['novel_unjudged']} |",
+        "",
+        f"Claims proposed {agg['proposed']}, dropped by the honesty guard "
+        f"{agg['dropped_quote_guard']}, duplicates of held cards "
+        f"{agg['duplicate_of_existing']}, novel {agg['novel']} "
+        f"(accepted {agg['novel_accepted']}, escalated {agg['novel_escalated']}, "
+        f"unjudged {agg['novel_unjudged']}).",
+        "",
+        "**Limitation:** duplicate detection is `claim_fingerprint`, which is "
+        "normalised but not semantic, so a paraphrase of a held claim counts "
+        "as novel and reaches the panel. Read the novel figure with that in "
+        "mind; the escalation reasons below are where paraphrases surface.",
+        "",
+        "## Per document",
+        "",
+        "| document | band | old A/R/P | proposed | guard | dupe | novel | acc | esc | unj | USD |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for r in results:
+        title = (r.get("title") or r.get("key") or "")[:44]
+        note = ""
+        if r.get("error"):
+            note = f" — ERROR: {r['error']}"
+        elif r.get("stopped"):
+            note = f" — STOPPED: {r['stopped']}"
+        lines.append(
+            f"| {title}{note} | {r.get('band','')} | "
+            f"{r['old_accepted']}/{r['old_rejected']}/{r['old_pending']} | "
+            f"{r['proposed']} | {r['dropped_quote_guard']} | "
+            f"{r['duplicate_of_existing']} | {r['novel']} | "
+            f"{r['novel_accepted']} | {r['novel_escalated']} | "
+            f"{r.get('novel_unjudged', 0)} | {r['usd']:.3f} |")
+
+    reasons = [x for r in results for x in r.get("escalation_reasons", [])]
+    if reasons:
+        lines += ["", "## Escalation reasons (every dissenting reviewer)", ""]
+        lines += [f"- {reason}" for reason in reasons]
+
+    md_path = out_dir / f"{date_utc}-reextract-shadow.md"
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    js_path = out_dir / f"{date_utc}-reextract-shadow.json"
+    js_path.write_text(json.dumps(
+        {"date_utc": date_utc, "seed": seed, "python_version": py,
+         "model": model, "verdict": verdict, "aggregate": agg,
+         "documents": results},
+        indent=2), encoding="utf-8")
+    return md_path, js_path

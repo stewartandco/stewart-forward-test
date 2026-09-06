@@ -622,3 +622,56 @@ def test_a_budget_stopped_document_still_counts_in_the_aggregate():
     assert agg["novel_unjudged"] == 2
     assert agg["novel_accept_rate"] == pytest.approx(1.0)   # 1 judged, 1 accepted
     assert agg["old_accept_rate"] == pytest.approx(0.75)
+
+
+import json
+
+from tools.reextract_shadow import write_report
+
+
+def test_write_report_writes_markdown_and_a_json_sidecar(tmp_path):
+    results = [_result(key="https://a.example/x", title="Doc A", novel=4,
+                       novel_accepted=3, novel_escalated=1, proposed=6,
+                       dropped_quote_guard=1, duplicate_of_existing=1,
+                       old_accepted=5, old_rejected=1, usd=0.11,
+                       escalation_reasons=["claim exceeds the quote"])]
+    agg = aggregate(results)
+    md, js = write_report(tmp_path, results=results, agg=agg,
+                          seed=1234, model="claude-opus-5",
+                          date_utc="2026-09-07")
+
+    assert md.name == "2026-09-07-reextract-shadow.md"
+    assert js.name == "2026-09-07-reextract-shadow.json"
+    body = md.read_text(encoding="utf-8")
+    assert "seed 1234" in body
+    assert "claude-opus-5" in body
+    assert "python " in body                      # version recorded beside the seed
+    assert "Doc A" in body
+    assert "claim exceeds the quote" in body
+    assert verdict_for(agg).upper() in body
+
+    payload = json.loads(js.read_text(encoding="utf-8"))
+    assert payload["seed"] == 1234
+    assert payload["python_version"]
+    assert payload["aggregate"]["novel_accepted"] == 3
+    assert payload["documents"][0]["title"] == "Doc A"
+
+
+def test_write_report_states_the_paraphrase_limitation(tmp_path):
+    agg = aggregate([])
+    md, _ = write_report(tmp_path, results=[], agg=agg, seed=1, model="m",
+                         date_utc="2026-09-07")
+    assert "paraphrase" in md.read_text(encoding="utf-8").lower()
+
+
+def test_write_report_marks_stopped_and_unjudged(tmp_path):
+    results = [_result(key="https://a.example/x", title="Doc A", novel=3,
+                       novel_accepted=1, novel_unjudged=2, stopped="budget",
+                       usd=0.05)]
+    agg = aggregate(results)
+    md, js = write_report(tmp_path, results=results, agg=agg, seed=1, model="m",
+                          date_utc="2026-09-07")
+    body = md.read_text(encoding="utf-8")
+    assert "STOPPED: budget" in body
+    assert "unjudged 2" in body
+    assert json.loads(js.read_text(encoding="utf-8"))["aggregate"]["stopped"] == 1
