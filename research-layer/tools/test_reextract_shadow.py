@@ -708,3 +708,47 @@ def test_write_report_keeps_a_pipe_in_a_title_from_breaking_the_table(tmp_path):
     body = md.read_text(encoding="utf-8")
     assert "Alpha / Beta Gamma" in body
     assert "- a / b" in body
+
+
+from tools.reextract_shadow import run
+
+
+def _fake_chain(tmp_path):
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text("", encoding="utf-8")
+    (tmp_path / "logs").mkdir()
+    cards = {f"c{i}": _card(f"https://a.example/{i}", "accepted", f"claim {i}")
+             for i in range(6)}
+    cards.update({f"p{i}": _card(f"https://b.example/{i}", "pending", f"stuck {i}")
+                  for i in range(6)})
+    return cards
+
+
+def test_run_dry_run_selects_documents_and_spends_nothing(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+
+    rc = run(["--dry-run", "--layer", str(tmp_path), "--seed", "42", "--sample", "4"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "seed 42" in out
+    assert out.count("https://") >= 4          # the chosen documents are listed
+    assert not (tmp_path / "logs" / "chain.lock").exists()   # dry run takes no lock
+
+
+def test_run_refuses_when_a_cycle_holds_the_chain_lock(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    (tmp_path / "logs" / "chain.lock").write_text('{"holder": "loop", "pid": 1}',
+                                                  encoding="utf-8")
+
+    def must_not_be_called(model):
+        raise AssertionError("the live client must not be built when refused")
+
+    monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", must_not_be_called)
+
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "4"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "chain.lock" in out

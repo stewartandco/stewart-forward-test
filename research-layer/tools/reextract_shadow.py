@@ -8,11 +8,14 @@ docs/2026-09-06-reextract-shadow-design.md.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import platform
 import random
 import re
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pipeline.common import quote_in_source
@@ -505,3 +508,147 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
          "documents": results},
         indent=2), encoding="utf-8")
     return md_path, js_path
+
+
+DEFAULT_SEED = 20260906
+
+
+def _load_cards(registry_path: Path) -> dict[str, dict]:
+    """Read-only view of the chain's cards. Split out so tests can stub it."""
+    from pipeline.registry import Registry
+    return Registry(registry_path).cards()
+
+
+def _live_extract_and_panel(model: str):
+    """(extract, panel, meter) bound to the real client, key and ledger.
+
+    Mirrors triage_batch._client_and_meter: the sc-reader key lives in the
+    reader's .env, not the ambient environment. The meter is scoped to
+    agent "pipeline" and extraction is RECORDED under that same agent (the
+    panel's review_card already hardcodes it), so one meter sees both and
+    the resident scanner's "reader" rows cannot pollute the per-document
+    spend delta.
+    """
+    import anthropic
+
+    from pipeline.budget import BudgetMeter, PIPELINE_CAP_USD
+    from pipeline.reader import extract_claims_usage
+    from pipeline.scanner import DEFAULT_READER_ENV, _load_api_key
+    from pipeline.triage_batch import build_decisions
+
+    _load_api_key(DEFAULT_READER_ENV)
+    client = anthropic.Anthropic()
+    logs = Path(__file__).resolve().parent.parent / "logs"
+    meter = BudgetMeter(logs / "budget_ledger.jsonl",
+                        monthly_cap_usd=PIPELINE_CAP_USD, agent="pipeline")
+
+    def extract(label: str, chunk: str) -> list[dict]:
+        claims, usage = extract_claims_usage(client, model, label, chunk)
+        meter.record_call(model, usage, purpose="reextract-shadow extract",
+                          agent="pipeline")
+        return claims
+
+    def panel(cards: dict) -> dict:
+        # `accepted` is deliberately EMPTY: build_decisions would otherwise
+        # re-run its own pending-vs-accepted duplicate check, but
+        # classify_claims has already deduped against every card in the chain
+        # on a wider rule. Passing the real accepted set here would double-count
+        # duplicates and hide them from the novel figure.
+        return build_decisions(client, model, cards, {}, meter)
+
+    return extract, panel, meter
+
+
+def run(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--layer", type=Path,
+                    default=Path(__file__).resolve().parent.parent,
+                    help="research-layer root (holds registry_log.jsonl and logs/)")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ap.add_argument("--sample", type=int, default=SAMPLE_SIZE)
+    ap.add_argument("--model", default=None,
+                    help="defaults to pipeline.reader.DEFAULT_MODEL")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="select and report the sample; no model calls, no spend")
+    args = ap.parse_args(argv)
+
+    from pipeline.reader import DEFAULT_MODEL
+    model = args.model or DEFAULT_MODEL
+    chain = args.layer / "registry_log.jsonl"
+    logs = args.layer / "logs"
+
+    cards = _load_cards(chain)          # parsed once: the chain is ~33k entries
+    corpus = build_corpus(cards)
+    picked = sample_documents(corpus, n=args.sample, seed=args.seed)
+
+    print(f"corpus {len(corpus)} documents; sampled {len(picked)} at seed "
+          f"{args.seed}; model {model}")
+    for doc in picked:
+        print(f"  [{doc['band']:7}] {doc['old_accepted']}A/{doc['old_rejected']}R/"
+              f"{doc['old_pending']}P  {doc.get('url') or doc['key']}")
+    if args.dry_run:
+        print("\nDRY RUN — no model calls, no spend, nothing written.")
+        return 0
+
+    # Guards first, before any client or key is touched: a refusal must cost
+    # nothing and read as a sentence, not a traceback.
+    from pipeline.chainlock import ChainLock, ChainLockHeld
+    try:
+        ensure_no_cycle_running(logs)
+    except RuntimeError as exc:
+        print(f"REFUSED: {exc}")
+        return 2
+    lock = ChainLock(logs, holder="reextract-shadow",
+                     purpose=f"shadow re-extract pilot, seed {args.seed}")
+    try:
+        lock.acquire()
+    except ChainLockHeld as exc:
+        print(f"REFUSED: {exc}")
+        return 2
+
+    results: list[dict] = []
+    try:
+        extract, panel, meter = _live_extract_and_panel(model)
+        known = {claim_fingerprint(c.get("claim", "")) for c in cards.values()}
+        may_continue = spend_guard(meter.month_spend())
+
+        from pipeline.feeds import fetch_url, html_to_text
+        from pipeline.reader import chunk_text, read_source_text
+        local = LocalPdfMap.from_afml_dir()
+
+        def load_text(doc: dict):
+            return load_document_text(doc, local=local, read_pdf=read_source_text,
+                                      fetch=fetch_url, html_to_text=html_to_text)
+
+        with ChainUnchanged(chain):
+            for doc in picked:
+                if not may_continue(meter.month_spend()):
+                    print(f"STOPPED at the USD {PILOT_CEILING_USD:.0f} pilot ceiling "
+                          f"after {len(results)} document(s)")
+                    break
+                res = shadow_one_document(doc, load_text=load_text, extract=extract,
+                                          panel=panel, known_fingerprints=known,
+                                          meter=meter, chunker=chunk_text)
+                results.append(res)
+                print(f"  {res['key'][:60]}: proposed {res['proposed']}, "
+                      f"novel {res['novel']}, accepted {res['novel_accepted']}, "
+                      f"unjudged {res['novel_unjudged']}, USD {res['usd']:.3f}"
+                      + (f"  ERROR {res['error']}" if res["error"] else "")
+                      + (f"  STOPPED {res['stopped']}" if res.get("stopped") else ""))
+    finally:
+        lock.release()
+
+    agg = aggregate(results)
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    md, js = write_report(args.layer / "docs" / "runs", results=results, agg=agg,
+                          seed=args.seed, model=model, date_utc=date_utc)
+    verdict = verdict_for(agg)
+    print(f"\nVERDICT {verdict.upper().replace('_', ' ')} — "
+          f"{agg['novel_accepted_per_doc']:.2f} novel accepted per document, "
+          f"USD {agg['usd_total']:.2f}")
+    print(f"report -> {md}\njson   -> {js}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
