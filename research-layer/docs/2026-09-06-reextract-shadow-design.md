@@ -141,6 +141,9 @@ Judged on novel cards that the panel **accepted**, per document:
   or an accept rate materially below the original.
 - **Red — close the question:** < 0.5 novel accepted per document. Fewer than one new
   usable card per two documents does not justify a mechanism.
+- **No result:** zero documents completed (every one errored). No verdict is issued —
+  a red on an empty sample would read as "close the question" when the question was
+  never asked. Fix the fetch problem and re-run (found in review, 2026-09-06).
 
 Stating this before the run is the point: it stops a disappointing result being
 re-read as an encouraging one.
