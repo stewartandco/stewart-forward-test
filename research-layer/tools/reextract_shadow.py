@@ -111,16 +111,19 @@ class LocalPdfMap:
     def from_afml_dir(cls, directory: Path = AFML_DIR) -> "LocalPdfMap":
         """Map `https://ssrn.com/abstract=NNNNN` -> `ssrn-NNNNN.pdf`.
 
-        Missing directory or missing file is not an error: the document then
+        Missing directory is not an error, and a stem that is not exactly
+        ssrn-<digits> is skipped rather than guessed: the document then
         falls through to the fetch path and reports its own failure.
         """
         mapping: dict[str, Path] = {}
         if not directory.is_dir():
             return cls(mapping)
         for pdf in directory.glob("ssrn-*.pdf"):
-            digits = re.sub(r"[^0-9]", "", pdf.stem)
-            if digits:
-                mapping[f"https://ssrn.com/abstract={digits}"] = pdf
+            # Anchored: `ssrn-3270329 (1).pdf` (a Windows duplicate) must be
+            # SKIPPED, not squashed into a wrong abstract id.
+            match = re.fullmatch(r"ssrn-(\d+)", pdf.stem)
+            if match:
+                mapping[f"https://ssrn.com/abstract={match.group(1)}"] = pdf
         return cls(mapping)
 
 
@@ -139,6 +142,10 @@ def load_document_text(doc: dict, *, local: LocalPdfMap, read_pdf, fetch,
     if not url:
         raise RuntimeError("no url and no local file")
     status, body, _final = fetch(url, timeout=FETCH_TIMEOUT)
+    if status == 0:
+        # feeds.fetch_url reports a network error as status 0 with the
+        # message in the body slot; "http 0" would say nothing.
+        raise RuntimeError(f"network error: {body[:160]}")
     if status != 200:
         raise RuntimeError(f"http {status}")
     looks_html = body.lstrip()[:400].lower().startswith(("<!doctype", "<html", "<"))

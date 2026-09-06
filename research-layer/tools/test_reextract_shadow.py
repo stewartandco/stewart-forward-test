@@ -156,3 +156,41 @@ def test_load_document_text_raises_when_there_is_no_url_and_no_local_file():
                            read_pdf=lambda p: "unused",
                            fetch=lambda u, timeout=25: (200, "x", u),
                            html_to_text=lambda h: h)
+
+
+def test_local_pdf_map_from_afml_dir_maps_exact_stems_and_skips_the_rest(tmp_path):
+    (tmp_path / "ssrn-3270329.pdf").write_bytes(b"%PDF")
+    (tmp_path / "ssrn-3257415.pdf").write_bytes(b"%PDF")
+    (tmp_path / "ssrn-3270329 (1).pdf").write_bytes(b"%PDF")   # a Windows duplicate
+    (tmp_path / "notes.pdf").write_bytes(b"%PDF")
+    local = LocalPdfMap.from_afml_dir(tmp_path)
+    assert local.get("https://ssrn.com/abstract=3270329") == tmp_path / "ssrn-3270329.pdf"
+    assert local.get("https://ssrn.com/abstract=3257415") == tmp_path / "ssrn-3257415.pdf"
+    assert local.get("https://ssrn.com/abstract=32703291") is None   # never squashed
+    assert local.get("https://ssrn.com/abstract=") is None
+
+
+def test_local_pdf_map_from_a_missing_dir_is_empty_not_an_error(tmp_path):
+    local = LocalPdfMap.from_afml_dir(tmp_path / "nope")
+    assert local.get("https://ssrn.com/abstract=3270329") is None
+
+
+def test_load_document_text_reports_a_network_error_with_its_reason():
+    def fake_fetch(url, timeout=25):
+        return 0, "URLError: getaddrinfo failed", url
+
+    with pytest.raises(RuntimeError, match="network error: URLError"):
+        load_document_text({"url": "https://gone.example/x"}, local=LocalPdfMap({}),
+                           read_pdf=lambda p: "unused", fetch=fake_fetch,
+                           html_to_text=lambda h: h)
+
+
+def test_load_document_text_passes_plain_text_through_untouched():
+    def fake_fetch(url, timeout=25):
+        return 200, "Just plain text, no markup.", url
+
+    text, how = load_document_text({"url": "https://a.example/t"}, local=LocalPdfMap({}),
+                                   read_pdf=lambda p: "unused", fetch=fake_fetch,
+                                   html_to_text=lambda h: "MUST NOT BE CALLED")
+    assert text == "Just plain text, no markup."
+    assert how == "fetched"
