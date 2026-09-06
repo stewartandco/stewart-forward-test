@@ -96,6 +96,9 @@ Per document, and aggregated:
 | `duplicate_of_existing` | exact fingerprint collision with a held card |
 | `novel` | survived both |
 | `novel_accepted`, `novel_escalated` | the shadow panel |
+| `novel_unjudged` | novel cards the panel never reached — production's
+  `build_decisions` stops mid-batch when the meter refuses (`stopped="budget"`),
+  and those cards are unjudged, not failed (found in review, 2026-09-06) |
 | `escalation_reasons` | each dissenting reviewer's reason |
 | `usd` | metered spend for that document — summed into `usd_total` for EVERY
   document, errored or not: money spent is spent (a document can pay for extraction
@@ -104,9 +107,11 @@ Per document, and aggregated:
 **Headline comparators:**
 
 - novel accept rate vs the accept rate those same documents actually achieved, where
-  **both rates are `accepted / (accepted + rejected)`, excluding still-pending cards**
-  (a pending card is undecided, so counting it as a failure would understate the old
-  corpus); the pending share is reported separately alongside;
+  **both rates are accepted over JUDGED cards**: old = `accepted / (accepted + rejected)`
+  excluding still-pending cards, new = `accepted / (accepted + escalated)` excluding
+  unjudged cards. In both, an undecided card is not a failure; counting it as one would
+  understate whichever side it fell on. The pending share and the unjudged count are
+  reported separately alongside;
 - novel-accepted per document, and per dollar;
 - overreach (escalation) share, new vs old.
 
