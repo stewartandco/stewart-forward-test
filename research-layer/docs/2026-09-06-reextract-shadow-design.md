@@ -61,7 +61,9 @@ For each sampled document:
    (the Reader's path). No new fetching or parsing code — a measurement made with a
    different extractor answers a different question.
 2. **Chunk** with `reader.chunk_text`.
-3. **Extract** with `reader.extract_claims` at today's prompt and model.
+3. **Extract** with `reader.extract_claims_usage` (the metered form of
+   `extract_claims`) at today's prompt and model, recording each call's spend under
+   agent `pipeline` — the same agent the panel charges, so one meter sees both.
 4. **Apply the honesty guard**: drop any claim whose quote is not in the text
    (`common.quote_in_source`), counting the drops. This is what production does —
    with one explicit tightening: **an empty or missing quote is a guard failure**,
@@ -74,8 +76,11 @@ For each sampled document:
    rejected is not novel either, and counting it as novel would flatter the result.
 6. **Judge the novel ones** with the real panel: `triage_batch.build_decisions`, which
    its own docstring states "turns pending cards into a decision list without chaining
-   anything". Synthetic (unchained) card dicts go in as `pending`; the chain's real
-   accepted cards go in as `accepted`.
+   anything". Synthetic (unchained) card dicts go in as `pending`; `accepted` is
+   passed **empty** on purpose — step 5 has already deduped against every card in
+   the chain on a wider rule, and handing the panel the real accepted set would make
+   it re-run its narrower duplicate check and hide those duplicates from the novel
+   figure.
 7. **Record** everything to a dated JSON report. Nothing is chained at any point.
 
 ## Where it lives
@@ -104,6 +109,8 @@ Per document, and aggregated:
   card. A stop is NOT an error: the document was loaded, extracted and partly judged,
   so its counts stay in the aggregate. `error` means only "learned nothing" (found in
   review, 2026-09-06 — conflating the two dropped a partly-judged document entirely) |
+| `text_source` | `local_pdf` or `fetched` — which path supplied the text (the SSRN
+  decks come off disk; everything else is fetched) |
 | `usd` | metered spend for that document — summed into `usd_total` for EVERY
   document, errored or not: money spent is spent (a document can pay for extraction
   and then fail at the panel) |

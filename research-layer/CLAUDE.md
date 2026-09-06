@@ -314,7 +314,7 @@ fix; the release block now only drops what the pool phase no longer needs.
 
 ## Re-extract shadow run (tools/, NOT a pipeline stage)
 
-`python -m tools.reextract_shadow [--dry-run] [--seed N] [--sample N] [--model M] [--panel-model M]`
+`python -m tools.reextract_shadow [--dry-run] [--layer DIR] [--seed N] [--sample N] [--model M] [--panel-model M]`
 measures whether today's extractor beats August's on documents we already own.
 Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-06-reextract-shadow.md`.
 
