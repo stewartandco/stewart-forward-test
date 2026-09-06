@@ -279,6 +279,11 @@ def verdict_for(agg: dict) -> str:
 PILOT_CEILING_USD = 3.0
 
 
+class ChainChanged(RuntimeError):
+    """The chain moved during a shadow run. `__cause__` carries the original
+    exception when the block also raised, so a crash is never hidden."""
+
+
 class ChainUnchanged:
     """Context manager asserting the chain file is byte-identical afterwards.
 
@@ -312,8 +317,8 @@ class ChainUnchanged:
         if exc_type is not None:
             # The run crashed AND the chain moved: report both, chained, never
             # mask the original error.
-            raise RuntimeError(message) from exc
-        raise RuntimeError(message)
+            raise ChainChanged(message) from exc
+        raise ChainChanged(message)
 
 
 def ensure_no_cycle_running(logs_dir: Path) -> None:
@@ -345,6 +350,10 @@ def spend_guard(start_usd: float, ceiling: float = PILOT_CEILING_USD):
     def may_continue(current_usd: float) -> bool:
         return (current_usd - start_usd) < ceiling
     return may_continue
+
+
+class CapReached(RuntimeError):
+    """The monthly pipeline cap was hit mid-document: a STOP, not an error."""
 
 
 def _blank_result(doc: dict) -> dict:
@@ -412,6 +421,8 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
             # partly judged. Its counts stay in the aggregate; `stopped`
             # records why the panel did not finish.
             res["stopped"] = out.get("stopped") or None
+    except CapReached as exc:
+        res["stopped"] = "monthly cap"       # the document was loaded; nothing was judged
     except Exception as exc:
         res["error"] = str(exc)[:200]
     res["usd"] = round(meter.month_spend() - before_usd, 6)
@@ -563,7 +574,7 @@ def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
 
     def extract(label: str, chunk: str) -> list[dict]:
         if not meter.can_spend():
-            raise RuntimeError("monthly pipeline cap reached - extraction refused")
+            raise CapReached("monthly pipeline cap reached - extraction refused")
         claims, usage = extract_claims_usage(client, model, label, chunk)
         meter.record_call(model, usage, purpose="reextract-shadow extract",
                           agent="pipeline")
@@ -646,6 +657,7 @@ def run(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     chain_note: str | None = None
+    crash: BaseException | None = None
     try:
         extract, panel, meter = _live_extract_and_panel(model, panel_model, logs)
         known = {claim_fingerprint(c.get("claim", "")) for c in cards.values()}
@@ -666,8 +678,9 @@ def run(argv: list[str] | None = None) -> int:
             with ChainUnchanged(chain):
                 for doc in picked:
                     if not may_continue(meter.month_spend()):
-                        print(f"STOPPED at the USD {PILOT_CEILING_USD:.0f} pilot ceiling "
-                              f"after {len(results)} document(s)")
+                        why = ("the monthly pipeline cap" if not meter.can_spend()
+                               else f"the USD {PILOT_CEILING_USD:.0f} pilot ceiling")
+                        print(f"STOPPED at {why} after {len(results)} document(s)")
                         break
                     res = shadow_one_document(doc, load_text=load_text, extract=extract,
                                               panel=panel, known_fingerprints=known,
@@ -678,10 +691,9 @@ def run(argv: list[str] | None = None) -> int:
                           f"unjudged {res['novel_unjudged']}, USD {res['usd']:.3f}"
                           + (f"  ERROR {res['error']}" if res["error"] else "")
                           + (f"  STOPPED {res['stopped']}" if res.get("stopped") else ""))
-        except RuntimeError as exc:
-            if "chain changed" not in str(exc):
-                raise
-            chain_note = str(exc)        # reported, never swallowed, never fatal
+        except ChainChanged as exc:
+            chain_note = str(exc)            # reported in the sidecar, never fatal by itself
+            crash = exc.__cause__            # ...but a crash underneath it is re-raised below
         finally:
             agg = aggregate(results)
             date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -691,6 +703,9 @@ def run(argv: list[str] | None = None) -> int:
             print(f"report -> {md}\njson   -> {js}")
     finally:
         lock.release()
+
+    if crash is not None:
+        raise crash
 
     verdict = verdict_for(agg)
     print(f"\nVERDICT {verdict.upper().replace('_', ' ')} — extractor {model}, "

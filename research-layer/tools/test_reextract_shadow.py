@@ -438,6 +438,7 @@ class _FakeMeter:
 
     def __init__(self, spend=0.0):
         self._spend = spend
+        self.capped = False
 
     def month_spend(self, month=None, agent=None):
         return self._spend
@@ -446,7 +447,7 @@ class _FakeMeter:
         self._spend += usd
 
     def can_spend(self) -> bool:
-        return True
+        return not self.capped
 
 
 def test_shadow_one_document_walks_extract_classify_and_panel():
@@ -857,3 +858,56 @@ def test_run_exits_nonzero_on_no_result(tmp_path, capsys, monkeypatch):
     rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
     assert rc == 3
     assert "NO RESULT" in capsys.readouterr().out
+
+
+def test_run_names_the_monthly_cap_when_that_is_what_stopped_it(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+    meter = _FakeMeter(0.0)
+    meter.capped = True                                   # month already at the cap
+    _stub_live(monkeypatch, meter)
+    run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert "STOPPED at the monthly pipeline cap after 0 document(s)" in out
+    assert "pilot ceiling" not in out
+
+
+def test_shadow_one_document_records_a_mid_document_cap_trip_as_stopped():
+    from tools.reextract_shadow import CapReached
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 0, "old_accepted": 0,
+           "old_rejected": 0, "old_pending": 0}
+
+    def capped_extract(label, chunk):
+        raise CapReached("monthly pipeline cap reached - extraction refused")
+
+    res = shadow_one_document(doc, load_text=lambda d: ("text", "fetched"),
+                              extract=capped_extract, panel=lambda cards: {},
+                              known_fingerprints=set(), meter=_FakeMeter(),
+                              chunker=lambda t: [("full document", t)])
+    assert res["stopped"] == "monthly cap"
+    assert res["error"] is None
+
+
+def test_run_reraises_a_crash_hidden_under_a_chain_change_after_writing_the_report(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    chain = tmp_path / "registry_log.jsonl"
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+
+    def crash_after_write(label, chunk):
+        with chain.open("a", encoding="utf-8") as fh:
+            fh.write('{"x": 1}\n')
+        raise SystemExit("the real crash")
+
+    _stub_live(monkeypatch, _FakeMeter(0.0), extract=crash_after_write)
+    with pytest.raises(SystemExit):
+        run(["--layer", str(tmp_path), "--seed", "42", "--sample", "1"])
+    js = json.loads(next((tmp_path / "docs" / "runs").glob("*-seed42.json")).read_text(encoding="utf-8"))
+    assert js["chain_note"] and "chain changed" in js["chain_note"]   # report survived
+    assert not (tmp_path / "logs" / "chain.lock").exists()             # lock released
