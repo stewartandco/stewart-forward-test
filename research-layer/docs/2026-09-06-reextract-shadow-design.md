@@ -169,13 +169,29 @@ re-read as an encouraging one.
   cost (cents) — a bound on where the last document starts, not an exact stop. September
   stands at $27.34 of the $40 cap with the batch-stop at $32; the loop parks itself on
   every fire past that line, so the pilot must not approach it.
-- **Deterministic**: seed recorded, re-runnable, report written to
-  `research-layer/docs/runs/<date>-reextract-shadow.md` plus a JSON sidecar.
+- **Deterministic**: seed and Python version recorded, re-runnable, report written to
+  `research-layer/docs/runs/<date>-reextract-shadow-seed<seed>.md` plus a JSON sidecar
+  (the seed is in the filename so a same-day re-run cannot overwrite a paid result).
+- **The report is written even on an abort** (Ctrl-C, a crash, the chain moving): it is
+  produced from a `finally`, so paid work is never lost. A chain change during the run
+  is recorded as a field in the report, not a lost report.
+- **Every path derives from `--layer`**: the chain, the lock, the ledger and the report
+  directory. A missing ledger is a refusal, never "zero spend this month" — in a
+  worktree `logs/` is gitignored and absent, and an unguarded run there would have
+  passed the cycle guard, locked the wrong tree and metered nothing (found in review).
+- **Extraction checks the monthly cap** before every model call, not only the pilot
+  ceiling between documents; a month at the cap refuses rather than spending through.
+- **Exit codes:** 0 measured; 2 refused (lock held, no ledger); 3 no result.
 
 ## What this does NOT isolate
 
 The comparison is **today's extractor as a whole** versus August's — prompt, model
-(`reader.DEFAULT_MODEL`, recorded in the report) and honesty guard together. It is not
+(`reader.DEFAULT_MODEL`, recorded in the report) and honesty guard together. **The
+panel is held constant:** it runs on the model that judged every card in the chain
+(`triage_batch`'s default, sonnet — the loop passes no `--model`), never on the
+extractor's model. Judging shadow cards with a different panel would change the
+measuring instrument inside the measurement (found in review, 2026-09-06). Both
+models are recorded in the report. It is not
 an ablation: a green result does not say which of the three improved, and a red result
 does not exonerate any of them individually. That is the right trade for a $3
 measurement, but it means the finding is "re-extraction is/isn't worth it today", not
