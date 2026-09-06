@@ -26,14 +26,15 @@ def test_build_corpus_groups_cards_by_document_and_counts_dispositions():
         "c2": _card("https://a.example/x", "rejected", "claim two"),
         "c3": _card("https://a.example/x", "pending", "claim three"),
         "c4": _card("https://b.example/y", "accepted", "claim four"),
+        "c5": _card("https://a.example/x", None, "claim five"),
     }
     corpus = build_corpus(cards)
 
     assert set(corpus) == {"https://a.example/x", "https://b.example/y"}
     a = corpus["https://a.example/x"]
-    assert a["old_cards"] == 3
+    assert a["old_cards"] == 4            # true count: the None-status card counts here...
     assert a["old_accepted"] == 1
     assert a["old_rejected"] == 1
-    assert a["old_pending"] == 1
+    assert a["old_pending"] == 1          # ...but in none of the three buckets
     assert a["title"] == "T"
     assert a["source_type"] == "blog"
