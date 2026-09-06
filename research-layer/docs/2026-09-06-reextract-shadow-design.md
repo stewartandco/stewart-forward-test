@@ -63,7 +63,10 @@ For each sampled document:
 2. **Chunk** with `reader.chunk_text`.
 3. **Extract** with `reader.extract_claims` at today's prompt and model.
 4. **Apply the honesty guard**: drop any claim whose quote is not in the text
-   (`common.quote_in_source`), counting the drops. This is what production does.
+   (`common.quote_in_source`), counting the drops. This is what production does —
+   with one explicit tightening: **an empty or missing quote is a guard failure**,
+   because `""` is a substring of every text and `quote_in_source` alone would wave
+   an unsupported claim into `novel` (found in review, 2026-09-06).
 5. **Fingerprint** every surviving claim with `triage_batch.claim_fingerprint` against
    **every card in the chain — accepted, rejected and pending alike.** This is
    deliberately wider than production's `find_duplicates`, which compares pending
@@ -94,7 +97,9 @@ Per document, and aggregated:
 | `novel` | survived both |
 | `novel_accepted`, `novel_escalated` | the shadow panel |
 | `escalation_reasons` | each dissenting reviewer's reason |
-| `usd` | metered spend for that document |
+| `usd` | metered spend for that document — summed into `usd_total` for EVERY
+  document, errored or not: money spent is spent (a document can pay for extraction
+  and then fail at the panel) |
 
 **Headline comparators:**
 
@@ -133,13 +138,23 @@ re-read as an encouraging one.
 
 ## Guards
 
-- **No chain writes.** No `Registry` is opened for writing. The run asserts the chain's
-  entry count is byte-identical before and after.
+- **No chain writes.** No `Registry` is opened for writing. The run proves it: the
+  chain's size and sha256 are compared before and after, on every exit path — a crash
+  that also moved the chain reports both, chained, never masking the original error.
+- **The run holds `chain.lock` itself** (`ChainLock(holder="reextract-shadow")`) for its
+  duration, exactly as the repo asks of any manual chain-adjacent session. Not to
+  protect the chain — we never write it — but because the resident scanner and the
+  quarantine daily append under their own brief locks, and a legitimate concurrent
+  append would otherwise trip the no-write proof with a false accusation. Holding the
+  lock makes them defer politely for the ~10 minutes the pilot runs. The guard's
+  message names those writers anyway, in case a stale-lock break ever lets one through.
 - **No `loop_state` writes**, and it refuses to start while a cycle is running (the
   loop reads state at start and saves the whole object at the end, so a concurrent
   write would be clobbered — and its own spend calibration reads spend deltas around
   its stages).
-- **Budget ceiling $3**, enforced through the existing meter, not assumed. September
+- **Budget ceiling $3**, enforced through the existing meter, not assumed. Checked
+  before each document, so the true total can overshoot by at most one document's
+  cost (cents) — a bound on where the last document starts, not an exact stop. September
   stands at $27.34 of the $40 cap with the batch-stop at $32; the loop parks itself on
   every fire past that line, so the pilot must not approach it.
 - **Deterministic**: seed recorded, re-runnable, report written to
