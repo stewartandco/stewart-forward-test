@@ -272,7 +272,7 @@ def _result(**kw):
             "old_rejected": 0, "old_pending": 0, "proposed": 0,
             "dropped_quote_guard": 0, "duplicate_of_existing": 0, "novel": 0,
             "novel_accepted": 0, "novel_escalated": 0, "novel_unjudged": 0,
-            "restated_existing": 0, "restated_reasons": [],
+            "restated_existing": 0, "restated_reasons": [], "judge_failures": 0,
             "escalation_reasons": [], "usd": 0.0, "error": None,
             "stopped": None, "text_source": None}
     base.update(kw)
@@ -1016,7 +1016,7 @@ def test_run_passes_each_documents_held_claims_to_the_judge(tmp_path, capsys, mo
     (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
     monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
     monkeypatch.setattr("tools.reextract_shadow.load_document_text",
-                        lambda doc, **kw: ("some text", "fetched"))
+                        lambda doc, **kw: (f"text of {doc['url']}", "fetched"))
     seen_held = {}
 
     def judge(claim, held):
@@ -1024,7 +1024,7 @@ def test_run_passes_each_documents_held_claims_to_the_judge(tmp_path, capsys, mo
         return (None, "")
 
     def fake_live(model, panel_model, logs):
-        return (lambda label, chunk: [{"claim": f"new for {label}", "quote": "some text"}],
+        return (lambda label, chunk: [{"claim": f"new: {chunk}", "quote": chunk}],
                 lambda cards_: {"decisions": {}, "escalated": {c: "dissent" for c in cards_},
                                 "dissent_reasons": {}, "counts": {}, "stopped": None},
                 judge, _FakeMeter(0.0))
@@ -1032,8 +1032,57 @@ def test_run_passes_each_documents_held_claims_to_the_judge(tmp_path, capsys, mo
     monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", fake_live)
     rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
     assert rc == 0
-    assert seen_held                                   # the judge was consulted
-    # every held list handed to the judge is exactly that document's chain claims
-    for held in seen_held.values():
-        assert held and all(h.startswith(("claim ", "stuck ")) for h in held)
+    assert len(seen_held) == 2                          # one judge call per sampled document
+    for claim, held in seen_held.items():
+        url = claim.split("text of ", 1)[1]
+        i = url.rsplit("/", 1)[1]
+        assert held == [f"claim {i}"] or held == [f"stuck {i}"], (url, held)   # THIS document's card only
     assert "restated 0" in capsys.readouterr().out
+
+
+def test_semantic_dedupe_counts_judge_failures_instead_of_hiding_them():
+    held = ["one held claim"]
+    novel = [{"claim": "A", "quote": "q"}, {"claim": "B", "quote": "q"}]
+
+    def broken(claim, held_claims):
+        raise RuntimeError("model hiccup")
+
+    out = semantic_dedupe(novel, held, broken)
+    assert out["judge_failures"] == 2
+    assert [c["claim"] for c in out["novel"]] == ["A", "B"]
+
+
+def test_report_warns_when_the_judge_failed(tmp_path):
+    results = [_result(title="Doc A", proposed=3, novel=3, judge_failures=3, usd=0.02)]
+    agg = aggregate(results)
+    assert agg["judge_failures"] == 3
+    md, _ = write_report(tmp_path, results=results, agg=agg, seed=1, model="m",
+                         panel_model="p", date_utc="2026-09-07")
+    body = md.read_text(encoding="utf-8")
+    assert "judge failures 3" in body and "WARNING: the semantic judge failed 3" in body
+
+
+def test_semantic_dedupe_never_reads_true_as_index_one():
+    held = ["zero", "one"]
+    out = semantic_dedupe([{"claim": "X", "quote": "q"}], held, lambda c, h: (True, "bool"))
+    assert out["restated"] == 0 and len(out["novel"]) == 1
+
+
+def test_a_cap_trip_inside_the_judge_is_a_stop_not_a_failure():
+    from tools.reextract_shadow import CapReached
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 1, "old_accepted": 1,
+           "old_rejected": 0, "old_pending": 0}
+
+    def capped_judge(claim, held):
+        raise CapReached("monthly pipeline cap reached - dedupe refused")
+
+    res = shadow_one_document(
+        doc, load_text=lambda d: ("the text", "fetched"),
+        extract=lambda label, chunk: [{"claim": "C", "quote": "the text"}],
+        panel=lambda cards: (_ for _ in ()).throw(AssertionError("panel must not run")),
+        known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("full document", t)],
+        held_claims=["held"], judge=capped_judge)
+    assert res["stopped"] == "monthly cap" and res["error"] is None
+    assert res["judge_failures"] == 0

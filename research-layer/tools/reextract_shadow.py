@@ -215,7 +215,7 @@ New claim:
 Held claims from this document (index: text):
 {held}
 
-Set restates_index to the index of a held claim that makes the SAME assertion - a rewording, a narrowing, or the same relationship in different terms - or null if the new claim asserts something none of the held claims does. A different relationship, a different variable, a different direction, or a materially stronger or weaker scope is NOT a restatement. Give a one-sentence reason."""
+Set restates_index to the index of a held claim that makes the SAME assertion - a rewording, or the same relationship in different terms - or null if the new claim asserts something none of the held claims does. A different relationship, a different variable, a different direction, or a materially stronger or weaker scope is NOT a restatement. Give a one-sentence reason."""
 
 
 def semantic_dedupe(novel: list[dict], held_claims: list[str], judge) -> dict:
@@ -227,23 +227,32 @@ def semantic_dedupe(novel: list[dict], held_claims: list[str], judge) -> dict:
     stays novel. A judge failure keeps the claim NOVEL: fail open toward
     measuring is the honest direction - a restatement wrongly kept is what the
     report's paraphrase limitation already covers, while a novel claim wrongly
-    dropped would silently understate the result.
+    dropped would silently understate the result. Failures are COUNTED
+    (`judge_failures`), never silently absorbed into "0 restatements" - a run
+    where every call failed must not read identically to a clean run that
+    found nothing to restate. A `CapReached` mid-loop is not a failure; it
+    propagates so the caller can record a stop instead.
     """
     if not held_claims or judge is None:
-        return {"novel": list(novel), "restated": 0, "restated_reasons": []}
+        return {"novel": list(novel), "restated": 0, "restated_reasons": [],
+                "judge_failures": 0}
     kept: list[dict] = []
-    restated, reasons = 0, []
+    restated, reasons, failures = 0, [], 0
     for raw in novel:
         try:
             idx, reason = judge(raw.get("claim", ""), held_claims)
+        except CapReached:
+            raise
         except Exception as exc:
             idx, reason = None, f"judge failed: {exc}"[:120]
-        if isinstance(idx, int) and 0 <= idx < len(held_claims):
+            failures += 1
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(held_claims):
             restated += 1
             reasons.append(f"[{idx}] {reason}".strip())
         else:
             kept.append(raw)
-    return {"novel": kept, "restated": restated, "restated_reasons": reasons}
+    return {"novel": kept, "restated": restated, "restated_reasons": reasons,
+            "judge_failures": failures}
 
 
 GREEN_PER_DOC = 2.0
@@ -298,6 +307,7 @@ def aggregate(results: list[dict]) -> dict:
         "dropped_quote_guard": sum(r["dropped_quote_guard"] for r in ok),
         "duplicate_of_existing": sum(r["duplicate_of_existing"] for r in ok),
         "restated_existing": sum(r.get("restated_existing", 0) for r in ok),
+        "judge_failures": sum(r.get("judge_failures", 0) for r in ok),
         "novel_accepted_per_doc": (novel_acc / len(ok)) if ok else 0.0,
         "novel_accepted_per_usd": (novel_acc / usd) if usd else 0.0,
         "usd_total": usd,
@@ -415,7 +425,7 @@ def _blank_result(doc: dict) -> dict:
         "old_rejected": doc.get("old_rejected", 0),
         "old_pending": doc.get("old_pending", 0),
         "proposed": 0, "dropped_quote_guard": 0, "duplicate_of_existing": 0,
-        "restated_existing": 0, "restated_reasons": [],
+        "restated_existing": 0, "restated_reasons": [], "judge_failures": 0,
         "novel": 0, "novel_accepted": 0, "novel_escalated": 0,
         "novel_unjudged": 0,
         "escalation_reasons": [], "usd": 0.0, "error": None,
@@ -457,6 +467,7 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
         dd = semantic_dedupe(split["novel"], list(held_claims), judge)
         res.update(restated_existing=dd["restated"],
                    restated_reasons=dd["restated_reasons"],
+                   judge_failures=dd["judge_failures"],
                    novel=len(dd["novel"]))
         if dd["novel"]:
             cards = {f"shadow-{i}": {"claim": c.get("claim", ""),
@@ -544,9 +555,14 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
         f"Claims proposed {agg['proposed']}, dropped by the honesty guard "
         f"{agg['dropped_quote_guard']}, duplicates of held cards "
         f"{agg['duplicate_of_existing']}, restatements of held cards "
-        f"{agg['restated_existing']}, novel {agg['novel']} "
+        f"{agg['restated_existing']}, judge failures {agg['judge_failures']}, "
+        f"novel {agg['novel']} "
         f"(accepted {agg['novel_accepted']}, escalated {agg['novel_escalated']}, "
         f"unjudged {agg['novel_unjudged']}).",
+        *(["", f"**WARNING: the semantic judge failed {agg['judge_failures']} time(s); those "
+              "claims were kept as novel, so the restatement count is a FLOOR and the novel "
+              "figure is inflated by at least that much.**"]
+          if agg.get("judge_failures") else []),
         "",
         "**Limitation:** duplicate detection is `claim_fingerprint` (normalised, "
         "not semantic) followed by a one-call semantic check against cards held "
@@ -661,15 +677,19 @@ def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
         return build_decisions(client, panel_model, cards, {}, meter)
 
     def judge(claim: str, held: list[str]) -> tuple[int | None, str]:
+        if not meter.can_spend():
+            raise CapReached("monthly pipeline cap reached - dedupe refused")
         held_text = "\n".join(f"{i}: {h}" for i, h in enumerate(held))
         msg = client.messages.create(
             model=panel_model,
-            max_tokens=800,
+            max_tokens=1500,   # thinking blocks eat the budget; 300 truncated the JSON (review_card)
             messages=[{"role": "user", "content": DEDUPE_PROMPT.format(claim=claim, held=held_text)}],
             output_config={"format": {"type": "json_schema", "schema": DEDUPE_SCHEMA}},
         )
         meter.record_call(panel_model, msg.usage, purpose="reextract-shadow dedupe",
                           agent="pipeline")
+        if msg.stop_reason in ("max_tokens", "refusal"):
+            raise RuntimeError(f"judge stop_reason={msg.stop_reason}")
         text = next(b.text for b in msg.content if b.type == "text")
         out = json.loads(text)
         idx = out.get("restates_index")
