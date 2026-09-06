@@ -100,6 +100,10 @@ Per document, and aggregated:
   `build_decisions` stops mid-batch when the meter refuses (`stopped="budget"`),
   and those cards are unjudged, not failed (found in review, 2026-09-06) |
 | `escalation_reasons` | each dissenting reviewer's reason |
+| `stopped` | set (e.g. `"budget"`) when the panel stopped before judging every novel
+  card. A stop is NOT an error: the document was loaded, extracted and partly judged,
+  so its counts stay in the aggregate. `error` means only "learned nothing" (found in
+  review, 2026-09-06 — conflating the two dropped a partly-judged document entirely) |
 | `usd` | metered spend for that document — summed into `usd_total` for EVERY
   document, errored or not: money spent is spent (a document can pay for extraction
   and then fail at the panel) |
