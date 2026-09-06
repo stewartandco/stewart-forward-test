@@ -273,7 +273,7 @@ def _result(**kw):
             "dropped_quote_guard": 0, "duplicate_of_existing": 0, "novel": 0,
             "novel_accepted": 0, "novel_escalated": 0, "novel_unjudged": 0,
             "escalation_reasons": [], "usd": 0.0, "error": None,
-            "text_source": None}
+            "stopped": None, "text_source": None}
     base.update(kw)
     return base
 
@@ -562,7 +562,8 @@ def test_shadow_one_document_records_a_budget_stopped_panel_as_unjudged():
     assert res["novel_accepted"] == 1
     assert res["novel_escalated"] == 0
     assert res["novel_unjudged"] == 2
-    assert res["error"] == "panel stopped: budget"
+    assert res["stopped"] == "budget"
+    assert res["error"] is None           # a stop is not an error
 
 
 def test_shadow_one_document_extracts_across_every_chunk():
@@ -594,3 +595,30 @@ def test_aggregate_keeps_unjudged_cards_out_of_the_accept_rate():
     agg = aggregate(results)
     assert agg["novel_accept_rate"] == pytest.approx(2 / 3)   # judged only
     assert agg["novel_unjudged"] == 2
+
+
+def test_a_budget_stopped_document_still_counts_in_the_aggregate():
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 4, "old_accepted": 3,
+           "old_rejected": 1, "old_pending": 0}
+    text = "Alpha decays. Beta persists. Gamma reverses."
+
+    def stopped_panel(cards):
+        first = next(iter(cards))
+        return {"decisions": {first: ("accepted", None)}, "escalated": {},
+                "dissent_reasons": {}, "counts": {}, "stopped": "budget"}
+
+    res = shadow_one_document(
+        doc, load_text=lambda d: (text, "fetched"),
+        extract=lambda label, chunk: [
+            {"claim": "Alpha claim", "quote": "Alpha decays."},
+            {"claim": "Beta claim", "quote": "Beta persists."},
+            {"claim": "Gamma claim", "quote": "Gamma reverses."}],
+        panel=stopped_panel, known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("full document", t)])
+    agg = aggregate([res])
+    assert agg["documents"] == 1 and agg["errors"] == 0 and agg["stopped"] == 1
+    assert agg["novel_accepted"] == 1
+    assert agg["novel_unjudged"] == 2
+    assert agg["novel_accept_rate"] == pytest.approx(1.0)   # 1 judged, 1 accepted
+    assert agg["old_accept_rate"] == pytest.approx(0.75)

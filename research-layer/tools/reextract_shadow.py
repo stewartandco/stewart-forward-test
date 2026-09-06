@@ -215,6 +215,10 @@ def aggregate(results: list[dict]) -> dict:
     The novel accept rate is accepted / (accepted + escalated) - JUDGED cards
     only. A card the panel never reached (a budget stop) is unjudged,
     reported separately, and never counted as a failure.
+
+    A document whose panel STOPPED (budget) is not an error: it was loaded,
+    extracted and partly judged, so its counts stay in and it is tallied
+    under "stopped".
     """
     ok = [r for r in results if not r.get("error")]
     old_acc = sum(r["old_accepted"] for r in ok)
@@ -228,6 +232,7 @@ def aggregate(results: list[dict]) -> dict:
     return {
         "documents": len(ok),
         "errors": len(results) - len(ok),
+        "stopped": sum(1 for r in ok if r.get("stopped")),
         "old_accept_rate": _rate(old_acc, old_acc + old_rej),
         "old_pending_share": _rate(old_pend, old_acc + old_rej + old_pend),
         "novel_accept_rate": _rate(novel_acc, novel_acc + novel_esc),
@@ -345,6 +350,7 @@ def _blank_result(doc: dict) -> dict:
         "novel": 0, "novel_accepted": 0, "novel_escalated": 0,
         "novel_unjudged": 0,
         "escalation_reasons": [], "usd": 0.0, "error": None,
+        "stopped": None,
         "text_source": None,
     }
 
@@ -393,8 +399,10 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
             # be folded into the accept rate.
             res["novel_unjudged"] = (len(cards) - res["novel_accepted"]
                                      - res["novel_escalated"])
-            if out.get("stopped"):
-                res["error"] = f"panel stopped: {out['stopped']}"
+            # A stop is NOT an error: this document was loaded, extracted and
+            # partly judged. Its counts stay in the aggregate; `stopped`
+            # records why the panel did not finish.
+            res["stopped"] = out.get("stopped") or None
     except Exception as exc:
         res["error"] = str(exc)[:200]
     res["usd"] = round(meter.month_spend() - before_usd, 6)
