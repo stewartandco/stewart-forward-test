@@ -8,6 +8,7 @@ docs/2026-09-06-reextract-shadow-design.md.
 """
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from pathlib import Path
@@ -252,3 +253,56 @@ def verdict_for(agg: dict) -> str:
             and old_rate is not None and new_rate >= old_rate):
         return "green"
     return "amber"
+
+
+PILOT_CEILING_USD = 3.0
+
+
+class ChainUnchanged:
+    """Context manager asserting the chain file is byte-identical afterwards.
+
+    This harness must never write to the chain. Rather than trusting that,
+    the run proves it: sha256 and size before, compared after. A failure here
+    means a code path opened the Registry for writing and is a defect, not a
+    warning.
+    """
+
+    def __init__(self, chain_path: Path):
+        self.chain_path = Path(chain_path)
+
+    def _fingerprint(self) -> tuple[int, str]:
+        data = self.chain_path.read_bytes()
+        return len(data), hashlib.sha256(data).hexdigest()
+
+    def __enter__(self) -> "ChainUnchanged":
+        self._before = self._fingerprint()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None and self._fingerprint() != self._before:
+            raise RuntimeError(
+                f"chain changed during a shadow run: {self.chain_path} - "
+                "this harness must never write to the chain")
+        return False
+
+
+def ensure_no_cycle_running(logs_dir: Path) -> None:
+    """Refuse to start while a pipeline cycle holds the chain lock.
+
+    Not for the chain's sake - we never write it - but because a cycle's own
+    spend calibration reads ledger deltas around its stages, and this run's
+    charges would land inside that window and distort the loop's allowance.
+    """
+    lock = Path(logs_dir) / "chain.lock"
+    if lock.exists():
+        raise RuntimeError(
+            f"a cycle is running ({lock} is held) - rerun when it is free; "
+            "shadow spend inside a cycle would distort the loop's calibration")
+
+
+def spend_guard(start_usd: float, ceiling: float = PILOT_CEILING_USD):
+    """-> predicate(current_usd) that is False once the pilot has spent
+    `ceiling`. The ceiling is enforced, never assumed."""
+    def may_continue(current_usd: float) -> bool:
+        return (current_usd - start_usd) < ceiling
+    return may_continue

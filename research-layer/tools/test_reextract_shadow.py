@@ -350,3 +350,43 @@ def test_verdict_for_applies_the_specs_thresholds():
 def test_verdict_for_is_amber_when_there_is_no_old_rate_to_compare():
     assert verdict_for({"novel_accepted_per_doc": 5.0, "novel_accept_rate": 0.9,
                         "old_accept_rate": None}) == "amber"
+
+
+from tools.reextract_shadow import (ChainUnchanged, PILOT_CEILING_USD,
+                                    ensure_no_cycle_running, spend_guard)
+
+
+def test_chain_unchanged_passes_when_the_file_is_untouched(tmp_path):
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8")
+    with ChainUnchanged(chain):
+        pass          # a well-behaved run writes nothing
+
+
+def test_chain_unchanged_raises_when_a_line_is_appended(tmp_path):
+    chain = tmp_path / "registry_log.jsonl"
+    chain.write_text('{"a": 1}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="chain changed"):
+        with ChainUnchanged(chain):
+            with chain.open("a", encoding="utf-8") as fh:
+                fh.write('{"b": 2}\n')
+
+
+def test_ensure_no_cycle_running_raises_when_the_lock_is_held(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chain.lock").write_text('{"holder": "loop", "pid": 1}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="chain.lock"):
+        ensure_no_cycle_running(logs)
+
+
+def test_ensure_no_cycle_running_is_quiet_when_the_lock_is_absent(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    ensure_no_cycle_running(logs)
+
+
+def test_spend_guard_stops_the_run_at_the_pilot_ceiling():
+    guard = spend_guard(start_usd=1.0, ceiling=PILOT_CEILING_USD)
+    assert guard(1.5) is True                       # 0.5 spent, keep going
+    assert guard(1.0 + PILOT_CEILING_USD) is False  # ceiling reached
