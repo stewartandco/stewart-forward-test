@@ -12,6 +12,9 @@ import random
 import re
 from pathlib import Path
 
+from pipeline.common import quote_in_source
+from pipeline.triage_batch import claim_fingerprint
+
 
 def doc_key(card: dict) -> str:
     """Document identity for a card: its URL, else a title fallback.
@@ -150,3 +153,35 @@ def load_document_text(doc: dict, *, local: LocalPdfMap, read_pdf, fetch,
         raise RuntimeError(f"http {status}")
     looks_html = body.lstrip()[:400].lower().startswith(("<!doctype", "<html", "<"))
     return (html_to_text(body) if looks_html else body), "fetched"
+
+
+def classify_claims(claims: list[dict], *, text: str,
+                    known_fingerprints: set[str]) -> dict:
+    """Split proposed claims into guard-drops, duplicates and novel.
+
+    The honesty guard is production's own `quote_in_source`, applied first
+    because a claim whose quote is not in the document is not a claim at all.
+    Duplicates are exact `claim_fingerprint` collisions against
+    `known_fingerprints`, which the caller builds from EVERY card in the
+    chain - accepted, rejected and pending. That is deliberately wider than
+    production's `find_duplicates` (pending vs accepted only): for this
+    measurement a claim identical to one we already rejected is not novel
+    either, and counting it as novel would flatter the result.
+
+    A claim repeated inside one run is a duplicate of its own first
+    occurrence, so a chatty extractor cannot inflate `novel`.
+    """
+    seen = set(known_fingerprints)
+    out = {"proposed": len(claims), "dropped_quote_guard": 0,
+           "duplicate_of_existing": 0, "novel": []}
+    for raw in claims:
+        if not quote_in_source(raw.get("quote", ""), text):
+            out["dropped_quote_guard"] += 1
+            continue
+        fp = claim_fingerprint(raw.get("claim", ""))
+        if fp in seen:
+            out["duplicate_of_existing"] += 1
+            continue
+        seen.add(fp)
+        out["novel"].append(raw)
+    return out

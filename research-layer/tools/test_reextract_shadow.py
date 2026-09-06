@@ -194,3 +194,49 @@ def test_load_document_text_passes_plain_text_through_untouched():
                                    html_to_text=lambda h: "MUST NOT BE CALLED")
     assert text == "Just plain text, no markup."
     assert how == "fetched"
+
+
+from pipeline.triage_batch import claim_fingerprint
+from tools.reextract_shadow import classify_claims
+
+
+def test_classify_claims_drops_quotes_absent_from_the_text():
+    text = "Momentum reverses after large volume shocks."
+    claims = [
+        {"claim": "A", "quote": "Momentum reverses after large volume shocks."},
+        {"claim": "B", "quote": "This sentence is not in the document at all."},
+    ]
+    out = classify_claims(claims, text=text, known_fingerprints=set())
+    assert out["dropped_quote_guard"] == 1
+    assert [c["claim"] for c in out["novel"]] == ["A"]
+
+
+def test_classify_claims_counts_fingerprint_duplicates_against_every_held_card():
+    text = "Momentum reverses after large volume shocks."
+    held = {claim_fingerprint("Momentum reverses after volume shocks")}
+    claims = [
+        # differs only by punctuation and case - same fingerprint
+        {"claim": "momentum reverses after volume shocks!",
+         "quote": "Momentum reverses after large volume shocks."},
+        {"claim": "Overnight returns are higher after shocks",
+         "quote": "Momentum reverses after large volume shocks."},
+    ]
+    out = classify_claims(claims, text=text, known_fingerprints=held)
+    assert out["duplicate_of_existing"] == 1
+    assert [c["claim"] for c in out["novel"]] == ["Overnight returns are higher after shocks"]
+
+
+def test_classify_claims_treats_repeats_within_one_run_as_duplicates():
+    text = "Momentum reverses after large volume shocks."
+    claims = [
+        {"claim": "Same claim", "quote": "Momentum reverses after large volume shocks."},
+        {"claim": "Same claim", "quote": "Momentum reverses after large volume shocks."},
+    ]
+    out = classify_claims(claims, text=text, known_fingerprints=set())
+    assert out["duplicate_of_existing"] == 1
+    assert len(out["novel"]) == 1
+
+
+def test_classify_claims_reports_the_proposed_total():
+    out = classify_claims([], text="anything", known_fingerprints=set())
+    assert out["proposed"] == 0 and out["novel"] == []
