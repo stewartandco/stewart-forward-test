@@ -662,9 +662,14 @@ def run(argv: list[str] | None = None) -> int:
         extract, panel, meter = _live_extract_and_panel(model, panel_model, logs)
         known = {claim_fingerprint(c.get("claim", "")) for c in cards.values()}
         ceiling_ok = spend_guard(meter.month_spend())
+        from pipeline.pipeline_budget import may_start_batch
 
         def may_continue(current_usd: float) -> bool:
-            return ceiling_ok(current_usd) and meter.can_spend()
+            # Three lines, all enforced: the pilot ceiling, the monthly hard cap,
+            # and the 80% batch-stop line past which the LOOP parks itself for
+            # the rest of the month - a pilot must never be what parks it.
+            return (ceiling_ok(current_usd) and meter.can_spend()
+                    and may_start_batch(current_usd))
 
         from pipeline.feeds import fetch_url, html_to_text
         from pipeline.reader import chunk_text, read_source_text
@@ -678,8 +683,12 @@ def run(argv: list[str] | None = None) -> int:
             with ChainUnchanged(chain):
                 for doc in picked:
                     if not may_continue(meter.month_spend()):
-                        why = ("the monthly pipeline cap" if not meter.can_spend()
-                               else f"the USD {PILOT_CEILING_USD:.0f} pilot ceiling")
+                        if not meter.can_spend():
+                            why = "the monthly pipeline cap"
+                        elif not may_start_batch(meter.month_spend()):
+                            why = "the 80% batch-stop line (the loop would park)"
+                        else:
+                            why = f"the USD {PILOT_CEILING_USD:.0f} pilot ceiling"
                         print(f"STOPPED at {why} after {len(results)} document(s)")
                         break
                     res = shadow_one_document(doc, load_text=load_text, extract=extract,

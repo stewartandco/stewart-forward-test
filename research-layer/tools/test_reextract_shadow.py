@@ -911,3 +911,19 @@ def test_run_reraises_a_crash_hidden_under_a_chain_change_after_writing_the_repo
     js = json.loads(next((tmp_path / "docs" / "runs").glob("*-seed42.json")).read_text(encoding="utf-8"))
     assert js["chain_note"] and "chain changed" in js["chain_note"]   # report survived
     assert not (tmp_path / "logs" / "chain.lock").exists()             # lock released
+
+
+def test_run_stops_at_the_batch_stop_line_before_the_pilot_ceiling(tmp_path, capsys, monkeypatch):
+    from pipeline.budget import PIPELINE_CAP_USD
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+    # month already at 80% of the cap: the loop's own park line, not the hard cap
+    meter = _FakeMeter(PIPELINE_CAP_USD * 0.80)
+    _stub_live(monkeypatch, meter)
+    run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert "STOPPED at the 80% batch-stop line" in out
+    assert "after 0 document(s)" in out
