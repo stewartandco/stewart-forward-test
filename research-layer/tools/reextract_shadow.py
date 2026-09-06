@@ -9,6 +9,8 @@ docs/2026-09-06-reextract-shadow-design.md.
 from __future__ import annotations
 
 import random
+import re
+from pathlib import Path
 
 
 def doc_key(card: dict) -> str:
@@ -85,3 +87,59 @@ def sample_documents(corpus: dict[str, dict], n: int = SAMPLE_SIZE,
         leftovers = [d for b in BANDS for d in by_band[b] if d["key"] not in chosen]
         picked.extend(leftovers[:n - len(picked)])
     return picked
+
+
+AFML_DIR = Path(r"E:\Users\Coen\Desktop\AFML")
+FETCH_TIMEOUT = 25
+
+
+class LocalPdfMap:
+    """{document url: local PDF path} for documents whose text is on disk.
+
+    The ten Lopez de Prado lecture decks were originally read from local PDFs
+    and their SSRN pages now answer 403, so fetching them would measure
+    SSRN's bot policy rather than our extractor.
+    """
+
+    def __init__(self, mapping: dict[str, Path]):
+        self._map = dict(mapping)
+
+    def get(self, url: str | None) -> Path | None:
+        return self._map.get(url or "")
+
+    @classmethod
+    def from_afml_dir(cls, directory: Path = AFML_DIR) -> "LocalPdfMap":
+        """Map `https://ssrn.com/abstract=NNNNN` -> `ssrn-NNNNN.pdf`.
+
+        Missing directory or missing file is not an error: the document then
+        falls through to the fetch path and reports its own failure.
+        """
+        mapping: dict[str, Path] = {}
+        if not directory.is_dir():
+            return cls(mapping)
+        for pdf in directory.glob("ssrn-*.pdf"):
+            digits = re.sub(r"[^0-9]", "", pdf.stem)
+            if digits:
+                mapping[f"https://ssrn.com/abstract={digits}"] = pdf
+        return cls(mapping)
+
+
+def load_document_text(doc: dict, *, local: LocalPdfMap, read_pdf, fetch,
+                       html_to_text) -> tuple[str, str]:
+    """(text, how) for one document, or raise RuntimeError with the reason.
+
+    Every impure dependency is injected so the routing logic is testable
+    without a network or a PDF. Production passes
+    `reader.read_source_text`, `feeds.fetch_url` and `feeds.html_to_text`.
+    """
+    url = doc.get("url")
+    path = local.get(url)
+    if path is not None:
+        return read_pdf(path), "local_pdf"
+    if not url:
+        raise RuntimeError("no url and no local file")
+    status, body, _final = fetch(url, timeout=FETCH_TIMEOUT)
+    if status != 200:
+        raise RuntimeError(f"http {status}")
+    looks_html = body.lstrip()[:400].lower().startswith(("<!doctype", "<html", "<"))
+    return (html_to_text(body) if looks_html else body), "fetched"

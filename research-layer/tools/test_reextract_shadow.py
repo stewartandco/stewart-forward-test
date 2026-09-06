@@ -99,3 +99,60 @@ def test_sample_documents_tops_up_in_the_other_direction_too():
 def test_sample_documents_returns_everything_when_corpus_is_smaller_than_n():
     docs = {"d0": _doc("d0", 9, 0, 1), "s0": _doc("s0", 0, 0, 9)}
     assert len(sample_documents(docs, n=10, seed=7)) == 2
+
+
+import pytest
+
+from tools.reextract_shadow import LocalPdfMap, load_document_text
+
+
+def test_load_document_text_uses_the_local_pdf_when_one_is_mapped(tmp_path):
+    pdf = tmp_path / "ssrn-3270329.pdf"
+    pdf.write_text("not really a pdf", encoding="utf-8")
+    local = LocalPdfMap({"https://ssrn.com/abstract=3270329": pdf})
+    seen = {}
+
+    def fake_read_pdf(path):
+        seen["path"] = path
+        return "PDF TEXT"
+
+    def fail_fetch(url, timeout=25):
+        raise AssertionError("must not fetch when a local file is mapped")
+
+    text, how = load_document_text({"url": "https://ssrn.com/abstract=3270329"},
+                                   local=local, read_pdf=fake_read_pdf,
+                                   fetch=fail_fetch, html_to_text=lambda h: h)
+    assert text == "PDF TEXT"
+    assert how == "local_pdf"
+    assert seen["path"] == pdf
+
+
+def test_load_document_text_fetches_and_converts_html():
+    def fake_fetch(url, timeout=25):
+        return 200, "<html><body>Hello</body></html>", url
+
+    text, how = load_document_text({"url": "https://a.example/x"},
+                                   local=LocalPdfMap({}),
+                                   read_pdf=lambda p: "unused",
+                                   fetch=fake_fetch,
+                                   html_to_text=lambda h: "Hello")
+    assert text == "Hello"
+    assert how == "fetched"
+
+
+def test_load_document_text_raises_on_a_non_200():
+    def fake_fetch(url, timeout=25):
+        return 403, "Forbidden", url
+
+    with pytest.raises(RuntimeError, match="http 403"):
+        load_document_text({"url": "https://ssrn.com/x"}, local=LocalPdfMap({}),
+                           read_pdf=lambda p: "unused", fetch=fake_fetch,
+                           html_to_text=lambda h: h)
+
+
+def test_load_document_text_raises_when_there_is_no_url_and_no_local_file():
+    with pytest.raises(RuntimeError, match="no url"):
+        load_document_text({"url": None}, local=LocalPdfMap({}),
+                           read_pdf=lambda p: "unused",
+                           fetch=lambda u, timeout=25: (200, "x", u),
+                           html_to_text=lambda h: h)
