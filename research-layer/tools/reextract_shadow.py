@@ -204,6 +204,8 @@ def aggregate(results: list[dict]) -> dict:
 
     Errored documents are excluded from every rate and counted separately -
     a document we could not fetch says nothing about the extractor.
+    Its SPEND still counts: usd_total and the per-dollar yield are over every
+    document, errored or not, because money spent is spent.
 
     Both accept rates are accepted / (accepted + rejected): a pending card is
     undecided, so counting it as a failure would understate the old corpus.
@@ -215,7 +217,7 @@ def aggregate(results: list[dict]) -> dict:
     old_pend = sum(r["old_pending"] for r in ok)
     novel = sum(r["novel"] for r in ok)
     novel_acc = sum(r["novel_accepted"] for r in ok)
-    usd = sum(r["usd"] for r in ok)
+    usd = sum(r.get("usd", 0.0) for r in results)
     return {
         "documents": len(ok),
         "errors": len(results) - len(ok),

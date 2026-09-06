@@ -312,6 +312,18 @@ def test_aggregate_ignores_errored_documents_in_the_rates_but_reports_them():
     assert agg["novel_accepted_per_doc"] == pytest.approx(4.0)
 
 
+def test_aggregate_counts_spend_on_errored_documents_too():
+    # extraction cost money, then the panel raised: the money is still spent
+    results = [
+        _result(novel=2, novel_accepted=2, usd=0.10),
+        _result(error="panel raised", usd=0.05),
+    ]
+    agg = aggregate(results)
+    assert agg["documents"] == 1 and agg["errors"] == 1
+    assert agg["usd_total"] == pytest.approx(0.15)
+    assert agg["novel_accepted_per_usd"] == pytest.approx(2 / 0.15)
+
+
 def test_aggregate_is_safe_on_an_empty_run():
     agg = aggregate([])
     assert agg["documents"] == 0
@@ -330,6 +342,9 @@ def test_verdict_for_applies_the_specs_thresholds():
                         "old_accept_rate": 0.8}) == "amber"
     assert verdict_for({"novel_accepted_per_doc": 0.4, "novel_accept_rate": 0.9,
                         "old_accept_rate": 0.8}) == "red"
+    # exactly 0.5 is NOT red: the rule is strictly less than
+    assert verdict_for({"novel_accepted_per_doc": 0.5, "novel_accept_rate": 0.9,
+                        "old_accept_rate": 0.8}) == "amber"
 
 
 def test_verdict_for_is_amber_when_there_is_no_old_rate_to_compare():
