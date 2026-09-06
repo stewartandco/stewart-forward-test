@@ -675,3 +675,36 @@ def test_write_report_marks_stopped_and_unjudged(tmp_path):
     assert "STOPPED: budget" in body
     assert "unjudged 2" in body
     assert json.loads(js.read_text(encoding="utf-8"))["aggregate"]["stopped"] == 1
+
+
+def test_verdict_for_has_no_result_when_nothing_was_measured():
+    assert verdict_for(aggregate([])) == "no_result"
+    assert verdict_for(aggregate([_result(error="http 403")])) == "no_result"
+
+
+def test_write_report_says_no_result_instead_of_red_on_an_all_errored_run(tmp_path):
+    results = [_result(error="http 403"), _result(error="network error: dns")]
+    md, js = write_report(tmp_path, results=results, agg=aggregate(results),
+                          seed=1, model="m", date_utc="2026-09-07")
+    body = md.read_text(encoding="utf-8")
+    assert "NO RESULT" in body
+    assert "RED" not in body
+    assert "ERROR: http 403" in body
+    assert json.loads(js.read_text(encoding="utf-8"))["verdict"] == "no_result"
+
+
+def test_write_report_omits_the_reasons_section_when_there_are_none(tmp_path):
+    results = [_result(novel=1, novel_accepted=1, usd=0.01)]
+    md, _ = write_report(tmp_path, results=results, agg=aggregate(results),
+                         seed=1, model="m", date_utc="2026-09-07")
+    assert "Escalation reasons" not in md.read_text(encoding="utf-8")
+
+
+def test_write_report_keeps_a_pipe_in_a_title_from_breaking_the_table(tmp_path):
+    results = [_result(title="Alpha | Beta\nGamma", novel=1, novel_accepted=1,
+                       usd=0.01, escalation_reasons=["a | b"])]
+    md, _ = write_report(tmp_path, results=results, agg=aggregate(results),
+                         seed=1, model="m", date_utc="2026-09-07")
+    body = md.read_text(encoding="utf-8")
+    assert "Alpha / Beta Gamma" in body
+    assert "- a / b" in body

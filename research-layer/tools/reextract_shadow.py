@@ -252,12 +252,16 @@ def aggregate(results: list[dict]) -> dict:
 
 
 def verdict_for(agg: dict) -> str:
-    """"green" | "amber" | "red" per the design's decision rule.
+    """"green" | "amber" | "red" | "no_result" per the design's decision rule.
 
     Stated before the run so a disappointing result cannot be re-read as an
     encouraging one. Green additionally requires an old rate to compare
-    against; with nothing to beat, the honest answer is amber.
+    against; with nothing to beat, the honest answer is amber. A run that
+    completed zero documents has NO verdict: a red on an empty sample would
+    read as "close the question" when the question was never asked.
     """
+    if "documents" in agg and agg["documents"] == 0:
+        return "no_result"           # nothing was measured; no verdict is honest
     per_doc = agg.get("novel_accepted_per_doc") or 0.0
     new_rate = agg.get("novel_accept_rate")
     old_rate = agg.get("old_accept_rate")
@@ -415,6 +419,11 @@ def _fmt_rate(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.0%}"
 
 
+def _cell(text) -> str:
+    """One markdown table cell: pipes and newlines would break the row."""
+    return str(text or "").replace("|", "/").replace("\n", " ").replace("\r", " ")
+
+
 def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
                  model: str, date_utc: str) -> tuple[Path, Path]:
     """Write `<date>-reextract-shadow.md` plus a JSON sidecar; return both.
@@ -432,9 +441,12 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
     lines = [
         f"# Re-extract shadow run {date_utc}",
         "",
-        f"**Verdict: {verdict.upper()}** "
-        f"({agg['novel_accepted_per_doc']:.2f} novel accepted per document; "
-        f"green needs >= {GREEN_PER_DOC}, red is < {RED_PER_DOC})",
+        (f"**Verdict: NO RESULT** ({agg['documents']} document(s) completed - "
+         f"nothing was measured; {agg['errors']} errored)"
+         if verdict == "no_result" else
+         f"**Verdict: {verdict.upper()}** "
+         f"({agg['novel_accepted_per_doc']:.2f} novel accepted per document; "
+         f"green needs >= {GREEN_PER_DOC}, red is < {RED_PER_DOC})"),
         "",
         f"Sample: {agg['documents']} document(s) at seed {seed}, python {py}, "
         f"model {model}; {agg['errors']} errored, {agg['stopped']} stopped at "
@@ -464,7 +476,7 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in results:
-        title = (r.get("title") or r.get("key") or "")[:44]
+        title = _cell(r.get("title") or r.get("key"))[:44]
         note = ""
         if r.get("error"):
             note = f" — ERROR: {r['error']}"
@@ -481,7 +493,7 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
     reasons = [x for r in results for x in r.get("escalation_reasons", [])]
     if reasons:
         lines += ["", "## Escalation reasons (every dissenting reviewer)", ""]
-        lines += [f"- {reason}" for reason in reasons]
+        lines += [f"- {_cell(reason)}" for reason in reasons]
 
     md_path = out_dir / f"{date_utc}-reextract-shadow.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
