@@ -74,6 +74,16 @@ For each sampled document:
    deliberately wider than production's `find_duplicates`, which compares pending
    against accepted only: for this measurement a claim identical to one we already
    rejected is not novel either, and counting it as novel would flatter the result.
+5b. **Semantic dedupe** (added 2026-09-06 after the first pilot, Coen's ruling). The
+   fingerprint in step 5 is not semantic, and the first live pilot proved the point:
+   0 duplicates in 41 claims from documents we already held 22 cards for — today's
+   extractor simply phrases everything differently. So each fingerprint-novel claim is
+   now put to one cheap model call (the PANEL model, sonnet, for consistency with the
+   judge) with the claims of every card we already hold **from the same document**,
+   any review state: "does this restate one of these?" A restatement is counted as
+   `restated_existing` and never reaches the panel; only what survives is `novel`.
+   A document with no held cards skips the call. ~USD 0.005 per claim. This is what
+   makes the "novel accepted per document" figure mean novelty rather than rewording.
 6. **Judge the novel ones** with the real panel: `triage_batch.build_decisions`, which
    its own docstring states "turns pending cards into a decision list without chaining
    anything". Synthetic (unchained) card dicts go in as `pending`; `accepted` is
@@ -99,7 +109,9 @@ Per document, and aggregated:
 | `proposed` | claims returned by the extractor |
 | `dropped_quote_guard` | failed `quote_in_source` |
 | `duplicate_of_existing` | exact fingerprint collision with a held card |
-| `novel` | survived both |
+| `restated_existing` | fingerprint-novel but judged a restatement of a held card from the
+  same document (step 5b) — never sent to the panel |
+| `novel` | survived the guard, the fingerprint AND the semantic check |
 | `novel_accepted`, `novel_escalated` | the shadow panel |
 | `novel_unjudged` | novel cards the panel never reached — production's
   `build_decisions` stops mid-batch when the meter refuses (`stopped="budget"`),
@@ -189,6 +201,16 @@ re-read as an encouraging one.
 - **Extraction checks the monthly cap** before every model call, not only the pilot
   ceiling between documents; a month at the cap refuses rather than spending through.
 - **Exit codes:** 0 measured; 2 refused (lock held, no ledger); 3 no result.
+
+## First pilot result (2026-09-06, `--sample 5`, USD 1.16)
+
+AMBER by the rule — 6.8 novel accepted per document, novel accept rate 83% vs 86% old
+(one card in 41). But `duplicate_of_existing` was 0 on 41 claims from documents holding
+22 cards: the fingerprint saw no restatements because none were verbatim. The headline
+was paraphrase-inflated, exactly as the limitation below warned. Clean signals: the
+honesty guard dropped 0 of 41; escalations 7/41, all classic overreach; the stalled
+rebalancing document yielded 9 accepted of 11. Ruling: add the semantic dedupe (step
+5b) and re-pilot. Do not scale on the first pilot's numbers.
 
 ## What this does NOT isolate
 
