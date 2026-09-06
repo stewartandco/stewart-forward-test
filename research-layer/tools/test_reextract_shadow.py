@@ -272,6 +272,7 @@ def _result(**kw):
             "old_rejected": 0, "old_pending": 0, "proposed": 0,
             "dropped_quote_guard": 0, "duplicate_of_existing": 0, "novel": 0,
             "novel_accepted": 0, "novel_escalated": 0, "novel_unjudged": 0,
+            "restated_existing": 0, "restated_reasons": [],
             "escalation_reasons": [], "usd": 0.0, "error": None,
             "stopped": None, "text_source": None}
     base.update(kw)
@@ -769,6 +770,7 @@ def _stub_live(monkeypatch, meter, extract=None, panel=None):
                 panel or (lambda cards: {"decisions": {}, "escalated": {},
                                          "dissent_reasons": {}, "counts": {},
                                          "stopped": None}),
+                (lambda claim, held: (None, "")),
                 meter)
 
     monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", fake_live)
@@ -927,3 +929,111 @@ def test_run_stops_at_the_batch_stop_line_before_the_pilot_ceiling(tmp_path, cap
     out = capsys.readouterr().out
     assert "STOPPED at the 80% batch-stop line" in out
     assert "after 0 document(s)" in out
+
+
+from tools.reextract_shadow import semantic_dedupe
+
+
+def test_semantic_dedupe_splits_restatements_from_novel():
+    held = ["Momentum reverses after volume shocks", "Overnight returns are higher after shocks"]
+    novel = [{"claim": "After a volume shock, momentum tends to reverse", "quote": "q"},
+             {"claim": "Volatility clusters in the afternoon", "quote": "q"}]
+
+    def judge(claim, held_claims):
+        return (0, "same assertion reworded") if "momentum" in claim.lower() else (None, "new")
+
+    out = semantic_dedupe(novel, held, judge)
+    assert out["restated"] == 1
+    assert [c["claim"] for c in out["novel"]] == ["Volatility clusters in the afternoon"]
+    assert out["restated_reasons"] == ["[0] same assertion reworded"]
+
+
+def test_semantic_dedupe_makes_no_calls_when_nothing_is_held():
+    def must_not_be_called(claim, held):
+        raise AssertionError("no held cards means no judge call")
+    novel = [{"claim": "Anything", "quote": "q"}]
+    out = semantic_dedupe(novel, [], must_not_be_called)
+    assert out["restated"] == 0 and out["novel"] == novel
+
+
+def test_semantic_dedupe_keeps_a_claim_when_the_judge_fails_or_points_out_of_range():
+    held = ["one held claim"]
+    novel = [{"claim": "A", "quote": "q"}, {"claim": "B", "quote": "q"}]
+
+    def flaky(claim, held_claims):
+        if claim == "A":
+            raise RuntimeError("model hiccup")
+        return (7, "index out of range")
+
+    out = semantic_dedupe(novel, held, flaky)
+    assert out["restated"] == 0
+    assert [c["claim"] for c in out["novel"]] == ["A", "B"]
+
+
+def test_shadow_one_document_sends_only_semantically_novel_claims_to_the_panel():
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 1, "old_accepted": 1,
+           "old_rejected": 0, "old_pending": 0}
+    text = "Momentum reverses after large volume shocks. Volatility clusters."
+    seen_by_panel = []
+
+    def fake_panel(cards):
+        seen_by_panel.extend(c["claim"] for c in cards.values())
+        return {"decisions": {c: ("accepted", None) for c in cards}, "escalated": {},
+                "dissent_reasons": {}, "counts": {}, "stopped": None}
+
+    res = shadow_one_document(
+        doc, load_text=lambda d: (text, "fetched"),
+        extract=lambda label, chunk: [
+            {"claim": "Momentum tends to reverse after a volume shock", "quote": "Momentum reverses after large volume shocks."},
+            {"claim": "Volatility clusters", "quote": "Volatility clusters."}],
+        panel=fake_panel, known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("full document", t)],
+        held_claims=["Momentum reverses after volume shocks"],
+        judge=lambda claim, held: ((0, "reworded") if "omentum" in claim else (None, "")))
+    assert res["restated_existing"] == 1
+    assert res["novel"] == 1 and res["novel_accepted"] == 1
+    assert seen_by_panel == ["Volatility clusters"]
+    assert res["restated_reasons"] == ["[0] reworded"]
+
+
+def test_aggregate_and_report_carry_restatements(tmp_path):
+    results = [_result(title="Doc A", proposed=5, novel=2, restated_existing=3,
+                       novel_accepted=2, usd=0.05, restated_reasons=["[0] same thing"])]
+    agg = aggregate(results)
+    assert agg["restated_existing"] == 3
+    md, js = write_report(tmp_path, results=results, agg=agg, seed=1, model="m",
+                          panel_model="p", date_utc="2026-09-07")
+    body = md.read_text(encoding="utf-8")
+    assert "restatements of held cards 3" in body
+    assert "| rest |" in body
+    assert "same thing" in body
+    assert json.loads(js.read_text(encoding="utf-8"))["aggregate"]["restated_existing"] == 3
+
+
+def test_run_passes_each_documents_held_claims_to_the_judge(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+    seen_held = {}
+
+    def judge(claim, held):
+        seen_held[claim] = list(held)
+        return (None, "")
+
+    def fake_live(model, panel_model, logs):
+        return (lambda label, chunk: [{"claim": f"new for {label}", "quote": "some text"}],
+                lambda cards_: {"decisions": {}, "escalated": {c: "dissent" for c in cards_},
+                                "dissent_reasons": {}, "counts": {}, "stopped": None},
+                judge, _FakeMeter(0.0))
+
+    monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", fake_live)
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    assert rc == 0
+    assert seen_held                                   # the judge was consulted
+    # every held list handed to the judge is exactly that document's chain claims
+    for held in seen_held.values():
+        assert held and all(h.startswith(("claim ", "stuck ")) for h in held)
+    assert "restated 0" in capsys.readouterr().out

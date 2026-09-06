@@ -197,6 +197,55 @@ def classify_claims(claims: list[dict], *, text: str,
     return out
 
 
+DEDUPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "restates_index": {"type": ["integer", "null"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["restates_index", "reason"],
+    "additionalProperties": False,
+}
+
+DEDUPE_PROMPT = """You are checking whether a NEW research claim merely RESTATES a claim we already hold from the SAME source document.
+
+New claim:
+{claim}
+
+Held claims from this document (index: text):
+{held}
+
+Set restates_index to the index of a held claim that makes the SAME assertion - a rewording, a narrowing, or the same relationship in different terms - or null if the new claim asserts something none of the held claims does. A different relationship, a different variable, a different direction, or a materially stronger or weaker scope is NOT a restatement. Give a one-sentence reason."""
+
+
+def semantic_dedupe(novel: list[dict], held_claims: list[str], judge) -> dict:
+    """Split fingerprint-novel claims into restatements of held cards and the
+    truly novel (design step 5b).
+
+    `judge(claim_text, held_claims) -> (index | None, reason)` is injected;
+    production's asks the PANEL model. No held claims -> no calls, everything
+    stays novel. A judge failure keeps the claim NOVEL: fail open toward
+    measuring is the honest direction - a restatement wrongly kept is what the
+    report's paraphrase limitation already covers, while a novel claim wrongly
+    dropped would silently understate the result.
+    """
+    if not held_claims or judge is None:
+        return {"novel": list(novel), "restated": 0, "restated_reasons": []}
+    kept: list[dict] = []
+    restated, reasons = 0, []
+    for raw in novel:
+        try:
+            idx, reason = judge(raw.get("claim", ""), held_claims)
+        except Exception as exc:
+            idx, reason = None, f"judge failed: {exc}"[:120]
+        if isinstance(idx, int) and 0 <= idx < len(held_claims):
+            restated += 1
+            reasons.append(f"[{idx}] {reason}".strip())
+        else:
+            kept.append(raw)
+    return {"novel": kept, "restated": restated, "restated_reasons": reasons}
+
+
 GREEN_PER_DOC = 2.0
 RED_PER_DOC = 0.5
 
@@ -248,6 +297,7 @@ def aggregate(results: list[dict]) -> dict:
         "proposed": sum(r["proposed"] for r in ok),
         "dropped_quote_guard": sum(r["dropped_quote_guard"] for r in ok),
         "duplicate_of_existing": sum(r["duplicate_of_existing"] for r in ok),
+        "restated_existing": sum(r.get("restated_existing", 0) for r in ok),
         "novel_accepted_per_doc": (novel_acc / len(ok)) if ok else 0.0,
         "novel_accepted_per_usd": (novel_acc / usd) if usd else 0.0,
         "usd_total": usd,
@@ -365,6 +415,7 @@ def _blank_result(doc: dict) -> dict:
         "old_rejected": doc.get("old_rejected", 0),
         "old_pending": doc.get("old_pending", 0),
         "proposed": 0, "dropped_quote_guard": 0, "duplicate_of_existing": 0,
+        "restated_existing": 0, "restated_reasons": [],
         "novel": 0, "novel_accepted": 0, "novel_escalated": 0,
         "novel_unjudged": 0,
         "escalation_reasons": [], "usd": 0.0, "error": None,
@@ -375,13 +426,17 @@ def _blank_result(doc: dict) -> dict:
 
 def shadow_one_document(doc: dict, *, load_text, extract, panel,
                         known_fingerprints: set[str], meter,
-                        chunker) -> dict:
+                        chunker, held_claims: list[str] = (), judge=None) -> dict:
     """One document end to end, returning a DocResult. Never raises.
 
     `extract(chunk_label, chunk_text) -> [raw claim]` and
     `panel(cards) -> build_decisions payload` are injected so the wiring is
     testable without a model. Spend is measured from the meter's own ledger
     around the work, not estimated.
+
+    Between classification and the panel, semantic_dedupe removes
+    restatements of cards already held from this document (step 5b); only
+    the survivors are judged.
 
     The panel is skipped entirely when nothing survives classification: a
     panel with no cards costs money and answers nothing.
@@ -398,13 +453,16 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
                                 known_fingerprints=known_fingerprints)
         res.update(proposed=split["proposed"],
                    dropped_quote_guard=split["dropped_quote_guard"],
-                   duplicate_of_existing=split["duplicate_of_existing"],
-                   novel=len(split["novel"]))
-        if split["novel"]:
+                   duplicate_of_existing=split["duplicate_of_existing"])
+        dd = semantic_dedupe(split["novel"], list(held_claims), judge)
+        res.update(restated_existing=dd["restated"],
+                   restated_reasons=dd["restated_reasons"],
+                   novel=len(dd["novel"]))
+        if dd["novel"]:
             cards = {f"shadow-{i}": {"claim": c.get("claim", ""),
                                      "quote": c.get("quote", ""),
                                      "source": {"title": doc.get("title")}}
-                     for i, c in enumerate(split["novel"])}
+                     for i, c in enumerate(dd["novel"])}
             out = panel(cards)
             res["novel_accepted"] = sum(
                 1 for v in out.get("decisions", {}).values() if v[0] == "accepted")
@@ -485,19 +543,22 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
         "",
         f"Claims proposed {agg['proposed']}, dropped by the honesty guard "
         f"{agg['dropped_quote_guard']}, duplicates of held cards "
-        f"{agg['duplicate_of_existing']}, novel {agg['novel']} "
+        f"{agg['duplicate_of_existing']}, restatements of held cards "
+        f"{agg['restated_existing']}, novel {agg['novel']} "
         f"(accepted {agg['novel_accepted']}, escalated {agg['novel_escalated']}, "
         f"unjudged {agg['novel_unjudged']}).",
         "",
-        "**Limitation:** duplicate detection is `claim_fingerprint`, which is "
-        "normalised but not semantic, so a paraphrase of a held claim counts "
-        "as novel and reaches the panel. Read the novel figure with that in "
-        "mind; the escalation reasons below are where paraphrases surface.",
+        "**Limitation:** duplicate detection is `claim_fingerprint` (normalised, "
+        "not semantic) followed by a one-call semantic check against cards held "
+        "from the SAME document. A restatement of a card held from a DIFFERENT "
+        "document, or one the judge misses, still counts as novel and reaches "
+        "the panel; the restatements section shows what the check caught. "
+        "Paraphrase across documents is the remaining gap.",
         "",
         "## Per document",
         "",
-        "| document | band | old A/R/P | proposed | guard | dupe | novel | acc | esc | unj | USD |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| document | band | old A/R/P | proposed | guard | dupe | rest | novel | acc | esc | unj | USD |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in results:
         title = _cell(r.get("title") or r.get("key"))[:44]
@@ -510,7 +571,8 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
             f"| {title}{note} | {r.get('band','')} | "
             f"{r['old_accepted']}/{r['old_rejected']}/{r['old_pending']} | "
             f"{r['proposed']} | {r['dropped_quote_guard']} | "
-            f"{r['duplicate_of_existing']} | {r['novel']} | "
+            f"{r['duplicate_of_existing']} | {r.get('restated_existing', 0)} | "
+            f"{r['novel']} | "
             f"{r['novel_accepted']} | {r['novel_escalated']} | "
             f"{r.get('novel_unjudged', 0)} | {r['usd']:.3f} |")
 
@@ -518,6 +580,11 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
     if reasons:
         lines += ["", "## Escalation reasons (every dissenting reviewer)", ""]
         lines += [f"- {_cell(reason)}" for reason in reasons]
+
+    restated = [x for r in results for x in r.get("restated_reasons", [])]
+    if restated:
+        lines += ["", "## Restatements caught by the semantic dedupe (never sent to the panel)", ""]
+        lines += [f"- {_cell(x)}" for x in restated]
 
     md_path = out_dir / f"{date_utc}-reextract-shadow-seed{seed}.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -548,7 +615,7 @@ def _load_cards(registry_path: Path) -> dict[str, dict]:
 
 
 def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
-    """(extract, panel, meter) bound to the real client, key and ledger.
+    """(extract, panel, judge, meter) bound to the real client, key and ledger.
 
     Mirrors triage_batch._client_and_meter: the sc-reader key lives in the
     reader's .env, not the ambient environment. `logs` is ALWAYS the caller's
@@ -558,7 +625,9 @@ def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
     the LIVE cap. The meter is scoped to agent "pipeline" and extraction is
     RECORDED under that same agent (the panel's review_card already
     hardcodes it), so one meter sees both and the resident scanner's
-    "reader" rows cannot pollute the per-document spend delta.
+    "reader" rows cannot pollute the per-document spend delta. `judge` (step
+    5b's semantic dedupe) runs on `panel_model`, the same instrument as the
+    panel, and is metered under the same agent.
     """
     import anthropic
 
@@ -591,7 +660,22 @@ def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
         # the shadow purpose.
         return build_decisions(client, panel_model, cards, {}, meter)
 
-    return extract, panel, meter
+    def judge(claim: str, held: list[str]) -> tuple[int | None, str]:
+        held_text = "\n".join(f"{i}: {h}" for i, h in enumerate(held))
+        msg = client.messages.create(
+            model=panel_model,
+            max_tokens=800,
+            messages=[{"role": "user", "content": DEDUPE_PROMPT.format(claim=claim, held=held_text)}],
+            output_config={"format": {"type": "json_schema", "schema": DEDUPE_SCHEMA}},
+        )
+        meter.record_call(panel_model, msg.usage, purpose="reextract-shadow dedupe",
+                          agent="pipeline")
+        text = next(b.text for b in msg.content if b.type == "text")
+        out = json.loads(text)
+        idx = out.get("restates_index")
+        return (idx if isinstance(idx, int) else None), str(out.get("reason", ""))
+
+    return extract, panel, judge, meter
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -659,8 +743,11 @@ def run(argv: list[str] | None = None) -> int:
     chain_note: str | None = None
     crash: BaseException | None = None
     try:
-        extract, panel, meter = _live_extract_and_panel(model, panel_model, logs)
+        extract, panel, judge, meter = _live_extract_and_panel(model, panel_model, logs)
         known = {claim_fingerprint(c.get("claim", "")) for c in cards.values()}
+        held_by_doc: dict[str, list[str]] = {}
+        for c in cards.values():
+            held_by_doc.setdefault(doc_key(c), []).append(c.get("claim", ""))
         ceiling_ok = spend_guard(meter.month_spend())
         from pipeline.pipeline_budget import may_start_batch
 
@@ -693,10 +780,13 @@ def run(argv: list[str] | None = None) -> int:
                         break
                     res = shadow_one_document(doc, load_text=load_text, extract=extract,
                                               panel=panel, known_fingerprints=known,
-                                              meter=meter, chunker=chunk_text)
+                                              meter=meter, chunker=chunk_text,
+                                              held_claims=held_by_doc.get(doc["key"], []),
+                                              judge=judge)
                     results.append(res)
                     print(f"  {res['key'][:60]}: proposed {res['proposed']}, "
-                          f"novel {res['novel']}, accepted {res['novel_accepted']}, "
+                          f"novel {res['novel']}, restated {res['restated_existing']}, "
+                          f"accepted {res['novel_accepted']}, "
                           f"unjudged {res['novel_unjudged']}, USD {res['usd']:.3f}"
                           + (f"  ERROR {res['error']}" if res["error"] else "")
                           + (f"  STOPPED {res['stopped']}" if res.get("stopped") else ""))
