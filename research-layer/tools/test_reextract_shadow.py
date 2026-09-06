@@ -86,6 +86,16 @@ def test_sample_documents_tops_up_when_one_band_is_short():
     assert sum(1 for d in picked if d["band"] == "stalled") == 1
 
 
+def test_sample_documents_tops_up_in_the_other_direction_too():
+    # the mirror case: "passed" is the short band, "stalled" is abundant
+    docs = {f"d{i}": _doc(f"d{i}", 9, 0, 1) for i in range(3)}
+    docs.update({f"s{i}": _doc(f"s{i}", 0, 0, 9) for i in range(20)})
+    picked = sample_documents(docs, n=10, seed=7)
+    assert len(picked) == 10
+    assert sum(1 for d in picked if d["band"] == "passed") == 3
+    assert sum(1 for d in picked if d["band"] == "stalled") == 7
+
+
 def test_sample_documents_returns_everything_when_corpus_is_smaller_than_n():
     docs = {"d0": _doc("d0", 9, 0, 1), "s0": _doc("s0", 0, 0, 9)}
     assert len(sample_documents(docs, n=10, seed=7)) == 2
