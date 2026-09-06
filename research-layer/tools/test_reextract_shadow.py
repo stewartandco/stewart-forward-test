@@ -445,6 +445,9 @@ class _FakeMeter:
     def bump(self, usd):
         self._spend += usd
 
+    def can_spend(self) -> bool:
+        return True
+
 
 def test_shadow_one_document_walks_extract_classify_and_panel():
     doc = {"key": "k", "url": "https://a.example/x", "title": "T",
@@ -637,11 +640,11 @@ def test_write_report_writes_markdown_and_a_json_sidecar(tmp_path):
                        escalation_reasons=["claim exceeds the quote"])]
     agg = aggregate(results)
     md, js = write_report(tmp_path, results=results, agg=agg,
-                          seed=1234, model="claude-opus-5",
+                          seed=1234, model="claude-opus-5", panel_model="m",
                           date_utc="2026-09-07")
 
-    assert md.name == "2026-09-07-reextract-shadow.md"
-    assert js.name == "2026-09-07-reextract-shadow.json"
+    assert md.name == "2026-09-07-reextract-shadow-seed1234.md"
+    assert js.name == "2026-09-07-reextract-shadow-seed1234.json"
     body = md.read_text(encoding="utf-8")
     assert "seed 1234" in body
     assert "claude-opus-5" in body
@@ -660,7 +663,7 @@ def test_write_report_writes_markdown_and_a_json_sidecar(tmp_path):
 def test_write_report_states_the_paraphrase_limitation(tmp_path):
     agg = aggregate([])
     md, _ = write_report(tmp_path, results=[], agg=agg, seed=1, model="m",
-                         date_utc="2026-09-07")
+                         panel_model="m", date_utc="2026-09-07")
     assert "paraphrase" in md.read_text(encoding="utf-8").lower()
 
 
@@ -670,7 +673,7 @@ def test_write_report_marks_stopped_and_unjudged(tmp_path):
                        usd=0.05)]
     agg = aggregate(results)
     md, js = write_report(tmp_path, results=results, agg=agg, seed=1, model="m",
-                          date_utc="2026-09-07")
+                          panel_model="m", date_utc="2026-09-07")
     body = md.read_text(encoding="utf-8")
     assert "STOPPED: budget" in body
     assert "unjudged 2" in body
@@ -685,7 +688,7 @@ def test_verdict_for_has_no_result_when_nothing_was_measured():
 def test_write_report_says_no_result_instead_of_red_on_an_all_errored_run(tmp_path):
     results = [_result(error="http 403"), _result(error="network error: dns")]
     md, js = write_report(tmp_path, results=results, agg=aggregate(results),
-                          seed=1, model="m", date_utc="2026-09-07")
+                          seed=1, model="m", panel_model="m", date_utc="2026-09-07")
     body = md.read_text(encoding="utf-8")
     assert "NO RESULT" in body
     assert "RED" not in body
@@ -696,7 +699,7 @@ def test_write_report_says_no_result_instead_of_red_on_an_all_errored_run(tmp_pa
 def test_write_report_omits_the_reasons_section_when_there_are_none(tmp_path):
     results = [_result(novel=1, novel_accepted=1, usd=0.01)]
     md, _ = write_report(tmp_path, results=results, agg=aggregate(results),
-                         seed=1, model="m", date_utc="2026-09-07")
+                         seed=1, model="m", panel_model="m", date_utc="2026-09-07")
     assert "Escalation reasons" not in md.read_text(encoding="utf-8")
 
 
@@ -704,7 +707,7 @@ def test_write_report_keeps_a_pipe_in_a_title_from_breaking_the_table(tmp_path):
     results = [_result(title="Alpha | Beta\nGamma", novel=1, novel_accepted=1,
                        usd=0.01, escalation_reasons=["a | b"])]
     md, _ = write_report(tmp_path, results=results, agg=aggregate(results),
-                         seed=1, model="m", date_utc="2026-09-07")
+                         seed=1, model="m", panel_model="m", date_utc="2026-09-07")
     body = md.read_text(encoding="utf-8")
     assert "Alpha / Beta Gamma" in body
     assert "- a / b" in body
@@ -739,11 +742,12 @@ def test_run_dry_run_selects_documents_and_spends_nothing(tmp_path, capsys, monk
 
 def test_run_refuses_when_a_cycle_holds_the_chain_lock(tmp_path, capsys, monkeypatch):
     cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
     monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
     (tmp_path / "logs" / "chain.lock").write_text('{"holder": "loop", "pid": 1}',
                                                   encoding="utf-8")
 
-    def must_not_be_called(model):
+    def must_not_be_called(model, panel_model, logs):
         raise AssertionError("the live client must not be built when refused")
 
     monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", must_not_be_called)
@@ -752,3 +756,104 @@ def test_run_refuses_when_a_cycle_holds_the_chain_lock(tmp_path, capsys, monkeyp
     assert rc == 2
     out = capsys.readouterr().out
     assert "REFUSED" in out and "chain.lock" in out
+
+
+def _stub_live(monkeypatch, meter, extract=None, panel=None):
+    seen = {}
+
+    def fake_live(model, panel_model, logs):
+        seen["logs"] = logs
+        seen["panel_model"] = panel_model
+        return (extract or (lambda label, chunk: []),
+                panel or (lambda cards: {"decisions": {}, "escalated": {},
+                                         "dissent_reasons": {}, "counts": {},
+                                         "stopped": None}),
+                meter)
+
+    monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", fake_live)
+    return seen
+
+
+def test_run_refuses_without_a_ledger_before_touching_anything(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("must not build a client")))
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "no ledger" in out
+    assert not (tmp_path / "logs" / "chain.lock").exists()
+
+
+def test_run_uses_the_layers_logs_and_releases_the_lock_after_the_loop(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+    meter = _FakeMeter(1.0)
+    seen = _stub_live(monkeypatch, meter,
+                      extract=lambda label, chunk: [{"claim": "c", "quote": "some text"}],
+                      panel=lambda cards: {"decisions": {c: ("accepted", None) for c in cards},
+                                           "escalated": {}, "dissent_reasons": {},
+                                           "counts": {}, "stopped": None})
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    assert rc == 0
+    assert seen["logs"] == tmp_path / "logs"                    # never __file__-derived
+    assert seen["panel_model"] == "claude-sonnet-5"             # the chain's judge
+    assert not (tmp_path / "logs" / "chain.lock").exists()      # released
+    md = next((tmp_path / "docs" / "runs").glob("*-reextract-shadow-seed42.md"))
+    assert "panel claude-sonnet-5" in md.read_text(encoding="utf-8")
+
+
+def test_run_stops_at_the_pilot_ceiling_and_still_writes_the_report(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: ("some text", "fetched"))
+    meter = _FakeMeter(0.0)
+
+    def pricey_extract(label, chunk):
+        meter.bump(PILOT_CEILING_USD)          # one document eats the whole ceiling
+        return [{"claim": "c", "quote": "some text"}]
+
+    _stub_live(monkeypatch, meter, extract=pricey_extract)
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "4"])
+    out = capsys.readouterr().out
+    assert "STOPPED at the USD 3 pilot ceiling after 1 document(s)" in out
+    assert next((tmp_path / "docs" / "runs").glob("*-seed42.json")).exists()
+
+
+def test_run_writes_the_report_even_when_the_chain_moved(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    chain = tmp_path / "registry_log.jsonl"
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+
+    def load_and_append(doc, **kw):
+        with chain.open("a", encoding="utf-8") as fh:     # a "legitimate writer" mid-run
+            fh.write('{"x": 1}\n')
+        return "some text", "fetched"
+
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text", load_and_append)
+    _stub_live(monkeypatch, _FakeMeter(0.0),
+               extract=lambda label, chunk: [{"claim": "c", "quote": "some text"}])
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "1"])
+    js = json.loads(next((tmp_path / "docs" / "runs").glob("*-seed42.json")).read_text(encoding="utf-8"))
+    assert js["chain_note"] and "chain changed" in js["chain_note"]
+    assert js["aggregate"]["documents"] == 1                   # the paid work survived
+    assert not (tmp_path / "logs" / "chain.lock").exists()
+
+
+def test_run_exits_nonzero_on_no_result(tmp_path, capsys, monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    monkeypatch.setattr("tools.reextract_shadow.load_document_text",
+                        lambda doc, **kw: (_ for _ in ()).throw(RuntimeError("http 403")))
+    _stub_live(monkeypatch, _FakeMeter(0.0))
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
+    assert rc == 3
+    assert "NO RESULT" in capsys.readouterr().out

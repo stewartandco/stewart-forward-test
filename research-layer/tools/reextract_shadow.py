@@ -428,13 +428,19 @@ def _cell(text) -> str:
 
 
 def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
-                 model: str, date_utc: str) -> tuple[Path, Path]:
-    """Write `<date>-reextract-shadow.md` plus a JSON sidecar; return both.
+                 model: str, panel_model: str, date_utc: str,
+                 chain_note: str | None = None) -> tuple[Path, Path]:
+    """Write `<date>-reextract-shadow-seed<seed>.md` plus a JSON sidecar;
+    return both.
 
     The markdown is Coen's read; the JSON is the machine-readable record a
     later full run compares against. The Python version is recorded beside
     the seed because `random.shuffle` is only reproducible for a seed within
-    one Python version.
+    one Python version. The seed is in the filename so a same-day re-run at a
+    different seed never overwrites the earlier report. `chain_note`, when
+    set, is a `ChainUnchanged` finding: the run still completed and is still
+    reported, but the chain moved under it and that is a fact for the read,
+    never a reason to lose the paid work.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -450,10 +456,14 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
          f"**Verdict: {verdict.upper()}** "
          f"({agg['novel_accepted_per_doc']:.2f} novel accepted per document; "
          f"green needs >= {GREEN_PER_DOC}, red is < {RED_PER_DOC})"),
+    ]
+    if chain_note:
+        lines += ["", f"**CHAIN CHANGED DURING THE RUN:** {chain_note}"]
+    lines += [
         "",
         f"Sample: {agg['documents']} document(s) at seed {seed}, python {py}, "
-        f"model {model}; {agg['errors']} errored, {agg['stopped']} stopped at "
-        f"the budget. Spend USD {agg['usd_total']:.2f}.",
+        f"extractor {model}, panel {panel_model}; {agg['errors']} errored, "
+        f"{agg['stopped']} stopped at the budget. Spend USD {agg['usd_total']:.2f}.",
         "",
         "| measure | old corpus | this run |",
         "|---|---:|---:|",
@@ -498,19 +508,26 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
         lines += ["", "## Escalation reasons (every dissenting reviewer)", ""]
         lines += [f"- {_cell(reason)}" for reason in reasons]
 
-    md_path = out_dir / f"{date_utc}-reextract-shadow.md"
+    md_path = out_dir / f"{date_utc}-reextract-shadow-seed{seed}.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    js_path = out_dir / f"{date_utc}-reextract-shadow.json"
+    js_path = out_dir / f"{date_utc}-reextract-shadow-seed{seed}.json"
     js_path.write_text(json.dumps(
         {"date_utc": date_utc, "seed": seed, "python_version": py,
-         "model": model, "verdict": verdict, "aggregate": agg,
-         "documents": results},
+         "model": model, "panel_model": panel_model, "verdict": verdict,
+         "chain_note": chain_note, "aggregate": agg, "documents": results},
         indent=2), encoding="utf-8")
     return md_path, js_path
 
 
 DEFAULT_SEED = 20260906
+
+# The chain's historical verdicts were made by triage_batch's default panel
+# model (the loop passes none). The shadow panel MUST use the same model or
+# the accept-rate comparison is opus-judged vs sonnet-judged - a different
+# instrument, not a different extractor. Kept in sync by hand with the
+# argparse default in pipeline/triage_batch.py run().
+DEFAULT_PANEL_MODEL = "claude-sonnet-5"
 
 
 def _load_cards(registry_path: Path) -> dict[str, dict]:
@@ -519,15 +536,18 @@ def _load_cards(registry_path: Path) -> dict[str, dict]:
     return Registry(registry_path).cards()
 
 
-def _live_extract_and_panel(model: str):
+def _live_extract_and_panel(model: str, panel_model: str, logs: Path):
     """(extract, panel, meter) bound to the real client, key and ledger.
 
     Mirrors triage_batch._client_and_meter: the sc-reader key lives in the
-    reader's .env, not the ambient environment. The meter is scoped to
-    agent "pipeline" and extraction is RECORDED under that same agent (the
-    panel's review_card already hardcodes it), so one meter sees both and
-    the resident scanner's "reader" rows cannot pollute the per-document
-    spend delta.
+    reader's .env, not the ambient environment. `logs` is ALWAYS the caller's
+    `--layer`-derived logs dir, never `__file__`-derived: in a worktree
+    `logs/` is gitignored and absent, so a meter built from this module's own
+    location would read a missing ledger as "zero spend this month" against
+    the LIVE cap. The meter is scoped to agent "pipeline" and extraction is
+    RECORDED under that same agent (the panel's review_card already
+    hardcodes it), so one meter sees both and the resident scanner's
+    "reader" rows cannot pollute the per-document spend delta.
     """
     import anthropic
 
@@ -538,11 +558,12 @@ def _live_extract_and_panel(model: str):
 
     _load_api_key(DEFAULT_READER_ENV)
     client = anthropic.Anthropic()
-    logs = Path(__file__).resolve().parent.parent / "logs"
     meter = BudgetMeter(logs / "budget_ledger.jsonl",
                         monthly_cap_usd=PIPELINE_CAP_USD, agent="pipeline")
 
     def extract(label: str, chunk: str) -> list[dict]:
+        if not meter.can_spend():
+            raise RuntimeError("monthly pipeline cap reached - extraction refused")
         claims, usage = extract_claims_usage(client, model, label, chunk)
         meter.record_call(model, usage, purpose="reextract-shadow extract",
                           agent="pipeline")
@@ -554,7 +575,10 @@ def _live_extract_and_panel(model: str):
         # classify_claims has already deduped against every card in the chain
         # on a wider rule. Passing the real accepted set here would double-count
         # duplicates and hide them from the novel figure.
-        return build_decisions(client, model, cards, {}, meter)
+        # review_card hardcodes purpose="triage", so the panel's ledger rows
+        # are not distinguishable from the loop's; only extraction carries
+        # the shadow purpose.
+        return build_decisions(client, panel_model, cards, {}, meter)
 
     return extract, panel, meter
 
@@ -568,12 +592,15 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--sample", type=int, default=SAMPLE_SIZE)
     ap.add_argument("--model", default=None,
                     help="defaults to pipeline.reader.DEFAULT_MODEL")
+    ap.add_argument("--panel-model", default=DEFAULT_PANEL_MODEL,
+                    help="model for the triage panel; defaults to what judged the chain")
     ap.add_argument("--dry-run", action="store_true",
                     help="select and report the sample; no model calls, no spend")
     args = ap.parse_args(argv)
 
     from pipeline.reader import DEFAULT_MODEL
     model = args.model or DEFAULT_MODEL
+    panel_model = args.panel_model
     chain = args.layer / "registry_log.jsonl"
     logs = args.layer / "logs"
 
@@ -582,13 +609,24 @@ def run(argv: list[str] | None = None) -> int:
     picked = sample_documents(corpus, n=args.sample, seed=args.seed)
 
     print(f"corpus {len(corpus)} documents; sampled {len(picked)} at seed "
-          f"{args.seed}; model {model}")
+          f"{args.seed}; extractor {model}, panel {panel_model}")
     for doc in picked:
         print(f"  [{doc['band']:7}] {doc['old_accepted']}A/{doc['old_rejected']}R/"
               f"{doc['old_pending']}P  {doc.get('url') or doc['key']}")
     if args.dry_run:
         print("\nDRY RUN — no model calls, no spend, nothing written.")
         return 0
+
+    # An absent ledger is never "zero spend this month" - it usually means
+    # --layer is not the live research-layer (logs/ is gitignored, so a
+    # worktree checkout has none). Checked before any other guard: touching
+    # the cycle lock or the client on a wrong-tree run would be worse than a
+    # refusal.
+    ledger = logs / "budget_ledger.jsonl"
+    if not ledger.exists():
+        print(f"REFUSED: no ledger at {ledger} - is --layer the live research-layer? "
+              "An absent ledger is never 'zero spend this month'.")
+        return 2
 
     # Guards first, before any client or key is touched: a refusal must cost
     # nothing and read as a sentence, not a traceback.
@@ -607,10 +645,14 @@ def run(argv: list[str] | None = None) -> int:
         return 2
 
     results: list[dict] = []
+    chain_note: str | None = None
     try:
-        extract, panel, meter = _live_extract_and_panel(model)
+        extract, panel, meter = _live_extract_and_panel(model, panel_model, logs)
         known = {claim_fingerprint(c.get("claim", "")) for c in cards.values()}
-        may_continue = spend_guard(meter.month_spend())
+        ceiling_ok = spend_guard(meter.month_spend())
+
+        def may_continue(current_usd: float) -> bool:
+            return ceiling_ok(current_usd) and meter.can_spend()
 
         from pipeline.feeds import fetch_url, html_to_text
         from pipeline.reader import chunk_text, read_source_text
@@ -620,34 +662,41 @@ def run(argv: list[str] | None = None) -> int:
             return load_document_text(doc, local=local, read_pdf=read_source_text,
                                       fetch=fetch_url, html_to_text=html_to_text)
 
-        with ChainUnchanged(chain):
-            for doc in picked:
-                if not may_continue(meter.month_spend()):
-                    print(f"STOPPED at the USD {PILOT_CEILING_USD:.0f} pilot ceiling "
-                          f"after {len(results)} document(s)")
-                    break
-                res = shadow_one_document(doc, load_text=load_text, extract=extract,
-                                          panel=panel, known_fingerprints=known,
-                                          meter=meter, chunker=chunk_text)
-                results.append(res)
-                print(f"  {res['key'][:60]}: proposed {res['proposed']}, "
-                      f"novel {res['novel']}, accepted {res['novel_accepted']}, "
-                      f"unjudged {res['novel_unjudged']}, USD {res['usd']:.3f}"
-                      + (f"  ERROR {res['error']}" if res["error"] else "")
-                      + (f"  STOPPED {res['stopped']}" if res.get("stopped") else ""))
+        try:
+            with ChainUnchanged(chain):
+                for doc in picked:
+                    if not may_continue(meter.month_spend()):
+                        print(f"STOPPED at the USD {PILOT_CEILING_USD:.0f} pilot ceiling "
+                              f"after {len(results)} document(s)")
+                        break
+                    res = shadow_one_document(doc, load_text=load_text, extract=extract,
+                                              panel=panel, known_fingerprints=known,
+                                              meter=meter, chunker=chunk_text)
+                    results.append(res)
+                    print(f"  {res['key'][:60]}: proposed {res['proposed']}, "
+                          f"novel {res['novel']}, accepted {res['novel_accepted']}, "
+                          f"unjudged {res['novel_unjudged']}, USD {res['usd']:.3f}"
+                          + (f"  ERROR {res['error']}" if res["error"] else "")
+                          + (f"  STOPPED {res['stopped']}" if res.get("stopped") else ""))
+        except RuntimeError as exc:
+            if "chain changed" not in str(exc):
+                raise
+            chain_note = str(exc)        # reported, never swallowed, never fatal
+        finally:
+            agg = aggregate(results)
+            date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            md, js = write_report(args.layer / "docs" / "runs", results=results, agg=agg,
+                                  seed=args.seed, model=model, panel_model=panel_model,
+                                  date_utc=date_utc, chain_note=chain_note)
+            print(f"report -> {md}\njson   -> {js}")
     finally:
         lock.release()
 
-    agg = aggregate(results)
-    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    md, js = write_report(args.layer / "docs" / "runs", results=results, agg=agg,
-                          seed=args.seed, model=model, date_utc=date_utc)
     verdict = verdict_for(agg)
-    print(f"\nVERDICT {verdict.upper().replace('_', ' ')} — "
-          f"{agg['novel_accepted_per_doc']:.2f} novel accepted per document, "
-          f"USD {agg['usd_total']:.2f}")
-    print(f"report -> {md}\njson   -> {js}")
-    return 0
+    print(f"\nVERDICT {verdict.upper().replace('_', ' ')} — extractor {model}, "
+          f"panel {panel_model}; {agg['novel_accepted_per_doc']:.2f} novel "
+          f"accepted per document, USD {agg['usd_total']:.2f}")
+    return 3 if verdict == "no_result" else 0
 
 
 if __name__ == "__main__":
