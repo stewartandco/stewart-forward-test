@@ -211,6 +211,10 @@ def aggregate(results: list[dict]) -> dict:
     Both accept rates are accepted / (accepted + rejected): a pending card is
     undecided, so counting it as a failure would understate the old corpus.
     The pending share is reported alongside so the exclusion is visible.
+
+    The novel accept rate is accepted / (accepted + escalated) - JUDGED cards
+    only. A card the panel never reached (a budget stop) is unjudged,
+    reported separately, and never counted as a failure.
     """
     ok = [r for r in results if not r.get("error")]
     old_acc = sum(r["old_accepted"] for r in ok)
@@ -218,16 +222,19 @@ def aggregate(results: list[dict]) -> dict:
     old_pend = sum(r["old_pending"] for r in ok)
     novel = sum(r["novel"] for r in ok)
     novel_acc = sum(r["novel_accepted"] for r in ok)
+    novel_esc = sum(r["novel_escalated"] for r in ok)
+    novel_unj = sum(r.get("novel_unjudged", 0) for r in ok)
     usd = sum(r.get("usd", 0.0) for r in results)
     return {
         "documents": len(ok),
         "errors": len(results) - len(ok),
         "old_accept_rate": _rate(old_acc, old_acc + old_rej),
         "old_pending_share": _rate(old_pend, old_acc + old_rej + old_pend),
-        "novel_accept_rate": _rate(novel_acc, novel),
+        "novel_accept_rate": _rate(novel_acc, novel_acc + novel_esc),
         "novel": novel,
         "novel_accepted": novel_acc,
-        "novel_escalated": sum(r["novel_escalated"] for r in ok),
+        "novel_escalated": novel_esc,
+        "novel_unjudged": novel_unj,
         "proposed": sum(r["proposed"] for r in ok),
         "dropped_quote_guard": sum(r["dropped_quote_guard"] for r in ok),
         "duplicate_of_existing": sum(r["duplicate_of_existing"] for r in ok),
@@ -336,7 +343,9 @@ def _blank_result(doc: dict) -> dict:
         "old_pending": doc.get("old_pending", 0),
         "proposed": 0, "dropped_quote_guard": 0, "duplicate_of_existing": 0,
         "novel": 0, "novel_accepted": 0, "novel_escalated": 0,
+        "novel_unjudged": 0,
         "escalation_reasons": [], "usd": 0.0, "error": None,
+        "text_source": None,
     }
 
 
@@ -379,6 +388,13 @@ def shadow_one_document(doc: dict, *, load_text, extract, panel,
             res["escalation_reasons"] = [
                 r for reasons in out.get("dissent_reasons", {}).values()
                 for r in reasons]
+            # Production's panel stops mid-batch when the meter refuses; the
+            # cards it never reached are UNJUDGED, not failed, and must never
+            # be folded into the accept rate.
+            res["novel_unjudged"] = (len(cards) - res["novel_accepted"]
+                                     - res["novel_escalated"])
+            if out.get("stopped"):
+                res["error"] = f"panel stopped: {out['stopped']}"
     except Exception as exc:
         res["error"] = str(exc)[:200]
     res["usd"] = round(meter.month_spend() - before_usd, 6)

@@ -271,8 +271,9 @@ def _result(**kw):
             "band": "passed", "old_cards": 0, "old_accepted": 0,
             "old_rejected": 0, "old_pending": 0, "proposed": 0,
             "dropped_quote_guard": 0, "duplicate_of_existing": 0, "novel": 0,
-            "novel_accepted": 0, "novel_escalated": 0,
-            "escalation_reasons": [], "usd": 0.0, "error": None}
+            "novel_accepted": 0, "novel_escalated": 0, "novel_unjudged": 0,
+            "escalation_reasons": [], "usd": 0.0, "error": None,
+            "text_source": None}
     base.update(kw)
     return base
 
@@ -535,3 +536,61 @@ def test_shadow_one_document_skips_the_panel_when_nothing_is_novel():
         panel=fail_panel, known_fingerprints=set(), meter=_FakeMeter(),
         chunker=lambda t: [("full document", t)])
     assert res["novel"] == 0 and res["novel_accepted"] == 0
+
+
+def test_shadow_one_document_records_a_budget_stopped_panel_as_unjudged():
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 0, "old_accepted": 0,
+           "old_rejected": 0, "old_pending": 0}
+    text = "Alpha decays. Beta persists. Gamma reverses."
+
+    def fake_extract(label, chunk):
+        return [{"claim": "Alpha claim", "quote": "Alpha decays."},
+                {"claim": "Beta claim", "quote": "Beta persists."},
+                {"claim": "Gamma claim", "quote": "Gamma reverses."}]
+
+    def stopped_panel(cards):
+        first = next(iter(cards))
+        return {"decisions": {first: ("accepted", None)}, "escalated": {},
+                "dissent_reasons": {}, "counts": {}, "stopped": "budget"}
+
+    res = shadow_one_document(doc, load_text=lambda d: (text, "fetched"),
+                              extract=fake_extract, panel=stopped_panel,
+                              known_fingerprints=set(), meter=_FakeMeter(),
+                              chunker=lambda t: [("full document", t)])
+    assert res["novel"] == 3
+    assert res["novel_accepted"] == 1
+    assert res["novel_escalated"] == 0
+    assert res["novel_unjudged"] == 2
+    assert res["error"] == "panel stopped: budget"
+
+
+def test_shadow_one_document_extracts_across_every_chunk():
+    doc = {"key": "k", "url": "u", "title": "T", "source_type": "blog",
+           "band": "passed", "old_cards": 0, "old_accepted": 0,
+           "old_rejected": 0, "old_pending": 0}
+    text = "First half sentence. Second half sentence."
+    seen_labels = []
+
+    def fake_extract(label, chunk):
+        seen_labels.append(label)
+        return [{"claim": f"claim from {label}", "quote": chunk.strip()}]
+
+    res = shadow_one_document(
+        doc, load_text=lambda d: (text, "fetched"), extract=fake_extract,
+        panel=lambda cards: {"decisions": {c: ("accepted", None) for c in cards},
+                             "escalated": {}, "dissent_reasons": {}, "counts": {},
+                             "stopped": None},
+        known_fingerprints=set(), meter=_FakeMeter(),
+        chunker=lambda t: [("chunk 1", "First half sentence."),
+                           ("chunk 2", "Second half sentence.")])
+    assert seen_labels == ["chunk 1", "chunk 2"]
+    assert res["proposed"] == 2 and res["novel"] == 2 and res["novel_accepted"] == 2
+
+
+def test_aggregate_keeps_unjudged_cards_out_of_the_accept_rate():
+    results = [_result(novel=5, novel_accepted=2, novel_escalated=1,
+                       novel_unjudged=2, usd=0.10)]
+    agg = aggregate(results)
+    assert agg["novel_accept_rate"] == pytest.approx(2 / 3)   # judged only
+    assert agg["novel_unjudged"] == 2
