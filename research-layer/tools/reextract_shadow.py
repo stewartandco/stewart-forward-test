@@ -175,7 +175,11 @@ def classify_claims(claims: list[dict], *, text: str,
     out = {"proposed": len(claims), "dropped_quote_guard": 0,
            "duplicate_of_existing": 0, "novel": []}
     for raw in claims:
-        if not quote_in_source(raw.get("quote", ""), text):
+        quote = raw.get("quote") or ""
+        # An empty quote is a guard FAILURE, not a pass: "" is a substring of
+        # every text, so quote_in_source alone would wave an unsupported
+        # claim straight into `novel`.
+        if not quote or not quote_in_source(quote, text):
             out["dropped_quote_guard"] += 1
             continue
         fp = claim_fingerprint(raw.get("claim", ""))

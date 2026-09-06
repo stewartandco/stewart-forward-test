@@ -240,3 +240,24 @@ def test_classify_claims_treats_repeats_within_one_run_as_duplicates():
 def test_classify_claims_reports_the_proposed_total():
     out = classify_claims([], text="anything", known_fingerprints=set())
     assert out["proposed"] == 0 and out["novel"] == []
+
+
+def test_classify_claims_treats_an_empty_or_missing_quote_as_a_guard_failure():
+    text = "Momentum reverses after large volume shocks."
+    claims = [
+        {"claim": "No quote at all"},
+        {"claim": "Empty quote", "quote": ""},
+        {"claim": "None quote", "quote": None},
+    ]
+    out = classify_claims(claims, text=text, known_fingerprints=set())
+    assert out["dropped_quote_guard"] == 3
+    assert out["novel"] == []
+
+
+def test_classify_claims_never_mutates_the_callers_known_fingerprints():
+    text = "Momentum reverses after large volume shocks."
+    known = {claim_fingerprint("something already held")}
+    before = set(known)
+    classify_claims([{"claim": "Brand new", "quote": text}], text=text,
+                    known_fingerprints=known)
+    assert known == before
