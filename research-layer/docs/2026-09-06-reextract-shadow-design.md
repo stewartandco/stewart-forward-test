@@ -84,6 +84,12 @@ For each sampled document:
    `restated_existing` and never reaches the panel; only what survives is `novel`.
    A document with no held cards skips the call. ~USD 0.005 per claim. This is what
    makes the "novel accepted per document" figure mean novelty rather than rewording.
+   **A failed judge call keeps the claim novel (fail open toward measuring) but is
+   COUNTED** as `judge_failures`, surfaced in the claims line and as a report WARNING:
+   an inert dedupe must never masquerade as "0 restatements" — that would be the first
+   pilot's defect reproduced with a spend attached (found in review, 2026-09-06). The
+   judge runs on the panel model with the same token ceiling as the panel, checks the
+   stop reason, and is cap-guarded like every other model call.
 6. **Judge the novel ones** with the real panel: `triage_batch.build_decisions`, which
    its own docstring states "turns pending cards into a decision list without chaining
    anything". Synthetic (unchained) card dicts go in as `pending`; `accepted` is
