@@ -357,11 +357,17 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - **The report survives an abort** (Ctrl-C, a crash, the chain moving): it is written
   from a `finally`, to `docs/runs/<date>-reextract-shadow-seed<seed>.md` plus a JSON
   sidecar, so paid work is never lost and a same-day re-run cannot overwrite it.
-- **Known limitation, stated in every report:** duplicate detection is
-  `claim_fingerprint`, normalised but not semantic, so a paraphrase of a held claim
-  counts as novel and reaches the panel. An empty or missing quote is a guard
-  FAILURE (`""` is a substring of everything), deliberately stricter than the
-  Reader's crash-on-missing-key.
+- **Duplicate detection is two-stage** (step 5b, added after the first pilot on
+  2026-09-06 returned 0 fingerprint duplicates in 41 claims from documents holding 22
+  cards): `claim_fingerprint` (normalised, not semantic) against EVERY chain card,
+  then one call on the panel model per survivor asking whether it restates a card
+  held from the SAME document. Restatements are counted (`restated_existing`) and
+  never reach the panel. **Read `judge failures N` in the claims line first:** a
+  failed judge call keeps the claim novel (fail open toward measuring) but is counted
+  and WARNED, so an inert dedupe cannot masquerade as "0 restatements". Cross-document
+  paraphrase remains the stated gap. An empty or missing quote is a guard FAILURE
+  (`""` is a substring of everything), deliberately stricter than the Reader's
+  crash-on-missing-key.
 - Exit codes: 0 measured, 2 refused (lock held, no ledger), 3 no result.
 
 ## Triage cost controls (loop stage 4a)
