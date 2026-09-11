@@ -602,10 +602,18 @@ def write_report(out_dir: Path, *, results: list[dict], agg: dict, seed: int,
         lines += ["", "## Restatements caught by the semantic dedupe (never sent to the panel)", ""]
         lines += [f"- {_cell(x)}" for x in restated]
 
-    md_path = out_dir / f"{date_utc}-reextract-shadow-seed{seed}.md"
+    # A same-day, same-seed re-run lands beside the earlier report as `-run2`,
+    # `-run3`, ... never on top of it: on 2026-09-06 pilot 2 overwrote pilot 1
+    # and the paid read survived only because it had been copied by hand.
+    stem = f"{date_utc}-reextract-shadow-seed{seed}"
+    run_no = 1
+    while (out_dir / f"{stem}.md").exists() or (out_dir / f"{stem}.json").exists():
+        run_no += 1
+        stem = f"{date_utc}-reextract-shadow-seed{seed}-run{run_no}"
+    md_path = out_dir / f"{stem}.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    js_path = out_dir / f"{date_utc}-reextract-shadow-seed{seed}.json"
+    js_path = out_dir / f"{stem}.json"
     js_path.write_text(json.dumps(
         {"date_utc": date_utc, "seed": seed, "python_version": py,
          "model": model, "panel_model": panel_model, "verdict": verdict,

@@ -1086,3 +1086,26 @@ def test_a_cap_trip_inside_the_judge_is_a_stop_not_a_failure():
         held_claims=["held"], judge=capped_judge)
     assert res["stopped"] == "monthly cap" and res["error"] is None
     assert res["judge_failures"] == 0
+
+
+def test_write_report_never_overwrites_a_same_day_same_seed_report(tmp_path):
+    # 2026-09-06: pilot 2 ran the same seed on the same day as pilot 1 and
+    # overwrote its report; the paid pilot-1 read survived only because it had
+    # been copied by hand to `-pilot1`. A same-day, same-seed re-run must land
+    # beside the earlier report, never on top of it.
+    results = [_result(key="https://a.example/x", title="Doc A", novel=4,
+                       novel_accepted=3, novel_escalated=1, proposed=6,
+                       dropped_quote_guard=1, duplicate_of_existing=1,
+                       old_accepted=5, old_rejected=1, usd=0.11)]
+    agg = aggregate(results)
+    kw = dict(results=results, agg=agg, seed=1, model="m", panel_model="p", date_utc="2026-09-06")
+    first_md, first_js = write_report(tmp_path, **kw)
+    first_bytes = first_md.read_bytes()
+    second_md, second_js = write_report(tmp_path, **kw)
+    third_md, _ = write_report(tmp_path, **kw)
+    assert second_md != first_md and second_js != first_js
+    assert second_md.name == "2026-09-06-reextract-shadow-seed1-run2.md"
+    assert second_js.name == "2026-09-06-reextract-shadow-seed1-run2.json"
+    assert third_md.name == "2026-09-06-reextract-shadow-seed1-run3.md"
+    assert first_md.read_bytes() == first_bytes, "the earlier report must be untouched"
+    assert all(p.exists() for p in (first_md, first_js, second_md, second_js, third_md))
