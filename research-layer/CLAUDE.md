@@ -39,6 +39,25 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   SAME basis; changing one side without the other re-breaks the loop in one
   direction or the other. loop.py `_triggerable_counts` decides;
   `_routable_counts` (accepted-only) is reported, never compared.
+- **Stage 0 snapshot + freshness preflight (2026-09-12, `docs/2026-09-12-loop-snapshot-stage-design.md`).**
+  Every fire that gets past the lock probes first runs
+  `python -m pipeline.tradfi_data snapshot --classes fx,equity_etf,bond_etf,metal_etf --out <layer> --ts-root <producer>`
+  (loop.SNAPSHOT_CLASSES) BEFORE the first chain read -- on `no_trigger` and budget parks too,
+  so the 08:20 quarantine daily always finds fresh cells. Skipped (printed + `snapshot_skipped=1`)
+  only when the trading-systems producer root does not exist (tests, a fresh clone). A non-zero
+  exit is `snapshot_failed` (FAIL, exit 1, escalation `run_aborted`, task retry, zero spend). Then,
+  after the orphan check and before triage, `_freshness_preflight` reads each registered cell's
+  LAST bar and runs the gauntlet's own `assert_cells_comparable`; a breach is `stale_data` (FAIL,
+  exit 1, `run_aborted`, zero spend; `stale_detail` names the cells, `data_end_by_class` names the
+  class). Both derive their cells from `screen.comparable_cells`, the one implementation the
+  gauntlet also uses. Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
+  but returns at the trigger report, before the chain verify, the orphan check and this preflight.
+  **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
+  failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
+  (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance. Staleness is now
+  SYMMETRIC: crypto's BTCUSD/ETHUSD come from the 08:20 QuarantineDaily, so if THAT stalls, crypto
+  goes stale against fresh tradfi and every fire parks at `stale_data` (zero spend, Sentinel FAIL)
+  until the crypto fetch is fixed -- read `data_end_by_class` in the status to see which class.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the

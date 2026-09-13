@@ -76,6 +76,17 @@ not intraday range; any block whose semantics REQUIRE a real high/low distinct f
 Refresh policy: a snapshot is taken at track start and then deliberately (before a
 generation run), never on a schedule — generations pin to the snapshot they were bred on.
 
+> **Amended 2026-09-12** (`docs/2026-09-12-loop-snapshot-stage-design.md`, Coen's decision):
+> the pipeline loop IS the generation run and fires unattended, so "deliberately before a
+> generation run" is done by the loop itself as its stage 0, on every fire. The pinning half
+> is unchanged and is stronger than this paragraph said: what binds a generation to its data
+> is the per-cell `data_sha256` the screen and the gauntlet chain with every verdict (the
+> "records the snapshot id in its universe provenance" sentence above was never implemented in
+> composer/registry; the hash is what exists). There is still no separate schedule for the
+> snapshot. A hand `tradfi_data snapshot` is a repair, not a routine. Why: the 2026-09-11
+> 22:30 cycle refused in the gauntlet (fx 20 days behind crypto) because the last hand
+> snapshot was eleven days old.
+
 ## 4. Composer routing (rule 1, made executable)
 
 A declared table in `pipeline/composer.py` — data, not inference:
