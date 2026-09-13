@@ -503,6 +503,12 @@ def _gauntlet_orphans(registry: Registry) -> list[str]:
                   if st == "gauntlet" and sid in verdicted)
 
 
+def _clip(text: str, n: int = 800) -> str:
+    """Keep the head (assert_cells_comparable lists day-groups ascending, so
+    the STALE cells come first) and make a cut audible in the digest."""
+    return text if len(text) <= n else f"{text[:n]} [+{len(text) - n} chars truncated]"
+
+
 def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None, dict[str, str]]:
     """(problem, items). problem is None when every cell the gauntlet will
     compare ends within the cross-class allowance; otherwise the text
@@ -515,11 +521,37 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
     2026-09-11 that cost USD 1.90 and the month's last cycle. With stage 0
     in front of this check, staleness now means the source lags beyond its
     declared max_end_lag_days or a cell vanished -- a defect, never weather.
+
+    Only FileNotFoundError is caught below, deliberately. A locked or
+    half-written price file (AV, a concurrent snapshot writer, a torn handle)
+    raises PermissionError/OSError instead, and that must surface as
+    loop_crashed with the path and WinError attached, not stale_data --
+    stale_data's advice ("re-fetch to a common end date") is actively wrong
+    for a file that is already there and merely unreadable right now.
+
+    The `from .screen import` below stays local on purpose, the same
+    convention gauntlet.py's own screen import follows: the no_trigger
+    majority of fires never reach this line, so they never pay for pulling
+    in screen.py's dependency chain.
     """
     from .screen import assert_cells_comparable, cell_end_dates, comparable_cells
     all_specs = [e["payload"] for e in registry.entries()
                  if e["entry_type"] == "strategy_registered"]
-    cells_needed, class_of = comparable_cells(all_specs)
+    try:
+        cells_needed, class_of = comparable_cells(all_specs)
+    except KeyError:
+        # A spec with no universe.assets at all -- e.g. a hand-appended chain
+        # entry -- must not be silently dropped from the compared set
+        # (exactly what assert_cells_comparable's own docstring forbids one
+        # layer up); name it and let this escape to run()'s catch-all as
+        # loop_crashed, never soften it into stale_data.
+        bad = next((s for s in all_specs
+                   if not isinstance(s.get("universe"), dict)
+                   or "assets" not in s["universe"]), None)
+        sid = bad.get("strategy_id") if bad else None
+        raise ValueError(
+            f"registered spec {sid!r} has no universe.assets; the chain "
+            f"holds a spec the composer's schema forbids") from None
     if not cells_needed:
         return None, {}
     try:
@@ -528,6 +560,17 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
         return str(exc), {}
     days = sorted(e[:10] for e in ends.values() if e)
     items = {"data_end_min": days[0], "data_end_max": days[-1]} if days else {}
+    # Per-class end dates: data_end_min/max span EVERY class, so a within-
+    # class failure (one class's cells stale against each other) reads
+    # identically to a cross-class one. Broken out per class so the digest
+    # can tell which class actually lags.
+    by_cls: dict[str, list[str]] = {}
+    for cid, e in ends.items():
+        if e:
+            by_cls.setdefault(class_of.get(cid, "?"), []).append(e[:10])
+    items["data_end_by_class"] = "; ".join(
+        f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
+        for c, v in sorted(by_cls.items()))
     try:
         assert_cells_comparable(ends, class_of=class_of)
     except ValueError as exc:
@@ -1187,7 +1230,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     if problem is not None:
         print(f"stale_data: {problem}", flush=True)
         _write_status(logs_dir, "stale_data", overall="FAIL",
-                      extra={"stale_detail": problem[:400], **fresh_items,
+                      extra={"stale_detail": _clip(problem), **fresh_items,
                              "asset_class": asset_class},
                       spent=_spent(logs_dir), escalations=["run_aborted"],
                       state=state, counts=trigger_counts)

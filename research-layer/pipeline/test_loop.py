@@ -1596,10 +1596,11 @@ def test_a_clean_chain_has_no_orphans_and_proceeds(tmp_path):
     the normal completed case, not an orphan."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    # universe.assets must be present (even empty) for the 4.0c freshness
-    # preflight's comparable_cells to iterate this entry without crashing --
-    # this raw append predates that requirement and (unlike register_strategy
-    # specs) is never routed through validation that would supply one.
+    # "universe": {"assets": []} is deliberately INERT and deliberately not a
+    # shape any real spec has -- the composer's own schema requires a
+    # non-empty assets list. It exists purely so comparable_cells has an
+    # entry to iterate with nothing in it to compare: this test's point is
+    # the orphan preflight, not the freshness one.
     reg.append("strategy_registered", {"strategy_id": "done-sid",
                                        "universe": {"assets": []}})
     reg.append("state_change", {"strategy_id": "done-sid", "from": "proposed",
@@ -2259,6 +2260,7 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert "AUD_1d" in status["items"]["stale_detail"]
     assert status["items"]["data_end_min"] == "2026-08-21"
     assert status["items"]["data_end_max"] == "2026-09-10"
+    assert status["items"]["data_end_by_class"] == "crypto:2026-09-10; fx:2026-08-21"
     assert "run_aborted" in status["escalations"]
     assert status["push"] is True
     assert "triggerable_fx" in status["items"]     # after the chain read, so counts present
@@ -2269,7 +2271,7 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert "watermark" not in st.get("classes", {}).get("fx", {})     # nothing banked
 
 
-def test_fresh_data_passes_the_preflight_and_the_stage_argv_is_unchanged(tmp_path):
+def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp_path):
     layer = _layer_with_two_registered_cells(tmp_path, "2026-09-04 00:00:00",
                                              "2026-09-10 00:00:00")   # 6 days, allowed
     fr = FakeRunner()
@@ -2301,5 +2303,60 @@ def test_no_registered_specs_means_nothing_to_compare(tmp_path):
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     assert _modules(fr)[0] == "pipeline.triage_batch"
+
+
+def test_stale_detail_is_clipped_with_a_marker_not_silently():
+    """assert_cells_comparable lists day-groups ascending, so the STALE cells
+    come first in `problem`; a wide cell set can still overrun a status item
+    the digest scrolls past. The clip must be AUDIBLE -- a truncated detail
+    that reads like a complete one would hide exactly the cells a human most
+    needs to see."""
+    clipped = loop._clip("x" * 900)
+    marker = " [+100 chars truncated]"
+    assert clipped.endswith(marker)
+    assert len(clipped) == 800 + len(marker)
+    assert loop._clip("short") == "short"
+
+
+def test_a_registered_spec_without_a_universe_names_itself_in_the_crash(tmp_path):
+    """comparable_cells raises KeyError on a spec with no universe.assets --
+    a hand-appended (or otherwise malformed) chain entry the composer's own
+    schema would never produce. Silently dropping it from the compared set
+    is exactly what assert_cells_comparable's docstring forbids, one layer
+    up -- so this must crash loudly, naming the offending strategy_id, never
+    get reinterpreted as an ordinary stale_data park."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    register_example_blocks(reg)
+    reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
+    reg.append("strategy_registered", {"strategy_id": "bad-sid",
+                                       "provenance": {"card_ids": ["card0001"]}})
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []                     # nothing metered ran
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "loop_crashed"
+    assert "bad-sid" in status["items"]["error"]
+
+
+def test_stage0_runs_before_the_freshness_preflight_on_a_stale_tree(tmp_path, monkeypatch):
+    """Stage 0 is the ONLY thing that can fix staleness (it refreshes the
+    tradfi cells), so it must run even on a fire the freshness preflight is
+    about to reject -- a preflight ordered first would refuse forever on
+    data stage 0 never got the chance to refresh."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "stale_data"
+    assert _modules(fr) == ["pipeline.tradfi_data"]        # stage 0 ran, nothing metered did
 
 
