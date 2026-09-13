@@ -1,10 +1,12 @@
 @echo off
 REM Quarantine -> live gate, per the chained quarantine-live-protocol-v1.
 REM
-REM Registered as Scheduled Task \StewartCo\26_LiveGateWeekly, WEEKLY Sunday
-REM 09:10 local. To (re)create (elevated):
-REM   schtasks /Create /TN "StewartCo\26_LiveGateWeekly" /TR "E:\Users\Coen\Claude\stewart-forward-test\research-layer\tasks\run_livegate.bat" /SC WEEKLY /D SUN /ST 09:10
-REM   then: powershell -ExecutionPolicy Bypass -File E:\Users\Coen\Claude\quant\tasks\apply_retry_settings.ps1 -Task 26_LiveGateWeekly
+REM Registered as Scheduled Task \Morpheus\26_LiveGateWeekly, WEEKLY Sunday
+REM 09:10 local. Moved from \StewartCo\ on 2026-09-13. To (re)create (elevated):
+REM   E:\Users\Coen\Claude\morpheus-hub\tasks\setup_morpheus_scheduler.bat
+REM   then: powershell -ExecutionPolicy Bypass -File E:\Users\Coen\Claude\morpheus-hub\tasks\apply_retry_settings.ps1 -Task 26_LiveGateWeekly
+REM NOT a lone schtasks /Create: that registers with NO retry. The registrar
+REM reads the exported XML in morpheus-hub\tasks\xml\ and is the decision record.
 REM
 REM WHY WEEKLY, NOT DAILY: the note says "at each assessment the eligible
 REM strategies form a cohort" and charges Benjamini-Hochberg over that cohort.

@@ -1,9 +1,11 @@
 @echo off
 REM Quarantine forward test -- records ONE completed trading day, daily.
 REM
-REM Registered as Scheduled Task \StewartCo\23_QuarantineDaily, daily 08:20 local
-REM (00:20 UTC). To (re)create:
-REM   schtasks /Create /TN "StewartCo\23_QuarantineDaily" /TR "E:\Users\Coen\Claude\stewart-forward-test\research-layer\tasks\run_quarantine.bat" /SC DAILY /ST 08:20
+REM Registered as Scheduled Task \Morpheus\23_QuarantineDaily, daily 08:20 local
+REM (00:20 UTC). Moved from \StewartCo\ on 2026-09-13. To (re)create (elevated):
+REM   E:\Users\Coen\Claude\morpheus-hub\tasks\setup_morpheus_scheduler.bat
+REM NOT a lone schtasks /Create: that registers with NO retry. 23 is in
+REM $NO_RETRY_BY_DESIGN in that folder's applier, so it takes no retry pass.
 REM
 REM WHY 00:20 UTC: a decision for date D describes what the book did on D's bar,
 REM and D's daily bar does not close until 00:00 UTC on D+1. Running at 00:20 UTC

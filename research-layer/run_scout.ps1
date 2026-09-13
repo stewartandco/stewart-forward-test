@@ -1,4 +1,4 @@
-# Weekly source scout (StewartCo\22_SourceScout). One-shot; safe to run manually.
+# Weekly source scout (\Morpheus\22_SourceScout). One-shot; safe to run manually.
 $layer = Split-Path -Parent $MyInvocation.MyCommand.Path
 $log = Join-Path $layer "logs\scout.log"
 New-Item -ItemType Directory -Force (Join-Path $layer "logs") | Out-Null

@@ -7,7 +7,7 @@ watchlist. This widens discovery beyond the citation graph of verified sources
 fully human.
 
     python -m pipeline.scout            # one run (scheduled weekly:
-                                        # StewartCo\\22_SourceScout)
+                                        # \\Morpheus\\22_SourceScout)
 """
 from __future__ import annotations
 
