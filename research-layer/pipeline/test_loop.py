@@ -2025,7 +2025,7 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     own stage 0, before anything reads the chain."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    _with_producer(monkeypatch, tmp_path)
+    root = _with_producer(monkeypatch, tmp_path)
     fr = FakeRunner()
 
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
@@ -2039,6 +2039,7 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     assert argv[argv.index("--classes") + 1] == "fx,equity_etf,bond_etf,metal_etf"
     assert argv[argv.index("--classes") + 1] == ",".join(loop.SNAPSHOT_CLASSES)
     assert argv[argv.index("--out") + 1] == str(layer)
+    assert argv[argv.index("--ts-root") + 1] == str(root)
     assert fr.call_kwargs[0]["cwd"] == str(layer)
     assert _modules(fr) == ["pipeline.tradfi_data", "pipeline.triage_batch",
                             "pipeline.composer", "pipeline.composer",
@@ -2093,9 +2094,10 @@ def test_stage0_runs_on_a_no_trigger_fire_and_on_a_budget_park(tmp_path, monkeyp
 
 
 def test_stage0_runs_under_dry_run(tmp_path, monkeypatch):
-    """A dry run that reported 'would fire' on stale data would be lying
-    about what the real fire will do. The snapshot writes data/, never the
-    chain, so the dry run takes it too."""
+    """A dry run runs no metered stage and does not reach the freshness
+    preflight either; stage 0 still runs, so a dry run in the live tree
+    refreshes data/ exactly as a real fire would (the live proof relies on
+    this)."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     _with_producer(monkeypatch, tmp_path)
@@ -2125,7 +2127,8 @@ def test_stage0_failure_ends_the_fire_before_any_chain_read(tmp_path, monkeypatc
     assert status["items"]["outcome"] == "snapshot_failed"
     assert status["items"]["snapshot_rc"] == "1"
     assert "triggerable_fx" not in status["items"]        # before the chain read
-    assert "snapshot_failed" in status.get("escalations", [])
+    assert "run_aborted" in status["escalations"]
+    assert status["push"] is True
 
 
 def test_stage0_is_skipped_without_a_producer_root(tmp_path, capsys):
@@ -2157,5 +2160,47 @@ def test_status_carries_the_snapshot_utc_of_the_manifest_on_disk(tmp_path, monke
     assert status["items"]["outcome"] == "no_trigger"
     assert status["items"]["snapshot_utc"] == "2026-09-12T14:30:05+00:00"
     assert "snapshot_skipped" not in status["items"]
+
+
+def test_stage0_failure_never_reports_a_stale_manifest_s_snapshot_utc(tmp_path, monkeypatch):
+    """A failed adapter run must not let a PRIOR (now-stale) manifest's
+    snapshot_utc leak into this cycle's status -- _snapshot_items is only
+    ever consulted on rc == 0 (see _snapshot_stage), so a failure reports no
+    snapshot_utc at all rather than an honest-looking but stale one."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    (layer / "data").mkdir()
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-01T00:00:00+00:00", "series": {}}), encoding="utf-8")
+    fr = FakeRunner(codes={"pipeline.tradfi_data": 1})
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "snapshot_failed"
+    assert "snapshot_utc" not in status["items"]
+
+
+def test_cycle_items_do_not_leak_between_runs_in_one_process(tmp_path, monkeypatch):
+    """_cycle_items is a module-level dict, cleared at the top of run(). A
+    missing or misplaced clear() would let one run's items (snapshot_skipped
+    here) survive into the next run() call in the same process -- exactly
+    the kind of bug a fresh-process test suite would never catch."""
+    (tmp_path / "a").mkdir()
+    layer1, _ = _mk_layer(tmp_path / "a", accepted_fx=0)
+    fr1 = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer1)], runner=fr1) == 0
+    status1 = json.loads((layer1 / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status1["items"]["snapshot_skipped"] == "1"
+
+    (tmp_path / "b").mkdir()
+    layer2, _ = _mk_layer(tmp_path / "b", accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    fr2 = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer2)], runner=fr2) == 0
+    status2 = json.loads((layer2 / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert "snapshot_skipped" not in status2["items"]
 
 

@@ -50,6 +50,7 @@ from .budget import BudgetMeter, PIPELINE_CAP_USD
 from .chainlock import ChainLock, ChainLockHeld
 from .composer import expand_family, expander_for, routable_cards
 from .registry import Registry
+from .tradfi_data import DEFAULT_TS_ROOT
 
 LAYER_DEFAULT = Path(__file__).resolve().parent.parent
 Runner = Callable[..., object]
@@ -154,6 +155,13 @@ SNAPSHOT_CLASSES = ("fx", "equity_etf", "bond_etf", "metal_etf")
 
 # Items that belong to THIS run and must appear on every status path written
 # after they are known (snapshot_skipped, snapshot_utc). Reset at run() start.
+#
+# Three invariants: (1) written only from inside a run() call -- a second
+# entry point must move the clear() there too, or its items leak into the
+# next run(); (2) values are str, like every other status item; (3) merged
+# BEFORE extra in _write_status, so a per-path extra key wins over one of
+# these (Task 4's stale_detail, once it exists, goes through extra for
+# exactly this reason).
 _cycle_items: dict[str, str] = {}
 
 
@@ -624,8 +632,9 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
     them, not just no_trigger: CLAUDE.md documents both series as always
     present, and a digest that can only see them when nothing fired cannot
     tell an undrained pending backlog from a healthy one. Paths that run
-    before the counts are computed (the lock probes, loop_crashed) legitimately
-    omit them -- they have no chain read to report."""
+    before the counts are computed -- the lock probes, snapshot_failed,
+    loop_crashed -- legitimately omit them: they have no chain read to
+    report."""
     items: dict[str, str] = {"outcome": outcome,
                              # Emitted on EVERY path, not just the three
                              # budget-blocked ones -- otherwise "ok" is a
@@ -653,9 +662,7 @@ def _stage(runner: Runner, argv: list[str], cwd: str | Path) -> int:
 
 def _producer_root() -> Path:
     """The trading-systems repo the tradfi adapter reads from: the env var
-    the adapter itself honours, else its default. Imported lazily: the
-    adapter pulls in pandas, which the loop otherwise never needs."""
-    from .tradfi_data import DEFAULT_TS_ROOT
+    the adapter itself honours, else its default."""
     return Path(os.environ.get("TRADING_SYSTEMS_ROOT") or DEFAULT_TS_ROOT)
 
 
@@ -672,21 +679,28 @@ def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
         return None
     rc = _stage(runner, [sys.executable, "-m", "pipeline.tradfi_data", "snapshot",
                          "--classes", ",".join(SNAPSHOT_CLASSES),
-                         "--out", str(layer)], cwd=layer)
+                         "--out", str(layer), "--ts-root", str(root)], cwd=layer)
     if rc == 0:
-        _cycle_items.update(_snapshot_items(layer))
+        items = _snapshot_items(layer)
+        if not items:
+            print("snapshot_warning: adapter exited 0 but "
+                  "data/tradfi_snapshot_manifest.json carries no snapshot_utc",
+                  flush=True)
+        _cycle_items.update(items)
     return rc
 
 
 def _snapshot_items(layer: Path) -> dict[str, str]:
     """`snapshot_utc` from the manifest the adapter just rewrote, so the
-    digest can say which snapshot a cycle was bred on. Absent or unreadable
-    manifest -> no item (the FakeRunner writes nothing; a real run always
-    does)."""
+    digest can say which snapshot a cycle was bred on. Absent, unreadable or
+    malformed manifest -> no item (the FakeRunner writes nothing; a real run
+    always does). AttributeError/TypeError alongside OSError/ValueError: a
+    manifest whose top level parses as a list (or anything else without
+    .get) must not turn an otherwise-successful cycle into loop_crashed."""
     p = layer / "data" / "tradfi_snapshot_manifest.json"
     try:
         utc = json.loads(p.read_text(encoding="utf-8")).get("snapshot_utc")
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, TypeError):
         return {}
     return {"snapshot_utc": str(utc)} if utc else {}
 
@@ -864,7 +878,10 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     ap.add_argument("--layer", type=Path, default=LAYER_DEFAULT,
                     help="research-layer root (holds registry_log.jsonl and logs/)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="report whether a class would fire; run nothing")
+                    help="report whether a class would fire and run no "
+                         "metered stage. Stage 0 (the tradfi snapshot into "
+                         "data/) still runs: a dry run in the live tree is "
+                         "the cheap way to refresh the cells.")
     args = ap.parse_args(argv)
     _cycle_items.clear()
 
@@ -1020,7 +1037,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
               flush=True)
         _write_status(logs_dir, "snapshot_failed", overall="FAIL",
                       extra={"snapshot_rc": str(snap_rc)},
-                      spent=_spent(logs_dir), escalations=["snapshot_failed"],
+                      spent=_spent(logs_dir), escalations=["run_aborted"],
                       state=state)
         return 1
 

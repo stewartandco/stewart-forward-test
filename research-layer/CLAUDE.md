@@ -13,7 +13,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
 
 ## Pipeline loop (25_PipelineLoop)
 - python -m pipeline.loop --once from the layer root; --dry-run reports the
-  trigger decision without running anything; --seed-watermarks initialises
+  trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
+  data/) still runs, so a dry run in the live tree refreshes the cells;
+  --seed-watermarks initialises
   every class watermark to the current corpus (ACTIVATION step -- prevents a
   whole-corpus generation on first fire).
 - **DO NOT run --seed-watermarks after the 2026-08-29 trigger fix.** It seeds
@@ -44,9 +46,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   Items carry BOTH routable_<cls> (accepted-only) and triggerable_<cls>
   (accepted+pending) per class -- a large gap between them is an undrained
   pending backlog. Present on every path that has read the chain (no_trigger,
-  dry_run, cycle_complete, stage_failed, the budget/lock defers); the three
-  paths that run BEFORE the chain read -- the two startup lock probes and
-  loop_crashed -- legitimately omit them.
+  dry_run, cycle_complete, stage_failed, the budget/lock defers); the paths
+  that run BEFORE the chain read -- the two startup lock probes,
+  snapshot_failed, and loop_crashed -- legitimately omit them.
+  `data/tradfi_snapshot_manifest.json` is a TRACKED file that stage 0
+  rewrites on every fire, and the loop's own scoped commit never includes it
+  -- so it shows as modified on a shared working tree. That is expected;
+  never `git checkout --` it from another session. (The CSVs under data/ are
+  gitignored.)
 - `budget_state` item: ok | batch_stop (80% line) | hard_cap. Written on
   EVERY status path, not just the budget-blocked ones, so "ok" is a value
   that actually appears. A budget park also stamps `last_park_ts_utc` in
