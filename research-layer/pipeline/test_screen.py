@@ -1105,3 +1105,33 @@ def test_last_csv_date_walks_back_across_chunk_boundaries(tmp_path):
                           "2026-09-10 00:00:00,1,1,1,1,1\n"
                           + "\n" * 9000, encoding="utf-8")
     assert screen._last_csv_date(blank_tail) == "2026-09-10 00:00:00"
+
+
+# ─── comparable_cells (moved out of gauntlet.run, 2026-09-12 spec §3) ────────
+
+
+def test_comparable_cells_derives_cells_and_classes_from_each_spec_s_own_universe():
+    """The gauntlet derived (cells_needed, class_of) inline; the loop's
+    preflight needs the identical derivation, so it lives in ONE function.
+    Class comes from the spec's own universe.asset_class (default 'crypto'),
+    never from cells.class_of_asset: production crypto specs register legacy
+    BTCUSD/ETHUSD, which are not members of the USDT grid."""
+    from .screen import comparable_cells
+    specs = [
+        {"universe": {"assets": ["AUD", "EUR"], "asset_class": "fx", "timeframe": "1d"}},
+        {"universe": {"assets": ["BTCUSD", "ETHUSD"]}},                 # no class, no tf
+        {"universe": {"assets": ["AUD"], "asset_class": "fx", "timeframe": "1d"}},  # duplicate cell
+        {"universe": {"assets": ["SPY"], "asset_class": "equity_etf", "timeframe": "4h"}},
+    ]
+
+    cells_needed, class_of = comparable_cells(specs)
+
+    assert cells_needed == [("AUD", "1d"), ("BTCUSD", "1d"), ("ETHUSD", "1d"),
+                            ("EUR", "1d"), ("SPY", "4h")]
+    assert class_of == {"AUD_1d": "fx", "EUR_1d": "fx", "BTCUSD_1d": "crypto",
+                        "ETHUSD_1d": "crypto", "SPY_4h": "equity_etf"}
+
+
+def test_comparable_cells_of_nothing_is_nothing():
+    from .screen import comparable_cells
+    assert comparable_cells([]) == ([], {})

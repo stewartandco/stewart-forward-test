@@ -998,7 +998,8 @@ def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
 
 def run(argv: list[str] | None = None) -> int:
     import hashlib
-    from .screen import assert_cells_comparable, bundle_hash, load_cell_data
+    from .screen import (assert_cells_comparable, bundle_hash, comparable_cells,
+                         load_cell_data)
 
     t_run0 = time.time()          # SP4 Task P5: final stage-timings summary
 
@@ -1087,29 +1088,12 @@ def run(argv: list[str] | None = None) -> int:
                                    deadline_utc=args.deadline_utc, stopped_at_deadline=True)
         return 0
 
-    # A CELL is (asset, timeframe), same as the screen. This used to load
-    # `_1d` for every spec and hash by bare asset, so a 15m spec would have
-    # been gauntleted on daily bars while the manifest named the cell, and two
-    # cells of one asset would have overwritten each other's hash. Latent while
-    # all 80 registered specs were 1d; live the moment gen-4 uses the grid.
-    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
-                           for s in all_specs for a in s["universe"]["assets"]})
+    # A CELL is (asset, timeframe), same as the screen; the derivation and
+    # the class-per-cell rule live in screen.comparable_cells (2026-09-12) so
+    # the loop's pre-spend freshness preflight cannot drift from this check.
+    cells_needed, class_of = comparable_cells(all_specs)
     bars_by_cell, data_hashes, data_end = load_cell_data(
         args.data_dir, cells_needed, "9999-12-31")          # full history
-
-    # cell_id -> asset class, read from each spec's OWN declared universe
-    # rather than cells.class_of_asset: production crypto specs register
-    # legacy BTCUSD/ETHUSD tickers that are not members of cells.CLASSES's
-    # ...USDT grid (spec s10.9), so deriving class from the ticker would
-    # raise on every one of them. asset_class already travels on every
-    # registered spec's universe (composer stamps it; legacy fixtures declare
-    # it explicitly too), so reading it back is both safe and exact.
-    class_of: dict[str, str] = {}
-    for s in all_specs:
-        tf = s["universe"].get("timeframe", "1d")
-        cls = s["universe"].get("asset_class", "crypto")
-        for a in s["universe"]["assets"]:
-            class_of[cells.cell_id(a, tf)] = cls
 
     # This stage COMPARES: clustering pools trials registry-wide, CSCV runs
     # over a sibling family, and plateau selection ranks neighbours. Comparing

@@ -152,6 +152,32 @@ def _last_csv_date(path: Path, chunk: int = 4096) -> str:
     return last.split(",", 1)[0].strip()
 
 
+def comparable_cells(all_specs) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """(cells_needed, class_of) for the set of registered specs the gauntlet
+    compares registry-wide. Moved here from gauntlet.run() on 2026-09-12 so
+    the loop's pre-spend preflight and the gauntlet's own check derive the
+    same cells by the same rule and cannot drift.
+
+    A CELL is (asset, timeframe), same as the screen. Timeframe defaults to
+    '1d'. The class is read from each spec's OWN declared universe
+    (`asset_class`, default 'crypto'), never from cells.class_of_asset:
+    production crypto specs register legacy BTCUSD/ETHUSD tickers that are
+    not members of cells.CLASSES's USDT grid (spec s10.9), so deriving the
+    class from the ticker would raise on every one of them. asset_class
+    already travels on every registered spec's universe (the composer stamps
+    it; legacy fixtures declare it explicitly too).
+    """
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in all_specs for a in s["universe"]["assets"]})
+    class_of: dict[str, str] = {}
+    for s in all_specs:
+        tf = s["universe"].get("timeframe", "1d")
+        cls = s["universe"].get("asset_class", "crypto")
+        for a in s["universe"]["assets"]:
+            class_of[cell_id(a, tf)] = cls
+    return cells_needed, class_of
+
+
 def assert_cells_comparable(data_end: dict[str, str],
                             class_of: dict[str, str] | None = None) -> None:
     """Refuse to compare cells whose data stops on different DAYS.
