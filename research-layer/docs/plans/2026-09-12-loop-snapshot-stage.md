@@ -714,10 +714,12 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert "AUD_1d" in status["items"]["stale_detail"]
     assert status["items"]["data_end_min"] == "2026-08-21"
     assert status["items"]["data_end_max"] == "2026-09-10"
-    assert "stale_data" in status.get("escalations", [])
+    assert "run_aborted" in status["escalations"]   # a PUSH_TRIGGERS member; "stale_data" is not
+    assert status["push"] is True
     assert "triggerable_fx" in status["items"]     # after the chain read, so counts present
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
-    assert st["classes"]["fx"]["watermark"] == 0     # nothing banked
+    # nothing banked: a stale abort never creates classes["fx"] at all
+    assert "watermark" not in st.get("classes", {}).get("fx", {})
 
 
 def test_fresh_data_passes_the_preflight_and_the_stage_argv_is_unchanged(tmp_path):
@@ -808,7 +810,7 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
         _write_status(logs_dir, "stale_data", overall="FAIL",
                       extra={"stale_detail": problem[:400], **fresh_items,
                              "asset_class": asset_class},
-                      spent=_spent(logs_dir), escalations=["stale_data"],
+                      spent=_spent(logs_dir), escalations=["run_aborted"],
                       state=state, counts=trigger_counts)
         return 1
 ```
