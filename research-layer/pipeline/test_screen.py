@@ -980,19 +980,50 @@ def test_cell_end_dates_matches_load_cell_data_s_data_end(tmp_path):
                     "BTCUSD_1d": "2026-09-10 00:00:00"}
 
 
-def test_cell_end_dates_reads_only_the_tail(tmp_path):
-    """A 10 MB file with an unparseable FIRST data line still answers: the
-    helper must never read the whole file (the live tree holds 140 cells,
-    some with 11,000+ rows, and the preflight runs on every fire)."""
-    from .screen import cell_end_dates
+def test_cell_end_dates_reads_only_the_tail(tmp_path, monkeypatch):
+    """A ~5.9 MB file with an unparseable FIRST data line still answers --
+    and this asserts it by counting actual bytes pulled off disk, not just by
+    picking an input that happens to answer correctly if read whole (a file
+    read end-to-end would still return the right date; that proves nothing
+    about tail-only reading). The helper must never approach reading the
+    whole file: the live tree holds 140 cells, some with 11,000+ rows, and
+    the preflight runs on every fire.
+
+    `Path.open` is wrapped for the duration of this test only, and every
+    `.read(n)` on the returned file object is recorded. `_last_csv_date`
+    walks backward in <=4096-byte steps and stops within a couple of chunks
+    once it has two non-blank lines, so the total bytes read must stay near
+    4096, nowhere near the multi-megabyte fixture."""
+    from . import screen
     p = tmp_path / "SPY_1d.csv"
     junk = "this,is,not,a,bar,row\n"
     good = "".join(f"2020-01-{d:02d} 00:00:00,1,1,1,1,1\n" for d in range(1, 29))
-    filler = good * 400          # ~1 MB of valid rows so the tail is far from the head
+    filler = good * 7000        # 28 rows/block * 7000 ~= 5.9 MB of valid rows
     p.write_text("date,open,high,low,close,volume\n" + junk + filler
                  + "2026-09-10 00:00:00,1,1,1,1,1\n", encoding="utf-8")
+    assert p.stat().st_size >= 5 * 1024 * 1024        # the fixture really is multi-MB
 
-    assert cell_end_dates(tmp_path, [("SPY", "1d")]) == {"SPY_1d": "2026-09-10 00:00:00"}
+    read_lengths: list[int] = []
+    real_open = Path.open
+
+    def spy_open(self, *args, **kwargs):
+        fh = real_open(self, *args, **kwargs)
+        real_read = fh.read
+
+        def spy_read(n=-1):
+            result = real_read(n)
+            read_lengths.append(len(result))
+            return result
+
+        fh.read = spy_read
+        return fh
+
+    monkeypatch.setattr(Path, "open", spy_open)
+
+    result = screen.cell_end_dates(tmp_path, [("SPY", "1d")])
+
+    assert result == {"SPY_1d": "2026-09-10 00:00:00"}
+    assert sum(read_lengths) <= 3 * 4096
 
 
 def test_cell_end_dates_tolerates_a_trailing_blank_line(tmp_path):
@@ -1017,3 +1048,60 @@ def test_cell_end_dates_header_only_file_is_an_empty_end(tmp_path):
     from .screen import cell_end_dates
     (tmp_path / "AUD_1d.csv").write_text("date,open,high,low,close,volume\n", encoding="utf-8")
     assert cell_end_dates(tmp_path, [("AUD", "1d")]) == {"AUD_1d": ""}
+
+    # A UTF-8 BOM on a header-only file must not survive as part of the
+    # "last line" -- '﻿date,...' does not start with 'date,', so an
+    # unstripped BOM would make this report a header-only file as non-empty.
+    (tmp_path / "EUR_1d.csv").write_text("date,open,high,low,close,volume\n",
+                                          encoding="utf-8-sig")
+    assert cell_end_dates(tmp_path, [("EUR", "1d")]) == {"EUR_1d": ""}
+
+
+def test_cell_end_dates_assumes_ascending_rows_and_diverges_when_they_are_not(tmp_path):
+    """NAMED divergence (cell_end_dates docstring), not a bug to "fix" by
+    reading the whole file. cell_end_dates trusts ascending-date rows --
+    every producer in this repo writes them that way -- and answers from the
+    physically last row. load_cell_data sorts and reports the max date. On
+    an out-of-order CSV the two disagree, and cell_end_dates reports the
+    EARLIER date: exactly the shape that can shrink a cross-class gap and
+    let a stale tree pass the loop's preflight. The gauntlet's own
+    assert_cells_comparable on the full (sorted) load is the backstop."""
+    from .screen import cell_end_dates, load_cell_data
+    p = tmp_path / "AUD_1d.csv"
+    p.write_text("date,open,high,low,close,volume\n"
+                 "2026-09-10 00:00:00,1,1,1,1,1\n"
+                 "2026-09-09 00:00:00,1,1,1,1,1\n", encoding="utf-8")
+
+    ends = cell_end_dates(tmp_path, [("AUD", "1d")])
+    loaded_end = load_cell_data(tmp_path, [("AUD", "1d")], "9999-12-31")[2]
+
+    assert ends == {"AUD_1d": "2026-09-09 00:00:00"}
+    assert loaded_end == {"AUD_1d": "2026-09-10 00:00:00"}
+    assert ends["AUD_1d"] != loaded_end["AUD_1d"]
+
+
+def test_last_csv_date_walks_back_across_chunk_boundaries(tmp_path):
+    """The backward walk must keep widening past a single 4096-byte chunk
+    when the content that matters spans more than one -- exercised nowhere
+    else in this file, since every other fixture's rows are short enough to
+    resolve on the very first backward read.
+
+    Two shapes: (1) the LAST line itself is longer than one chunk, so the
+    walk must not truncate its front edge (the file's own end already
+    guarantees the line's back edge is intact); (2) a long blank tail after
+    the last data row must not be mistaken for "nothing more to read"."""
+    from . import screen
+
+    wide = tmp_path / "WIDE_1d.csv"
+    long_tail = "2026-09-10 00:00:00," + "9," * 6000 + "9\n"
+    wide.write_text("date,open,high,low,close,volume\n"
+                    "2026-01-01 00:00:00,1,1,1,1,1\n"
+                    + long_tail, encoding="utf-8")
+    assert screen._last_csv_date(wide) == "2026-09-10 00:00:00"
+    assert screen._last_csv_date(wide, chunk=16) == "2026-09-10 00:00:00"
+
+    blank_tail = tmp_path / "BLANKTAIL_1d.csv"
+    blank_tail.write_text("date,open,high,low,close,volume\n"
+                          "2026-09-10 00:00:00,1,1,1,1,1\n"
+                          + "\n" * 9000, encoding="utf-8")
+    assert screen._last_csv_date(blank_tail) == "2026-09-10 00:00:00"

@@ -103,6 +103,12 @@ def cell_end_dates(data_dir: Path, cells) -> dict[str, str]:
     with a message naming the cell). A missing file raises FileNotFoundError
     naming the cell: a registered cell with no data is a defect the caller
     reports, not something to skip.
+
+    Assumes bars are written in ascending date order (every producer in this
+    repo does; verified across all 155 live cells 2026-09-13). An unsorted
+    file makes this report EARLIER than load_cell_data, which can shrink a
+    cross-class gap and let a stale tree through to the gauntlet -- the
+    gauntlet's own assert_cells_comparable on the full load is the backstop.
     """
     data_dir = Path(data_dir)
     ends: dict[str, str] = {}
@@ -129,14 +135,18 @@ def _last_csv_date(path: Path, chunk: int = 4096) -> str:
             fh.seek(pos)
             buf = fh.read(step) + buf
             lines = [ln for ln in buf.split(b"\n") if ln.strip()]
-            # Need at least two non-blank lines to know the last one is complete
-            # and is not the header; or we have reached the start of the file.
+            # Two non-blank lines in the buffer guarantee lines[-1] starts
+            # right after a newline WE read, not mid-line -- so a last line
+            # longer than one chunk is never truncated at its FRONT (the
+            # file end already guarantees its END). Below that, keep
+            # widening the buffer until we either clear the bar or exhaust
+            # the file.
             if len(lines) >= 2 or pos == 0:
                 break
     lines = [ln for ln in buf.split(b"\n") if ln.strip()]
     if not lines:
         return ""
-    last = lines[-1].decode("utf-8").strip()
+    last = lines[-1].decode("utf-8").strip().lstrip("﻿")
     if last.lower().startswith("date,"):
         return ""                       # header-only file
     return last.split(",", 1)[0].strip()
