@@ -1,0 +1,1765 @@
+  family symmetric_breakout_ff: 4 expanded, 0 already registered, 4 new
+  family symmetric_breakout_vt_control: 4 expanded, 0 already registered, 4 new
+  family tstat_trend_both_high_turnover: 4 expanded, 0 already registered, 4 new
+  family bear_regime_short_ma_cross: 4 expanded, 0 already registered, 4 new
+  family bull_regime_long_ma_cross_mirror: 4 expanded, 0 already registered, 4 new
+family symmetric_breakout_ff: 4 sibling(s), cites 9 card(s) — Range-expansion entry taken on both sides of the channel (80a41669681d747b) applied to an asset class with no valuation anchor and documented trend persistence (6078cc70ec7b8303, contrasted with the far less trendy E-mini in 072eb45a179fca95). Both legs are traded so the family's expectancy does not depend on the sign of drift, which is what killed generations 1 and 2. Exit structure is the triple barrier of 295c089b48478986: a volatility-scaled stop, a profit target and a time expiration, so every trade is a realistically stoppable path. Because the underlying is trending rather than mean-reverting, the mean-reversion-optimal pairing of small target and wide stop (010bcfbdbae4e5fa) is inverted: we run a wide target (r=3) against a 2-3 ATR stop, which per e818d7f15744fa91 adds positive skew at no cost to average return when the asset does trend at the traded horizon. The vol_percentile filter at the 0.9 ceiling with a 90-day lookback (window length chosen from e7371faa2a9e8b31, which puts the useful horizon for persistent vol classification at 40-100 business days) deliberately removes the top-decile volatility states in which the earlier generations' per-trade edge was concentrated: if the edge exists only there, this spec should fail the screen outright rather than pass and then decay. Sizing is fixed_fraction, the arm that has never reached the gauntlet, at the Kelly-conservative end implied by 19533cf882254744 for a sub-1 Sharpe. Identical parameters are used on BTCUSD and ETHUSD, since a pattern that only works on one series is likely a false discovery (9a6abe19343ae46f).
+  regime hypothesis: Expected to work when daily ranges expand and the breakout direction continues for days to weeks, in either sign: sustained selloffs supply the short trades that sustained rallies supply on the long side. It is not levered drift exposure because the short leg is armed with the same parameters as the long leg, and because the top volatility decile is filtered out rather than harvested. Its distinct failure mode is a choppy, range-bound, low-trendiness market: repeated false breakouts in both directions, whipsaw losses, and a screen failure on net_negative. If crypto realized volatility keeps falling but trends remain directional, this family should still trade; if directional persistence itself disappears, it should die, and that is a different death than losing drift.
+{
+  "strategy_id": "9f3bcf2ec5f99307",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_ff dboth l20 l90 mp0.9 al14 m2.0 r3.0 mb40 f0.02",
+  "family": "symmetric_breakout_ff",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 20,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "010bcfbdbae4e5fa",
+      "072eb45a179fca95",
+      "19533cf882254744",
+      "295c089b48478986",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "e7371faa2a9e8b31",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_ff-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "e67f7322b382f1b3",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_ff dboth l20 l90 mp0.9 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "symmetric_breakout_ff",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 20,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "010bcfbdbae4e5fa",
+      "072eb45a179fca95",
+      "19533cf882254744",
+      "295c089b48478986",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "e7371faa2a9e8b31",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_ff-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "ec37328555a7e9a4",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_ff dboth l55 l90 mp0.9 al14 m2.0 r3.0 mb40 f0.02",
+  "family": "symmetric_breakout_ff",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 55,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "010bcfbdbae4e5fa",
+      "072eb45a179fca95",
+      "19533cf882254744",
+      "295c089b48478986",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "e7371faa2a9e8b31",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_ff-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "fad166aaf7ef36bd",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_ff dboth l55 l90 mp0.9 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "symmetric_breakout_ff",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 55,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "010bcfbdbae4e5fa",
+      "072eb45a179fca95",
+      "19533cf882254744",
+      "295c089b48478986",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "e7371faa2a9e8b31",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_ff-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+family symmetric_breakout_vt_control: 4 sibling(s), cites 10 card(s) — This is the matched sizing control for symmetric_breakout_ff: identical entry, filter, stop, target and time exit, with the risk block swapped to vol_target. All 18 gen-2 specs that reached the gauntlet used vol_target, so the four worst ruin and Monte Carlo outcomes were vol_target by construction and nothing in the record actually compares sizing rules; the fixed_fraction arm has never been observed past the screen. Running the two arms as otherwise-identical families is the only way inside this grammar to attribute ruin and tail outcomes to sizing rather than to signal. Mechanically vol_target levers up as realized volatility falls, which is exactly the direction volatility moved out of sample, so this arm is the hypothesis 'the gen-2 tails were a leverage artifact, not a signal artifact' stated in testable form. The 30-day estimation window is the only grid value and is close to the ~25-business-day lookback shown to maximise realized-vol predictability and strategy Sharpe (303001052725c19f, 9aeedfe2b4f5e2cc, a2e3769454c39476). The ann_vol axis spans 0.2, which is inside the 15-20% band that minimises drawdown-constrained cost of failure (bab6f94b2a0dee70), and 0.4, which is roughly the level at which the previous generation's leverage became destructive.
+  regime hypothesis: Same signal hypothesis as the fixed_fraction sibling: directional range expansion in either sign, not drift. The added hypothesis is about the sizing rule, not the market: if this arm's per-trade edge matches its fixed_fraction twin but its ruin and Monte Carlo tails are materially worse, the gen-2 tail failures were caused by inverse-volatility leverage rising into a falling-volatility regime rather than by the entry logic. If both arms fail identically, sizing is exonerated and the entry is the problem. This family is explicitly not expected to survive a regime where volatility falls persistently while trends weaken, because the sizing rule then maximises exposure precisely when per-trade edge is smallest.
+{
+  "strategy_id": "cae39607ebd8edaf",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_vt_control dboth l20 l90 mp0.9 al14 m3.0 r3.0 mb40 av0.2 l30",
+  "family": "symmetric_breakout_vt_control",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 20,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "vol_target",
+      "params": {
+        "ann_vol": 0.2,
+        "lookback": 30
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "295c089b48478986",
+      "303001052725c19f",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "9aeedfe2b4f5e2cc",
+      "a2e3769454c39476",
+      "bab6f94b2a0dee70",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_vt_control-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "c4f98d9c2f752cc2",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_vt_control dboth l20 l90 mp0.9 al14 m3.0 r3.0 mb40 av0.4 l30",
+  "family": "symmetric_breakout_vt_control",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 20,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "vol_target",
+      "params": {
+        "ann_vol": 0.4,
+        "lookback": 30
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "295c089b48478986",
+      "303001052725c19f",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "9aeedfe2b4f5e2cc",
+      "a2e3769454c39476",
+      "bab6f94b2a0dee70",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_vt_control-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "12da1f9c9bd5d96b",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_vt_control dboth l55 l90 mp0.9 al14 m3.0 r3.0 mb40 av0.2 l30",
+  "family": "symmetric_breakout_vt_control",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 55,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "vol_target",
+      "params": {
+        "ann_vol": 0.2,
+        "lookback": 30
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "295c089b48478986",
+      "303001052725c19f",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "9aeedfe2b4f5e2cc",
+      "a2e3769454c39476",
+      "bab6f94b2a0dee70",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_vt_control-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "df579c73fb458472",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d symmetric_breakout_vt_control dboth l55 l90 mp0.9 al14 m3.0 r3.0 mb40 av0.4 l30",
+  "family": "symmetric_breakout_vt_control",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "channel_breakout",
+      "params": {
+        "lookback": 55,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "vol_percentile",
+      "params": {
+        "lookback": 90,
+        "max_pctile": 0.9
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "vol_target",
+      "params": {
+        "ann_vol": 0.4,
+        "lookback": 30
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "295c089b48478986",
+      "303001052725c19f",
+      "6078cc70ec7b8303",
+      "80a41669681d747b",
+      "9a6abe19343ae46f",
+      "9aeedfe2b4f5e2cc",
+      "a2e3769454c39476",
+      "bab6f94b2a0dee70",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "symmetric_breakout_vt_control-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+family tstat_trend_both_high_turnover: 4 sibling(s), cites 8 card(s) — Entry is the t-value trend scan: fit a linear time trend over multiple look-back windows and act on the window whose slope carries the largest absolute t-statistic (3d4db3693d78d717), taken in both directions so a significant negative slope arms a short on the same footing as a significant positive slope. This is the honest, opposite-signed construction that e6cc6c4188b35751 and e0d728e421153bec recommend and that lowers backtest Sharpe relative to only trading the side known in advance to have worked. The crypto motivation for a trend signal at all is 6078cc70ec7b8303. The design is corrected for the specific way the gen-2 short-only trend scan died: 10-19 trades in six and a half years failed the trade-count floor. Here direction is 'both', the max_lookback axis is pushed to the short end of the grid, and the time expiration is swept at 20 and 40 bars so positions are recycled and the signal can re-arm. Bets per year is a first-order term in the Sharpe of a precision-based strategy (831e8c990e96e75e), so turnover is treated as a design variable, not a nuisance. Stop and target follow the triple-barrier convention (295c089b48478986) with the wide target and volatility-scaled stop appropriate to a trending process, which also buys positive skew (e818d7f15744fa91). Same parameters on both assets (9a6abe19343ae46f).
+  regime hypothesis: Works when there exists, at some horizon between 60 and 120 days, a statistically significant linear drift in either direction that persists past the fitting window. It is not levered upward drift because the identical significance threshold arms short entries on negative slopes; in the 2018 and 2022 drawdowns this family should be net short. Plainly stated failure mode: if slopes stop being significant at any horizon (declining trend strength, the general environmental decay documented for trend rules), the entry simply stops firing and the family fails the trade-count floor again rather than losing money slowly. Also, if realized volatility collapses without trends collapsing, fixed_fraction sizing means the per-trade return in percent falls even where the volatility-normalized edge is intact, so we expect this family to look weak in raw return and healthy in vol-normalized edge in that regime, and we want to observe that split rather than mask it with inverse-vol leverage.
+{
+  "strategy_id": "b3befebae9a5f993",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d tstat_trend_both_high_turnover dboth ml60 tm2.0 al14 m3.0 r3.0 mb20 f0.02",
+  "family": "tstat_trend_both_high_turnover",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "trend_scan_ds",
+      "params": {
+        "max_lookback": 60,
+        "t_min": 2.0,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "295c089b48478986",
+      "3d4db3693d78d717",
+      "6078cc70ec7b8303",
+      "831e8c990e96e75e",
+      "9a6abe19343ae46f",
+      "e0d728e421153bec",
+      "e6cc6c4188b35751",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "tstat_trend_both_high_turnover-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "82a12dfebc704d6e",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d tstat_trend_both_high_turnover dboth ml60 tm2.0 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "tstat_trend_both_high_turnover",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "trend_scan_ds",
+      "params": {
+        "max_lookback": 60,
+        "t_min": 2.0,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "295c089b48478986",
+      "3d4db3693d78d717",
+      "6078cc70ec7b8303",
+      "831e8c990e96e75e",
+      "9a6abe19343ae46f",
+      "e0d728e421153bec",
+      "e6cc6c4188b35751",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "tstat_trend_both_high_turnover-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "55c318f6bb48fa16",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d tstat_trend_both_high_turnover dboth ml90 tm2.0 al14 m3.0 r3.0 mb20 f0.02",
+  "family": "tstat_trend_both_high_turnover",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "trend_scan_ds",
+      "params": {
+        "max_lookback": 90,
+        "t_min": 2.0,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "295c089b48478986",
+      "3d4db3693d78d717",
+      "6078cc70ec7b8303",
+      "831e8c990e96e75e",
+      "9a6abe19343ae46f",
+      "e0d728e421153bec",
+      "e6cc6c4188b35751",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "tstat_trend_both_high_turnover-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "9316785e854cb8a1",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d tstat_trend_both_high_turnover dboth ml90 tm2.0 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "tstat_trend_both_high_turnover",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "trend_scan_ds",
+      "params": {
+        "max_lookback": 90,
+        "t_min": 2.0,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "295c089b48478986",
+      "3d4db3693d78d717",
+      "6078cc70ec7b8303",
+      "831e8c990e96e75e",
+      "9a6abe19343ae46f",
+      "e0d728e421153bec",
+      "e6cc6c4188b35751",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "tstat_trend_both_high_turnover-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+family bear_regime_short_ma_cross: 4 sibling(s), cites 8 card(s) — A pure downtrend-regime family: entries only below the moving average (regime_ma_short, with the binary 'price below its long moving average' detector of e774e6dd0f261cfc used in the inverse sense), signal from a short-side moving-average crossover, and no long leg at all. Cards 799502905879efbd and 3042ee8aec83f2f2 establish that suppressing exposure during downtrends materially changes a directional strategy's outcome; this family takes the complementary position that the downtrend state is itself tradeable from the short side in an asset class where trends are documented (6078cc70ec7b8303), and it is the deliberate opposite-signed rule that e0d728e421153bec asks be included in the universe rather than quietly dropped. It is engineered against the known failure of the gen-2 short-only trend family, which produced only 10-19 trades: the crossover is fast (fast 5 or 10 against slow 50) rather than slope-significance based, the regime moving average is the permissive 100-day rather than 200-day so the eligible window is wider, and a 20-bar time expiration recycles positions so the crossover can re-arm. Payoff geometry is asymmetric for shorts: a falling-equilibrium process has a stop-loss/profit-taking surface that is the rotated complement of the rising case (dc1cf81e13929936), and selloffs come with rising volatility, so the target is taken in at r=2 against a 2-3 ATR stop rather than run to r=3. Stops on trend positions add positive skew (e818d7f15744fa91), which matters most for a short book. Identical parameters on both assets (9a6abe19343ae46f).
+  regime hypothesis: Expected to make money only in sustained bear regimes: price below its 100-day average with fast-over-slow crossovers rolling over, i.e. 2018, mid-2021 through 2022, and any comparable future drawdown. Its P&L should be negatively correlated with buy-and-hold by construction, which is the point: it is the one family here that cannot be an accidental repackaging of upward drift, and it is the natural portfolio complement to the long mirror family. If crypto simply rises for the whole sample, this family should fail the screen on net_negative, and that failure is informative rather than concealed. Its own hidden risk is not drift but violence: short exposure in sharp V-shaped reversals off capitulation lows, where the ATR stop is gapped through on a daily bar. The tighter 2 ATR arm exists to measure exactly that cost.
+{
+  "strategy_id": "3f38f3f7e83e0628",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bear_regime_short_ma_cross dshort f5 s50 ml100 al14 m2.0 r2.0 mb20 f0.01",
+  "family": "bear_regime_short_ma_cross",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 5,
+        "slow": 50,
+        "direction": "short"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma_short",
+      "params": {
+        "ma_len": 100
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 2.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.01
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "3042ee8aec83f2f2",
+      "6078cc70ec7b8303",
+      "799502905879efbd",
+      "9a6abe19343ae46f",
+      "dc1cf81e13929936",
+      "e0d728e421153bec",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bear_regime_short_ma_cross-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "81b7542b15b1764a",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bear_regime_short_ma_cross dshort f5 s50 ml100 al14 m3.0 r2.0 mb20 f0.01",
+  "family": "bear_regime_short_ma_cross",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 5,
+        "slow": 50,
+        "direction": "short"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma_short",
+      "params": {
+        "ma_len": 100
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 2.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.01
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "3042ee8aec83f2f2",
+      "6078cc70ec7b8303",
+      "799502905879efbd",
+      "9a6abe19343ae46f",
+      "dc1cf81e13929936",
+      "e0d728e421153bec",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bear_regime_short_ma_cross-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "5d256d13abb54f44",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bear_regime_short_ma_cross dshort f10 s50 ml100 al14 m2.0 r2.0 mb20 f0.01",
+  "family": "bear_regime_short_ma_cross",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 10,
+        "slow": 50,
+        "direction": "short"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma_short",
+      "params": {
+        "ma_len": 100
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 2.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.01
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "3042ee8aec83f2f2",
+      "6078cc70ec7b8303",
+      "799502905879efbd",
+      "9a6abe19343ae46f",
+      "dc1cf81e13929936",
+      "e0d728e421153bec",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bear_regime_short_ma_cross-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "2cfbd2dae234c586",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bear_regime_short_ma_cross dshort f10 s50 ml100 al14 m3.0 r2.0 mb20 f0.01",
+  "family": "bear_regime_short_ma_cross",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 10,
+        "slow": 50,
+        "direction": "short"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma_short",
+      "params": {
+        "ma_len": 100
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 2.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 20
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.01
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "3042ee8aec83f2f2",
+      "6078cc70ec7b8303",
+      "799502905879efbd",
+      "9a6abe19343ae46f",
+      "dc1cf81e13929936",
+      "e0d728e421153bec",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bear_regime_short_ma_cross-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+family bull_regime_long_ma_cross_mirror: 4 sibling(s), cites 8 card(s) — The exact directional mirror of bear_regime_short_ma_cross, submitted as a controlled comparison rather than as a new idea: same crossover entry, same stop family, same time expiration, same fixed_fraction sizing, with direction long and the regime filter flipped to regime_ma (price above its long average, the trend detector of e774e6dd0f261cfc). Because regime_ma and regime_ma_short cannot coexist in one spec, the long and short regimes must be registered as two families; run as a pair they isolate direction as the single variable, which is precisely what the gen-1 (long-only) and gen-2 (short-capable) records cannot do, since the two generations differed in signal as well as in side. It also gives the first long-trend result under fixed_fraction sizing, against gen-1's long-trend results under vol_target. The 200-day regime average and r=3 target follow the finding that a positive long-run equilibrium raises the optimal profit-taking threshold (73ba48a43e430161), and the ATR stop is retained for skew (e818d7f15744fa91). Priors are set low: trend rules show multi-decade environmental decay rather than instrument-specific decay (1be665e133422ed2) and discovered strategies have short shelf lives (658c272c7c5620ea).
+  regime hypothesis: Stated plainly: this family is drift-conditional and will not survive a flat or falling market. Its per-trade edge comes from upward continuation while price holds above a 200-day average, so if crypto's drift and volatility both fall the way they did out of sample for generations 1 and 2, this family's raw returns should fall with them; it is registered as the labelled control for that effect, not as a claim that the effect has gone away. What it should add beyond levered exposure is the regime gate and the stop: exposure is zero below the 200-day average and every position carries a volatility-scaled stop, so drawdown and skew should differ from buy-and-hold even where mean return does not. Two diagnostics matter: whether its volatility-normalized edge holds out of sample the way 12 of the 18 gen-2 specs did, and whether fixed_fraction sizing removes the ruin and Monte Carlo tails that vol_target produced on comparable long trend signals. If it passes the screen and then fails the gauntlet exactly like gen-1, that is the confirmation that the long-trend arm is spent, not a surprise.
+{
+  "strategy_id": "f4ae9fa2b02cabfc",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bull_regime_long_ma_cross_mirror dlong f5 s50 ml200 al14 m2.0 r3.0 mb40 f0.02",
+  "family": "bull_regime_long_ma_cross_mirror",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 5,
+        "slow": 50,
+        "direction": "long"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma",
+      "params": {
+        "ma_len": 200
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "1be665e133422ed2",
+      "6078cc70ec7b8303",
+      "658c272c7c5620ea",
+      "73ba48a43e430161",
+      "9a6abe19343ae46f",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bull_regime_long_ma_cross_mirror-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "10218ddcf91b4657",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bull_regime_long_ma_cross_mirror dlong f5 s50 ml200 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "bull_regime_long_ma_cross_mirror",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 5,
+        "slow": 50,
+        "direction": "long"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma",
+      "params": {
+        "ma_len": 200
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "1be665e133422ed2",
+      "6078cc70ec7b8303",
+      "658c272c7c5620ea",
+      "73ba48a43e430161",
+      "9a6abe19343ae46f",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bull_regime_long_ma_cross_mirror-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "10b20b824701eec7",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bull_regime_long_ma_cross_mirror dlong f10 s50 ml200 al14 m2.0 r3.0 mb40 f0.02",
+  "family": "bull_regime_long_ma_cross_mirror",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 10,
+        "slow": 50,
+        "direction": "long"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma",
+      "params": {
+        "ma_len": 200
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 2.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "1be665e133422ed2",
+      "6078cc70ec7b8303",
+      "658c272c7c5620ea",
+      "73ba48a43e430161",
+      "9a6abe19343ae46f",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bull_regime_long_ma_cross_mirror-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+{
+  "strategy_id": "75f8bbe09c6a56c1",
+  "version": 1,
+  "created_utc": "2026-08-16T20:55:36Z",
+  "name": "BTC+ETH 1d bull_regime_long_ma_cross_mirror dlong f10 s50 ml200 al14 m3.0 r3.0 mb40 f0.02",
+  "family": "bull_regime_long_ma_cross_mirror",
+  "universe": {
+    "assets": [
+      "BTCUSD",
+      "ETHUSD"
+    ],
+    "asset_class": "crypto",
+    "timeframe": "1d",
+    "session": "24x7"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "ma_cross_ds",
+      "params": {
+        "fast": 10,
+        "slow": 50,
+        "direction": "long"
+      }
+    },
+    {
+      "role": "regime",
+      "type": "regime_ma",
+      "params": {
+        "ma_len": 200
+      }
+    },
+    {
+      "role": "stop",
+      "type": "atr_stop",
+      "params": {
+        "atr_len": 14,
+        "mult": 3.0
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 3.0
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_stop",
+      "params": {
+        "max_bars": 40
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_fraction",
+      "params": {
+        "f": 0.02
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "19533cf882254744",
+      "1be665e133422ed2",
+      "6078cc70ec7b8303",
+      "658c272c7c5620ea",
+      "73ba48a43e430161",
+      "9a6abe19343ae46f",
+      "e774e6dd0f261cfc",
+      "e818d7f15744fa91"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "bull_regime_long_ma_cross_mirror-2026-08-16-manual",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-opus-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-16-manual"
+  },
+  "cost_model": {
+    "commission_per_side": 0.001,
+    "slippage_ticks": 0.0005
+  }
+}
+
+DRY RUN — 5 families kept, 0 dropped, 20 sibling spec(s); nothing written.

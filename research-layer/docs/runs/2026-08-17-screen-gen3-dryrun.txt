@@ -1,0 +1,26 @@
+9b2a9b23a940b91e  fail trades= 22  pnl=+0.0916  wr=0.41  dd=-0.0391  [trade_count]
+8d13d7866706ff8a  fail trades= 22  pnl=+0.1832  wr=0.41  dd=-0.0757  [trade_count]
+7546f0eaf8ba8557  fail trades= 15  pnl=+0.0825  wr=0.20  dd=-0.0876  [trade_count]
+78b75c3e46808ec2  fail trades= 15  pnl=+0.1668  wr=0.20  dd=-0.1630  [trade_count]
+9440b0b664606cea  fail trades= 19  pnl=+0.1708  wr=0.26  dd=-0.0634  [trade_count]
+6697c1f8ab44fd70  fail trades= 19  pnl=+0.3588  wr=0.26  dd=-0.1142  [trade_count]
+43bf5e97b141ff78  fail trades= 15  pnl=+0.0533  wr=0.20  dd=-0.0805  [trade_count]
+a64ffec1d436bfac  fail trades= 15  pnl=+0.1052  wr=0.20  dd=-0.1513  [trade_count]
+9b6753a48c4d0ccd  PASS trades= 76  pnl=+1.4033  wr=0.53  dd=-0.0955
+876dc462f1d6e442  PASS trades= 73  pnl=+0.8046  wr=0.56  dd=-0.0760
+7a146aebe202bd0c  PASS trades= 52  pnl=+0.7990  wr=0.50  dd=-0.1221
+9593dc8a09a625b3  PASS trades= 50  pnl=+0.5194  wr=0.54  dd=-0.0967
+75773b65e7ce1834  PASS trades= 76  pnl=+2.4964  wr=0.53  dd=-0.1575
+ad654fd8097717bd  PASS trades= 76  pnl=+8.2782  wr=0.53  dd=-0.2815
+08b2b899076c2b7d  PASS trades= 52  pnl=+1.2450  wr=0.50  dd=-0.1792
+ecd8c854495dc869  PASS trades= 52  pnl=+3.0976  wr=0.50  dd=-0.3292
+b0c0d512d28274dc  fail trades= 33  pnl=+0.0285  wr=0.42  dd=-0.0240  [trade_count]
+92784fad199a27e4  fail trades= 32  pnl=+0.0396  wr=0.41  dd=-0.0303  [trade_count]
+ce1fef877a375712  fail trades= 27  pnl=+0.0214  wr=0.44  dd=-0.0197  [trade_count]
+edf31b12365cdfcc  fail trades= 24  pnl=+0.0334  wr=0.46  dd=-0.0247  [trade_count]
+ef7712f41e2188e2  PASS trades=140  pnl=+0.6772  wr=0.47  dd=-0.1141
+0a872bb0b01ac435  PASS trades= 96  pnl=+0.8883  wr=0.43  dd=-0.0932
+76043263fde44531  PASS trades=153  pnl=+0.4787  wr=0.44  dd=-0.1718
+9cc49ddd9b6a569f  PASS trades=108  pnl=+0.5842  wr=0.37  dd=-0.1688
+
+DRY RUN — 24 screened, 12 would pass, 12 would fail; nothing written.

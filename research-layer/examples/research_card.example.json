@@ -1,0 +1,52 @@
+{
+  "card_id": "1100678d37f1f221",
+  "version": 1,
+  "created_utc": "2026-08-05T02:14:09Z",
+  "source": {
+    "type": "book",
+    "title": "Advances in Financial Machine Learning",
+    "authors": [
+      "M. López de Prado"
+    ],
+    "year": 2018,
+    "locator": "ch. 3, pp. 43-49",
+    "url": null,
+    "doi": null,
+    "isbn": "978-1119482086",
+    "credibility_tier": "peer_reviewed"
+  },
+  "claim": "Triple-barrier labeling produces more robust classifier targets than fixed-horizon returns for intraday futures data.",
+  "quote": "the triple-barrier method labels an observation according to the first barrier touched out of three barriers",
+  "tags": {
+    "asset_classes": [
+      "futures"
+    ],
+    "topics": [
+      "labeling",
+      "ml",
+      "overfitting"
+    ],
+    "horizon": "intraday"
+  },
+  "testability": {
+    "score": 0.8,
+    "data_required": [
+      "MNQ 1m bars 2015-2025"
+    ],
+    "notes": "Needs labeled event sampling; cheap to test on existing futures data."
+  },
+  "links": [],
+  "relation": {},
+  "extraction": {
+    "agent": "reader",
+    "model": "claude-sonnet-5",
+    "pipeline_version": "r1.0.0",
+    "run_id": "2026-08-05-nightly"
+  },
+  "review": {
+    "status": "pending",
+    "reviewed_by": null,
+    "reviewed_utc": null,
+    "reject_reason": null
+  }
+}

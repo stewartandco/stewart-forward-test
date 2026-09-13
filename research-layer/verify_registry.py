@@ -1,0 +1,607 @@
+"""
+verify_registry.py — chain integrity + invariant walker for registry_log.jsonl.
+
+Mirrors the root verify.py hash-chain walk, then checks research-layer
+invariants:
+
+  1. chain integrity (prev_entry_hash links, genesis = 64 zeros)
+  2. verdicts / state_changes reference a previously registered strategy_id
+  3. strategies cite >= 1 card_id previously registered AND accepted
+  4. strategy_registered payloads carry no results fields
+  5. lifecycle transitions follow the state machine
+  6. strategy blocks reference previously registered block types
+  7. quarantine_decision entries reference a strategy CURRENTLY in quarantine,
+     and (strategy_id, date, asset) is unique
+  8. a repeated composition_fingerprint is a legitimate D9 RE-TRIAL, not a
+     duplicate. docs/notes/family-openness-v1.md (chained, entry 16,071)
+     retired chain-wide composition uniqueness: a buried COMPOSITION may be
+     proposed again as a NEW strategy with a new id and its own number. So
+     what is checked is the composer's own admission rule, via the ONE shared
+     implementation (composer.retrial_verdict): every EARLIER registration of
+     the fingerprint is currently BURIED, and the latest burying verdict's
+     cutoff is >= RETRIAL_WINDOW_DAYS behind the OLDEST referenced cell's
+     data end. Two registrations of one composition inside ONE run are never
+     a re-trial, and a duplicate of a quarantine/live/unjudged registration
+     still fails. WHAT THIS VERIFIER CANNOT DO FROM THE CHAIN ALONE: the
+     cutoff lives in artifacts/<sid>/{gauntlet/,}config.json and the data end
+     in data/<cell>.csv, and neither is a chain fact. Both legs are read from
+     disk beside the log (override with --artifacts-dir/--data-dir); when
+     they cannot be read the window leg is reported UNVERIFIED rather than
+     failed, and the count is printed. The buried-priors and same-run legs
+     are chain-only and always enforced
+  9. quarantine_data_snapshot dates are unique, both digest maps name the same
+     assets, every digest is a real 64-char lowercase sha256 (the same check
+     the writer applies, so a hand-appended fake cannot license a date), and
+     every quarantine_decision is covered by an EARLIER snapshot for its date
+     naming its asset in both maps — so no forward record exists without the
+     provenance of the bars behind it. Since the 2026-08-27 per-class-
+     calendars addendum, a quarantine_data_snapshot_supplement (same shape)
+     may extend a date's coverage for a class that published late: it must
+     FOLLOW a base snapshot for its date, name only assets the date does not
+     already cover, and it licenses decisions exactly as the base does —
+     earlier-than-the-row, both maps
+ 10. D15 (docs/2026-09-03-exit-rules-v7-design.md s2): AFTER the chained
+     exit-rules-v7 note -- the `note` entry whose text STARTS with
+     `exit-rules-v7:` -- every strategy_registered must carry `version: 2`
+     and no block whose (role, type) is in blocks.RETIRED_TYPES (exit/
+     time_stop, stop/pct_stop). BEFORE the note, `version: 1` entries stand:
+     the legacy registrations are history, not defects, and the walk is in
+     chain order so nothing earlier can trip a rule armed later. Every block
+     type must still be chained (invariant 6, unchanged)
+
+Usage:
+    python verify_registry.py [path/to/registry_log.jsonl]
+                              [--artifacts-dir DIR] [--data-dir DIR]
+"""
+from __future__ import annotations
+
+import sys
+import json
+import hashlib
+import argparse
+from pathlib import Path
+
+# Invariant 8 needs the SAME fingerprint the composer computes; a second
+# implementation here would be two hashes that must stay byte-identical
+# forever. pipeline/__init__.py is empty and composer.py keeps jsonschema and
+# anthropic function-local, so this pulls in no third-party dependency. The
+# explicit sys.path entry keeps the script runnable from any directory.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:                    # idempotent under re-import
+    sys.path.insert(0, _HERE)
+from pipeline.composer import (composition_fingerprint,        # noqa: E402
+                              burying_cutoff, cell_data_end,
+                              retrial_verdict, RETRIAL_REASONS,
+                              RETRIAL_OK, RETRIAL_WINDOW_UNKNOWN)
+from pipeline.registry import (is_sha256_hex,                  # noqa: E402
+                               QUARANTINE_SNAPSHOT_DIGEST_KEYS)
+# Invariant 10 reads the SAME retired-type table the engine and the composer
+# refuse from; a second list here would be two tables that must stay equal.
+from pipeline.blocks import RETIRED_TYPES                      # noqa: E402
+
+# Invariant 8 recomputes fingerprints for FROZEN entries against the LIVE
+# block grammar, so it is fair to ask whether a future grammar edit could
+# retroactively flip a sound chain to INVALID. It cannot:
+#
+#   * composition_fingerprint snaps a param to a grid value only where
+#     `g == v`, so it can never merge two values that differ UNDER `==`.
+#     Note what that does NOT cover: the fingerprint hashes JSON, and values
+#     equal under `==` but distinct in JSON — 2 vs 2.0, true vs 1, false vs 0
+#     — ARE merged once a grid holds one of them. A grid GAINING a value is
+#     therefore a real merge vector for already-chained specs, so this leg
+#     alone does not close the hole. The additive-only guarantee below is
+#     load-bearing, not belt-and-braces.
+#   * Manufacturing one would additionally require an existing type's grid to
+#     gain a value. composer.preflight_block_types aborts the run when
+#     blocks.py mutates a chained params_schema, and Registry.register_block_type
+#     refuses to re-register a type with a conflicting schema. The grammar is
+#     additive-only by construction.
+#   * preflight compares against BLOCK_TYPES, so it catches a CHANGED chained
+#     type but not a DELETED one. Deletion turns snapping OFF, which can only
+#     split fingerprints apart, never merge them, so it cannot produce a false
+#     duplicate either.
+#
+# Checked against the live chain 2026-08-16: 56 registered strategies stay 56
+# distinct fingerprints under the live grammar, under a wholly EMPTY grammar
+# (worst-case deletion), and under a numeric-type-insensitive comparison
+# (worst-case snapping). No grid holds two entries that are `==` but distinct.
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+GENESIS_HASH = "0" * 64
+
+FORBIDDEN_RESULT_KEYS = {"net_pnl", "sharpe", "win_rate", "results", "backtest",
+                         "pnl", "equity_curve", "max_dd"}
+
+VALID_TRANSITIONS = {
+    "proposed":   {"screened", "graveyard"},
+    "screened":   {"gauntlet", "graveyard"},
+    "gauntlet":   {"quarantine", "graveyard"},
+    "quarantine": {"live", "graveyard"},
+    "live":       {"retired", "graveyard"},
+}
+TERMINAL_STATES = {"retired", "graveyard"}
+
+
+def _canonical_json(obj) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, default=str)
+
+
+def _entry_hash(entry: dict) -> str:
+    return hashlib.sha256(_canonical_json(entry).encode("utf-8")).hexdigest()
+
+
+def snapshot_digest_coverage(lineno, etype, payload, fail):
+    """The digest-map half of invariant 9, shared by quarantine_data_snapshot
+    and quarantine_data_snapshot_supplement.
+
+    `named` is what the entry CLAIMS, `valid` is what survives the same digest
+    test the writer applies. Checking the format here is the point of
+    invariant 9: a verifier that accepted digests the writer rejects would
+    leave an outsider unable to tell a real provenance record from a
+    fabricated one. Returns the covered assets: the INTERSECTION of the VALID
+    sets, because an asset hashed only one way, or carrying something that is
+    not a digest, is not provenanced and must not license a decision.
+    """
+    named, valid, bad_map = [], [], False
+    for field in QUARANTINE_SNAPSHOT_DIGEST_KEYS:
+        m = payload.get(field)
+        if not isinstance(m, dict):
+            fail(lineno, f"{etype} {field} is not an {{asset: sha256}} map")
+            bad_map = True
+            named.append(set())
+            valid.append(set())
+            continue
+        named.append(set(m))
+        good = {a for a, h in m.items()
+                if isinstance(a, str) and is_sha256_hex(h)}
+        if set(m) - good:
+            fail(lineno, f"{etype} {field}: not a sha256 digest for "
+                         f"{sorted(repr(a) for a in set(m) - good)}")
+        valid.append(good)
+    # skipped when a map was unusable: it would report a second, misleading
+    # reason for the same defect
+    if not bad_map and named[0] != named[1]:
+        fail(lineno, f"{etype} names different assets in "
+                     f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[0]} and "
+                     f"{QUARANTINE_SNAPSHOT_DIGEST_KEYS[1]}")
+    return valid[0] & valid[1]
+
+
+def verify(log_path: Path, artifacts_dir: Path | None = None,
+           data_dir: Path | None = None) -> int:
+    """Walk the chain. `artifacts_dir`/`data_dir` supply invariant 8's
+    OFF-CHAIN evidence (the burying cutoff and the cells' data ends); they
+    default to `artifacts/` and `data/` beside the log, which is where the
+    composer keeps them and where the loop's pre-spend gate finds them. When
+    a piece of that evidence is missing the window leg is reported unverified,
+    never failed — see invariant 8 in the module docstring."""
+    if not log_path.exists():
+        print(f"ERROR: log file not found: {log_path}")
+        return 2
+
+    beside = log_path.resolve().parent
+    artifacts_dir = Path(artifacts_dir) if artifacts_dir else beside / "artifacts"
+    data_dir = Path(data_dir) if data_dir else beside / "data"
+
+    prev_hash = GENESIS_HASH
+    n_entries = 0
+    # The LINES that carry at least one problem, not a count of problems: an
+    # entry can trip several invariants at once (a decision with no snapshot
+    # AND a duplicate key), and counting those separately reported more
+    # failures than the log has lines. Recording the line inside fail() is
+    # what makes "prints a problem but exits VALID" unrepresentable -- there
+    # is no second flag a future call site could forget to set.
+    bad_lines: set[int] = set()
+    cards: set[str] = set()
+    accepted: set[str] = set()
+    block_types: set[tuple[str, str]] = set()
+    strategies: set[str] = set()
+    state: dict[str, str] = {}
+    by_type: dict[str, int] = {}
+    quarantine_seen: set[tuple] = set()
+    # EVERY registering id per composition, in chain order -- not just the
+    # first. Collapsing to the first was lossless only while a fingerprint
+    # could be registered once, and D9 is precisely what ends that: the oldest
+    # copy can be buried while a later one is under test, and the rule has to
+    # see all of them.
+    fingerprints: dict[str, list[str]] = {}   # composition -> registering ids
+    run_of: dict[str, str] = {}               # strategy_id -> generator.run_id
+    buried_at_of: dict[str, str] = {}         # strategy_id -> stage it was buried from
+    unverified_windows: list[str] = []        # invariant 8, evidence missing
+    v7_note_line: int | None = None           # invariant 10, armed at the note
+    snapshots: dict[str, set] = {}          # date -> assets fully provenanced
+
+    cutoff_cache: dict[str, str | None] = {}
+
+    def cutoff_of(sid: str) -> str | None:
+        """The burying verdict's cutoff, off disk. None (unreadable) makes the
+        window UNVERIFIED here, not shut -- the verifier is checking, not
+        deciding, and must not call a chain corrupt over a pruned bundle."""
+        if sid not in cutoff_cache:
+            cutoff_cache[sid] = burying_cutoff(artifacts_dir, sid,
+                                               buried_at_of.get(sid, ""))
+        return cutoff_cache[sid]
+
+    data_end_cache: dict[tuple, str] = {}
+
+    def data_end_of(cell) -> str:
+        """Last bar on disk for one cell. Cached: cell_data_end scans a whole
+        CSV, and a chain with many re-trials would otherwise re-scan the same
+        handful of files once per duplicate per asset."""
+        cell = tuple(cell)
+        if cell not in data_end_cache:
+            data_end_cache[cell] = cell_data_end(data_dir, cell)
+        return data_end_cache[cell]
+
+    def fail(lineno: int, msg: str) -> None:
+        print(f"  line {lineno}: {msg}")
+        bad_lines.add(lineno)
+
+    def as_key(lineno: int, value: object, what: str) -> str | None:
+        """A payload field that becomes a set element or a dict key must be a
+        non-empty string, or it raises TypeError out of the walk -- the same
+        one-bad-entry-kills-every-later-entry failure the shape guards above
+        exist to prevent. Returns None when the caller must skip it."""
+        if isinstance(value, str) and value:
+            return value
+        fail(lineno, f"{what} must be a non-empty string, got {value!r}")
+        return None
+
+    with log_path.open("r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            n_entries += 1
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                fail(lineno, f"PARSE ERROR — {exc}")
+                continue
+
+            # Shape first, and ONCE, so no branch below dereferences something
+            # that is not a mapping. A hand-appended entry whose payload is a
+            # string used to raise AttributeError out of the walk and leave
+            # every LATER entry unverified -- the worst failure mode an
+            # append-only public chain has.
+            if not isinstance(entry, dict):
+                fail(lineno, f"entry is not a JSON object, got "
+                             f"{type(entry).__name__}")
+                # still advance the head so the REST of the chain stays
+                # checkable rather than cascading into false BROKEN CHAINs
+                prev_hash = _entry_hash(entry)
+                continue
+
+            if entry.get("prev_entry_hash") != prev_hash:
+                fail(lineno, "BROKEN CHAIN")
+            prev_hash = _entry_hash(entry)
+
+            etype = entry.get("entry_type", "?")
+            if not isinstance(etype, str):
+                etype = repr(etype)
+            by_type[etype] = by_type.get(etype, 0) + 1
+            payload = entry.get("payload", {})
+            if not isinstance(payload, dict):
+                fail(lineno, f"payload is not a JSON object, got "
+                             f"{type(payload).__name__}")
+                payload = {}
+
+            if etype == "card_registered":
+                cid = as_key(lineno, payload.get("card_id"),
+                             "card_registered card_id")
+                if cid:
+                    cards.add(cid)
+
+            elif etype == "card_reviewed":
+                cid = as_key(lineno, payload.get("card_id"),
+                             "card_reviewed card_id")
+                if cid:
+                    if payload.get("status") == "accepted":
+                        accepted.add(cid)
+                    else:
+                        accepted.discard(cid)
+
+            elif etype == "block_type_registered":
+                role = as_key(lineno, payload.get("role"),
+                              "block_type_registered role")
+                btype = as_key(lineno, payload.get("type"),
+                               "block_type_registered type")
+                if role and btype:
+                    block_types.add((role, btype))
+
+            elif etype == "strategy_registered":
+                sid = as_key(lineno, payload.get("strategy_id"),
+                             "strategy_registered strategy_id")
+                if sid:
+                    strategies.add(sid)
+                    state[sid] = "proposed"
+                prov = payload.get("provenance", {})
+                cards_cited = prov.get("card_ids") if isinstance(prov, dict) else None
+                if not isinstance(prov, dict):
+                    fail(lineno, f"strategy {sid}: provenance is not a JSON "
+                                 f"object, got {type(prov).__name__}")
+                elif not isinstance(cards_cited, list) or not all(
+                        isinstance(c, str) for c in cards_cited):
+                    # set() of a non-iterable, or of an unhashable item, would
+                    # raise out of the walk; report and skip the citation
+                    # checks rather than adding a misleading second reason
+                    fail(lineno, f"strategy {sid}: provenance.card_ids must be "
+                                 f"a list of strings")
+                else:
+                    cited = set(cards_cited)
+                    if not cited:
+                        fail(lineno, f"strategy {sid}: cites no research cards")
+                    elif not cited <= cards:
+                        fail(lineno, f"strategy {sid}: cites unregistered cards {sorted(cited - cards)}")
+                    not_accepted = sorted(cited & cards - accepted)
+                    if cited <= cards and not_accepted:
+                        fail(lineno, f"strategy {sid}: cites cards not accepted {not_accepted}")
+                blocks = payload.get("blocks", [])
+                if not isinstance(blocks, list):
+                    fail(lineno, f"strategy {sid}: blocks is not a list, got "
+                                 f"{type(blocks).__name__}")
+                    blocks = []
+                for b in blocks:
+                    # a non-mapping block, or an unhashable role/type, would
+                    # raise on the membership test below
+                    if not isinstance(b, dict) or not all(
+                            isinstance(b.get(k), str) for k in ("role", "type")):
+                        fail(lineno, f"strategy {sid}: block is not an object "
+                                     f"with string role/type ({b!r})")
+                        continue
+                    if (b["role"], b["type"]) not in block_types:
+                        fail(lineno, f"strategy {sid}: unregistered block type "
+                                     f"{b['role']}/{b['type']}")
+                    if (v7_note_line is not None
+                            and (b["role"], b["type"]) in RETIRED_TYPES):
+                        fail(lineno, f"strategy {sid}: retired block type "
+                                     f"{b['role']}/{b['type']} after "
+                                     f"exit-rules-v7 (note at line "
+                                     f"{v7_note_line}) -- "
+                                     f"{RETIRED_TYPES[(b['role'], b['type'])]}")
+                if v7_note_line is not None:
+                    # Invariant 10. `!r` so a missing key reads "version None"
+                    # and a string "2" reads "version '2'" -- neither is 2.
+                    v = payload.get("version")
+                    if v != 2:
+                        fail(lineno, f"strategy {sid}: version {v!r} after "
+                                     f"exit-rules-v7 (note at line "
+                                     f"{v7_note_line}); every registration "
+                                     f"after the note must be version 2")
+                leaked = FORBIDDEN_RESULT_KEYS & set(payload.keys())
+                if leaked:
+                    fail(lineno, f"strategy {sid}: results fields in spec {sorted(leaked)}")
+                # Wrapped because the verifier must report a malformed payload
+                # as malformed rather than crashing the whole walk — the chain
+                # is append-only and a single bad entry must not make the
+                # remaining thousands unverifiable.
+                try:
+                    fp = composition_fingerprint(payload)
+                except Exception as exc:            # malformed spec, not a dupe
+                    fail(lineno, f"strategy {sid}: cannot fingerprint ({exc})")
+                else:
+                    priors = fingerprints.get(fp, [])
+                    # `state` here is the lifecycle state AS OF THIS LINE,
+                    # which is the moment the composer's oracle was consulted.
+                    # A later transition cannot retro-license or retro-void a
+                    # registration that was legitimate when it was made
+                    # (graveyard is terminal, so a burial never un-happens).
+                    #
+                    # Wrapped for the SAME reason the fingerprint call above
+                    # is, and it is a WIDER exposure: this is the only part of
+                    # the walk that touches DISK, and disk is not the chain. A
+                    # corrupt artifact bundle or a corrupt bars file must
+                    # degrade to "window not verifiable", never to a traceback
+                    # -- an uncaught exception here is exit 1, chain_invalid,
+                    # and every loop cycle aborting, which is precisely the
+                    # outage this invariant was rewritten to end.
+                    try:
+                        verdict = retrial_verdict(
+                            [(s, state.get(s, "proposed"), run_of.get(s, ""))
+                             for s in priors],
+                            payload, cutoff_of, data_end_of)
+                    except Exception:
+                        verdict = RETRIAL_WINDOW_UNKNOWN if priors else RETRIAL_OK
+                    if verdict == RETRIAL_WINDOW_UNKNOWN:
+                        unverified_windows.append(f"line {lineno} {sid}")
+                    elif verdict != RETRIAL_OK:
+                        # Name EVERY earlier registration once there is more
+                        # than one: post-D9 the culprit is not always the
+                        # oldest, and a chain_invalid abort is diagnosed from
+                        # this line alone.
+                        also = ("" if len(priors) < 2 else
+                                f" (all: {', '.join(priors)})")
+                        fail(lineno, f"strategy {sid}: duplicate composition "
+                                     f"already registered as {priors[0]}"
+                                     f"{also} — "
+                                     f"{RETRIAL_REASONS.get(verdict, verdict)}")
+                    if sid:
+                        # only a NAMED strategy may be recorded, or a later
+                        # duplicate reports "already registered as None" and
+                        # the real culprit goes unnamed
+                        fingerprints.setdefault(fp, []).append(sid)
+                        gen = payload.get("generator")
+                        rid = gen.get("run_id") if isinstance(gen, dict) else None
+                        # "" never equals another entry's run_id, so a spec
+                        # with no readable run_id falls through to the buried
+                        # /window legs rather than being waved through OR
+                        # condemned on a field it does not have
+                        run_of[sid] = rid if isinstance(rid, str) else ""
+                    # an unnamed spec is already reported by as_key above
+
+            elif etype == "quarantine_data_snapshot":
+                d = payload.get("date")
+                covered = snapshot_digest_coverage(lineno, etype, payload,
+                                                   fail)
+                if not isinstance(d, str):
+                    # a list date would raise on the dict lookup below
+                    fail(lineno, f"quarantine_data_snapshot date {d!r} is not "
+                                 f"a string")
+                elif d in snapshots:
+                    fail(lineno, f"duplicate quarantine_data_snapshot for {d}")
+                else:
+                    snapshots[d] = covered
+
+            elif etype == "quarantine_data_snapshot_supplement":
+                # 2026-08-27 per-class-calendars addendum: a supplement
+                # extends a date's coverage for a class that published after
+                # the base snapshot was chained. Same digest rules as the
+                # base; additionally it must FOLLOW a base for its date and
+                # be asset-disjoint from what the date already covers.
+                d = payload.get("date")
+                covered = snapshot_digest_coverage(lineno, etype, payload,
+                                                   fail)
+                if not isinstance(d, str):
+                    fail(lineno, f"quarantine_data_snapshot_supplement date "
+                                 f"{d!r} is not a string")
+                elif d not in snapshots:
+                    fail(lineno, f"quarantine_data_snapshot_supplement for "
+                                 f"{d}: no earlier quarantine_data_snapshot "
+                                 f"for its date -- a supplement extends a "
+                                 f"date's provenance, it cannot start it")
+                else:
+                    overlap = sorted(covered & snapshots[d])
+                    if overlap:
+                        fail(lineno, f"quarantine_data_snapshot_supplement "
+                                     f"for {d}: assets already covered "
+                                     f"{overlap}")
+                    snapshots[d] |= covered
+
+            elif etype == "quarantine_decision":
+                sid = payload.get("strategy_id")
+                date, asset = payload.get("date"), payload.get("asset")
+                # The key goes into a set and the coverage lookup into a dict,
+                # so a non-string field here would raise out of the walk and
+                # leave every LATER entry unverified -- the worst failure mode
+                # an append-only public chain has. Report and move on instead.
+                if not all(isinstance(v, str) for v in (sid, date, asset)):
+                    fail(lineno, f"quarantine_decision strategy_id/date/asset "
+                                 f"must be strings, got "
+                                 f"{type(sid).__name__}/{type(date).__name__}/"
+                                 f"{type(asset).__name__}")
+                else:
+                    if sid not in strategies:
+                        fail(lineno, f"quarantine_decision for unregistered "
+                                     f"strategy {sid!r}")
+                    elif state.get(sid) != "quarantine":
+                        fail(lineno, f"quarantine_decision for strategy {sid} "
+                                     f"in state {state.get(sid)!r}, not "
+                                     f"'quarantine'")
+                    key = (sid, date, asset)
+                    if key in quarantine_seen:
+                        fail(lineno, f"duplicate quarantine_decision for {key}")
+                    else:
+                        quarantine_seen.add(key)
+                    # Because the walk is in chain order, `snapshots` holds
+                    # only entries that appeared EARLIER, which is what makes
+                    # "the provenance was recorded before the decision"
+                    # checkable rather than assumed.
+                    if asset not in snapshots.get(date, set()):
+                        fail(lineno, f"quarantine_decision {key}: no earlier "
+                                     f"quarantine_data_snapshot covers this "
+                                     f"date/asset")
+
+            elif etype == "note":
+                # Invariant 10's marker. Identified by its FIRST LINE (design
+                # s2), never by a substring: an incident note that mentions
+                # the rule in passing must not retroactively arm it. A
+                # non-string text is not the marker and is left to the
+                # schema; the walk never dereferences it. First occurrence
+                # arms; a second copy of the note changes nothing.
+                text = payload.get("text")
+                if (v7_note_line is None and isinstance(text, str)
+                        and text.startswith("exit-rules-v7:")):
+                    v7_note_line = lineno
+
+            elif etype in ("verdict", "state_change"):
+                sid = as_key(lineno, payload.get("strategy_id"),
+                             f"{etype} strategy_id")
+                if sid is not None and sid not in strategies:
+                    fail(lineno, f"{etype} for unregistered strategy {sid!r}")
+                if etype == "state_change" and sid in strategies:
+                    frm, to = payload.get("from"), payload.get("to")
+                    cur = state.get(sid)
+                    if cur in TERMINAL_STATES:
+                        fail(lineno, f"strategy {sid}: transition out of terminal state {cur!r}")
+                    elif frm != cur:
+                        fail(lineno, f"strategy {sid}: 'from' is {frm!r} but recorded state is {cur!r}")
+                    elif to not in VALID_TRANSITIONS.get(frm, set()):
+                        fail(lineno, f"strategy {sid}: illegal transition {frm!r} -> {to!r}")
+                    else:
+                        state[sid] = to
+                        if to == "graveyard":
+                            # which stage's verdict did the burying, and
+                            # therefore which artifact bundle carries the
+                            # cutoff (composer.burying_cutoff's argument)
+                            ba = payload.get("buried_at") or frm
+                            buried_at_of[sid] = ba if isinstance(ba, str) else ""
+
+    n_bad = len(bad_lines)
+    print()
+    if unverified_windows:
+        # Loud on purpose. These entries passed invariant 8's chain-only legs
+        # (every earlier registration buried, not the same run) but their
+        # re-trial WINDOW could not be checked because the burying cutoff or
+        # the cell's bars were not on disk. Reported, never failed.
+        print(f"  NOTE: {len(unverified_windows)} re-trial(s) admitted with "
+              f"the window not verifiable (no artifact cutoff or no bars "
+              f"under {artifacts_dir} / {data_dir}):")
+        for row in unverified_windows[:10]:
+            print(f"    {row}")
+        if len(unverified_windows) > 10:
+            print(f"    ... and {len(unverified_windows) - 10} more")
+        print()
+    print(f"  Entries           : {n_entries}")
+    print(f"  By type           : "
+          + ", ".join(f"{t}={n}" for t, n in sorted(by_type.items())))
+    print(f"  Cards registered  : {len(cards)}")
+    print(f"  exit-rules-v7     : "
+          + (f"note at line {v7_note_line}; version 2 enforced after it"
+             if v7_note_line is not None else
+             "no note on the chain; version 1 stands"))
+    print(f"  Strategies        : {len(strategies)}")
+    if strategies:
+        funnel: dict[str, int] = {}
+        for s in state.values():
+            funnel[s] = funnel.get(s, 0) + 1
+        print(f"  Funnel            : "
+              + ", ".join(f"{s}={n}" for s, n in sorted(funnel.items())))
+    print()
+    if n_bad == 0 and n_entries > 0:
+        print(f"  REGISTRY VALID — all {n_entries} entries link and satisfy invariants.")
+        return 0
+    elif n_entries == 0:
+        print("  Empty log.")
+        return 1
+    else:
+        print(f"  REGISTRY INVALID — {n_bad}/{n_entries} entries fail.")
+        return 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Verify research-layer registry log")
+    ap.add_argument("path", nargs="?",
+                    default="registry_log.jsonl",
+                    help="Path to registry_log.jsonl")
+    # Invariant 8's window leg reads OFF-CHAIN evidence. Both default to
+    # sitting beside the log, which is the layout the composer writes and the
+    # loop's pre-spend gate runs against; pass them when verifying a chain
+    # copied somewhere else for inspection.
+    ap.add_argument("--artifacts-dir", default=None,
+                    help="artifact bundles (default: artifacts/ beside the log)")
+    ap.add_argument("--data-dir", default=None,
+                    help="cached bars (default: data/ beside the log)")
+    args = ap.parse_args()
+    log_path = Path(args.path)
+    print(f"Verifying registry at {log_path}")
+    print("=" * 70)
+    return verify(log_path, args.artifacts_dir, args.data_dir)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

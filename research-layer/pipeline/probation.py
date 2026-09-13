@@ -1,0 +1,408 @@
+"""D27 case 3: mechanical admission of single-citation source proposals.
+
+Pre-filter (no cost) -> source screen (one Sonnet call) -> probation by yield.
+Pure functions over dicts; all I/O (fetch, LLM client, clock) is injected so the
+state machine is fully testable offline. Spec:
+docs/2026-08-23-source-probation-filter-design.md
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .feeds import (fetch_url, discover_feed, parse_feed, article_links,
+                    html_to_text)
+from .watchlist import JUNK_DOMAINS, discovery_domain, DEFAULT_POLL_MINUTES_AUTO
+
+WINDOW_1 = 40
+WINDOW_2 = 80
+PROMOTE_KEEPS = 2
+TIMEOUT_DAYS = 90
+PRIORITY_CAP = 40
+ADMISSIONS_PER_RUN = 20
+BLOCKED_SUBDOMAINS = ("store.", "shop.", "cms.", "app.", "login.", "my.")
+MIN_INDEX_ITEMS = 5
+MAX_MALFORMED_RUNS = 3
+KEEP_STATUSES = ("screen_keep", "screen_keep_low", "extracted", "paywalled",
+                 "fetch_failed", "thin_content", "extract_failed")
+SCREENED_STATUSES = KEEP_STATUSES + ("screen_kill",)
+PROVENANCE_PROBATION = "auto-d27-probation"
+PROVENANCE_PROMOTED = "auto-d27-promoted"
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# ---------------- pre-filter ----------------
+
+def prefilter(url: str, fetch=fetch_url) -> dict:
+    """Deterministic, no tokens. Returns {ok, reason, feed, titles, about}."""
+    domain = discovery_domain(url)
+    if not domain or domain in JUNK_DOMAINS or \
+            any(domain.endswith("." + j) for j in JUNK_DOMAINS):
+        return {"ok": False, "reason": "junk domain", "feed": None, "titles": [], "about": ""}
+    if any(domain.startswith(p) for p in BLOCKED_SUBDOMAINS):
+        return {"ok": False, "reason": f"blocked subdomain {domain.split('.')[0]}.",
+                "feed": None, "titles": [], "about": ""}
+    status, html, final = fetch(url)
+    if status != 200:
+        status, html, final = fetch(url)          # one retry
+        if status != 200:
+            return {"ok": False, "reason": f"unreachable: http {status}",
+                    "feed": None, "titles": [], "about": ""}
+    about = html_to_text(html)[:300]
+    feed = discover_feed(html, final)
+    if feed and not feed.startswith(("http://", "https://")):
+        feed = None  # e.g. feed://... -- never fetch a non-http(s) scheme
+    titles: list[str] = []
+    if feed:
+        fstatus, ftext, _ = fetch(feed)
+        if fstatus == 200:
+            titles = [it["title"] for it in parse_feed(ftext, domain)][:10]
+        else:
+            feed = None
+    if not titles:
+        feed = None  # dead/empty/non-XML feed: fall back to index mode
+        titles = [t or link for link, t in article_links(html, final, cap=25)][:10]
+        if len(titles) < MIN_INDEX_ITEMS:
+            return {"ok": False,
+                    "reason": f"no feed and only {len(titles)} index items (< {MIN_INDEX_ITEMS})",
+                    "feed": None, "titles": titles, "about": about}
+    return {"ok": True, "reason": "feed" if feed else "index", "feed": feed,
+            "titles": titles, "about": about}
+
+
+# ---------------- yield ----------------
+
+def source_stats(seen, source_id: str) -> dict:
+    """Screened / kept counts for one source from the seen store's latest
+    statuses. Post-keep states (extracted, paywalled, ...) are keeps."""
+    screened = keeps = 0
+    for e in seen._latest.values():
+        if e["source_id"] != source_id or e["status"] not in SCREENED_STATUSES:
+            continue
+        screened += 1
+        if e["status"] in KEEP_STATUSES:
+            keeps += 1
+    return {"screened": screened, "keeps": keeps}
+
+
+def decide_probation(stats: dict, since: str, today: str) -> dict:
+    """The state machine. Returns {action: promote|revoke|timeout|wait, reason}."""
+    screened, keeps = stats["screened"], stats["keeps"]
+    if keeps >= PROMOTE_KEEPS:
+        return {"action": "promote", "reason": f"probation-yield {keeps}/{screened}"}
+    try:
+        age = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(since, "%Y-%m-%d")).days
+    except ValueError:
+        return {"action": "wait", "reason": f"bad probation_since {since!r}"}
+    if age < 0:
+        return {"action": "wait", "reason": f"probation_since {since} is in the future"}
+    if age >= TIMEOUT_DAYS:
+        return {"action": "timeout", "reason": "probation-timeout"}
+    window = WINDOW_1 if keeps == 0 else WINDOW_2
+    if screened >= window:
+        return {"action": "revoke", "reason": f"probation-yield {keeps}/{window}"}
+    return {"action": "wait", "reason": f"{keeps} keeps in {screened}/{window}"}
+
+
+# ---------------- admissions (proposal -> blocked | probation) ----------------
+
+def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
+                       screen, today: str | None = None,
+                       max_per_run: int = ADMISSIONS_PER_RUN,
+                       can_spend=lambda: True) -> dict:
+    """Case-3 admission pass. `screen(domain, titles, about) -> (kind, payload)`
+    is injected (production binds relevance.screen_source, whose return
+    shape this matches exactly). `kind` is one of:
+      'verdict'   -- payload is the parsed dict; the normal path
+      'malformed' -- payload is a reason string; counts toward the
+                     per-source malformed-run cap (source's fault/flake)
+      'refusal'   -- payload is None; counts toward the same cap
+      'budget'    -- payload is None; NOT the source's fault -- the whole
+                     pass stops here without touching this or later entries
+      'api_error' -- payload is an error message; same as 'budget': stop,
+                     don't count, don't touch
+    `can_spend` (production binds meter.can_spend) gates the ENTIRE pass up
+    front: a closed budget returns the empty shape immediately, logging and
+    flipping nothing -- so a monthly cap closing (or a multi-minute API
+    outage straddling several 60s scanner cycles) can never rack up false
+    'malformed x3' blocks against proposals that were never actually
+    screened.
+
+    Returns the domains admitted / blocked / deferred this pass. Idempotent.
+    The queue is loaded once and written once at the end (if anything
+    changed); same for the watchlist (only when something was admitted).
+    Chain events are collected during the loop and only emitted with
+    `actions.event` AFTER both writes succeed, so a crash (or an exception
+    raised out of a write) mid-pass leaves no chain row describing a
+    mutation that was never actually persisted.
+
+    `max_per_run` bounds the number of entries that reach `prefilter` (a
+    live fetch) in one call -- free "already on watchlist" closeouts don't
+    count against it. The rest stay 'proposed' and are picked up next run;
+    this keeps one flood of proposals from stalling a cycle behind dozens
+    of sequential live fetches."""
+    from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
+                            flip_entries, entry_domain, is_mechanically_admissible,
+                            watchlist_domains)
+    out = {"admitted": [], "blocked": [], "deferred": []}
+    if not can_spend():
+        return out
+    today = today or _today()
+    entries = load_discovery(discovery_path)
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    known = watchlist_domains(doc)
+    queue_dirty = False
+    prefiltered = 0
+    pending_events: list[tuple[str, dict]] = []
+    for e in entries:
+        if e.get("status") != "proposed" or is_mechanically_admissible(e):
+            continue
+        domain = entry_domain(e)
+        if domain in known:
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "auto_admitted", reason="already on watchlist")
+            queue_dirty = True
+            continue
+        if prefiltered >= max_per_run:
+            break
+        prefiltered += 1
+        pf = prefilter(e["url"], fetch)
+        if not pf["ok"]:
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "blocked", reason=f"prefilter: {pf['reason']}")
+            queue_dirty = True
+            pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "prefilter",
+                                                            "reason": pf["reason"], "url": e["url"]}))
+            out["blocked"].append(domain)
+            continue
+        kind, payload = screen(domain, pf["titles"], pf["about"])
+        if kind in ("budget", "api_error"):
+            # not this source's fault, and every remaining call this pass
+            # would fail identically -- stop rather than mis-blame the queue
+            break
+        if kind in ("malformed", "refusal"):
+            n = int(e.get("malformed_runs", 0)) + 1
+            if n >= MAX_MALFORMED_RUNS:
+                e.pop("malformed_runs", None)
+                flip_entries(entries, domain, "blocked", reason=f"source-screen malformed x{n}")
+                pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                                "reason": f"malformed x{n}", "url": e["url"]}))
+                out["blocked"].append(domain)
+            else:
+                e["malformed_runs"] = n
+                pending_events.append(("source_screen_malformed",
+                                       {"domain": domain, "run": n, "url": e["url"], "kind": kind}))
+                out["deferred"].append(domain)
+            queue_dirty = True
+            continue
+        verdict = payload
+        if not verdict["research_source"]:
+            e.pop("malformed_runs", None)
+            flip_entries(entries, domain, "blocked", reason=f"source-screen: {verdict['reason']}")
+            queue_dirty = True
+            pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
+                                                            "reason": verdict["reason"], "url": e["url"]}))
+            out["blocked"].append(domain)
+            continue
+        entry = {
+            "id": domain, "class": "blog", "name": domain, "url": e["url"],
+            "feed": pf["feed"], "poll_minutes": DEFAULT_POLL_MINUTES_AUTO,
+            "added_by": PROVENANCE_PROBATION, "verified_date": today,
+            "tier": "probation", "probation_since": today,
+            "notes": (f"probation from {today} per D27 case 3 (single citation; "
+                      f"screen: {verdict['reason'][:120]}; classes "
+                      f"{','.join(verdict['asset_classes']) or '-'}). Coen-revocable."),
+        }
+        doc["sources"].append(entry)
+        known.add(domain)
+        e.pop("malformed_runs", None)
+        flip_entries(entries, domain, "probation",
+                    reason=f"admitted on probation: {verdict['reason']}")
+        queue_dirty = True
+        pending_events.append(("source_auto_admitted", {"domain": domain, "rule": "probation",
+                                                         "reason": verdict["reason"],
+                                                         "asset_classes": verdict["asset_classes"],
+                                                         "url": e["url"], "feed": pf["feed"]}))
+        out["admitted"].append(domain)
+    # Watchlist first, then the queue: a crash between the two leaves a
+    # 'proposed' queue entry plus a watchlist entry, which the next run
+    # closes out cleanly via the "already on watchlist" branch above. The
+    # reverse order would leave a queue entry claiming admission with no
+    # matching watchlist row -- an admission that never actually happened.
+    if out["admitted"]:
+        write_watchlist_doc(watchlist_path, doc)
+    if queue_dirty:
+        write_discovery(discovery_path, entries)
+    # Chain events are emitted last, and only once both writes above have
+    # actually succeeded -- see the docstring.
+    for event_type, payload in pending_events:
+        actions.event(event_type, payload)
+    return out
+
+
+# ---------------- reviews (probation -> promoted | revoked | timed_out) ------
+
+def process_reviews(*, watchlist_path, discovery_path, seen, actions,
+                    today: str | None = None) -> dict:
+    """Evaluate every probation entry. D27 case 2 (2+ distinct citers) wins
+    over yield; a timeout flips the queue row to 'timed_out' (a dead end,
+    NOT 'proposed' -- process_admissions only ever looks at 'proposed', so a
+    timed-out domain does not silently re-admit itself next cycle; it waits
+    for a genuinely new citer, which queue_discovery flips back to
+    'proposed' on arrival); a yield revoke blocks it. Idempotent: resolved
+    entries leave probation. Both the discovery queue and the watchlist are
+    loaded once and written once at the end (if anything changed). Chain
+    events are collected during the loop and only emitted with
+    `actions.event` AFTER both writes succeed, so a crash mid-pass leaves no
+    chain row describing a mutation that was never actually persisted."""
+    from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
+                            flip_entries, entry_domain, proposal_citers, tier_of)
+    today = today or _today()
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    probation_ids = {s["id"] for s in doc["sources"] if tier_of(s) == "probation"}
+    if not probation_ids:
+        # Nothing to review: skip the discovery-queue load and the seen-store
+        # scan entirely rather than paying for a pass over data with no
+        # probation entry to use it.
+        return {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
+    disc = load_discovery(discovery_path)
+    out = {"promoted": [], "revoked": [], "timed_out": [], "waiting": {}}
+    keep: list[dict] = []
+    watchlist_dirty = False
+    queue_dirty = False
+    pending_events: list[tuple[str, dict]] = []
+    # One pass over the seen store instead of one source_stats() scan per
+    # probation entry (source_stats itself is unchanged -- it's still used
+    # directly by tests and other callers; this just batches the same
+    # screened/keeps computation across every probation domain at once).
+    stats_by: dict[str, dict] = {d: {"screened": 0, "keeps": 0} for d in probation_ids}
+    for e in seen._latest.values():
+        sid = e["source_id"]
+        if sid not in probation_ids or e["status"] not in SCREENED_STATUSES:
+            continue
+        stats_by[sid]["screened"] += 1
+        if e["status"] in KEEP_STATUSES:
+            stats_by[sid]["keeps"] += 1
+    for s in doc["sources"]:
+        if tier_of(s) != "probation":
+            keep.append(s)
+            continue
+        domain = s["id"]
+        stats = stats_by[domain]
+        # Lookup is by domain over the single loaded queue snapshot; a
+        # matching entry that is still 'proposed' here (rather than
+        # 'probation') is harmless -- review is gated on tier=="probation"
+        # on the watchlist side, not on the discovery-queue entry's status.
+        match = next((de for de in disc if entry_domain(de) == domain), None)
+        citers = proposal_citers(match) if match is not None else set()
+        if len(citers) >= 2:
+            decision = {"action": "promote", "reason": "cited by 2 distinct verified sources"}
+        else:
+            since = s.get("probation_since") or s.get("verified_date", "")
+            decision = decide_probation(stats, since, today)
+        if decision["action"] == "promote":
+            s = {**s, "added_by": PROVENANCE_PROMOTED, "tier": "verified",
+                 "verified_date": today,
+                 "notes": s.get("notes", "") + f" | promoted {today}: {decision['reason']}"}
+            s.pop("probation_since", None)
+            keep.append(s)
+            queue_dirty |= flip_entries(disc, domain, "auto_admitted", reason=decision["reason"])
+            pending_events.append(("source_promoted", {"domain": domain, "rule": decision["reason"],
+                                                        "screened": stats["screened"], "keeps": stats["keeps"]}))
+            out["promoted"].append(domain); watchlist_dirty = True
+        elif decision["action"] in ("revoke", "timeout"):
+            # A timeout goes to 'timed_out', a DEAD END distinct from
+            # 'proposed' -- process_admissions only ever acts on 'proposed'
+            # rows, so this cannot silently re-admit itself next cycle. Only
+            # a genuinely new citer (via queue_discovery) re-opens it.
+            new_status = "blocked" if decision["action"] == "revoke" else "timed_out"
+            queue_dirty |= flip_entries(disc, domain, new_status, reason=decision["reason"])
+            pending_events.append(("source_auto_revoked", {"domain": domain, "rule": decision["reason"],
+                                                            "action": decision["action"],
+                                                            "screened": stats["screened"], "keeps": stats["keeps"],
+                                                            "requeued": decision["action"] == "timeout"}))
+            bucket = "revoked" if decision["action"] == "revoke" else "timed_out"
+            out[bucket].append(domain); watchlist_dirty = True
+        else:
+            keep.append(s)
+            out["waiting"][domain] = decision["reason"]
+    # Queue first, then the watchlist: a crash between the two leaves a
+    # resolved queue status (promoted/blocked/timed_out) alongside a stale
+    # probation entry still on the watchlist, which the next run re-resolves
+    # from the queue's status. The reverse order would leave the watchlist
+    # entry already gone with the queue still claiming 'probation' -- a
+    # resolution the queue can no longer explain.
+    if queue_dirty:
+        write_discovery(discovery_path, disc)
+    if watchlist_dirty:
+        doc["sources"] = keep
+        write_watchlist_doc(watchlist_path, doc)
+    # Chain events are emitted last, and only once both writes above have
+    # actually succeeded -- see the docstring.
+    for event_type, payload in pending_events:
+        actions.event(event_type, payload)
+    return out
+
+
+# ---------------- scheduling + visibility ----------------
+
+def prioritise_items(items: list[dict], probation_ids: set[str],
+                     cap: int = PRIORITY_CAP) -> tuple[list[dict], list[dict]]:
+    """Probation-source items first (at most `cap` per source), then everything
+    else in original order. Items over the cap are returned separately so the
+    caller can leave them for the next cycle (they stay 'seen' in the store)."""
+    first, rest, held = [], [], []
+    per: dict[str, int] = {}
+    for it in items:
+        sid = it["source_id"]
+        if sid in probation_ids:
+            if per.get(sid, 0) < cap:
+                first.append(it); per[sid] = per.get(sid, 0) + 1
+            else:
+                held.append(it)
+        else:
+            rest.append(it)
+    return first + rest, held
+
+
+def probation_counts(watchlist_path, actions_path, days: int = 30) -> dict:
+    """Real counts: probation entries on the watchlist now, plus chain events in
+    the trailing window. Nothing derived that the chain did not record."""
+    from .watchlist import tier_of
+    doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
+    on_probation = sum(1 for s in doc.get("sources", []) if tier_of(s) == "probation")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    counts = {"on_probation": on_probation, "admitted": 0, "promoted": 0,
+              "revoked": 0, "timed_out": 0, "blocked": 0}
+    p = Path(actions_path)
+    if not p.exists():
+        return counts
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue          # a truncated trailing line (crash mid-append)
+        try:
+            when = datetime.strptime((e.get("ts_utc") or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        t, pl = e.get("entry_type"), e.get("payload", {})
+        if t == "source_auto_admitted" and pl.get("rule") == "probation":
+            counts["admitted"] += 1
+        elif t == "source_promoted":
+            counts["promoted"] += 1
+        elif t == "source_auto_revoked":
+            counts["timed_out" if pl.get("action") == "timeout" else "revoked"] += 1
+        elif t == "source_auto_blocked":
+            counts["blocked"] += 1
+        elif t == "source_revoked_by_coen":
+            counts["revoked"] += 1
+    return counts

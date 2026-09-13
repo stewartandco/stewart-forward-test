@@ -1,0 +1,97 @@
+{
+ "cutoff": "2023-12-31",
+ "data_sha256": {
+  "BTCUSD": "815ad51a3f33b950f67df75612b75adb2f14c53943a03a3b1f16faa5266b9636",
+  "ETHUSD": "ef5a4eb98df4e7adba57969ea17ee392d1159cece5cfa5f2d0f5e9086d7ad4db"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "max_lookback": 120,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-13T07:49:47Z",
+  "family": "trend_scan_triple_barrier",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-13-manual"
+  },
+  "name": "BTC+ETH 1d trend_scan_triple_barrier ml120 tm2.0 ml200 al14 m2.0 r3.0 mb40 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "2117f951d16dc2e6",
+    "295c089b48478986",
+    "3d4db3693d78d717",
+    "9a6abe19343ae46f",
+    "a4ff31490b3d6b5d",
+    "b9eac347a54d8b73",
+    "d0fc8344bd267d47",
+    "d124a7351a44f986"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "trend_scan_triple_barrier-2026-08-13-manual"
+  },
+  "strategy_id": "2a81986933c36b30",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}
