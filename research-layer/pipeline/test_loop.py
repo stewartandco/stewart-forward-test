@@ -27,7 +27,7 @@ from .test_pipeline import make_strategy, register_example_blocks
 
 
 @pytest.fixture(autouse=True)
-def _no_real_schtasks(monkeypatch):
+def _no_real_schtasks(monkeypatch, tmp_path):
     """Stub the live-task window reader for EVERY test in this module.
 
     loop.run() reads the scheduled task's ExecutionTimeLimit at startup, which
@@ -39,8 +39,14 @@ def _no_real_schtasks(monkeypatch):
 
     None is the "cannot determine" answer, i.e. the silent no-op path. The
     warning itself is covered directly, with explicit stubs, by the
-    test_*_task_window_* tests below."""
+    test_*_task_window_* tests below.
+
+    Likewise the stage-0 snapshot (2026-09-12): it is SKIPPED when the
+    trading-systems producer root does not exist, and on this box it does.
+    Point every test at a non-existent root so the stage argv the existing
+    tests pin stays byte-identical; the stage-0 tests set an existing dir."""
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: None)
+    monkeypatch.setenv("TRADING_SYSTEMS_ROOT", str(tmp_path / "no-producer-here"))
 
 
 def _mk_layer(tmp_path, accepted_fx=0):
@@ -1994,5 +2000,162 @@ def test_the_monthly_batch_stop_park_after_triage_also_banks_the_reviewed_cards(
     assert status["items"]["outcome"] == "deferred_budget"
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
     assert st["classes"]["fx"]["watermark"] == 30          # banked (was: no watermark at all)
+
+
+# ─── stage 0: the loop takes the tradfi snapshot itself (2026-09-12 spec §2) ─
+
+
+def _with_producer(monkeypatch, tmp_path):
+    """Make stage 0 run: an existing (empty) producer root is all the loop
+    checks; FakeRunner never executes the adapter."""
+    root = tmp_path / "trading-systems"
+    root.mkdir()
+    monkeypatch.setenv("TRADING_SYSTEMS_ROOT", str(root))
+    return root
+
+
+def _snapshot_calls(fr):
+    return [c for c in fr.calls if c[0] == sys.executable and "-m" in c
+            and c[c.index("-m") + 1] == "pipeline.tradfi_data"]
+
+
+def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypatch):
+    """2026-09-11 22:30: fx cells were 20 days behind crypto because the
+    tradfi snapshot was a hand step nobody ran. The loop now takes it as its
+    own stage 0, before anything reads the chain."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 0
+    snaps = _snapshot_calls(fr)
+    assert len(snaps) == 1
+    assert fr.calls[0] == snaps[0]                      # the very first call
+    argv = snaps[0]
+    assert argv[:4] == [sys.executable, "-m", "pipeline.tradfi_data", "snapshot"]
+    assert argv[argv.index("--classes") + 1] == "fx,equity_etf,bond_etf,metal_etf"
+    assert argv[argv.index("--classes") + 1] == ",".join(loop.SNAPSHOT_CLASSES)
+    assert argv[argv.index("--out") + 1] == str(layer)
+    assert fr.call_kwargs[0]["cwd"] == str(layer)
+    assert _modules(fr) == ["pipeline.tradfi_data", "pipeline.triage_batch",
+                            "pipeline.composer", "pipeline.composer",
+                            "pipeline.screen", "pipeline.gauntlet"]
+
+
+def test_stage0_precedes_the_first_registry_read(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner()
+    seen_at = []
+
+    class RecordingRegistry(Registry):
+        def __init__(self, *a, **k):
+            seen_at.append(len(fr.calls))
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(loop, "Registry", RecordingRegistry)
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 0
+    assert seen_at and min(seen_at) >= 1, "registry constructed before stage 0 ran"
+    assert _snapshot_calls(fr) == [fr.calls[0]]
+
+
+def test_stage0_runs_on_a_no_trigger_fire_and_on_a_budget_park(tmp_path, monkeypatch):
+    """Deliberate (spec §2): the 08:20 quarantine daily reads the same data/,
+    so a fire that does nothing else still leaves fresh cells behind."""
+    # no_trigger
+    (tmp_path / "a").mkdir()                      # _mk_layer's mkdir is not recursive
+    layer, _ = _mk_layer(tmp_path / "a", accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"
+    assert _modules(fr) == ["pipeline.tradfi_data"]
+
+    # deferred_budget: spend already past the batch-stop line
+    (tmp_path / "b").mkdir()
+    layer2, _ = _mk_layer(tmp_path / "b", accepted_fx=30)
+    _seed_crypto_caught_up(layer2, 30)
+    ledger = layer2 / "logs" / "budget_ledger.jsonl"
+    ledger.write_text(json.dumps({"ts_utc": loop._now_utc(), "agent": "pipeline",
+                                  "usd": PIPELINE_CAP_USD * 0.9, "model": "m",
+                                  "purpose": "test"}) + "\n", encoding="utf-8")
+    fr2 = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer2)], runner=fr2) == 0
+    status2 = json.loads((layer2 / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status2["items"]["outcome"] == "deferred_budget"
+    assert _modules(fr2) == ["pipeline.tradfi_data"]
+
+
+def test_stage0_runs_under_dry_run(tmp_path, monkeypatch):
+    """A dry run that reported 'would fire' on stale data would be lying
+    about what the real fire will do. The snapshot writes data/, never the
+    chain, so the dry run takes it too."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--dry-run", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert _modules(fr) == ["pipeline.tradfi_data"]     # and nothing metered
+
+
+def test_stage0_failure_ends_the_fire_before_any_chain_read(tmp_path, monkeypatch, capsys):
+    """A SnapshotRefused (unpinned / hash-mismatched series) or a crash in the
+    adapter is a defect: exit 1 (Sentinel FAIL, task retry), zero spend, no
+    later stage, and no counts in the status (no chain read happened)."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    fr = FakeRunner(codes={"pipeline.tradfi_data": 1})
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == ["pipeline.tradfi_data"]
+    out = capsys.readouterr().out
+    assert "snapshot_failed" in out
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "snapshot_failed"
+    assert status["items"]["snapshot_rc"] == "1"
+    assert "triggerable_fx" not in status["items"]        # before the chain read
+    assert "snapshot_failed" in status.get("escalations", [])
+
+
+def test_stage0_is_skipped_without_a_producer_root(tmp_path, capsys):
+    """tmp registries, tests, a fresh clone: no trading-systems repo to read
+    from. The autouse fixture already points TRADING_SYSTEMS_ROOT at a
+    non-existent dir, so this is the default path every other test runs."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert _snapshot_calls(fr) == []
+    assert "snapshot_skipped: no producer at" in capsys.readouterr().out
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["snapshot_skipped"] == "1"
+    assert "snapshot_utc" not in status["items"]
+
+
+def test_status_carries_the_snapshot_utc_of_the_manifest_on_disk(tmp_path, monkeypatch):
+    """The digest can say which snapshot a cycle was bred on."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    (layer / "data").mkdir()
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-12T14:30:05+00:00", "series": {}}), encoding="utf-8")
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "no_trigger"
+    assert status["items"]["snapshot_utc"] == "2026-09-12T14:30:05+00:00"
+    assert "snapshot_skipped" not in status["items"]
 
 

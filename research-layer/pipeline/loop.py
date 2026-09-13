@@ -16,8 +16,8 @@ Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
 Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_cycle_budget | deferred_lock |
         deferred_budget | deferred_instance | dry_run_would_fire
         (distinguished in logs/pipeline_status.json items.outcome)
-Exit 1: stage_failed | chain_invalid | gauntlet_orphan | loop_crashed
-        -- a real defect.
+Exit 1: stage_failed | chain_invalid | gauntlet_orphan | snapshot_failed | stale_data |
+        loop_crashed -- a real defect.
 
 ACTIVATION: `python -m pipeline.loop --seed-watermarks` initialises every
 LIVE_CLASSES watermark to the current triggerable count, so the FIRST
@@ -143,6 +143,18 @@ FIX_WINDOW_CMD = (
     '  THEN  powershell -NoProfile -ExecutionPolicy Bypass -File '
     '"E:\\Users\\Coen\\Claude\\quant\\tasks\\apply_retry_settings.ps1" '
     '-Task 25_PipelineLoop   (both elevated)')
+
+# Stage 0 (2026-09-12, docs/2026-09-12-loop-snapshot-stage-design.md): the
+# loop takes the tradfi snapshot itself on every fire, before anything reads
+# the chain. Every class in cells.CLASSES except crypto -- crypto's BTCUSD/
+# ETHUSD are fetched daily by the quarantine task (pipeline.data_fetch) and
+# the 100-coin USDT grid is unscheduled and uncompared today. Skipped when no
+# producer repo exists (tests, a fresh clone); never skipped in production.
+SNAPSHOT_CLASSES = ("fx", "equity_etf", "bond_etf", "metal_etf")
+
+# Items that belong to THIS run and must appear on every status path written
+# after they are known (snapshot_skipped, snapshot_utc). Reset at run() start.
+_cycle_items: dict[str, str] = {}
 
 
 def _now_utc() -> str:
@@ -625,6 +637,7 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
         items.update(_queue_items(state))
     if counts is not None:
         items.update(_count_items(*counts))
+    items.update(_cycle_items)
     items.update(extra or {})
     payload = pipeline_status.build({"loop": overall}, spent, escalations)
     payload["items"] = {**payload.get("items", {}), **items}
@@ -636,6 +649,46 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
 def _stage(runner: Runner, argv: list[str], cwd: str | Path) -> int:
     print(f"loop: running {' '.join(argv)}", flush=True)
     return runner(argv, cwd=str(cwd)).returncode
+
+
+def _producer_root() -> Path:
+    """The trading-systems repo the tradfi adapter reads from: the env var
+    the adapter itself honours, else its default. Imported lazily: the
+    adapter pulls in pandas, which the loop otherwise never needs."""
+    from .tradfi_data import DEFAULT_TS_ROOT
+    return Path(os.environ.get("TRADING_SYSTEMS_ROOT") or DEFAULT_TS_ROOT)
+
+
+def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
+    """Stage 0: refresh the tradfi cells from the producer. Returns the
+    adapter's exit code, or None when skipped (no producer root). The
+    adapter's own stdout/stderr reach the run log because stages inherit
+    stdio; a refusal prints its reason there. Writes data/ only, never the
+    chain, so no chain.lock is taken."""
+    root = _producer_root()
+    if not root.exists():
+        print(f"snapshot_skipped: no producer at {root}", flush=True)
+        _cycle_items["snapshot_skipped"] = "1"
+        return None
+    rc = _stage(runner, [sys.executable, "-m", "pipeline.tradfi_data", "snapshot",
+                         "--classes", ",".join(SNAPSHOT_CLASSES),
+                         "--out", str(layer)], cwd=layer)
+    if rc == 0:
+        _cycle_items.update(_snapshot_items(layer))
+    return rc
+
+
+def _snapshot_items(layer: Path) -> dict[str, str]:
+    """`snapshot_utc` from the manifest the adapter just rewrote, so the
+    digest can say which snapshot a cycle was bred on. Absent or unreadable
+    manifest -> no item (the FakeRunner writes nothing; a real run always
+    does)."""
+    p = layer / "data" / "tradfi_snapshot_manifest.json"
+    try:
+        utc = json.loads(p.read_text(encoding="utf-8")).get("snapshot_utc")
+    except (OSError, ValueError):
+        return {}
+    return {"snapshot_utc": str(utc)} if utc else {}
 
 
 def _abort_stage_failed(logs_dir: str | Path, state: dict, asset_class: str,
@@ -813,6 +866,7 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="report whether a class would fire; run nothing")
     args = ap.parse_args(argv)
+    _cycle_items.clear()
 
     layer = Path(args.layer)
     logs_dir = layer / "logs"
@@ -953,6 +1007,22 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         if state.get("stale_lock") is not None:
             loop_state.clear_stale_lock(state)
             loop_state.save(state_path, state)
+
+    # -- 1b. stage 0: tradfi snapshot, BEFORE the first chain read -----------
+    # Runs on every fire that gets past the locks, no_trigger and budget
+    # parks included: the quarantine daily reads the same data/. A refusal
+    # is a defect (a pinned series changed or vanished), never weather.
+    snap_rc = _snapshot_stage(runner, layer)
+    if snap_rc not in (None, 0):
+        print(f"snapshot_failed: pipeline.tradfi_data exited {snap_rc}; "
+              f"the tradfi cells were not refreshed -- see the adapter's "
+              f"output above. Nothing was spent and the chain was not read.",
+              flush=True)
+        _write_status(logs_dir, "snapshot_failed", overall="FAIL",
+                      extra={"snapshot_rc": str(snap_rc)},
+                      spent=_spent(logs_dir), escalations=["snapshot_failed"],
+                      state=state)
+        return 1
 
     # -- 2. trigger check ----------------------------------------------------
     registry = Registry(registry_path)
