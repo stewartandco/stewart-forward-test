@@ -955,3 +955,65 @@ def test_serial_and_parallel_runs_produce_identical_verdicts(tmp_path):
         runs.append(verdict_rows(reg))
     assert len(runs[0]) == 2
     assert runs[0] == runs[1]
+
+
+# ─── cell_end_dates (loop preflight helper, 2026-09-12 spec §3) ──────────────
+
+
+def test_cell_end_dates_matches_load_cell_data_s_data_end(tmp_path):
+    """One rule for 'when does this cell's data stop'. The loop's pre-spend
+    preflight reads only each CSV's tail; the gauntlet loads every bar. They
+    must agree to the byte, or the preflight could pass a tree the gauntlet
+    then refuses (the 2026-09-11 failure, one stage later)."""
+    from .screen import cell_end_dates, load_cell_data
+    _write_cell_csv(tmp_path, "AUD", "1d", ["2026-08-19 00:00:00",
+                                            "2026-08-20 00:00:00",
+                                            "2026-08-21 00:00:00"])
+    _write_cell_csv(tmp_path, "BTCUSD", "1d", ["2026-09-09 00:00:00",
+                                               "2026-09-10 00:00:00"])
+    cells = [("AUD", "1d"), ("BTCUSD", "1d")]
+
+    ends = cell_end_dates(tmp_path, cells)
+
+    assert ends == load_cell_data(tmp_path, cells, "9999-12-31")[2]
+    assert ends == {"AUD_1d": "2026-08-21 00:00:00",
+                    "BTCUSD_1d": "2026-09-10 00:00:00"}
+
+
+def test_cell_end_dates_reads_only_the_tail(tmp_path):
+    """A 10 MB file with an unparseable FIRST data line still answers: the
+    helper must never read the whole file (the live tree holds 140 cells,
+    some with 11,000+ rows, and the preflight runs on every fire)."""
+    from .screen import cell_end_dates
+    p = tmp_path / "SPY_1d.csv"
+    junk = "this,is,not,a,bar,row\n"
+    good = "".join(f"2020-01-{d:02d} 00:00:00,1,1,1,1,1\n" for d in range(1, 29))
+    filler = good * 400          # ~1 MB of valid rows so the tail is far from the head
+    p.write_text("date,open,high,low,close,volume\n" + junk + filler
+                 + "2026-09-10 00:00:00,1,1,1,1,1\n", encoding="utf-8")
+
+    assert cell_end_dates(tmp_path, [("SPY", "1d")]) == {"SPY_1d": "2026-09-10 00:00:00"}
+
+
+def test_cell_end_dates_tolerates_a_trailing_blank_line(tmp_path):
+    from .screen import cell_end_dates
+    p = tmp_path / "GLD_1d.csv"
+    p.write_text("date,open,high,low,close,volume\n"
+                 "2026-09-09 00:00:00,1,1,1,1,1\n"
+                 "2026-09-10 00:00:00,1,1,1,1,1\n\n", encoding="utf-8")
+    assert cell_end_dates(tmp_path, [("GLD", "1d")]) == {"GLD_1d": "2026-09-10 00:00:00"}
+
+
+def test_cell_end_dates_names_a_missing_cell(tmp_path):
+    from .screen import cell_end_dates
+    _write_cell_csv(tmp_path, "AUD", "1d", ["2026-08-21 00:00:00"])
+    with pytest.raises(FileNotFoundError, match="EUR_1d"):
+        cell_end_dates(tmp_path, [("AUD", "1d"), ("EUR", "1d")])
+
+
+def test_cell_end_dates_header_only_file_is_an_empty_end(tmp_path):
+    """assert_cells_comparable already refuses an empty end string; the helper
+    reports it as '' rather than raising, so the message names the cell."""
+    from .screen import cell_end_dates
+    (tmp_path / "AUD_1d.csv").write_text("date,open,high,low,close,volume\n", encoding="utf-8")
+    assert cell_end_dates(tmp_path, [("AUD", "1d")]) == {"AUD_1d": ""}

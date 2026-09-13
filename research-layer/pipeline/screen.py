@@ -90,6 +90,58 @@ def load_cell_data(data_dir: Path, cells, cutoff: str) -> tuple[dict, dict, dict
     return bars_by_cell, data_hashes, data_end
 
 
+def cell_end_dates(data_dir: Path, cells) -> dict[str, str]:
+    """{cell_id: last bar's date string} for each (asset, timeframe), reading
+    only the TAIL of each `<asset>_<tf>.csv`.
+
+    The loop's pre-spend freshness preflight (2026-09-12 spec §3) needs the
+    same answer `load_cell_data(...)[2]` gives with cutoff 9999-12-31, on
+    every fire, without loading 140 cells of full history. The date is the
+    first comma-separated field of the last non-blank line, exactly the
+    string the CSV carries (`YYYY-MM-DD HH:MM:SS`); `assert_cells_comparable`
+    compares `[:10]`. A header-only file yields "" (the guard refuses that
+    with a message naming the cell). A missing file raises FileNotFoundError
+    naming the cell: a registered cell with no data is a defect the caller
+    reports, not something to skip.
+    """
+    data_dir = Path(data_dir)
+    ends: dict[str, str] = {}
+    for asset, tf in cells:
+        cid = cell_id(asset, tf)
+        path = data_dir / f"{asset}_{tf}.csv"
+        if not path.exists():
+            raise FileNotFoundError(f"{cid}: no price file at {path}")
+        ends[cid] = _last_csv_date(path)
+    return ends
+
+
+def _last_csv_date(path: Path, chunk: int = 4096) -> str:
+    """First field of the last non-blank line of `path`, or "" when the only
+    line is the header. Reads backwards in `chunk`-byte steps; never the
+    whole file."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        buf = b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step) + buf
+            lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+            # Need at least two non-blank lines to know the last one is complete
+            # and is not the header; or we have reached the start of the file.
+            if len(lines) >= 2 or pos == 0:
+                break
+    lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+    if not lines:
+        return ""
+    last = lines[-1].decode("utf-8").strip()
+    if last.lower().startswith("date,"):
+        return ""                       # header-only file
+    return last.split(",", 1)[0].strip()
+
+
 def assert_cells_comparable(data_end: dict[str, str],
                             class_of: dict[str, str] | None = None) -> None:
     """Refuse to compare cells whose data stops on different DAYS.
