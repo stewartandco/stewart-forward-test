@@ -861,7 +861,10 @@ In `CLAUDE.md`, find the bullet that begins `- State: logs/loop_state.json (per-
   one implementation the gauntlet also uses. Successful fires carry `snapshot_utc` in the status.
   **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
   failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
-  (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance.
+  (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance. Staleness is now
+  SYMMETRIC: crypto's BTCUSD/ETHUSD come from the 08:20 QuarantineDaily, so if THAT stalls, crypto
+  goes stale against fresh tradfi and every fire parks at `stale_data` (zero spend, Sentinel FAIL)
+  until the crypto fetch is fixed -- read `data_end_by_class` in the status to see which class.
 ```
 
 - [ ] **Step 2: SP4 design amendment**
@@ -879,10 +882,13 @@ insert:
 > **Amended 2026-09-12** (`docs/2026-09-12-loop-snapshot-stage-design.md`, Coen's decision):
 > the pipeline loop IS the generation run and fires unattended, so "deliberately before a
 > generation run" is done by the loop itself as its stage 0, on every fire. The pinning half
-> is unchanged — each generation still records the snapshot it was bred on — and there is
-> still no separate schedule for the snapshot. A hand `tradfi_data snapshot` is a repair, not a
-> routine. Why: the 2026-09-11 22:30 cycle refused in the gauntlet (fx 20 days behind crypto)
-> because the last hand snapshot was eleven days old.
+> is unchanged and is stronger than this paragraph said: what binds a generation to its data
+> is the per-cell `data_sha256` the screen and the gauntlet chain with every verdict (the
+> "records the snapshot id in its universe provenance" sentence above was never implemented in
+> composer/registry; the hash is what exists). There is still no separate schedule for the
+> snapshot. A hand `tradfi_data snapshot` is a repair, not a routine. Why: the 2026-09-11
+> 22:30 cycle refused in the gauntlet (fx 20 days behind crypto) because the last hand
+> snapshot was eleven days old.
 ```
 
 - [ ] **Step 3: Commit**
