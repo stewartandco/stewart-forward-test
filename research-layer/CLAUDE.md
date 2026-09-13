@@ -49,8 +49,8 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   after the orphan check and before triage, `_freshness_preflight` reads each registered cell's
   LAST bar and runs the gauntlet's own `assert_cells_comparable`; a breach is `stale_data` (FAIL,
   exit 1, `run_aborted`, zero spend; `stale_detail` names the cells, `data_end_by_class` names the
-  class). Both derive their cells from `screen.comparable_cells`, the one implementation the
-  gauntlet also uses. Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
+  class). The preflight derives its cells from `screen.comparable_cells`, the same implementation
+  the gauntlet uses (stage 0's classes are `SNAPSHOT_CLASSES`). Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
   but returns at the trigger report, before the chain verify, the orphan check and this preflight.
   **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
   failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
