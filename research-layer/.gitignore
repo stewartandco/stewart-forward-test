@@ -18,3 +18,16 @@ data/*.csv
 # entry is reproducible from the registry, the pinned data and engine.py's
 # ENGINE_REV -- and it grows with every gauntlet run, so it is not the record.
 simcache/
+
+# 2026-09-13 (Coen): the registry and pipeline are the public trust asset;
+# plans, run logs, unify notes, diagnostics, prompt files and the raw
+# discovery queue are internal. Durable copy: stewartandco-agents/hubs/
+# intelligence/research-layer-internals. Dated design docs, addenda and
+# docs/notes stay tracked (pre-registrations the tests and README cite).
+docs/plans/
+docs/runs/
+docs/unify/
+docs/diagnostics/
+docs/PROMPT-*.md
+sources/discovery_queue.jsonl
+sources/*.bak-*

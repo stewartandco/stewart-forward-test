@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 from .watchlist import normalize_url
 
 USER_AGENT = ("StewartCoReaderBot/2.0 (+research scanner; contact "
-              "coen@stewartandco.org)")
+              "coen@stewartandco.com.au)")
 
 PAYWALL_STATUSES = {401, 402, 403}
 PAYWALL_MARKERS = (
