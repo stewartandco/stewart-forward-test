@@ -503,6 +503,38 @@ def _gauntlet_orphans(registry: Registry) -> list[str]:
                   if st == "gauntlet" and sid in verdicted)
 
 
+def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None, dict[str, str]]:
+    """(problem, items). problem is None when every cell the gauntlet will
+    compare ends within the cross-class allowance; otherwise the text
+    assert_cells_comparable (or a missing price file) gives. Reads only each
+    CSV's tail, so it is cheap enough for every fire.
+
+    Sits with the chain verify and the orphan preflight (4.0a/4.0b) for the
+    same reason: the gauntlet refuses on this condition at the END of the
+    cycle, after triage and both composer calls have been paid for. On
+    2026-09-11 that cost USD 1.90 and the month's last cycle. With stage 0
+    in front of this check, staleness now means the source lags beyond its
+    declared max_end_lag_days or a cell vanished -- a defect, never weather.
+    """
+    from .screen import assert_cells_comparable, cell_end_dates, comparable_cells
+    all_specs = [e["payload"] for e in registry.entries()
+                 if e["entry_type"] == "strategy_registered"]
+    cells_needed, class_of = comparable_cells(all_specs)
+    if not cells_needed:
+        return None, {}
+    try:
+        ends = cell_end_dates(data_dir, cells_needed)
+    except FileNotFoundError as exc:
+        return str(exc), {}
+    days = sorted(e[:10] for e in ends.values() if e)
+    items = {"data_end_min": days[0], "data_end_max": days[-1]} if days else {}
+    try:
+        assert_cells_comparable(ends, class_of=class_of)
+    except ValueError as exc:
+        return str(exc), items
+    return None, items
+
+
 def _budget_state(spent: float) -> str:
     """Which budget line the cycle is standing on, as a status item. The
     digest could previously only infer this from the presence of a
@@ -1145,6 +1177,19 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                              "orphans": ", ".join(orphans),
                              "orphan_count": str(len(orphans))},
                       spent=_spent(logs_dir), escalations=["chain_invalid"],
+                      state=state, counts=trigger_counts)
+        return 1
+
+    # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
+    # refreshed the tradfi cells; if the tree is STILL not comparable, the
+    # gauntlet would refuse after every metered stage ran (2026-09-11).
+    problem, fresh_items = _freshness_preflight(registry, layer / "data")
+    if problem is not None:
+        print(f"stale_data: {problem}", flush=True)
+        _write_status(logs_dir, "stale_data", overall="FAIL",
+                      extra={"stale_detail": problem[:400], **fresh_items,
+                             "asset_class": asset_class},
+                      spent=_spent(logs_dir), escalations=["run_aborted"],
                       state=state, counts=trigger_counts)
         return 1
 

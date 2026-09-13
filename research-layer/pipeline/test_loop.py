@@ -21,9 +21,11 @@ from pathlib import Path
 import pytest
 
 from .chainlock import ChainLock, ChainLockHeld
+from .common import content_id
 from .registry import Registry
 from . import cells, loop, loop_state
 from .test_pipeline import make_strategy, register_example_blocks
+from .test_screen import _write_cell_csv
 
 
 @pytest.fixture(autouse=True)
@@ -1594,7 +1596,12 @@ def test_a_clean_chain_has_no_orphans_and_proceeds(tmp_path):
     the normal completed case, not an orphan."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    reg.append("strategy_registered", {"strategy_id": "done-sid"})
+    # universe.assets must be present (even empty) for the 4.0c freshness
+    # preflight's comparable_cells to iterate this entry without crashing --
+    # this raw append predates that requirement and (unlike register_strategy
+    # specs) is never routed through validation that would supply one.
+    reg.append("strategy_registered", {"strategy_id": "done-sid",
+                                       "universe": {"assets": []}})
     reg.append("state_change", {"strategy_id": "done-sid", "from": "proposed",
                                 "to": "gauntlet"})
     reg.append("verdict", {"strategy_id": "done-sid", "stage": "gauntlet",
@@ -2202,5 +2209,97 @@ def test_cycle_items_do_not_leak_between_runs_in_one_process(tmp_path, monkeypat
     assert loop.run(["--once", "--layer", str(layer2)], runner=fr2) == 0
     status2 = json.loads((layer2 / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert "snapshot_skipped" not in status2["items"]
+
+
+# ─── 4.0c freshness preflight (2026-09-12 spec §3) ──────────────────────────
+
+
+def _spec_on(card_ids, asset, asset_class):
+    """A registered spec whose universe is ONE daily cell of the given class
+    (make_strategy's default is a 15m futures cell with no CSV on disk)."""
+    spec = make_strategy(card_ids)
+    spec["universe"] = {"assets": [asset], "asset_class": asset_class,
+                        "timeframe": "1d", "session": "RTH"}
+    spec["strategy_id"] = None
+    spec["strategy_id"] = content_id(spec, "strategy_id")
+    return spec
+
+
+def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end):
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    register_example_blocks(reg)
+    reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
+    reg.register_strategy(_spec_on(["card0001"], "BTCUSD", "crypto"))
+    data = layer / "data"
+    data.mkdir()
+    if fx_end:
+        _write_cell_csv(data, "AUD", "1d", ["2026-01-02 00:00:00", fx_end])
+    if crypto_end:
+        _write_cell_csv(data, "BTCUSD", "1d", ["2026-01-02 00:00:00", crypto_end])
+    return layer
+
+
+def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys):
+    """The 2026-09-11 failure, caught one stage in instead of four: AUD ends
+    2026-08-21, BTCUSD 2026-09-10 -- 20 days, allowance 13 (3 + fx's 10)."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
+                                             "2026-09-10 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []                     # NOTHING metered ran
+    out = capsys.readouterr().out
+    assert "stale_data:" in out and "AUD_1d" in out and "BTCUSD_1d" in out
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "AUD_1d" in status["items"]["stale_detail"]
+    assert status["items"]["data_end_min"] == "2026-08-21"
+    assert status["items"]["data_end_max"] == "2026-09-10"
+    assert "run_aborted" in status["escalations"]
+    assert status["push"] is True
+    assert "triggerable_fx" in status["items"]     # after the chain read, so counts present
+    st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
+    # No generation, no park -- fx never got as far as either writer, so
+    # (matching test_stage_failure_exits_nonzero_and_does_not_advance_watermark's
+    # pattern) its classes entry carries no watermark at all rather than 0.
+    assert "watermark" not in st.get("classes", {}).get("fx", {})     # nothing banked
+
+
+def test_fresh_data_passes_the_preflight_and_the_stage_argv_is_unchanged(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-04 00:00:00",
+                                             "2026-09-10 00:00:00")   # 6 days, allowed
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 0
+    assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
+                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete"
+
+
+def test_a_registered_cell_with_no_price_file_is_stale_data_naming_the_cell(tmp_path, capsys):
+    layer = _layer_with_two_registered_cells(tmp_path, None, "2026-09-10 00:00:00")
+    fr = FakeRunner()
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    assert rc == 1
+    assert _modules(fr) == []
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "stale_data"
+    assert "AUD_1d" in status["items"]["stale_detail"]
+    assert "AUD_1d" in capsys.readouterr().out
+
+
+def test_no_registered_specs_means_nothing_to_compare(tmp_path):
+    """Every pre-existing loop test registers nothing before triage; the
+    preflight must be a no-op there, not a FileNotFoundError on data/."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr)[0] == "pipeline.triage_batch"
 
 
