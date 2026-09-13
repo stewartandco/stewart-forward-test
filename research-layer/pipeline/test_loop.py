@@ -1842,7 +1842,10 @@ def test_short_task_window_warns_loudly_and_names_the_fix(capsys):
     # TRIAGE_LIMIT, and a hardcoded "120 min" here silently rotted the moment
     # the limit was raised (2026-08-31, 40 -> 200).
     assert "60 min" in out and f"{loop.MIN_TASK_WINDOW_S // 60} min" in out
-    assert "schtasks" in out and "apply_retry_settings.ps1" in out   # the fix
+    # The fix names the task where it now lives and who owns its settings
+    # (morpheus-hub's applier since the 2026-09-13 folder move, not quant's
+    # apply_retry_settings.ps1, which would silently revert a hand change).
+    assert loop.TASK_NAME in out and "ExecutionTimeLimit" in out and "morpheus-hub" in out
 
 
 def test_adequate_task_window_is_silent(capsys):
@@ -2360,3 +2363,55 @@ def test_stage0_runs_before_the_freshness_preflight_on_a_stale_tree(tmp_path, mo
     assert _modules(fr) == ["pipeline.tradfi_data"]        # stage 0 ran, nothing metered did
 
 
+
+
+# ─── 2026-09-13: the loop's task moved to \Morpheus\ and the window reader ──
+
+
+def test_task_name_follows_the_2026_09_13_folder_move():
+    """On 2026-09-13 12:35 the nine research-layer tasks were moved from the
+    StewartCo scheduler folder to the Morpheus one. The reader queries BY NAME,
+    so a stale constant means no deadline on every fire -- silently (the
+    reader's contract is 'None for any reason'), which is the PT4H hard-kill
+    trap the deadline machinery exists to prevent."""
+    assert loop.TASK_NAME == r"\Morpheus\25_PipelineLoop"
+
+
+class _Proc:
+    def __init__(self, stdout, rc=0):
+        self.stdout, self.returncode = stdout, rc
+
+
+_TASK_XML = ('<?xml version="1.0" encoding="UTF-16"?>\r\r\n<Task version="1.3">'
+             '<Settings><ExecutionTimeLimit>PT4H</ExecutionTimeLimit></Settings></Task>')
+
+
+def test_window_reader_parses_8bit_output_that_claims_utf16(monkeypatch):
+    """schtasks /XML on a task registered by PowerShell (the Morpheus-folder
+    ones) returns plain 8-bit bytes whose header still SAYS UTF-16. Decoding
+    those as UTF-16 'succeeds' as garbage, the regex misses, and the reader
+    returned None -- measured live 2026-09-13 after the folder move. The
+    fixture is padded to an EVEN byte length like the live output (2,108
+    bytes): an odd length makes the UTF-16 decode raise and the old reader
+    fall through to UTF-8, which would hide the defect."""
+    monkeypatch.undo()
+    raw = _TASK_XML.encode("utf-8")
+    if len(raw) % 2:
+        raw += b"\n"
+    assert len(raw) % 2 == 0
+    monkeypatch.setattr(loop.subprocess, "run", lambda *a, **k: _Proc(raw))
+    assert loop._live_task_window_s(r"\Morpheus\25_PipelineLoop") == 4 * 3600
+
+
+def test_window_reader_still_parses_real_utf16_output(monkeypatch):
+    """Tasks imported from an XML file (schtasks /Create /XML) answer in real
+    UTF-16 with a BOM -- what the reader was written against."""
+    monkeypatch.undo()
+    monkeypatch.setattr(loop.subprocess, "run", lambda *a, **k: _Proc(_TASK_XML.encode("utf-16")))
+    assert loop._live_task_window_s(r"\Morpheus\25_PipelineLoop") == 4 * 3600
+
+
+def test_window_reader_returns_none_on_undecodable_output(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(loop.subprocess, "run", lambda *a, **k: _Proc(b"\xff\xfe\x00\xd8garbage"))
+    assert loop._live_task_window_s(r"\Morpheus\25_PipelineLoop") is None

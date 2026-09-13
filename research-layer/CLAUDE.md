@@ -458,7 +458,7 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - Fires 22:30 / 02:30 local (NIGHT, since 2026-09-04 -- was 10:30/15:30/21:30:
   a cycle needs ~9 GB of commit the desktop does not leave free by day, and no
   4h window may reach 08:20 QuarantineDaily; quant/tasks/xml/25_PipelineLoop.xml
-  + setup_scheduler.bat carry it) once \StewartCo\25_PipelineLoop is
+  + setup_scheduler.bat carry it) once \Morpheus\25_PipelineLoop (moved from \StewartCo\ on 2026-09-13; the loop's TASK_NAME follows it) is
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real
   defect (Sentinel FAILs the digest).
@@ -473,7 +473,7 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - `--report DIR` writes `<UTC date>-livegate-assessment.md` (every quarantined
   strategy, cohort size, verdicts) -- Coen's quarterly read. Written on a dry
   run too; it is not a chain write.
-- `tasks/run_livegate.bat` = `\StewartCo\26_LiveGateWeekly`, **Sunday 09:10**,
+- `tasks/run_livegate.bat` = `\Morpheus\26_LiveGateWeekly` (in `\StewartCo\` until 2026-09-13), **Sunday 09:10**,
   exit code load-bearing. Weekly, not daily: the note charges
   Benjamini-Hochberg over "the eligible strategies at each assessment" and
   fixes no cadence; weekly keeps the kill arm prompt without re-asking a

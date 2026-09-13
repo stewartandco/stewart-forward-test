@@ -11,7 +11,8 @@ outright (see _triggerable_counts). Both _triggerable_counts and _routable_count
 are reported to status; only the former decides.
 
 Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
-\\StewartCo\\25_PipelineLoop (~3x daily) as `python -m pipeline.loop --once`.
+\\Morpheus\\25_PipelineLoop (22:30 / 02:30; in \\StewartCo\\ until 2026-09-13)
+as `python -m pipeline.loop --once`.
 
 Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_cycle_budget | deferred_lock |
         deferred_budget | deferred_instance | dry_run_would_fire
@@ -128,7 +129,12 @@ ROTATION_CLASSES = ("crypto",)
 # killed task leaves no failure the Sentinel can see. On 2026-08-29 the live
 # task carried PT1H while its XML declared PT2H (apply_retry_settings.ps1 was
 # overwriting it), which is exactly that trap.
-TASK_NAME = r"\StewartCo\25_PipelineLoop"
+# 2026-09-13 12:35: the nine research-layer tasks moved from \StewartCo\ to
+# \Morpheus\ (morpheus-hub scheduler-folder cutover). The reader queries the
+# task BY NAME and answers None for any miss, so a stale name here means NO
+# cycle deadline on every fire, silently -- the hard-kill trap this exists for.
+# Pinned by test_task_name_follows_the_2026_09_13_folder_move.
+TASK_NAME = r"\Morpheus\25_PipelineLoop"
 MIN_TASK_WINDOW_S = int(TRIAGE_LIMIT * _TRIAGE_S_PER_CARD + _REST_OF_CYCLE_S)
 
 # Phase 3 step 3: the cycle's deadline is start + the live task's window minus
@@ -139,11 +145,10 @@ MIN_TASK_WINDOW_S = int(TRIAGE_LIMIT * _TRIAGE_S_PER_CARD + _REST_OF_CYCLE_S)
 # it, hitting the wall becomes evidence of a bug rather than weather.
 SAFETY_MARGIN_S = 15 * 60
 FIX_WINDOW_CMD = (
-    'schtasks /Create /TN "StewartCo\\25_PipelineLoop" /XML '
-    '"E:\\Users\\Coen\\Claude\\quant\\tasks\\xml\\25_PipelineLoop.xml" /F'
-    '  THEN  powershell -NoProfile -ExecutionPolicy Bypass -File '
-    '"E:\\Users\\Coen\\Claude\\quant\\tasks\\apply_retry_settings.ps1" '
-    '-Task 25_PipelineLoop   (both elevated)')
+    r'schtasks /Change /TN "\Morpheus\25_PipelineLoop" (elevated) is NOT enough: '
+    'since 2026-09-13 this task is owned by morpheus-hub\'s scheduler-folder '
+    'applier (docs/superpowers/plans/2026-09-13-morpheus-scheduler-folder.md); '
+    'set ExecutionTimeLimit PT4H there and re-apply, or the next apply reverts it')
 
 # Stage 0 (2026-09-12, docs/2026-09-12-loop-snapshot-stage-design.md): the
 # loop takes the tradfi snapshot itself on every fire, before anything reads
@@ -245,13 +250,17 @@ def _live_task_window_s(task_name: str = TASK_NAME) -> int | None:
         if proc.returncode != 0:
             return None
         raw = proc.stdout
-        for encoding in ("utf-16", "utf-8"):
-            try:
-                text = raw.decode(encoding)
-                break
-            except (UnicodeDecodeError, LookupError):
-                continue
-        else:
+        # Pick the encoding from the BYTES, not by trial: a task imported
+        # from an XML file answers in real UTF-16 (BOM, NUL bytes), but one
+        # registered by PowerShell (the \Morpheus\ tasks since 2026-09-13)
+        # answers in plain 8-bit bytes whose header still SAYS UTF-16. Trying
+        # UTF-16 first on those "succeeds" as garbage for any even-length
+        # payload (the live one is 2,108 bytes), the regex misses, and the
+        # loop silently ran with no deadline. Measured live 2026-09-13.
+        looks_utf16 = raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:64]
+        try:
+            text = raw.decode("utf-16" if looks_utf16 else "utf-8")
+        except (UnicodeDecodeError, LookupError):
             return None
         m = re.search(r"<ExecutionTimeLimit>([^<]+)</ExecutionTimeLimit>", text)
         return _parse_iso_duration_s(m.group(1)) if m else None
