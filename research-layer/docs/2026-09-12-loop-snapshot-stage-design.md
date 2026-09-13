@@ -50,6 +50,10 @@ helper, so tests drive it with the same fake runner as every other stage:
 
     <sys.executable> -m pipeline.tradfi_data snapshot
         --classes fx,equity_etf,bond_etf,metal_etf --out <layer root>
+        --ts-root <the producer root the loop probed>
+
+(`--ts-root` added 2026-09-13 in review: the loop probes one root for the
+skip rule and the adapter must use THAT root, not re-resolve its own.)
 
 `--classes` is a module constant `SNAPSHOT_CLASSES = ("fx", "equity_etf",
 "bond_etf", "metal_etf")`, i.e. every class in `cells.CLASSES` except
@@ -74,12 +78,16 @@ digest and the task's 3×15 min retry fires. Spend at that point is zero and
 no chain read has happened, so the status carries no counts (the same
 omission as the two lock-probe paths, documented in CLAUDE.md).
 
-**Provenance.** `tradfi_data.snapshot` already rewrites
+**Provenance.** `tradfi_data.snapshot` rewrites
 `data/tradfi_snapshot_manifest.json` with `snapshot_utc` and the producer's
-`source_snapshot_utc`, and every registration on these cells records the
-snapshot in its universe provenance (SP4 §3). A generation is therefore still
-pinned to the snapshot it was bred on — the snapshot is now taken at the
-generation's own start instead of by a person some days before.
+`source_snapshot_utc`. The pinning that actually binds a generation to its
+data is the per-cell `data_sha256` the screen and the gauntlet chain with
+every verdict (screen.py / gauntlet.py `load_cell_data` hashes) — stronger
+than a manifest id, and unchanged by this design. (Corrected 2026-09-13: SP4
+§3's "records the snapshot id in its universe provenance" is not implemented
+in composer/registry; the hash is what exists.) A generation is therefore
+still pinned to the data it was bred on — taken at the generation's own
+start instead of by a person some days before.
 
 **Commit.** None. The quarantine daily commits BTCUSD/ETHUSD CSVs because its
 forward records cite them; the tradfi snapshot is reproducible from the
@@ -120,7 +128,14 @@ logs_dir, "stale_data", overall="FAIL", extra={"stale_detail": <text>,
 "data_end_min": ..., "data_end_max": ...}, spent=_spent(logs_dir),
 escalations=["stale_data"], state=state, counts=trigger_counts)`, return 1.
 On `FileNotFoundError` (a registered cell with no CSV): same path, outcome
-`stale_data`, detail naming the cell. Exit 1 because, with stage 0 in front
+`stale_data`, detail naming the cell. Escalation vocabulary: both new FAIL
+outcomes escalate as `run_aborted` (a registered `pipeline_status.PUSH_TRIGGERS`
+string, like `stage_failed` and `loop_crashed`); the specific name lives in
+`items.outcome`. **Dry run, deliberately:** `--dry-run` runs stage 0 (so a
+dry run in the live tree refreshes `data/`) but returns at the trigger report,
+BEFORE the chain verify, the orphan check and this preflight — a dry run does
+not tell you whether the real fire would refuse with `stale_data`, exactly as
+it does not tell you whether the chain verify would fail. Exit 1 because, with stage 0 in front
 of it, staleness now means the source lags beyond its declared
 `max_end_lag_days` or a cell vanished — a defect to look at, never weather.
 Spend is zero: this runs before triage.

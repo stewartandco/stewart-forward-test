@@ -582,7 +582,7 @@ def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
         return None
     rc = _stage(runner, [sys.executable, "-m", "pipeline.tradfi_data", "snapshot",
                          "--classes", ",".join(SNAPSHOT_CLASSES),
-                         "--out", str(layer)], cwd=layer)
+                         "--out", str(layer), "--ts-root", str(root)], cwd=layer)
     if rc == 0:
         _cycle_items.update(_snapshot_items(layer))
     return rc
@@ -924,7 +924,7 @@ python -c "import json;i=json.load(open('logs/pipeline_status.json'))['items'];p
 git -C .. status --porcelain research-layer/data | head
 ```
 
-Expected: AUD ends on the producer's fx end (2026-09-04 or later), SPY and GLD on the producer's ETF end (2026-09-10 or later), manifest `snapshot_utc` = today, status outcome `deferred_budget` with `snapshot_utc` = the same timestamp and no `snapshot_skipped`. `git status` shows only tradfi CSVs and the manifest modified (they are not committed, per spec §2; leave them).
+Expected: AUD ends on the producer's fx end (2026-09-04 or later), SPY and GLD on the producer's ETF end (2026-09-10 or later), manifest `snapshot_utc` = today, status outcome `deferred_budget` with `snapshot_utc` = the same timestamp and no `snapshot_skipped`. `git status` shows ONLY `research-layer/data/tradfi_snapshot_manifest.json` modified: `data/*.csv` is gitignored (`.gitignore` line ~14), so the CSVs never appear. The manifest is tracked and stage 0 rewrites it on every fire; leave it modified (CLAUDE.md now says so).
 
 - [ ] **Step 4: Prove the preflight against the NOW-FRESH tree**
 
