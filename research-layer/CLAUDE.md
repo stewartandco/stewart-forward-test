@@ -57,7 +57,8 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance. Staleness is now
   SYMMETRIC: crypto's BTCUSD/ETHUSD come from the 08:20 QuarantineDaily, so if THAT stalls, crypto
   goes stale against fresh tradfi and every fire parks at `stale_data` (zero spend, Sentinel FAIL)
-  until the crypto fetch is fixed -- read `data_end_by_class` in the status to see which class.
+  until the crypto fetch is fixed -- read `data_end_by_class` in the status to see which class. The preflight covers only cells that already carry a registered spec: a class with no
+  registrations yet (metal_etf today) gets its FIRST generation checked by the gauntlet, not the preflight.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
@@ -71,8 +72,8 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `data/tradfi_snapshot_manifest.json` is a TRACKED file that stage 0
   rewrites on every fire, and the loop's own scoped commit never includes it
   -- so it shows as modified on a shared working tree. That is expected;
-  never `git checkout --` it from another session. (The CSVs under data/ are
-  gitignored.)
+  never `git checkout --` it from another session. (The tradfi CSVs under data/ are gitignored; BTCUSD/ETHUSD are tracked and committed
+  by the quarantine daily.)
 - `budget_state` item: ok | batch_stop (80% line) | hard_cap. Written on
   EVERY status path, not just the budget-blocked ones, so "ok" is a value
   that actually appears. A budget park also stamps `last_park_ts_utc` in
