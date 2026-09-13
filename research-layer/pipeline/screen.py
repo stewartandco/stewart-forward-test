@@ -20,6 +20,7 @@ import json
 import hashlib
 import argparse
 from pathlib import Path
+from collections.abc import Iterable
 
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id
@@ -152,7 +153,7 @@ def _last_csv_date(path: Path, chunk: int = 4096) -> str:
     return last.split(",", 1)[0].strip()
 
 
-def comparable_cells(all_specs) -> tuple[list[tuple[str, str]], dict[str, str]]:
+def comparable_cells(all_specs: Iterable[dict]) -> tuple[list[tuple[str, str]], dict[str, str]]:
     """(cells_needed, class_of) for the set of registered specs the gauntlet
     compares registry-wide. Moved here from gauntlet.run() on 2026-09-12 so
     the loop's pre-spend preflight and the gauntlet's own check derive the
@@ -166,7 +167,20 @@ def comparable_cells(all_specs) -> tuple[list[tuple[str, str]], dict[str, str]]:
     class from the ticker would raise on every one of them. asset_class
     already travels on every registered spec's universe (the composer stamps
     it; legacy fixtures declare it explicitly too).
+
+    When two specs declare the same cell with different asset_class, the
+    later spec in `all_specs` order wins -- class_of is a plain dict write,
+    last one in survives. The live registry has no such conflict today, but
+    the winner is not cosmetic: it decides which class's cross-class
+    allowance `assert_cells_comparable` applies to that cell.
+
+    `all_specs` is iterated twice below (once to build `cells_needed`, once
+    for `class_of`), so it is materialised into a list first -- a one-pass
+    iterable (a generator, a database cursor) would otherwise be exhausted
+    after the first pass, silently leaving `class_of` empty while
+    `cells_needed` is still fully populated.
     """
+    all_specs = list(all_specs)
     cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
                            for s in all_specs for a in s["universe"]["assets"]})
     class_of: dict[str, str] = {}

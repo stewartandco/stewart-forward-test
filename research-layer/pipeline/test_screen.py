@@ -1122,16 +1122,40 @@ def test_comparable_cells_derives_cells_and_classes_from_each_spec_s_own_univers
         {"universe": {"assets": ["BTCUSD", "ETHUSD"]}},                 # no class, no tf
         {"universe": {"assets": ["AUD"], "asset_class": "fx", "timeframe": "1d"}},  # duplicate cell
         {"universe": {"assets": ["SPY"], "asset_class": "equity_etf", "timeframe": "4h"}},
+        {"universe": {"assets": ["BTCUSDT"], "asset_class": "crypto", "timeframe": "15m"}},
+        {"universe": {"assets": ["BTCUSDT"], "asset_class": "crypto", "timeframe": "1d"}},
+        {"universe": {"assets": [], "asset_class": "fx", "timeframe": "1d"}},  # empty universe
     ]
 
     cells_needed, class_of = comparable_cells(specs)
 
-    assert cells_needed == [("AUD", "1d"), ("BTCUSD", "1d"), ("ETHUSD", "1d"),
-                            ("EUR", "1d"), ("SPY", "4h")]
+    assert cells_needed == [("AUD", "1d"), ("BTCUSD", "1d"), ("BTCUSDT", "15m"),
+                            ("BTCUSDT", "1d"), ("ETHUSD", "1d"), ("EUR", "1d"),
+                            ("SPY", "4h")]
     assert class_of == {"AUD_1d": "fx", "EUR_1d": "fx", "BTCUSD_1d": "crypto",
-                        "ETHUSD_1d": "crypto", "SPY_4h": "equity_etf"}
+                        "ETHUSD_1d": "crypto", "SPY_4h": "equity_etf",
+                        "BTCUSDT_15m": "crypto", "BTCUSDT_1d": "crypto"}
 
 
 def test_comparable_cells_of_nothing_is_nothing():
     from .screen import comparable_cells
     assert comparable_cells([]) == ([], {})
+
+
+def test_comparable_cells_accepts_a_single_pass_iterable():
+    """all_specs is consumed twice internally (a set comprehension, then a
+    for loop); a generator would be exhausted after the first pass, leaving
+    class_of empty while cells_needed is still populated. Must materialise
+    its input first."""
+    from .screen import comparable_cells
+    specs = [
+        {"universe": {"assets": ["AUD", "EUR"], "asset_class": "fx", "timeframe": "1d"}},
+        {"universe": {"assets": ["BTCUSD", "ETHUSD"]}},
+        {"universe": {"assets": ["AUD"], "asset_class": "fx", "timeframe": "1d"}},
+        {"universe": {"assets": ["SPY"], "asset_class": "equity_etf", "timeframe": "4h"}},
+    ]
+
+    from_list = comparable_cells(specs)
+    from_gen = comparable_cells(s for s in specs)
+
+    assert from_gen == from_list
