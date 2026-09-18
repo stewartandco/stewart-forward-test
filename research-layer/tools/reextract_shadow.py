@@ -777,14 +777,16 @@ def run(argv: list[str] | None = None) -> int:
         for c in cards.values():
             held_by_doc.setdefault(doc_key(c), []).append(c.get("claim", ""))
         ceiling_ok = spend_guard(meter.month_spend())
-        from pipeline.pipeline_budget import may_start_batch
 
         def may_continue(current_usd: float) -> bool:
-            # Three lines, all enforced: the pilot ceiling, the monthly hard cap,
-            # and the 80% batch-stop line past which the LOOP parks itself for
-            # the rest of the month - a pilot must never be what parks it.
-            return (ceiling_ok(current_usd) and meter.can_spend()
-                    and may_start_batch(current_usd))
+            # TWO lines, both enforced: the pilot ceiling and the monthly hard
+            # cap. There used to be a third -- the 80% batch-stop past which the
+            # LOOP parked itself -- but D41 (2026-09-18) removed it, so the
+            # loop's park line and the hard cap are now the same line. The
+            # principle it protected still holds and is still tested: a pilot
+            # must never be the thing that parks the loop, so the monthly cap is
+            # checked ahead of the pilot ceiling.
+            return ceiling_ok(current_usd) and meter.can_spend()
 
         from pipeline.feeds import fetch_url, html_to_text
         from pipeline.reader import chunk_text, read_source_text
@@ -800,8 +802,6 @@ def run(argv: list[str] | None = None) -> int:
                     if not may_continue(meter.month_spend()):
                         if not meter.can_spend():
                             why = "the monthly pipeline cap"
-                        elif not may_start_batch(meter.month_spend()):
-                            why = "the 80% batch-stop line (the loop would park)"
                         else:
                             why = f"the USD {PILOT_CEILING_USD:.0f} pilot ceiling"
                         print(f"STOPPED at {why} after {len(results)} document(s)")

@@ -57,7 +57,10 @@ UNATTRIBUTED = "unattributed"
 # it enforceable by scoping a meter to that agent's own attributed rows. It
 # lives HERE rather than in one of the two agents that spend against it,
 # because two copies of a number that must agree will eventually disagree.
-PIPELINE_CAP_USD = 40.0     # D39 (2026-09-03): Intelligence band re-split, Reader 20 / pipeline 40
+PIPELINE_CAP_USD = 200.0    # D41 (2026-09-18): Coen raised the line 40 -> 200 and removed the 80%
+                            # batch-stop, so nothing is skipped for the rest of a month. NOTE this
+                            # EXCEEDS the old D28 pool of 100 and no longer fits the Reader 20 /
+                            # pipeline 40 band split -- that band is superseded, not merely stretched.
 
 
 def agent_of(row: dict) -> str:

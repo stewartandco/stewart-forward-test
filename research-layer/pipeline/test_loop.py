@@ -422,9 +422,16 @@ def test_budget_cap_parks_before_spending(tmp_path):
     assert "budget_cap" in status["escalations"]      # at (not merely near) the hard cap
 
 
-def test_budget_batch_stop_zone_defers_without_cap_escalation(tmp_path):
-    """80-100% of cap parks the batch (WARN) but is NOT the hard-cap case --
-    distinct from test_budget_cap_parks_before_spending's >=cap escalation."""
+def test_the_old_batch_stop_zone_no_longer_parks_the_cycle(tmp_path):
+    """D41 (2026-09-18) REGRESSION GUARD, and an inversion of what this test
+    used to assert.
+
+    It previously pinned the 80-100% band as a park (WARN, no escalation),
+    distinct from the hard cap. Coen removed the 80% batch-stop precisely
+    because that band made the last fifth of every month unusable and skipped
+    good candidates. So the band must now be SPENDABLE: a cycle at 85% of cap
+    proceeds past the budget gate instead of parking. If a sub-cap stop is ever
+    reintroduced, this fails."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     ledger = layer / "logs" / "budget_ledger.jsonl"
@@ -437,11 +444,10 @@ def test_budget_batch_stop_zone_defers_without_cap_escalation(tmp_path):
     fr = FakeRunner()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
-    assert fr.calls == []
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
-    assert status["items"]["outcome"] == "deferred_budget"
-    assert status["overall"] == "WARN"
-    assert status["escalations"] == []                # below the hard cap: no push
+    assert status["items"]["outcome"] != "deferred_budget"
+    assert status["items"]["budget_state"] == "ok"
+    assert fr.calls != []                             # work actually started
 
 
 def test_run_id_is_unique_per_invocation(monkeypatch):
@@ -483,7 +489,7 @@ def test_budget_recheck_after_triage_parks_before_composer(tmp_path):
                 month = datetime.now(timezone.utc).strftime("%Y-%m")
                 with ledger.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                        "usd": PIPELINE_CAP_USD * 0.85, "purpose": "triage",
+                                        "usd": PIPELINE_CAP_USD, "purpose": "triage",
                                         "model": "claude-sonnet-5",
                                         "agent": "pipeline"}) + "\n")
             return r
@@ -1636,7 +1642,7 @@ def test_budget_park_records_state_and_rotates_the_class_to_the_back(tmp_path):
     from datetime import datetime, timezone
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     ledger.write_text(json.dumps({"ts_utc": f"{month}-01T00:00:00+00:00",
-                                  "usd": PIPELINE_CAP_USD * 0.85, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD, "purpose": "triage",
                                   "model": "claude-sonnet-5"}) + "\n",
                       encoding="utf-8")
 
@@ -1645,7 +1651,7 @@ def test_budget_park_records_state_and_rotates_the_class_to_the_back(tmp_path):
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "deferred_budget"
     first = status["items"]["asset_class"]
-    assert status["items"]["budget_state"] == "batch_stop"
+    assert status["items"]["budget_state"] == "hard_cap"   # D41: the only park line left
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
     assert st["classes"][first]["last_park_ts_utc"] is not None
     # Watermark NOT banked: no work was done for it.
@@ -1931,18 +1937,25 @@ class SpendingRunner(FakeRunner):
         return r
 
 
-def test_triage_limit_is_derived_from_the_allowance_not_declared(tmp_path):
-    """Fresh state, no calibration: the priors rule. cap 40 x 0.85 / floor 10
-    cycles = USD 3.40; (3.40 - 0.64) / 0.018 = 153 cards -- below the 200
-    ceiling, so the ceiling is NOT what gets passed."""
+def test_triage_limit_is_derived_from_the_allowance_not_declared(tmp_path, monkeypatch):
+    """Fresh state, no calibration: the priors rule.
+
+    ⚠ The cap is PINNED to 40 here rather than read live, and that is
+    load-bearing. At the live D41 cap of 200 the derivation SATURATES
+    TRIAGE_CEILING (200 cards at every cycle count), so a live-cap version of
+    this test could no longer tell a derived limit from a hardcoded ceiling --
+    it would pass just as happily if the derivation were deleted. Pinned:
+    cap 40 x 0.85 / floor 10 cycles = USD 3.40; (3.40 - 0.64) / 0.018 = 153
+    cards, below the 200 ceiling, so the ceiling is NOT what gets passed."""
     from . import allowance as al
-    from .budget import PIPELINE_CAP_USD
+    PINNED_CAP = 40.0
+    monkeypatch.setattr(loop, "PIPELINE_CAP_USD", PINNED_CAP)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     c = _stage_call(fr, "pipeline.triage_batch")
-    expect = al.triage_count(al.cycle_allowance(PIPELINE_CAP_USD, al.RESERVE, al.CYCLES_FLOOR),
+    expect = al.triage_count(al.cycle_allowance(PINNED_CAP, al.RESERVE, al.CYCLES_FLOOR),
                              al.PRIOR_COMPOSER_PAIR_USD, al.PRIOR_USD_PER_CARD, loop.TRIAGE_CEILING)
     assert c[c.index("--limit") + 1] == str(expect)
     assert expect < loop.TRIAGE_CEILING
@@ -1968,11 +1981,17 @@ def test_a_completed_cycle_records_itself_and_calibrates_from_its_own_spend(tmp_
     assert c.composer_pair_usd == pytest.approx(0.70)
 
 
-def test_spend_past_the_allowance_parks_before_the_composer_and_banks_the_reviewed_cards(tmp_path):
+def test_spend_past_the_allowance_parks_before_the_composer_and_banks_the_reviewed_cards(tmp_path, monkeypatch):
     """The park Coen said counts as a clean day. Triage alone costs more than
     the allowance leaves for the composer pair: stop at zero further spend,
     outcome deferred_cycle_budget, overall OK, composer never called -- and
-    the cards triage just paid for are BANKED, never re-paid."""
+    the cards triage just paid for are BANKED, never re-paid.
+
+    The cap is PINNED to 40 so the fixture's USD 3.30 triage spend still
+    exceeds a USD 3.40 allowance. At the live D41 cap of 200 the allowance is
+    USD 8.50 and this fixture would no longer trip the cycle park at all --
+    the mechanism would go untested rather than fail loudly."""
+    monkeypatch.setattr(loop, "PIPELINE_CAP_USD", 40.0)
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _add_cards(reg, 100, status="pending", asset_classes=["fx"], prefix="pend")
     _seed_crypto_caught_up(layer, 130)
@@ -1991,19 +2010,23 @@ def test_spend_past_the_allowance_parks_before_the_composer_and_banks_the_review
     assert st["classes"]["fx"]["watermark"] == 40         # 130 - (100 - 10 reviewed) = 40, banked
 
 
-def test_the_monthly_batch_stop_park_after_triage_also_banks_the_reviewed_cards(tmp_path):
+def test_the_monthly_cap_park_after_triage_also_banks_the_reviewed_cards(tmp_path):
     """Defect found 2026-09-03: the existing post-triage deferred_budget park
     recorded a park and never banked, so the cards triage had just paid for
-    were re-paid on the next fire. It banks now."""
+    were re-paid on the next fire. It banks now.
+
+    D41 (2026-09-18) moved the line this fixture straddles -- the 80% batch-stop
+    is gone, so the park now happens at the hard cap. The banking property under
+    test is unchanged."""
     from .budget import PIPELINE_CAP_USD
     # Accepted-driven fire (no pending cards): the no_new_accepted_cards guard
     # does not apply, so the cycle reaches the monthly park after triage.
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    # Just under the batch-stop line before triage; triage pushes it over.
+    # Just under the hard cap before triage; triage pushes it over.
     ledger = layer / "logs" / "budget_ledger.jsonl"
     ledger.write_text(json.dumps({"ts_utc": f"{_ledger_month()}-01T00:00:00+00:00",
-                                  "usd": PIPELINE_CAP_USD * 0.79, "purpose": "triage",
+                                  "usd": PIPELINE_CAP_USD * 0.99, "purpose": "triage",
                                   "agent": "pipeline", "model": "m"}) + "\n", encoding="utf-8")
     fr = SpendingRunner(layer, triage_usd=PIPELINE_CAP_USD * 0.02)
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
@@ -2089,13 +2112,13 @@ def test_stage0_runs_on_a_no_trigger_fire_and_on_a_budget_park(tmp_path, monkeyp
     assert status["items"]["outcome"] == "no_trigger"
     assert _modules(fr) == ["pipeline.tradfi_data"]
 
-    # deferred_budget: spend already past the batch-stop line
+    # deferred_budget: spend already past the hard cap (D41 removed the 80% line)
     (tmp_path / "b").mkdir()
     layer2, _ = _mk_layer(tmp_path / "b", accepted_fx=30)
     _seed_crypto_caught_up(layer2, 30)
     ledger = layer2 / "logs" / "budget_ledger.jsonl"
     ledger.write_text(json.dumps({"ts_utc": loop._now_utc(), "agent": "pipeline",
-                                  "usd": PIPELINE_CAP_USD * 0.9, "model": "m",
+                                  "usd": PIPELINE_CAP_USD, "model": "m",
                                   "purpose": "test"}) + "\n", encoding="utf-8")
     fr2 = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer2)], runner=fr2) == 0

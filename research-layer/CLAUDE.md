@@ -74,7 +74,7 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   -- so it shows as modified on a shared working tree. That is expected;
   never `git checkout --` it from another session. (The tradfi CSVs under data/ are gitignored; BTCUSD/ETHUSD are tracked and committed
   by the quarantine daily.)
-- `budget_state` item: ok | batch_stop (80% line) | hard_cap. Written on
+- `budget_state` item: ok | hard_cap (D41 removed the 80% batch_stop value). Written on
   EVERY status path, not just the budget-blocked ones, so "ok" is a value
   that actually appears. A budget park also stamps `last_park_ts_utc` in
   loop_state.json, which rotates that class to the back of pick_class's
@@ -406,11 +406,15 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `triage_count = clamp(floor((allowance - composer_pair_usd) / usd_per_card), 1, ceiling)`.
   The two unit costs are the loop's OWN measured spend deltas (trailing means
   in state["calibration"]; priors 0.018/card and 0.64/pair from 2026-09-01/02).
-  At USD 40 and 20 cycles/month that is ~USD 1.70 a cycle, ~58 cards -- the
-  intended effect of the cap, stated in the plan. Never hand-type a card count
-  into the loop again; change the cap (a decision) or the reserve.
+  At USD 40 and 20 cycles/month that was ~USD 1.70 a cycle, ~58 cards -- the
+  intended effect of the cap, stated in the plan. **Since D41 raised the cap to
+  200 the derivation saturates: the allowance buys more than `TRIAGE_CEILING`
+  at every cycle count, so the limit passed is ALWAYS 200 and the cap no longer
+  shapes cycle size.** Never hand-type a card count into the loop; change
+  `TRIAGE_CEILING` (now the binding constraint), the cap, or the reserve.
 - **Two parks after triage, both BANK the reviewed cards.** `deferred_budget`
-  = the MONTHLY batch-stop / hard-cap line (WARN, budget_cap semantics),
+  = the MONTHLY hard-cap line (WARN, budget_cap semantics; since D41 there is
+  no earlier batch-stop line),
   checked first; `deferred_cycle_budget` = this cycle's own allowance would be
   exceeded by the composer pair (overall OK -- Coen: a park counts as a clean
   day). Before 2026-09-03 the monthly park recorded a park and never banked,
@@ -498,11 +502,24 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   re-reviewed (a one-off `--no-skip-escalated` pass over 331 cards costs
   ~USD 6 -- Coen's call).
 
-## Budget lines (D39, 2026-09-03): pipeline 40, Reader 20, one constant
+## Budget lines (D41, 2026-09-18): pipeline 200, Reader 20, one constant, NO batch-stop
 - `pipeline/budget.py` `PIPELINE_CAP_USD` is THE pipeline cap;
-  `pipeline_budget.MONTHLY_USD` imports it. Batch-stop = 80% = 32. The
-  Reader's default meter cap and `scanner --cap` default are 20. Tests derive
-  every threshold from the constants -- never pin a literal dollar figure.
+  `pipeline_budget.MONTHLY_USD` imports it. The Reader's default meter cap and
+  `scanner --cap` default are 20. Tests derive every threshold from the
+  constants -- never pin a literal dollar figure.
+- **D41 (Coen): the 80% batch-stop is GONE and the cap went 40 -> 200.** The
+  batch-stop made the last fifth of every month unusable and skipped good
+  candidates; work now runs right up to the hard cap. `may_start_batch` is
+  kept as a named call site but is now the same line as `may_spend`.
+- **⚠ 200 EXCEEDS the old D28 pool of 100 and no longer fits the Reader 20 /
+  pipeline 40 band split. That band is superseded, not stretched.**
+- **⚠⚠ AT 200 THE ALLOWANCE NO LONGER BINDS -- `TRIAGE_CEILING` (200 cards)
+  does.** Measured: at 10/20/30 cycles a month the derived triage limit is 200
+  every time, so each cycle costs a flat ~USD 4.24 and MONTHLY SPEND NOW SCALES
+  WITH CYCLE COUNT (~42 / ~85 / ~127) instead of self-regulating to ~34 at any
+  cadence. Two fires a day that all run full cycles would reach the 200 cap
+  around day 23 and then park hard, with no glide path now the 80% stop is
+  gone. **If that is not wanted, the lever is `TRIAGE_CEILING`, not the cap.**
 - `BudgetMeter.state()` judges the CURRENT calendar month. A test that
   stamps rows in a fixed month goes silent when the month turns (that is what
   broke test_pipeline_budget on 2026-09-01); use a this-month timestamp.

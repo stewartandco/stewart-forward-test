@@ -588,22 +588,22 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
 
 
 def _budget_state(spent: float) -> str:
-    """Which budget line the cycle is standing on, as a status item. The
-    digest could previously only infer this from the presence of a
-    budget_cap escalation, which conflates "parked at the 80% batch-stop
-    line" (routine) with "parked at the hard cap" (urgent)."""
+    """Which budget line the cycle is standing on, as a status item.
+
+    D41 (2026-09-18) removed the 80% batch-stop, so "batch_stop" is no longer
+    reachable and is no longer returned. Only two states remain: ok and
+    hard_cap. Parking now means the hard cap, which IS urgent -- the routine
+    park this item existed to distinguish no longer happens."""
     if not pipeline_budget.may_spend(spent):
         return "hard_cap"
-    if not pipeline_budget.may_start_batch(spent):
-        return "batch_stop"
     return "ok"
 
 
 def _budget_escalations(spent: float) -> list[str]:
-    """budget_cap (a PUSH_TRIGGERS entry, interrupts the digest) only at the
-    hard cap. The 80% batch-stop line parks work just as surely, but it is
-    routine, not urgent -- escalating it would train Coen to ignore the
-    channel exactly as pipeline_status.py's own docstring warns against."""
+    """budget_cap (a PUSH_TRIGGERS entry, interrupts the digest) at the hard
+    cap. Since D41 removed the 80% batch-stop there is only one park line, and
+    reaching it is genuinely urgent -- the routine sub-cap park this guard was
+    written to stay quiet about no longer exists."""
     return ["budget_cap"] if spent >= PIPELINE_CAP_USD else []
 
 
@@ -810,12 +810,12 @@ def _composer_rc_or_park(logs_dir: str | Path, state: dict, asset_class: str,
     propose_families before it ever branches on --dry-run) -- which must map
     to a budget park, never a stage defect -- or a genuine composer crash.
 
-    Deliberately narrower than the proactive pre-triage/post-triage gates
-    (which use may_start_batch, the 80% batch-stop line, to decide whether
-    to START new work): this is a REACTIVE check explaining why composer
-    itself already failed, and composer's own guard only fires at the true
-    100% hard cap (pipeline_budget.may_spend). A failure in the 80-100% band
-    with no cap-crossing spend is a real defect, not a park."""
+    Distinct in KIND from the proactive pre-triage/post-triage gates (which
+    use may_start_batch to decide whether to START new work): this is a
+    REACTIVE check explaining why composer itself already failed. Since D41
+    removed the 80% batch-stop both questions now sit on the same line, so the
+    old "80-100% band" case is gone: a composer failure with no cap-crossing
+    spend is a real defect, not a park."""
     post_spent = _spent(logs_dir)
     if not pipeline_budget.may_spend(post_spent):
         msg = (f"deferred_budget: {module_key} exited nonzero (rc={rc}) with "
@@ -1151,7 +1151,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     spent = _spent(logs_dir)
     if not pipeline_budget.may_start_batch(spent):
         msg = (f"deferred_budget: pipeline spend USD {spent:.2f} is at/above "
-               f"the batch-start threshold -- parking the {asset_class} cycle")
+               f"the hard cap -- parking the {asset_class} cycle")
         print(msg, flush=True)
         # Rotate this class to the back before writing status: a park banks no
         # watermark (no work was done), so without this the same class is

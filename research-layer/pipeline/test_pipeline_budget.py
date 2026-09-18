@@ -1,9 +1,14 @@
-"""The pipeline's budget line: a standing monthly cap with a hard stop, plus
-an 80% stop BETWEEN batches (the D21 Composer pattern).
+"""The pipeline's budget line: a standing monthly cap with a hard stop.
 
 The 2026-08-15 scanner runaway is why the hard stop exists: billing errors were
 retried forever and logged 105,565 decisions in two hours. An alert alone does
-not stop a machine."""
+not stop a machine.
+
+D41 (2026-09-18, Coen) REMOVED the 80% batch-stop that used to sit below the
+cap: it made a month's last fifth of budget unusable and skipped good
+candidates for weeks. The cap was raised 40 -> 200 in the same decision. These
+tests now pin the ABSENCE of a sub-cap threshold, so it cannot return by
+accident."""
 import pytest
 
 from pipeline import pipeline_budget as pb
@@ -11,19 +16,31 @@ from pipeline.budget import PIPELINE_CAP_USD
 
 
 def test_the_standing_line_is_declared_not_guessed():
-    assert pb.MONTHLY_USD == PIPELINE_CAP_USD          # D39: one constant, 40 today
-    assert pb.BATCH_STOP_FRACTION == 0.80
+    assert pb.MONTHLY_USD == PIPELINE_CAP_USD          # D41: one constant, 200 today
+
+
+def test_there_is_no_sub_cap_batch_stop_any_more():
+    """D41 regression guard. The 80% line refused to START work while spend sat
+    between 80% and 100% of the cap, so the last fifth of every month was dead
+    budget. Anywhere below the cap must now be startable -- including the band
+    that used to be refused."""
+    assert not hasattr(pb, "BATCH_STOP_FRACTION")
+    for frac in (0.80, 0.85, 0.90, 0.99):
+        spent = pb.MONTHLY_USD * frac
+        assert pb.may_start_batch(spent) is True, f"{frac:.0%} of cap must start"
+        assert pb.state(spent) == "OK"
 
 
 def test_under_the_line_a_batch_may_start():
     assert pb.may_start_batch(spent=5.0) is True
 
 
-def test_at_eighty_percent_the_next_batch_is_refused():
-    """Stopping BETWEEN batches, not mid-batch, so a batch is never half-done
-    and half-chained."""
-    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION) is False
-    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION - 0.01) is True
+def test_at_the_cap_the_next_batch_is_refused():
+    """The start gate and the spend gate are the SAME line since D41, and the
+    refusal still happens BETWEEN batches rather than mid-batch, so a batch is
+    never left half-done and half-chained."""
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD) is False
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD - 0.01) is True
 
 
 def test_at_the_cap_nothing_may_spend():
@@ -32,16 +49,19 @@ def test_at_the_cap_nothing_may_spend():
 
 
 def test_a_batch_already_running_is_not_killed_mid_flight():
-    """may_spend stays true above the batch line: the stop is a gate on
-    STARTING work, not a guillotine on work in progress."""
-    assert pb.may_start_batch(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION + 1.0) is False
-    assert pb.may_spend(spent=17.0) is True
+    """The gates are asked BEFORE a batch starts and never mid-batch, so work in
+    flight always finishes. D41 removed the earlier of the two thresholds but
+    not this property: it is the call SITES that make it true, so the guard is
+    that no gate is consulted from inside a running batch."""
+    assert pb.may_spend(spent=pb.MONTHLY_USD * 0.5) is True
+    assert pb.may_start_batch(spent=pb.MONTHLY_USD * 0.5) is True
 
 
 def test_state_names_which_limit_was_hit():
+    """Two states since D41, not three: the middle one no longer exists."""
     assert pb.state(spent=5.0) == "OK"
-    assert pb.state(spent=pb.MONTHLY_USD * pb.BATCH_STOP_FRACTION) == "BATCH_STOP"
     assert pb.state(spent=pb.MONTHLY_USD) == "CAP"
+    assert pb.state(spent=pb.MONTHLY_USD + 100.0) == "CAP"
 
 
 # ---------------- 5c / D36: per-agent attribution on one ledger ----------------

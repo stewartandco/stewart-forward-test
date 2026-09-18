@@ -915,19 +915,29 @@ def test_run_reraises_a_crash_hidden_under_a_chain_change_after_writing_the_repo
     assert not (tmp_path / "logs" / "chain.lock").exists()             # lock released
 
 
-def test_run_stops_at_the_batch_stop_line_before_the_pilot_ceiling(tmp_path, capsys, monkeypatch):
-    from pipeline.budget import PIPELINE_CAP_USD
+def test_run_stops_at_the_monthly_cap_before_the_pilot_ceiling(tmp_path, capsys, monkeypatch):
+    """A pilot must never be the thing that parks the loop, so the MONTHLY cap is
+    checked ahead of the pilot ceiling and named as the reason.
+
+    Before D41 (2026-09-18) this fixture sat at 80% of the cap, because an 80%
+    batch-stop parked the loop there. That line is gone; the loop's park line and
+    the hard cap are now the same, so the fixture sits AT the cap. The property
+    under test -- which limit gets reported when two could fire -- is unchanged."""
+    from tools.reextract_shadow import PILOT_CEILING_USD
     cards = _fake_chain(tmp_path)
     (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
     monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
     monkeypatch.setattr("tools.reextract_shadow.load_document_text",
                         lambda doc, **kw: ("some text", "fetched"))
-    # month already at 80% of the cap: the loop's own park line, not the hard cap
-    meter = _FakeMeter(PIPELINE_CAP_USD * 0.80)
+    # BOTH limits would fire: spend is past the pilot ceiling AND the month is
+    # capped. The cap must win, because a pilot must never be what parks the loop.
+    meter = _FakeMeter(PILOT_CEILING_USD + 1.0)
+    meter.capped = True
     _stub_live(monkeypatch, meter)
     run(["--layer", str(tmp_path), "--seed", "42", "--sample", "2"])
     out = capsys.readouterr().out
-    assert "STOPPED at the 80% batch-stop line" in out
+    assert "STOPPED at the monthly pipeline cap" in out
+    assert "pilot ceiling" not in out
     assert "after 0 document(s)" in out
 
 
