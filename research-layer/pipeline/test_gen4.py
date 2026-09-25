@@ -128,14 +128,30 @@ def test_all_80_existing_fingerprints_unchanged():
     if every fingerprint had drifted.
 
     The registry size is read from the chain rather than pinned. This test
-    guards an INVARIANT -- no chained fingerprint moves when the dense types
-    are present, and no two collide -- not the size of the registry, and a
-    hard-coded count fails on every new generation for a reason that has
-    nothing to do with that invariant. It failed exactly that way when
-    generation 4 took the chain from 80 specs to 110. The floor below keeps
-    the fixture from silently emptying, which is the failure a bare count was
-    really guarding against, and the invariant now runs over MORE specs than
-    when it was written, including the first ones to use a dense type.
+    guards ONE INVARIANT -- no chained fingerprint moves when the dense types
+    are present -- not the size of the registry, and a hard-coded count fails
+    on every new generation for a reason that has nothing to do with that
+    invariant. It failed exactly that way when generation 4 took the chain
+    from 80 specs to 110. The floor below keeps the fixture from silently
+    emptying, which is the failure a bare count was really guarding against,
+    and the invariant now runs over MORE specs than when it was written,
+    including the first ones to use a dense type.
+
+    ⚠ It ALSO asserted "and no two collide" -- chain-wide fingerprint
+    uniqueness -- until 2026-09-25. That assertion was written pre-D9 and D9
+    ENDED chain-wide uniqueness on purpose: a re-trial is by definition a
+    second registration of the same composition (see CLAUDE.md, "D9 ends
+    chain-wide fingerprint uniqueness on purpose"). The surviving invariant is
+    PER RUN, and it is NOT re-implemented here: `composer.retrial_verdict` is
+    the one implementation and `verify_registry.py` invariant 8 is its
+    enforcer, because a second copy of that rule anywhere is itself a defect.
+
+    Measured when the assertion was removed: 8,742 chained specs, 170
+    colliding fingerprints, and ZERO groups whose members share a run -- every
+    collision spans days (e.g. 2026-08-22 -> 2026-09-03). `verify_registry.py`
+    reported REGISTRY VALID over all 47,456 entries. The chain was right and
+    the assertion was stale; it would have failed harder every generation as
+    re-trials accumulated. Do not re-add it.
     """
     payloads = []
     for line in REGISTRY.open(encoding="utf-8"):
@@ -153,8 +169,8 @@ def test_all_80_existing_fingerprints_unchanged():
         BLOCK_TYPES.clear()
         BLOCK_TYPES.update(original)
     assert with_dense == without_dense
-    assert len(set(with_dense)) == len(with_dense), (
-        "fingerprint collision among chained specs")
+    # No chain-wide uniqueness assertion here -- retired by D9, enforced by
+    # verify_registry.py invariant 8. See the docstring before re-adding one.
 
 
 from pipeline.engine import run_spec
