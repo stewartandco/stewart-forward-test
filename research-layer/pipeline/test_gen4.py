@@ -642,28 +642,62 @@ def test_the_sharpe_floor_still_matches_the_sop():
     assert SR_FLOOR == 0.4
 
 
-def test_the_diagnostic_writes_nothing():
+def test_the_diagnostic_writes_nothing(tmp_path):
     """Asserted mechanically. A diagnostic that quietly touched the chain would
     be the worst possible bug in this repo.
 
-    KNOWN FLAKE SOURCE: a concurrent session shares this working tree and
-    actively appends to registry_log.jsonl (a scanner cycle can land
-    mid-run), so this can fail spuriously with a hash mismatch that has
-    nothing to do with diagnose_protocol_v4.py. If it fails, re-run once and
-    check `git diff research-layer/registry_log.jsonl` -- if the added lines
-    are `card_registered` / `card_reviewed`, that is the scanner, not this
-    script. Only `verdict` or `state_change` entries in the diff would
-    implicate the diagnostic.
+    PINNED TO THE DIAGNOSTIC'S OWN POPULATION (2026-09-25). diagnose_protocol_v4
+    audits "the 80 already-chained strategies (77 graveyarded, 3 in quarantine)"
+    -- its docstring says so. This test used to run it against the LIVE chain,
+    which by 2026-09-25 held 8,742 strategies: ~100x the population it was
+    written for, so its CSCV/PBO gate blew the fixed 1800 s timeout even on a
+    quiet box. The test then failed with TimeoutExpired before ever reaching its
+    write guard -- it asserted NOTHING, and could neither catch nor clear the
+    bug it exists for. Re-run with every appended chain entry classified: 0
+    entries appended, so it was never a concurrent writer and never a write.
+
+    Now it runs against a copy of the chain PREFIX holding exactly those 80
+    strategies (the boundary is derived below, not hard-coded). That fixture is
+    the diagnostic's declared scope, so it exercises all its real paths (PBO
+    family-kill and pass, Sharpe-floor fails, plateau no_swept_axis) in ~19 s,
+    and the prefix of an append-only chain is fixed forever, so the runtime can
+    no longer grow. Reading only a copy also removes the old concurrent-writer
+    flake: nothing another session appends can move this hash.
+
+    Two guards, both needed:
+      * the hash of the registry it was HANDED is unchanged -- it did not
+        write the chain it read;
+      * its output reports the fixture's own 80 / 77 counts -- it actually
+        honoured --registry. Had it silently read (and so possibly written) the
+        live chain instead, it would report thousands of strategies, and a
+        hash of the copy alone would pass while the live chain changed.
     """
-    import subprocess, sys, hashlib
+    import subprocess, sys, hashlib, json
     root = Path(__file__).resolve().parent.parent
-    before = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
-    r = subprocess.run([sys.executable, "diagnose_protocol_v4.py"],
-                       cwd=root, capture_output=True, text=True, timeout=1800)
-    after = hashlib.sha256((root / "registry_log.jsonl").read_bytes()).hexdigest()
+    lines = (root / "registry_log.jsonl").read_text(encoding="utf-8").splitlines()
+    seen, cut = 0, None
+    for i, line in enumerate(lines):
+        if line.strip() and json.loads(line).get("entry_type") == "strategy_registered":
+            seen += 1
+            if seen == 81:
+                cut = i
+                break
+    assert cut is not None, "chain holds <= 80 strategies; the fixture boundary is undefined"
+    fixture = tmp_path / "registry_log.jsonl"
+    fixture.write_text("\n".join(lines[:cut]) + "\n", encoding="utf-8")
+
+    before = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    r = subprocess.run([sys.executable, "diagnose_protocol_v4.py",
+                        "--registry", str(fixture),
+                        "--artifacts-dir", str(root / "artifacts")],
+                       cwd=root, capture_output=True, text=True, timeout=600)
+    after = hashlib.sha256(fixture.read_bytes()).hexdigest()
     assert r.returncode == 0, r.stderr[-2000:]
-    assert before == after, "diagnostic mutated registry_log.jsonl"
+    assert before == after, "diagnostic mutated the registry it was handed"
     assert "WOULD" in r.stdout
+    assert "80 strategies registered on the chain: 77 graveyarded" in r.stdout, (
+        "diagnostic did not report the fixture's population -- it may have "
+        "ignored --registry and read the live chain:\n" + r.stdout[:600])
 
 
 def test_the_pbo_validity_diagnostic_writes_nothing():
