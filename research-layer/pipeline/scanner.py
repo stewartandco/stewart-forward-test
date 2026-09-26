@@ -11,8 +11,9 @@ Usage:
                                            # via run_scanner.ps1, never as a
                                            # session child)
 
-The scanner only ever polls watchlist entries Coen has verification-stamped;
-off-list discoveries queue as Tier 3 proposals and are never fetched.
+The scanner polls watchlist entries (verified, auto-admitted, or on
+probation). Off-list discoveries queue as proposals and are never fetched from
+here; the admission pass admits them to probation by default (D27/D44).
 """
 from __future__ import annotations
 
@@ -198,7 +199,7 @@ def _extract_item(client, model, item, source, page_text, html, *,
     finally:
         lock.release()
 
-    # off-list references become Tier 3 proposals for Coen — never fetched
+    # off-list references become proposals, admitted by the admission pass (D44) - never fetched here
     domains = _watchlist_domains(watchlist_sources)
     queued = 0
     item_domain = urlsplit(item["link"]).netloc.lower()
@@ -514,9 +515,11 @@ def process_auto_admissions(*, discovery_path, watchlist_path, actions) -> list[
 
 
 def pending_tier3_count(registry: Registry) -> int:
-    """What still waits on Coen: cards in triage. Source proposals have been
-    admitted or blocked mechanically (D27 cases 1-3) since the D27 case-3
-    build (2026-08-23/24)."""
+    """Cards registered but not yet decided by the automatic triage panel.
+
+    The field keeps its historical name (status.json contract). Since D44
+    (2026-09-26) NOTHING here waits on Coen: the panel decides every card it
+    reviews, and pending cards are simply the ones no cycle has reached yet."""
     return len(registry.cards(status="pending"))
 
 

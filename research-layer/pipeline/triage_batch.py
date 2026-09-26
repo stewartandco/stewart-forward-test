@@ -56,9 +56,9 @@ def claim_fingerprint(claim: str) -> str:
     punctuation and whitespace differences collide.
 
     Deliberately NOT semantic: this catches restatements of the same sentence,
-    not paraphrases. Paraphrased duplicates remain the panel's problem, and
-    then Coen's - a false duplicate-reject is worse than a missed one, because
-    the canonical card is the thing that stays citable.
+    not paraphrases. Paraphrased duplicates remain the panel's problem - a
+    false duplicate-reject is worse than a missed one, because the canonical
+    card is the thing that stays citable.
     """
     norm = _SPACE.sub(" ", _NOISE.sub(" ", (claim or "").lower())).strip()
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
@@ -164,6 +164,8 @@ def review_card(client, model: str, card: dict, meter,
             vote = json.loads(text)
         except (json.JSONDecodeError, AttributeError, IndexError, StopIteration):
             continue          # lost vote -> re-ask, bounded by MAX_VOTE_ATTEMPTS
+        if not isinstance(vote, dict):
+            continue          # valid JSON but not an object: also a lost vote
         votes.append({"accept": bool(vote.get("accept")),
                       "reason": str(vote.get("reason", ""))})
     return votes

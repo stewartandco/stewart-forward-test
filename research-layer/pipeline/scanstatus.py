@@ -110,7 +110,7 @@ def write_digest(dir_path: str | Path, *, date: str, new_by_source: dict,
             f"timed out {probation['timed_out']} | "
             f"blocked {probation['blocked']}")
         lines.append("")
-    lines.append("Off-list sources queued today (Tier 3; admitted by D27 rules, never by default):")
+    lines.append("Off-list sources queued today (accepted by default onto probation by the next admission pass, D44):")
     if discoveries:
         lines.extend(f"  {u}" for u in discoveries)
     else:

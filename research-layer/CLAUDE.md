@@ -447,6 +447,15 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `logs/triage_rejections.jsonl` (the chain only records the reason code), so
   a rejected card can still be audited and revoked. `triage_result.json`
   still carries `skipped_escalated` (always 0) because loop.py reads it.
+- **Resolving cards OUTSIDE a cycle moves the trigger basis -- re-bank.** The
+  retired skip-set's cards were PENDING (so triggerable) and already banked in
+  every class watermark. Rejecting them out of cycle (the D44 backfill) dropped
+  every class BELOW its watermark (crypto -95 .. equity_etf -142) and would have
+  stalled the loop. Fixed the same day under loop.lock: each watermark lowered
+  by the retired cards routable to that class (crypto 261, fx 67, equity_etf
+  205, bond_etf 78, metal_etf 80), restoring the pre-backfill gaps exactly;
+  backup `logs/loop_state.json.bak-2026-09-26-pre-d44-rebank`. Any future
+  out-of-cycle disposition of pending cards needs the same re-bank.
 - **D44 sources: accepted by default.** D27 case 3's AI source screen
   (`relevance.screen_source`, one Sonnet call per discovered source that could
   BLOCK it on content) is REMOVED, not unwired -- `process_admissions` has no
