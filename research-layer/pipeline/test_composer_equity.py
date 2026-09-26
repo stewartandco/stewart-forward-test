@@ -163,6 +163,31 @@ def test_equity_card_routing(tmp_path):
 # match against the live registry (read-only), and the routing MECHANISM
 # itself against fixture-injected cards, so the mechanism stays covered even
 # if that one card is later re-triaged.
+#
+# RE-MEASURED 2026-09-26: the pin went stale, not the routing. Seven more
+# accepted futures cards (auto-d31, 2026-08-31 and 09-01) match the lane, and
+# real equity_etf runs have routed all eight since 2026-09-01. See the
+# RE-MEASURED block on composer.INDEX_FUTURES_PROXY_TOPICS for the evidence.
+# The test now pins a FIXED chain prefix, not the growing live chain (same
+# fix as test_gen4's writes-nothing guard, dc0dcce8).
+
+# The measurement boundary: the prefix is every chain entry, in file order,
+# before the first one stamped at or after this instant. Scanning in file
+# order means a later append carrying an older ts_utc still lands after the
+# cut, so the prefix cannot grow.
+PROXY_PIN_CUTOFF_UTC = "2026-09-26T00:00:00Z"
+PROXY_PIN_PREFIX_ENTRIES = 53961
+# entry_hash of the prefix's last entry. An append-only chain's prefix never
+# changes, so a mismatch means history was rewritten, not that cards arrived.
+PROXY_PIN_PREFIX_HEAD = (
+    "d766fda98f01f03d9f3aaf43edb974202af94b6a96964fc6d63e07aa3c925ef0")
+PROXY_PIN_MATCHES = frozenset({
+    "f3c7efcd1bb41166",
+    "852aece92875e506", "544838dcf797e152", "ded07ff41e0aab51",
+    "909e5980b2648854", "5e4802082cb656f5",
+    "b427631e708f84b4", "633cf1b8809a154d",
+})
+
 
 def test_index_futures_proxy_topics_measured_and_bounded():
     """Sanity on the declared constant itself: 3-6 topics (build brief
@@ -179,15 +204,40 @@ def test_index_futures_proxy_topics_measured_and_bounded():
     })
 
 
-def test_live_registry_has_exactly_one_accepted_proxy_match():
-    """Pinned against the LIVE registry (read-only -- no writes, no compose/
-    screen/gauntlet run against it, matching this package's convention of
-    treating the live chain as read-only from tests). If this ever fails
-    because the corpus was re-triaged, re-measure through Registry.cards()
-    and update this assertion together with composer.py's comment -- never
-    one without the other (that mismatch is exactly what this fix corrects)."""
-    live = Registry(LAYER / "registry_log.jsonl")
-    accepted = live.cards(status="accepted")
+def test_chain_prefix_has_the_measured_proxy_matches(tmp_path):
+    """Pinned against a FIXED PREFIX of the live chain (read from a copy --
+    no writes, no compose/screen/gauntlet run against it). It used to pin
+    the live chain itself, so every new accepted index-futures card broke it
+    even though routing was working as designed (2026-09-26: 1 pinned, 8
+    real). A prefix of an append-only chain is fixed forever, so this now
+    fails only if the lane's topics, Registry.cards()'s status join, or the
+    chain's history change. If it fails, re-measure through
+    Registry.cards() and update these pins together with composer.py's
+    comment -- never one without the other."""
+    from .registry import entry_hash
+    lines = [line for line in
+             (LAYER / "registry_log.jsonl").read_text(encoding="utf-8").splitlines()
+             if line.strip()]
+    entries = [json.loads(line) for line in lines]
+    cut = next((i for i, e in enumerate(entries)
+                if e["ts_utc"] >= PROXY_PIN_CUTOFF_UTC), None)
+    assert cut is not None, "chain has nothing past the cutoff; boundary undefined"
+    assert cut == PROXY_PIN_PREFIX_ENTRIES, (
+        f"prefix before {PROXY_PIN_CUTOFF_UTC} is {cut} entries, pinned "
+        f"{PROXY_PIN_PREFIX_ENTRIES}: the chain's history was rewritten")
+    assert entry_hash(entries[cut - 1]) == PROXY_PIN_PREFIX_HEAD, (
+        "prefix head hash changed: the chain's history was rewritten")
+    fixture = tmp_path / "registry_log.jsonl"
+    fixture.write_text("\n".join(lines[:cut]) + "\n", encoding="utf-8")
+
+    prefix = Registry(fixture)
+    futures_all = {
+        cid: c for cid, c in prefix.cards().items()
+        if "futures" in (c.get("tags") or {}).get("asset_classes", [])
+    }
+    # the population composer.py's comment quotes
+    assert len(futures_all) == 386
+    accepted = prefix.cards(status="accepted")
     futures_accepted = {
         cid: c for cid, c in accepted.items()
         if "futures" in (c.get("tags") or {}).get("asset_classes", [])
@@ -196,7 +246,8 @@ def test_live_registry_has_exactly_one_accepted_proxy_match():
         cid for cid, c in futures_accepted.items()
         if set((c.get("tags") or {}).get("topics") or []) & composer.INDEX_FUTURES_PROXY_TOPICS
     }
-    assert matches == {"f3c7efcd1bb41166"}
+    assert len(futures_accepted) == 293
+    assert matches == PROXY_PIN_MATCHES
 
 
 def test_futures_card_with_matching_topic_proxy_routes(tmp_path):

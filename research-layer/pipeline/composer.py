@@ -181,6 +181,26 @@ SPEC_VERSION = 2
 # exercising a fixture-injected case (build brief 2026-08-24 asked for a
 # fixture-injected positive case only if measurement found zero accepted
 # matches; it did not).
+#
+# RE-MEASURED 2026-09-26, through Registry.cards() on the chain prefix
+# ending before 2026-09-26T00:00:00Z (53,961 entries): of 386 futures-tagged
+# cards, 293 are accepted, 51 rejected, 42 pending, and the lane matches
+# EIGHT accepted cards, not one. f3c7efcd1bb41166 plus seven accepted by
+# auto-d31: 852aece92875e506, 544838dcf797e152, ded07ff41e0aab51,
+# 909e5980b2648854, 5e4802082cb656f5 (2026-08-31), b427631e708f84b4,
+# 633cf1b8809a154d (2026-09-01). The set above is unchanged, and the
+# precision argument still holds: every one of the eight claims is about an
+# index-futures product (S&P 500 / ES futures, the VIX futures term structure,
+# or the VIX-futures ETPs TVIX, VXX, SVXY whose decay IS that contango), which
+# is what the lane is for. The weakest is 633cf1b8809a154d, an ES-futures ML
+# model's Sharpe by quarter: about a strategy on ES, not index behaviour. Real
+# equity_etf runs have routed all eight since 2026-09-01
+# (logs/batch_drift.jsonl: 2026-09-01-133003, 09-18-143037, 09-19-143028).
+# RECALL is the lane's known weakness, not precision: a loose claim-text
+# search (S&P/ES/E-mini/NQ/VIX/VXX/...) finds ~80 more accepted futures cards
+# naming an index product that these topics miss (mostly E-mini
+# microstructure/ES-NQ execution cards). Widening the set is a routing
+# change for Coen, not a re-measurement.
 INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
