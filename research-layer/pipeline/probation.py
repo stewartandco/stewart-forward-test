@@ -1,6 +1,13 @@
 """D27 case 3: mechanical admission of single-citation source proposals.
 
-Pre-filter (no cost) -> source screen (one Sonnet call) -> probation by yield.
+Pre-filter (no cost) -> probation by yield. D44 (Coen, 2026-09-26) removed the
+source screen that sat between them (one Sonnet call per source that could
+block it on a content judgement): a discovered source is ACCEPTED BY DEFAULT
+and its yield decides whether it stays. What remains in front of probation is
+mechanical only -- a source that cannot be fetched, has no articles, or is a
+store/login subdomain cannot be polled, so it is blocked rather than admitted
+to fail. The per-item relevance screen (relevance.screen_items) is what keeps
+a junk source's items out of extraction, and probation drops it on yield.
 Pure functions over dicts; all I/O (fetch, LLM client, clock) is injected so the
 state machine is fully testable offline. Spec:
 docs/2026-08-23-source-probation-filter-design.md
@@ -111,28 +118,14 @@ def decide_probation(stats: dict, since: str, today: str) -> dict:
 # ---------------- admissions (proposal -> blocked | probation) ----------------
 
 def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_url,
-                       screen, today: str | None = None,
-                       max_per_run: int = ADMISSIONS_PER_RUN,
-                       can_spend=lambda: True) -> dict:
-    """Case-3 admission pass. `screen(domain, titles, about) -> (kind, payload)`
-    is injected (production binds relevance.screen_source, whose return
-    shape this matches exactly). `kind` is one of:
-      'verdict'   -- payload is the parsed dict; the normal path
-      'malformed' -- payload is a reason string; counts toward the
-                     per-source malformed-run cap (source's fault/flake)
-      'refusal'   -- payload is None; counts toward the same cap
-      'budget'    -- payload is None; NOT the source's fault -- the whole
-                     pass stops here without touching this or later entries
-      'api_error' -- payload is an error message; same as 'budget': stop,
-                     don't count, don't touch
-    `can_spend` (production binds meter.can_spend) gates the ENTIRE pass up
-    front: a closed budget returns the empty shape immediately, logging and
-    flipping nothing -- so a monthly cap closing (or a multi-minute API
-    outage straddling several 60s scanner cycles) can never rack up false
-    'malformed x3' blocks against proposals that were never actually
-    screened.
+                       today: str | None = None,
+                       max_per_run: int = ADMISSIONS_PER_RUN) -> dict:
+    """Case-3 admission pass (D44: accept by default). Every single-citation
+    proposal that passes the mechanical `prefilter` is admitted to probation;
+    one that fails it is blocked. No model call is made, so nothing here is
+    metered and there is no budget gate.
 
-    Returns the domains admitted / blocked / deferred this pass. Idempotent.
+    Returns the domains admitted / blocked this pass. Idempotent.
     The queue is loaded once and written once at the end (if anything
     changed); same for the watchlist (only when something was admitted).
     Chain events are collected during the loop and only emitted with
@@ -148,9 +141,7 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
     from .watchlist import (load_discovery, write_discovery, write_watchlist_doc,
                             flip_entries, entry_domain, is_mechanically_admissible,
                             watchlist_domains)
-    out = {"admitted": [], "blocked": [], "deferred": []}
-    if not can_spend():
-        return out
+    out = {"admitted": [], "blocked": []}
     today = today or _today()
     entries = load_discovery(discovery_path)
     doc = json.loads(Path(watchlist_path).read_text(encoding="utf-8"))
@@ -162,8 +153,9 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         if e.get("status") != "proposed" or is_mechanically_admissible(e):
             continue
         domain = entry_domain(e)
+        # Legacy counter from the removed source screen; meaningless now.
+        e.pop("malformed_runs", None)
         if domain in known:
-            e.pop("malformed_runs", None)
             flip_entries(entries, domain, "auto_admitted", reason="already on watchlist")
             queue_dirty = True
             continue
@@ -172,40 +164,10 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
         prefiltered += 1
         pf = prefilter(e["url"], fetch)
         if not pf["ok"]:
-            e.pop("malformed_runs", None)
             flip_entries(entries, domain, "blocked", reason=f"prefilter: {pf['reason']}")
             queue_dirty = True
             pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "prefilter",
                                                             "reason": pf["reason"], "url": e["url"]}))
-            out["blocked"].append(domain)
-            continue
-        kind, payload = screen(domain, pf["titles"], pf["about"])
-        if kind in ("budget", "api_error"):
-            # not this source's fault, and every remaining call this pass
-            # would fail identically -- stop rather than mis-blame the queue
-            break
-        if kind in ("malformed", "refusal"):
-            n = int(e.get("malformed_runs", 0)) + 1
-            if n >= MAX_MALFORMED_RUNS:
-                e.pop("malformed_runs", None)
-                flip_entries(entries, domain, "blocked", reason=f"source-screen malformed x{n}")
-                pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
-                                                                "reason": f"malformed x{n}", "url": e["url"]}))
-                out["blocked"].append(domain)
-            else:
-                e["malformed_runs"] = n
-                pending_events.append(("source_screen_malformed",
-                                       {"domain": domain, "run": n, "url": e["url"], "kind": kind}))
-                out["deferred"].append(domain)
-            queue_dirty = True
-            continue
-        verdict = payload
-        if not verdict["research_source"]:
-            e.pop("malformed_runs", None)
-            flip_entries(entries, domain, "blocked", reason=f"source-screen: {verdict['reason']}")
-            queue_dirty = True
-            pending_events.append(("source_auto_blocked", {"domain": domain, "rule": "source-screen",
-                                                            "reason": verdict["reason"], "url": e["url"]}))
             out["blocked"].append(domain)
             continue
         entry = {
@@ -213,19 +175,17 @@ def process_admissions(*, discovery_path, watchlist_path, actions, fetch=fetch_u
             "feed": pf["feed"], "poll_minutes": DEFAULT_POLL_MINUTES_AUTO,
             "added_by": PROVENANCE_PROBATION, "verified_date": today,
             "tier": "probation", "probation_since": today,
-            "notes": (f"probation from {today} per D27 case 3 (single citation; "
-                      f"screen: {verdict['reason'][:120]}; classes "
-                      f"{','.join(verdict['asset_classes']) or '-'}). Coen-revocable."),
+            "notes": (f"probation from {today} per D27 case 3 / D44 (single "
+                      f"citation; accepted by default, {pf['reason']} mode). "
+                      f"Kept or dropped on yield; Coen-revocable."),
         }
         doc["sources"].append(entry)
         known.add(domain)
-        e.pop("malformed_runs", None)
         flip_entries(entries, domain, "probation",
-                    reason=f"admitted on probation: {verdict['reason']}")
+                    reason="admitted on probation: accepted by default (D44)")
         queue_dirty = True
         pending_events.append(("source_auto_admitted", {"domain": domain, "rule": "probation",
-                                                         "reason": verdict["reason"],
-                                                         "asset_classes": verdict["asset_classes"],
+                                                         "reason": "accepted by default (D44)",
                                                          "url": e["url"], "feed": pf["feed"]}))
         out["admitted"].append(domain)
     # Watchlist first, then the queue: a crash between the two leaves a

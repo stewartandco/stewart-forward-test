@@ -1,8 +1,8 @@
-"""triage_batch: turn pending cards into a decision list.
+"""triage_batch: turn pending cards into a decision list, fully automatic (D44).
 
-Three reviewers must agree unanimously before a card is accepted without Coen.
-Dissent is the signal - a card one reviewer doubts is exactly the one worth his
-attention - so dissent leaves the card PENDING, never rejected.
+Three reviewers must agree unanimously before a card is accepted. ANY dissent
+rejects it (claim_not_supported), and so does a panel that stays short after
+bounded in-call retries. Nothing is ever left pending for a human.
 """
 import json
 import pytest
@@ -40,35 +40,12 @@ def test_duplicates_are_found_against_the_accepted_corpus_only():
     assert dupes == {"c9": "c1"}
 
 
-# ---------------- the panel: unanimity or escalate ----------------
+# ---------------- the panel: unanimity or reject ----------------
 
 def _votes(*verdicts):
     """Fake panel results: each reviewer returns accept True/False + a note."""
     return [{"accept": v, "reason": "" if v else "claim exceeds quote"}
             for v in verdicts]
-
-
-def test_unanimous_accept_is_the_only_path_to_auto_accept():
-    assert tb.panel_verdict(_votes(True, True, True)) == ("accepted", None)
-
-
-def test_any_dissent_leaves_the_card_pending_not_rejected():
-    """Dissent escalates to Coen. It must never auto-REJECT - the panel is not
-    trusted to destroy research, only to wave through what it all agrees on."""
-    assert tb.panel_verdict(_votes(True, True, False)) == (None, "dissent")
-    assert tb.panel_verdict(_votes(False, False, False)) == (None, "dissent")
-
-
-def test_a_short_panel_escalates_rather_than_deciding():
-    """If a reviewer errored or was skipped, we have fewer than PANEL_SIZE
-    opinions and cannot claim unanimity."""
-    assert tb.panel_verdict(_votes(True, True)) == (None, "incomplete_panel")
-    assert tb.panel_verdict([]) == (None, "incomplete_panel")
-
-
-def test_decisions_use_auto_provenance_never_coen():
-    assert tb.REVIEWER == "auto-d31"
-    assert "coen" not in tb.REVIEWER
 
 
 # ---------------- the reviewer call ----------------
@@ -138,40 +115,7 @@ def test_the_prompt_carries_both_the_claim_and_its_quote():
     assert CARD["quote"] in client.prompts[0]
 
 
-def test_an_unparseable_reviewer_reply_drops_that_vote_and_escalates():
-    """A malformed reply must not be read as agreement. Losing the vote makes
-    the panel short, and a short panel escalates."""
-    client = _FakeClient(['{"accept": true, "reason": ""}',
-                          'not json',
-                          '{"accept": true, "reason": ""}'])
-    votes = tb.review_card(client, "m", CARD, _Meter())
-    assert len(votes) == 2
-    assert tb.panel_verdict(votes) == (None, "incomplete_panel")
-
-
 # ---------------- the decision list ----------------
-
-def test_build_decisions_splits_duplicates_accepts_and_escalations(monkeypatch):
-    accepted = {"a1": {"claim": "Momentum persists after earnings surprises."}}
-    pending = {
-        "p1": {"claim": "momentum persists after earnings surprises",
-               "quote": "q", "source": {}},                       # duplicate
-        "p2": {"claim": "Volatility clusters.", "quote": "q", "source": {}},
-        "p3": {"claim": "Skew predicts crashes.", "quote": "q", "source": {}},
-    }
-    # p2 unanimous accept; p3 dissent
-    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None:
-                        _votes(True, True, True)
-                        if card["claim"].startswith("Volatility")
-                        else _votes(True, False, True))
-
-    out = tb.build_decisions(None, "m", pending, accepted, _Meter())
-
-    assert out["decisions"]["p1"] == ("rejected", "duplicate")
-    assert out["decisions"]["p2"] == ("accepted", None)
-    assert "p3" not in out["decisions"]            # escalated, stays pending
-    assert out["escalated"]["p3"] == "dissent"
-    assert out["counts"] == {"accepted": 1, "duplicate": 1, "escalated": 1}
 
 
 def test_duplicates_are_not_sent_to_the_panel(monkeypatch):
@@ -230,24 +174,6 @@ def test_dry_run_writes_nothing_to_the_chain(tmp_path, monkeypatch):
 
     assert rc == 0
     assert sum(1 for _ in reg.entries()) == before      # nothing chained
-
-
-def test_apply_chains_with_auto_provenance(tmp_path, monkeypatch):
-    reg = _seed(tmp_path)
-    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, True, True))
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    tb.run(["--registry", str(tmp_path / "registry_log.jsonl"), "--apply"])
-
-    reviews = [e for e in reg.entries() if e["entry_type"] == "card_reviewed"]
-    auto = [r for r in reviews if r["payload"].get("reviewed_by") == "auto-d31"]
-    assert auto, "no auto-provenance reviews chained"
-    assert all(r["payload"]["reviewed_by"] != "coen" for r in auto)
-    # p1 duplicate rejected, p2 accepted
-    by_id = {r["payload"]["card_id"]: r["payload"] for r in auto}
-    assert by_id["p1"]["status"] == "rejected"
-    assert by_id["p1"]["reject_reason"] == "duplicate"
-    assert by_id["p2"]["status"] == "accepted"
 
 
 # ---------------- the client must load the reader key ----------------
@@ -309,7 +235,7 @@ def test_a_thinking_block_before_the_json_does_not_lose_the_vote():
     not the first block."""
     votes = tb.review_card(_ThinkingClient(3), "m", CARD, _Meter())
     assert len(votes) == tb.PANEL_SIZE
-    assert tb.panel_verdict(votes) == ("accepted", None)
+    assert tb.panel_verdict(votes) == ("accepted", "unanimous")
 
 
 def test_max_tokens_leaves_room_for_thinking_plus_the_json():
@@ -332,307 +258,129 @@ def test_max_tokens_leaves_room_for_thinking_plus_the_json():
     assert rec.kwargs[0]["max_tokens"] >= 1000
 
 
-# ---------------- escalation skip-set (Gate 1, 2026-08-29) ----------------
-# An escalated card is deliberately absent from `decisions` (build_decisions'
-# docstring): nothing is chained for it, so it stays pending forever until
-# Coen dispositions it in T3. run() slices `pending` in chain order, so those
-# cards re-occupy the head of the --limit window on EVERY cycle and get
-# re-reviewed (and re-paid for) indefinitely, while cards behind them are
-# never reached. logs/triage_escalated.json is the advisory skip-set that
-# breaks that loop.
+# ---------------- D44: unanimous accepts, any dissent rejects ----------------
+
+DISSENT_MSG = ("a card with a dissenting reviewer was not rejected -- D44: only "
+               "a unanimous full panel accepts, and nothing waits for Coen")
 
 
-def _seed_pending(tmp_path, n, prefix="c"):
-    reg = Registry(tmp_path / "registry_log.jsonl")
-    for i in range(n):
-        reg.append("card_registered", {
-            "card_id": f"{prefix}{i}", "claim": f"claim {prefix}{i}", "quote": "q",
-            "source": {"title": "t", "url": "u"},
-            "review": {"status": "pending", "reject_reason": None},
-        })
-    return reg
+def test_unanimous_full_panel_is_the_only_path_to_accept():
+    assert tb.panel_verdict(_votes(True, True, True)) == ("accepted", "unanimous")
 
 
-def test_escalated_cards_are_skipped_on_the_next_run(tmp_path, monkeypatch):
-    """The whole point: a card the panel escalated once must not be sent to
-    the panel again on the next cycle."""
-    _seed_pending(tmp_path, 2)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    seen = []
-
-    def _dissent(client, model, card, meter, panel_size=3):
-        seen.append(card["card_id"])
-        return _votes(True, False, True)          # dissent -> escalated
-
-    monkeypatch.setattr(tb, "review_card", _dissent)
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    argv = ["--registry", str(reg_path), "--escalated-state", str(state), "--apply"]
-    tb.run(argv)
-    assert sorted(seen) == ["c0", "c1"]           # both reviewed the first time
-    assert state.exists()
-    recorded = _json.loads(state.read_text(encoding="utf-8"))
-    assert set(recorded) == {"c0", "c1"}
-    assert recorded["c0"]["reason"] == "dissent"
-    assert "first_escalated_utc" in recorded["c0"]
-
-    seen.clear()
-    tb.run(argv)
-    assert seen == []                              # NOT re-reviewed, not re-paid for
+def test_any_dissent_rejects_even_one_reviewer_outvoted():
+    """D31's reason stands: one reviewer spotting overreach must never be
+    outvoted, so 2-to-1 in favour is still a reject, not an accept."""
+    assert tb.panel_verdict(_votes(True, True, False)) == ("rejected", "dissent"), DISSENT_MSG
+    assert tb.panel_verdict(_votes(False, False, False)) == ("rejected", "dissent"), DISSENT_MSG
 
 
-def test_skip_set_does_not_hide_cards_from_the_trigger_count(tmp_path, monkeypatch):
-    """The skip-set is a TRIAGE-cost control, never a trigger input. An
-    escalated card is real pending work awaiting Coen; if it stopped counting
-    toward the loop's triggerable count the trigger would silently drop, which
-    is the deadlock wearing a different hat."""
-    from pipeline import loop
-    _seed_pending(tmp_path, 3)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    before = loop._triggerable_counts(Registry(reg_path))["crypto"]
-    tb.run(["--registry", str(reg_path), "--escalated-state", str(state), "--apply"])
-    after = loop._triggerable_counts(Registry(reg_path))["crypto"]
-
-    assert before == 3
-    assert after == 3          # escalation chained nothing; all three still count
+def test_a_short_panel_rejects_because_it_is_not_unanimous():
+    assert tb.panel_verdict(_votes(True, True)) == ("rejected", "incomplete_panel")
+    assert tb.panel_verdict([]) == ("rejected", "incomplete_panel")
 
 
-def test_a_stale_skip_entry_for_a_now_accepted_card_is_harmless(tmp_path, monkeypatch):
-    """Coen dispositions an escalated card in T3: it leaves `pending` on its
-    own, so the stale skip entry simply never matches again. It must not
-    crash, and must not suppress anything else."""
-    reg = _seed_pending(tmp_path, 2)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    state.write_text(_json.dumps({
-        "c0": {"reason": "dissent", "first_escalated_utc": "2020-01-01T00:00:00+00:00",
-               "times_seen": 1},
-        "ghost": {"reason": "dissent", "first_escalated_utc": "2020-01-01T00:00:00+00:00",
-                  "times_seen": 9},
-    }), encoding="utf-8")
-    reg.review_card("c0", "accepted", "coen")      # Coen dispositions it
-
-    seen = []
-    def _accept(client, model, card, meter, panel_size=3):
-        seen.append(card["card_id"])
-        return _votes(True, True, True)
-    monkeypatch.setattr(tb, "review_card", _accept)
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    rc = tb.run(["--registry", str(reg_path), "--escalated-state", str(state), "--apply"])
-    assert rc == 0
-    assert seen == ["c1"]        # c0 is no longer pending; ghost matches nothing
+def test_decisions_use_d44_auto_provenance_never_coen():
+    assert tb.REVIEWER == "auto-d44"
+    assert "coen" not in tb.REVIEWER
 
 
-def test_a_corrupt_skip_set_warns_and_skips_nothing(tmp_path, monkeypatch, capsys):
-    """Advisory state, never a gate: a corrupt file must degrade to 'no skips'
-    with a loud WARN, never take the triage stage (and the loop cycle around
-    it) down with a JSONDecodeError."""
-    _seed_pending(tmp_path, 1)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    state.write_text("{not json at all", encoding="utf-8")
-
-    seen = []
-    def _accept(client, model, card, meter, panel_size=3):
-        seen.append(card["card_id"])
-        return _votes(True, True, True)
-    monkeypatch.setattr(tb, "review_card", _accept)
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    rc = tb.run(["--registry", str(reg_path), "--escalated-state", str(state), "--apply"])
-    assert rc == 0
-    assert seen == ["c0"]                     # degraded to no skips, still ran
-    assert "WARN" in capsys.readouterr().out
+def test_an_unparseable_reply_is_re_asked_in_the_same_run():
+    """A lost vote is re-asked, not escalated: one malformed reply followed by
+    three good ones is a full, unanimous panel."""
+    client = _FakeClient(['{"accept": true, "reason": ""}',
+                          'not json',
+                          '{"accept": true, "reason": ""}',
+                          '{"accept": true, "reason": ""}'])
+    votes = tb.review_card(client, "m", CARD, _Meter())
+    assert len(votes) == tb.PANEL_SIZE
+    assert len(client.prompts) == 4
+    assert tb.panel_verdict(votes) == ("accepted", "unanimous")
 
 
-def test_skip_filter_runs_before_the_limit_slice(tmp_path, monkeypatch):
-    """The defect was positional: escalated cards sat at the HEAD of the chain
-    order and ate the whole --limit window. Filtering after the slice would
-    leave the window full of skipped cards and review nothing."""
-    _seed_pending(tmp_path, 5)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    state.write_text(_json.dumps({
-        f"c{i}": {"reason": "dissent", "first_escalated_utc": "2020-01-01T00:00:00+00:00",
-                  "times_seen": 1} for i in range(3)}), encoding="utf-8")
-
-    seen = []
-    def _accept(client, model, card, meter, panel_size=3):
-        seen.append(card["card_id"])
-        return _votes(True, True, True)
-    monkeypatch.setattr(tb, "review_card", _accept)
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    tb.run(["--registry", str(reg_path), "--escalated-state", str(state),
-            "--limit", "2", "--apply"])
-    # c0-c2 skipped; the window of 2 is spent on the cards BEHIND them.
-    assert seen == ["c3", "c4"]
+def test_re_asking_is_bounded_so_an_unreadable_card_cannot_bill_forever():
+    client = _FakeClient(["not json"] * 50)
+    meter = _Meter()
+    votes = tb.review_card(client, "m", CARD, meter)
+    assert votes == []
+    assert len(client.prompts) == tb.MAX_VOTE_ATTEMPTS
+    assert meter.calls == ["triage"] * tb.MAX_VOTE_ATTEMPTS
+    assert tb.panel_verdict(votes) == ("rejected", "incomplete_panel")
 
 
-# ---------------- skip-set durability (wave-3 review, 2026-08-29) ------------
-# Two ways the skip-set was silently wiped, both of which hand the next
-# automated cycle the entire escalated backlog to re-pay for.
-
-
-def _skipset(**cards):
-    return _json.dumps({cid: {"reason": "dissent",
-                              "first_escalated_utc": "2020-01-01T00:00:00+00:00",
-                              "times_seen": n}
-                        for cid, n in cards.items()})
-
-
-def test_no_skip_escalated_preserves_the_skip_set(tmp_path, monkeypatch):
-    """--no-skip-escalated suppresses the FILTER, not the HISTORY. It used to
-    load an empty set, which meant the save then rewrote the file from empty
-    and destroyed every first_escalated_utc/times_seen on it."""
-    _seed_pending(tmp_path, 8)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    state.write_text(_skipset(**{f"c{i}": 3 for i in range(8)}), encoding="utf-8")
-
-    seen = []
-    def _accept(client, model, card, meter, panel_size=3):
-        seen.append(card["card_id"])
-        return _votes(True, True, True)
-    monkeypatch.setattr(tb, "review_card", _accept)
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    tb.run(["--registry", str(reg_path), "--escalated-state", str(state),
-            "--limit", "2", "--no-skip-escalated", "--apply"])
-
-    assert seen == ["c0", "c1"]          # the flag DID suppress the filter
-    kept = _json.loads(state.read_text(encoding="utf-8"))
-    assert len(kept) == 8, "the skip-set was wiped by a --no-skip-escalated run"
-    assert kept["c7"]["first_escalated_utc"] == "2020-01-01T00:00:00+00:00"
-
-
-def test_an_unreadable_skip_set_is_never_overwritten(tmp_path, monkeypatch, capsys):
-    """A transient read failure (on Windows an AV scanner or the indexer
-    holding a sharing lock is entirely plausible) must not cost the file. The
-    run degrades to 'skip nothing' but leaves the bytes alone."""
-    _seed_pending(tmp_path, 2)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    original = _skipset(c0=5, c1=5)
-    state.write_text(original, encoding="utf-8")
-
-    real_read = Path.read_text
-    def _sharing_violation(self, *a, **k):
-        if self.name == "triage_escalated.json":
-            raise OSError(13, "The process cannot access the file")
-        return real_read(self, *a, **k)
-    monkeypatch.setattr(Path, "read_text", _sharing_violation)
-    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    rc = tb.run(["--registry", str(reg_path), "--escalated-state", str(state),
-                 "--apply"])
-    assert rc == 0
-    monkeypatch.undo()
-    assert state.read_text(encoding="utf-8") == original, \
-        "a transient read error overwrote a still-valid skip-set"
-    out = capsys.readouterr().out
-    assert "WARN" in out and "untouched" in out
-
-
-def test_an_absent_skip_set_is_still_written_fresh(tmp_path, monkeypatch):
-    """The other side of the same distinction: ABSENT is safe to create.
-    Only 'present but unreadable' blocks the write."""
-    _seed_pending(tmp_path, 2)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    assert not state.exists()
-    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-
-    tb.run(["--registry", str(reg_path), "--escalated-state", str(state), "--apply"])
-    assert state.exists()
-    assert set(_json.loads(state.read_text(encoding="utf-8"))) == {"c0", "c1"}
-
-
-def test_times_seen_counts_cycles_a_card_has_been_waiting(tmp_path, monkeypatch):
-    """times_seen was dead: a skipped card is filtered out of `pending` before
-    review, so it could never be re-escalated and the only bump path never
-    ran. It now counts sightings, which is the signal a T3 queue needs."""
-    _seed_pending(tmp_path, 2)
-    reg_path = tmp_path / "registry_log.jsonl"
-    state = tmp_path / "triage_escalated.json"
-    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, False, True))
-    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
-    argv = ["--registry", str(reg_path), "--escalated-state", str(state), "--apply"]
-
-    tb.run(argv)
-    assert _json.loads(state.read_text(encoding="utf-8"))["c0"]["times_seen"] == 1
-    for expected in (2, 3, 4):
-        tb.run(argv)
-        got = _json.loads(state.read_text(encoding="utf-8"))["c0"]["times_seen"]
-        assert got == expected, f"times_seen stuck at {got}, expected {expected}"
-    # first_escalated_utc is the ORIGINAL sighting and must never move.
-    first = _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"]
-    tb.run(argv)
-    assert _json.loads(state.read_text(encoding="utf-8"))["c0"]["first_escalated_utc"] == first
-
-
-# ---------------- dissent reasons are kept, not discarded (2026-09-03) ------
-
-def test_escalations_carry_every_dissenting_reviewers_reason(monkeypatch):
-    """Coen's T3 queue held 331 cards on 2026-09-03, every one 'dissent', and
-    the reason each dissenting reviewer gave -- which the vote schema REQUIRES
-    -- had been thrown away, so the only way through the queue was to read
-    331 cards. build_decisions now returns the dissenting votes' reasons per
-    escalated card, in reviewer order."""
-    votes = [{"accept": True, "reason": "faithful"},
-             {"accept": False, "reason": "claim is about factor timing, not a tradable rule"},
-             {"accept": False, "reason": "quote does not support the stated magnitude"}]
-    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None: votes)
-    out = tb.build_decisions(None, "m", {"p1": {"claim": "x", "quote": "q", "source": {}}},
-                             {}, _Meter())
-    assert out["escalated"] == {"p1": "dissent"}
-    assert out["dissent_reasons"]["p1"] == [
-        "claim is about factor timing, not a tradable rule",
-        "quote does not support the stated magnitude"]
-
-
-def test_the_skip_set_persists_dissent_reasons_and_keeps_them_across_sightings(tmp_path):
-    """save_escalated stores the reasons on the entry; a later sighting bumps
-    times_seen and must NOT lose them (retained entries are copied whole)."""
-    p = tmp_path / "triage_escalated.json"
-    tb.save_escalated(p, {}, {"p1": "dissent"},
-                      dissent_reasons={"p1": ["not testable on daily bars"]})
-    first = tb.load_escalated(p).entries
-    assert first["p1"]["reason"] == "dissent"
-    assert first["p1"]["dissent_reasons"] == ["not testable on daily bars"]
-    tb.save_escalated(p, first, {})                      # next cycle: sighted again
-    again = tb.load_escalated(p).entries
-    assert again["p1"]["times_seen"] == 2
-    assert again["p1"]["dissent_reasons"] == ["not testable on daily bars"]
-
-
-def test_the_queue_view_groups_the_backlog_by_reason(tmp_path, capsys):
-    """`python -m pipeline.triage_batch --queue` reads the skip-set and prints
-    the backlog grouped by dissent reason, most common first, with the card
-    ids -- so Coen can accept or reject a whole reason at once. Read-only."""
-    p = tmp_path / "triage_escalated.json"
-    entries = {
-        "a1": {"reason": "dissent", "times_seen": 3, "first_escalated_utc": "2026-08-31T00:00:00+00:00",
-               "dissent_reasons": ["not a tradable rule"]},
-        "b2": {"reason": "dissent", "times_seen": 1, "first_escalated_utc": "2026-09-01T00:00:00+00:00",
-               "dissent_reasons": ["not a tradable rule", "magnitude unsupported"]},
-        "c3": {"reason": "dissent", "times_seen": 5, "first_escalated_utc": "2026-08-31T00:00:00+00:00"},
+def test_build_decisions_decides_every_card_nothing_left_pending(monkeypatch):
+    accepted = {"a1": {"claim": "Momentum persists after earnings surprises."}}
+    pending = {
+        "p1": {"claim": "momentum persists after earnings surprises",
+               "quote": "q", "source": {}},                       # duplicate
+        "p2": {"claim": "Volatility clusters.", "quote": "q", "source": {}},
+        "p3": {"claim": "Skew predicts crashes.", "quote": "q", "source": {}},
     }
-    p.write_text(json.dumps(entries), encoding="utf-8")
-    rc = tb.run(["--queue", "--escalated-state", str(p),
-                 "--registry", str(tmp_path / "nonexistent.jsonl")])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "3 card(s) awaiting Coen" in out
-    assert out.index("not a tradable rule") < out.index("magnitude unsupported")   # most common first
-    assert "(no reason recorded)" in out                  # c3 predates persistence
-    assert "a1" in out and "b2" in out and "c3" in out
-    assert not (tmp_path / "triage_escalated.json.tmp").exists()   # read-only
+    # p2 unanimous accept; p3 one dissent out of three
+    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None:
+                        _votes(True, True, True)
+                        if card["claim"].startswith("Volatility")
+                        else _votes(True, False, True))
+
+    out = tb.build_decisions(None, "m", pending, accepted, _Meter())
+
+    assert out["decisions"]["p1"] == ("rejected", "duplicate")
+    assert out["decisions"]["p2"] == ("accepted", None)
+    assert out["decisions"]["p3"] == ("rejected", "claim_not_supported"), DISSENT_MSG
+    assert set(out["decisions"]) == set(pending), "a reviewed card was left undecided"
+    assert out["rejections"]["p3"] == {"basis": "dissent",
+                                       "dissent_reasons": ["claim exceeds quote"]}
+    assert out["counts"] == {"accepted": 1, "rejected": 1, "duplicate": 1}
+
+
+def test_apply_chains_accepts_and_rejects_with_d44_provenance_and_audits(tmp_path, monkeypatch):
+    reg = _seed(tmp_path)
+    reg.append("card_registered", {
+        "card_id": "p3", "claim": "Skew predicts crashes.", "quote": "q",
+        "source": {"title": "t", "url": "u"},
+        "review": {"status": "pending", "reject_reason": None},
+    })
+    monkeypatch.setattr(tb, "review_card", lambda c, m, card, meter, ps=None:
+                        _votes(True, True, False) if card["claim"].startswith("Skew")
+                        else _votes(True, True, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Meter()))
+
+    tb.run(["--registry", str(tmp_path / "registry_log.jsonl"), "--apply"])
+
+    reviews = [e for e in reg.entries() if e["entry_type"] == "card_reviewed"]
+    auto = {r["payload"]["card_id"]: r["payload"] for r in reviews
+            if r["payload"].get("reviewed_by") == "auto-d44"}
+    assert auto["p1"]["status"] == "rejected" and auto["p1"]["reject_reason"] == "duplicate"
+    assert auto["p2"]["status"] == "accepted"
+    assert auto["p3"]["status"] == "rejected", DISSENT_MSG
+    assert auto["p3"]["reject_reason"] == "claim_not_supported"
+    assert not reg.cards(status="pending"), "a card was left pending for a human"
+    audit = [_json.loads(l) for l in
+             (tmp_path / "logs" / tb.REJECTIONS_LOG_NAME).read_text(encoding="utf-8").splitlines()]
+    assert [(a["card_id"], a["basis"], a["reviewed_by"]) for a in audit] == [("p3", "dissent", "auto-d44")]
+    assert audit[0]["dissent_reasons"] == ["claim exceeds quote"]
+    result = _json.loads((tmp_path / "logs" / tb.RESULT_NAME).read_text(encoding="utf-8"))
+    assert result == {"reviewed": 3, "skipped_escalated": 0}
+    assert not (tmp_path / "logs" / "triage_escalated.json").exists()
+
+
+def test_a_budget_stop_banks_only_the_cards_actually_decided(tmp_path, monkeypatch):
+    """Cards the panel never saw must stay visible to the loop's watermark."""
+    _seed(tmp_path)
+
+    class _Closed(_Meter):
+        def can_spend(self):
+            return False                    # no card may be sent to the panel
+
+    monkeypatch.setattr(tb, "review_card", lambda *a, **k: _votes(True, True, True))
+    monkeypatch.setattr(tb, "_client_and_meter", lambda: (None, _Closed()))
+    tb.run(["--registry", str(tmp_path / "registry_log.jsonl"), "--apply"])
+    result = _json.loads((tmp_path / "logs" / tb.RESULT_NAME).read_text(encoding="utf-8"))
+    # p1 is a duplicate (decided free, before the budget check); p2 never reached the panel
+    assert result["reviewed"] == 1
+
+
+def test_the_skip_set_cli_is_gone():
+    """D44 removed the human queue: no flag re-creates it."""
+    with pytest.raises(SystemExit):
+        tb.run(["--queue"])

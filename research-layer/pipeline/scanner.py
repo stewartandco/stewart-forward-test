@@ -30,7 +30,7 @@ from .feeds import (parse_feed, extract_links, article_links, discover_feed,
                     item_id, html_to_text, looks_paywalled, fetch_url)
 from .seen import SeenStore
 from .budget import BudgetMeter
-from .relevance import screen_items, screen_source, ApiCreditExhausted
+from .relevance import screen_items, ApiCreditExhausted
 from .approvals import process_approvals
 from .probation import (prioritise_items, process_admissions, process_reviews,
                         probation_counts, PRIORITY_CAP)
@@ -694,13 +694,10 @@ def run(argv: list[str] | None = None) -> int:
                     registry=registry, actions=actions)
                 if inbox_stats["files"] or inbox_stats["deferred_lock"]:
                     print(f"inbox: {inbox_stats}")
-                # D27 case 3: single-citation proposals -> prefilter -> source screen -> probation
-                def _screen(domain, titles, about):
-                    return screen_source(client, args.model, meter, domain, titles, about,
-                                         logs_dir / "source_screen_log.jsonl")
+                # D27 case 3 / D44: single-citation proposals -> prefilter -> probation
+                # (accepted by default; no source screen, no model call)
                 adm = process_admissions(discovery_path=discovery_path,
-                                         watchlist_path=args.watchlist, actions=actions,
-                                         screen=_screen, can_spend=meter.can_spend)
+                                         watchlist_path=args.watchlist, actions=actions)
                 rev = process_reviews(watchlist_path=args.watchlist,
                                       discovery_path=discovery_path, seen=seen, actions=actions)
                 if adm["admitted"] or adm["blocked"] or rev["promoted"] or rev["revoked"] or rev["timed_out"]:

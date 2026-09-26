@@ -9,10 +9,6 @@ import pytest
 
 from .watchlist import (load_watchlist, pollable, queue_discovery, load_discovery,
                         set_discovery_status, tier_of)
-from .relevance import (build_source_screen_prompt, parse_source_screen,
-                        screen_source, SOURCE_SCREEN_SYSTEM,
-                        SOURCE_SCREEN_SCHEMA, SOURCE_SCREEN_MAX_TOKENS,
-                        ApiCreditExhausted)
 from .probation import prefilter, BLOCKED_SUBDOMAINS, MIN_INDEX_ITEMS
 from .probation import (source_stats, decide_probation, WINDOW_1, WINDOW_2,
                         PROMOTE_KEEPS, TIMEOUT_DAYS)
@@ -26,9 +22,9 @@ from .approvals import process_approvals, sign_record
 from datetime import datetime, timedelta
 
 
-def test_contract_version_bumped_with_case_3():
+def test_contract_version_bumped_with_d44():
     from .scanstatus import CONTRACT_VERSION
-    assert CONTRACT_VERSION == "1.8"
+    assert CONTRACT_VERSION == "1.9"
 
 
 def make_source(**o):
@@ -81,105 +77,6 @@ def test_timed_out_domain_reopens_only_on_a_genuinely_new_citer(tmp_path):
     assert queue_discovery(q, "https://stale.example/c", found_in="blog2/i3", reason="cited") is False
     e = load_discovery(q)[0]
     assert e["status"] == "proposed" and sorted(e["cited_by"]) == ["blog1", "blog2"]
-
-
-class _Meter:
-    def __init__(self, ok=True):
-        self.ok, self.calls = ok, []
-    def can_spend(self): return self.ok
-    def record_call(self, model, usage, purpose, *, agent, **kw):
-        self.calls.append(purpose)
-        return 0.003
-
-
-def _source_msg(payload: dict | str, stop="end_turn"):
-    text = payload if isinstance(payload, str) else json.dumps(payload)
-    return SimpleNamespace(stop_reason=stop,
-                           content=[SimpleNamespace(type="text", text=text)],
-                           usage=SimpleNamespace(input_tokens=800, output_tokens=60,
-                                                 cache_read_input_tokens=0,
-                                                 cache_creation_input_tokens=0))
-
-
-class _Client:
-    def __init__(self, msg=None, exc=None):
-        self._msg, self._exc, self.kwargs = msg, exc, None
-        self.messages = self
-    def create(self, **kw):
-        self.kwargs = kw
-        if self._exc: raise self._exc
-        return self._msg
-
-
-def test_source_screen_prompt_carries_titles_and_about():
-    p = build_source_screen_prompt("x.example", ["T1", "T2"], "About us text")
-    assert "x.example" in p and "- T1" in p and "About us text" in p
-    assert "testable" in SOURCE_SCREEN_SYSTEM
-
-
-def test_parse_source_screen_true_false_malformed():
-    assert parse_source_screen({"research_source": True, "reason": "r",
-                                "asset_classes": ["futures"]}) == \
-        {"research_source": True, "reason": "r", "asset_classes": ["futures"]}
-    assert parse_source_screen({"research_source": False, "reason": "news",
-                                "asset_classes": []})["research_source"] is False
-    assert parse_source_screen({"reason": "no verdict"}) is None
-    assert parse_source_screen({"research_source": "yes", "reason": "", "asset_classes": []}) is None
-
-
-def test_screen_source_meters_and_logs(tmp_path):
-    meter = _Meter()
-    client = _Client(_source_msg({"research_source": True, "reason": "quant blog",
-                                  "asset_classes": ["equities"]}))
-    kind, payload = screen_source(client, "m", meter, "x.example", ["T1"], "about",
-                                  tmp_path / "source_screen_log.jsonl")
-    assert kind == "verdict" and payload["research_source"] is True
-    assert meter.calls == ["source_screen"]
-    assert client.kwargs["system"] == SOURCE_SCREEN_SYSTEM
-    assert client.kwargs["max_tokens"] == SOURCE_SCREEN_MAX_TOKENS
-    assert client.kwargs["output_config"]["format"]["schema"] is SOURCE_SCREEN_SCHEMA
-    row = json.loads((tmp_path / "source_screen_log.jsonl").read_text().splitlines()[0])
-    assert row["domain"] == "x.example" and row["verdict"] is True
-
-
-def test_screen_source_closed_meter_proves_no_spend(tmp_path):
-    # A VALID payload the client would happily return - proves the budget
-    # gate short-circuits before any call is made, not merely that the
-    # (already-null) response of an empty payload happens to come back None.
-    meter = _Meter(ok=False)
-    client = _Client(_source_msg({"research_source": True, "reason": "r",
-                                  "asset_classes": []}))
-    assert screen_source(client, "m", meter, "x", [], "",
-                         tmp_path / "l.jsonl") == ("budget", None)
-    assert client.kwargs is None
-    assert meter.calls == []
-
-
-def test_screen_source_refusal_charges_but_error_does_not(tmp_path):
-    log = tmp_path / "l.jsonl"
-    refusal_meter = _Meter()
-    assert screen_source(_Client(_source_msg({}, stop="refusal")), "m",
-                         refusal_meter, "x", [], "", log) == ("refusal", None)
-    assert refusal_meter.calls == ["source_screen"]
-
-    error_meter = _Meter()
-    kind, msg = screen_source(_Client(exc=RuntimeError("boom")), "m",
-                              error_meter, "x", [], "", log)
-    assert kind == "api_error" and msg == "boom"
-    assert error_meter.calls == []
-
-
-def test_screen_source_malformed_json_returns_none(tmp_path):
-    log = tmp_path / "l.jsonl"
-    assert screen_source(_Client(_source_msg("not json")), "m", _Meter(), "x",
-                         [], "", log) == ("malformed", "malformed")
-
-
-def test_screen_source_fatal_api_error_raises_and_aborts(tmp_path):
-    log = tmp_path / "l.jsonl"
-    with pytest.raises(ApiCreditExhausted):
-        screen_source(_Client(exc=RuntimeError("credit balance is too low")),
-                     "m", _Meter(), "x", [], "", log)
 
 
 FEED_XML = """<?xml version="1.0"?><rss><channel><title>X</title>
@@ -321,57 +218,6 @@ def _good_pages(domain):
             f"https://{domain}/feed": (200, FEED_XML.replace("x.example", domain), f"https://{domain}/feed")}
 
 
-def test_admissions_block_prefilter_screen_false_and_admit_true(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://good.example/", found_in="blog1/i1", reason="cited")
-    queue_discovery(q, "https://news.example/", found_in="blog1/i2", reason="cited")
-    queue_discovery(q, "https://down.example/", found_in="blog1/i3", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    pages = {**_good_pages("good.example"), **_good_pages("news.example")}
-    verdicts = {"good.example": ("verdict", {"research_source": True, "reason": "quant", "asset_classes": ["fx"]}),
-                "news.example": ("verdict", {"research_source": False, "reason": "news", "asset_classes": []})}
-    screen = lambda domain, titles, about: verdicts.get(domain, ("malformed", "unexpected call"))
-    actions = ActionLog(tmp_path / "act.jsonl")
-    out = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                             fetch=_fetch_factory(pages), screen=screen, today="2026-08-24")
-    assert out["admitted"] == ["good.example"] and out["blocked"] == ["news.example", "down.example"]
-    st = {e["domain"]: e for e in load_discovery(q)}
-    assert st["good.example"]["status"] == "probation"
-    assert st["news.example"]["status"] == "blocked" and "source-screen" in st["news.example"]["status_reason"]
-    assert st["down.example"]["status"] == "blocked" and "unreachable" in st["down.example"]["status_reason"]
-    src = {s["id"]: s for s in load_watchlist(wl)}["good.example"]
-    assert src["added_by"] == PROVENANCE_PROBATION and src["tier"] == "probation"
-    assert src["probation_since"] == "2026-08-24" and src["feed"] == "https://good.example/feed"
-    assert src["verified_date"] == "2026-08-24" and src["notes"].startswith("probation")
-    types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
-    assert types.count("source_auto_admitted") == 1 and types.count("source_auto_blocked") == 2
-    adm = next(e for e in _events(tmp_path / "act.jsonl") if e["entry_type"] == "source_auto_admitted")
-    assert adm["payload"]["rule"] == "probation"
-    again = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                               fetch=_fetch_factory(pages), screen=screen, today="2026-08-24")
-    assert again["admitted"] == [] and again["blocked"] == []
-
-
-def test_admissions_malformed_screen_retries_then_blocks(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://flaky.example/", found_in="blog1/i1", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    actions = ActionLog(tmp_path / "act.jsonl")
-    kw = dict(discovery_path=q, watchlist_path=wl, actions=actions,
-              fetch=_fetch_factory(_good_pages("flaky.example")),
-              screen=lambda d, t, a: ("malformed", "malformed"))
-    for day in ("2026-08-24", "2026-08-25"):
-        out = process_admissions(today=day, **kw)
-        assert out["admitted"] == [] and out["blocked"] == []
-        assert load_discovery(q)[0]["status"] == "proposed"
-    out = process_admissions(today="2026-08-26", **kw)
-    assert out["blocked"] == ["flaky.example"]
-    assert load_discovery(q)[0]["status_reason"] == "source-screen malformed x3"
-    malformed_events = [e for e in _events(tmp_path / "act.jsonl")
-                        if e["entry_type"] == "source_screen_malformed"]
-    assert [e["payload"]["run"] for e in malformed_events] == [1, 2]
-
-
 def test_admissions_skip_scout_and_multi_citer_proposals(tmp_path):
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://scouted.example/", found_in="scout/2026-08-15", reason="scout")
@@ -380,9 +226,9 @@ def test_admissions_skip_scout_and_multi_citer_proposals(tmp_path):
     wl = write_watchlist(tmp_path, [make_source()])
     out = process_admissions(discovery_path=q, watchlist_path=wl,
                              actions=ActionLog(tmp_path / "act.jsonl"),
-                             fetch=_fetch_factory({}), screen=lambda d, t, a: ("malformed", "malformed"),
+                             fetch=_fetch_factory({}),
                              today="2026-08-24")
-    assert out == {"admitted": [], "blocked": [], "deferred": []}
+    assert out == {"admitted": [], "blocked": []}
     assert all(e["status"] == "proposed" for e in load_discovery(q))
 
 
@@ -490,99 +336,17 @@ def test_reviews_batches_stats_in_one_pass_matching_source_stats(tmp_path):
     assert out["waiting"][domain] == f"{expected['keeps']} keeps in {expected['screened']}/{window}"
 
 
-def test_admissions_malformed_then_admit_pops_run_counter(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://flaky.example/", found_in="blog1/i1", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    actions = ActionLog(tmp_path / "act.jsonl")
-    fetch = _fetch_factory(_good_pages("flaky.example"))
-    verdicts = iter([("malformed", "malformed"),
-                     ("verdict", {"research_source": True, "reason": "quant", "asset_classes": ["fx"]})])
-    screen = lambda d, t, a: next(verdicts)
-    out1 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                              fetch=fetch, screen=screen, today="2026-08-24")
-    assert out1["deferred"] == ["flaky.example"]
-    assert load_discovery(q)[0]["malformed_runs"] == 1
-    out2 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                              fetch=fetch, screen=screen, today="2026-08-25")
-    assert out2["admitted"] == ["flaky.example"]
-    assert "malformed_runs" not in load_discovery(q)[0]
-    types = [e["entry_type"] for e in _events(tmp_path / "act.jsonl")]
-    assert types.count("source_screen_malformed") == 1
-    run = next(e["payload"]["run"] for e in _events(tmp_path / "act.jsonl")
-              if e["entry_type"] == "source_screen_malformed")
-    assert run == 1
-
-
 def test_admissions_known_via_watchlist_domain_not_id(tmp_path):
     q = tmp_path / "discovery.jsonl"
     queue_discovery(q, "https://legacy.example/", found_in="blog1/i1", reason="cited")
     wl = write_watchlist(tmp_path, [make_source(id="legacy-id", url="https://legacy.example/")])
     out = process_admissions(discovery_path=q, watchlist_path=wl,
                              actions=ActionLog(tmp_path / "act.jsonl"),
-                             fetch=_fetch_factory({}), screen=lambda d, t, a: ("malformed", "malformed"),
+                             fetch=_fetch_factory({}),
                              today="2026-08-24")
-    assert out == {"admitted": [], "blocked": [], "deferred": []}
+    assert out == {"admitted": [], "blocked": []}
     e = load_discovery(q)[0]
     assert e["status"] == "auto_admitted" and e["status_reason"] == "already on watchlist"
-
-
-def test_admissions_can_spend_false_skips_the_whole_pass(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://good.example/", found_in="blog1/i1", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    called = []
-    def screen(d, t, a):
-        called.append(d)
-        return ("verdict", {"research_source": True, "reason": "quant", "asset_classes": []})
-    out = process_admissions(discovery_path=q, watchlist_path=wl,
-                             actions=ActionLog(tmp_path / "act.jsonl"),
-                             fetch=_fetch_factory(_good_pages("good.example")),
-                             screen=screen, can_spend=lambda: False, today="2026-08-24")
-    assert out == {"admitted": [], "blocked": [], "deferred": []}
-    assert called == []                                    # never even prefiltered/screened
-    assert load_discovery(q)[0]["status"] == "proposed"    # nothing flipped
-    assert not (tmp_path / "act.jsonl").exists()            # nothing logged
-
-
-def test_admissions_api_error_stops_the_pass_without_counting_against_it(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://first.example/", found_in="blog1/i1", reason="cited")
-    queue_discovery(q, "https://second.example/", found_in="blog1/i2", reason="cited")
-    queue_discovery(q, "https://third.example/", found_in="blog1/i3", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    pages = {**_good_pages("first.example"), **_good_pages("second.example"),
-             **_good_pages("third.example")}
-    verdicts = {"first.example": ("verdict", {"research_source": True, "reason": "quant",
-                                              "asset_classes": []})}
-    def screen(d, t, a):
-        return verdicts.get(d, ("api_error", "transient outage"))
-    actions = ActionLog(tmp_path / "act.jsonl")
-    out = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                             fetch=_fetch_factory(pages), screen=screen, today="2026-08-24")
-    assert out["admitted"] == ["first.example"]             # processed before the failure
-    assert out["blocked"] == [] and out["deferred"] == []
-    st = {e["domain"]: e for e in load_discovery(q)}
-    assert st["first.example"]["status"] == "probation"
-    for d in ("second.example", "third.example"):           # untouched, not mis-blamed
-        assert st[d]["status"] == "proposed" and "malformed_runs" not in st[d]
-
-
-def test_admissions_three_refusals_still_block(tmp_path):
-    q = tmp_path / "discovery.jsonl"
-    queue_discovery(q, "https://refusey.example/", found_in="blog1/i1", reason="cited")
-    wl = write_watchlist(tmp_path, [make_source()])
-    actions = ActionLog(tmp_path / "act.jsonl")
-    kw = dict(discovery_path=q, watchlist_path=wl, actions=actions,
-              fetch=_fetch_factory(_good_pages("refusey.example")),
-              screen=lambda d, t, a: ("refusal", None))
-    for day in ("2026-08-24", "2026-08-25"):
-        out = process_admissions(today=day, **kw)
-        assert out["deferred"] == ["refusey.example"]
-        assert load_discovery(q)[0]["status"] == "proposed"
-    out = process_admissions(today="2026-08-26", **kw)
-    assert out["blocked"] == ["refusey.example"]
-    assert load_discovery(q)[0]["status_reason"] == "source-screen malformed x3"
 
 
 class _RecordingActions:
@@ -603,8 +367,6 @@ def test_admissions_events_emitted_only_after_persistence_succeeds(tmp_path, mon
     with pytest.raises(RuntimeError):
         process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
                            fetch=_fetch_factory(_good_pages("good.example")),
-                           screen=lambda d, t, a: ("verdict", {"research_source": True,
-                                                               "reason": "quant", "asset_classes": []}),
                            today="2026-08-24")
     assert actions.calls == []
 
@@ -696,10 +458,6 @@ def test_block_record_revokes_verified_source_not_in_queue(tmp_path):
                for e in _events(tmp_path / "act.jsonl"))
 
 
-def _refuse_screen(*a, **kw):
-    raise AssertionError("a permanently blocked queue row must never reach source-screen")
-
-
 def test_block_of_legacy_verified_source_writes_permanent_block_row(tmp_path):
     """A verified source Coen added directly (never discovered through the
     pipeline) has no discovery-queue row. Blocking it must still leave a
@@ -724,9 +482,8 @@ def test_block_of_legacy_verified_source_writes_permanent_block_row(tmp_path):
     # regardless of that row's status
     assert queue_discovery(q, "https://coen.example/post", found_in="blog1/i9",
                            reason="cited") is False
-    adm = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                             screen=_refuse_screen)
-    assert adm == {"admitted": [], "blocked": [], "deferred": []}
+    adm = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions)
+    assert adm == {"admitted": [], "blocked": []}
     assert load_discovery(q)[0]["status"] == "blocked"
 
 
@@ -817,17 +574,16 @@ def test_admissions_bounded_to_max_per_run_leaves_rest_proposed(tmp_path):
         domain = url.split("//", 1)[1].split("/", 1)[0]
         return 200, _idx_html(domain), url  # no feed link -> index mode, one fetch each
 
-    verdict = lambda d, t, a: ("verdict", {"research_source": True, "reason": "quant", "asset_classes": []})
     actions = ActionLog(tmp_path / "act.jsonl")
     out1 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                              fetch=fetch, screen=verdict, today="2026-08-24",
+                              fetch=fetch, today="2026-08-24",
                               max_per_run=20)
     assert len(calls) == 20                        # exactly 20 prefilter fetches
     assert len(out1["admitted"]) == 20
     remaining = [e for e in load_discovery(q) if e["status"] == "proposed"]
     assert len(remaining) == 5                      # the other 5 untouched, still proposed
     out2 = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
-                              fetch=fetch, screen=verdict, today="2026-08-24",
+                              fetch=fetch, today="2026-08-24",
                               max_per_run=20)
     assert len(out2["admitted"]) == 5
     assert all(e["status"] != "proposed" for e in load_discovery(q))
@@ -854,3 +610,49 @@ def test_probation_counts_skips_malformed_trailing_json_line(tmp_path):
         f.write('{"entry_type": "source_promoted", "payload": {"domain": "c"}, "ts_utc": "2026-0')
     c = probation_counts(wl, actions_path, days=30)
     assert c["promoted"] == 1 and c["blocked"] == 1
+
+
+def test_admissions_accept_by_default_and_block_only_on_the_prefilter(tmp_path):
+    """D44: a source is admitted to probation WITHOUT any content judgement.
+
+    news.example is exactly the kind of site the removed source screen used to
+    block ("news recaps ... are NOT research sources"). It must now be admitted
+    and left for its yield to decide. Only the mechanical prefilter blocks:
+    down.example cannot be fetched at all, so it could never be polled."""
+    q = tmp_path / "discovery.jsonl"
+    queue_discovery(q, "https://good.example/", found_in="blog1/i1", reason="cited")
+    queue_discovery(q, "https://news.example/", found_in="blog1/i2", reason="cited")
+    queue_discovery(q, "https://down.example/", found_in="blog1/i3", reason="cited")
+    wl = write_watchlist(tmp_path, [make_source()])
+    pages = {**_good_pages("good.example"), **_good_pages("news.example")}
+    actions = ActionLog(tmp_path / "act.jsonl")
+    out = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                             fetch=_fetch_factory(pages), today="2026-08-24")
+    assert out["admitted"] == ["good.example", "news.example"], (
+        "a fetchable source was not admitted by default -- a content screen is back")
+    assert out["blocked"] == ["down.example"]
+    st = {e["domain"]: e for e in load_discovery(q)}
+    assert st["news.example"]["status"] == "probation"
+    assert st["down.example"]["status"] == "blocked" and "unreachable" in st["down.example"]["status_reason"]
+    src = {s["id"]: s for s in load_watchlist(wl)}["news.example"]
+    assert src["added_by"] == PROVENANCE_PROBATION and src["tier"] == "probation"
+    assert src["probation_since"] == "2026-08-24" and src["feed"] == "https://news.example/feed"
+    assert "D44" in src["notes"] and src["notes"].startswith("probation")
+    events = _events(tmp_path / "act.jsonl")
+    types = [e["entry_type"] for e in events]
+    assert types.count("source_auto_admitted") == 2 and types.count("source_auto_blocked") == 1
+    adm = next(e for e in events if e["entry_type"] == "source_auto_admitted")
+    assert adm["payload"]["rule"] == "probation" and "D44" in adm["payload"]["reason"]
+    again = process_admissions(discovery_path=q, watchlist_path=wl, actions=actions,
+                               fetch=_fetch_factory(pages), today="2026-08-24")
+    assert again == {"admitted": [], "blocked": []}
+
+
+def test_admissions_takes_no_screen_and_no_budget_gate():
+    """The source screen is removed, not merely unwired: the admission pass
+    has no parameter a caller could hand a content judgement (or a spend gate
+    that only existed to protect one) back through."""
+    import inspect
+    params = inspect.signature(process_admissions).parameters
+    assert "screen" not in params and "can_spend" not in params, (
+        "process_admissions accepts a screen again -- D44 removed it")

@@ -5,9 +5,9 @@ parameters. Only passes proceed to full fetch + extraction. Every decision is
 logged with a one-line reason (auditable funnel); the budget meter is checked
 BEFORE any call and charged after.
 
-D27 case 3 adds `screen_source`: one metered Sonnet call judging a whole
-source (titles + about text) for probation admission, reusing this module's
-budget/logging/fatal-error conventions.
+D44 (2026-09-26) removed D27 case 3's source-level screen (`screen_source`):
+a discovered source is admitted to probation by default and judged by its
+yield, and THIS per-item screen is what keeps its junk out of extraction.
 """
 from __future__ import annotations
 
@@ -178,111 +178,3 @@ def screen_items(client, model: str, items: list[dict], meter,
         out.update(decisions)
         _log_decisions(log_path, model, decisions)
     return out
-
-
-# ---------------- D27 case 3: source-level screen ----------------------------
-
-SOURCE_SCREEN_SYSTEM = INTAKE_PARAMETERS + """
-
-SOURCE MODE. You are now judging a whole SOURCE, not items. You see its domain,
-its 10 most recent item titles, and the start of its landing/about text. Decide
-whether a recurring reader of this source would expect testable trading /
-portfolio-construction / execution / risk / market-microstructure / regime
-research that would pass the item bar above at least occasionally. Macro or
-market commentary without mechanisms, politics, gold-bug or doom sites, product
-or course marketing, news recaps, and general finance journalism are NOT research
-sources. Return research_source true/false, a one-line reason, and the asset
-classes the source mostly covers. Ignore the per-item output instructions
-above; the schema you are given is the only output."""
-
-SOURCE_SCREEN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "research_source": {"type": "boolean"},
-        "reason": {"type": "string"},
-        "asset_classes": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["research_source", "reason", "asset_classes"],
-    "additionalProperties": False,
-}
-SOURCE_SCREEN_MAX_TOKENS = 400
-
-
-def build_source_screen_prompt(domain: str, titles: list[str], about: str) -> str:
-    lines = [f"Source domain: {domain}", "", "Recent item titles:"]
-    lines += [f"- {t}" for t in titles[:10]] or ["- (none found)"]
-    lines += ["", "Landing/about text (truncated):", about[:300] or "(none)"]
-    return "\n".join(lines)
-
-
-def parse_source_screen(data: dict) -> dict | None:
-    """Strict: a missing or non-boolean verdict is malformed (None), never a pass."""
-    verdict = data.get("research_source") if isinstance(data, dict) else None
-    if not isinstance(verdict, bool):
-        return None
-    classes = data.get("asset_classes")
-    return {"research_source": verdict,
-            "reason": str(data.get("reason", ""))[:300],
-            "asset_classes": [str(c) for c in classes] if isinstance(classes, list) else []}
-
-
-def screen_source(client, model: str, meter, domain: str, titles: list[str],
-                  about: str, log_path: str | Path) -> tuple[str, object]:
-    """One metered Sonnet call. Returns (kind, payload):
-
-      ("verdict", parsed_dict)  -- success
-      ("malformed", reason)     -- unparseable/invalid schema output
-      ("refusal", None)         -- the model declined
-      ("budget", None)          -- monthly cap already closed (checked
-                                    before any call is made)
-      ("api_error", message)    -- a non-fatal API/network failure
-
-    'malformed' and 'refusal' are the SOURCE's fault (or a one-off model
-    hiccup on this source) and are safe to retry-count against it. 'budget'
-    and 'api_error' are NOT the source's fault -- every other source in the
-    same pass would fail identically -- so callers must leave the source
-    untouched and stop calling rather than count these against it. A fatal
-    billing/credential error still raises ApiCreditExhausted rather than
-    returning, same as before."""
-    log_path = Path(log_path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    def _log(verdict, reason):
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts_utc": ts, "domain": domain, "model": model,
-                                "verdict": verdict, "reason": reason},
-                               ensure_ascii=False) + "\n")
-
-    if not meter.can_spend():
-        _log(None, "monthly cap reached")
-        return ("budget", None)
-    try:
-        msg = client.messages.create(
-            model=model, max_tokens=SOURCE_SCREEN_MAX_TOKENS,
-            system=SOURCE_SCREEN_SYSTEM,
-            output_config={"format": {"type": "json_schema",
-                                      "schema": SOURCE_SCREEN_SCHEMA}},
-            messages=[{"role": "user",
-                       "content": build_source_screen_prompt(domain, titles, about)}])
-    except Exception as exc:
-        _log(None, f"api_error: {exc}"[:200])
-        if any(m in str(exc).lower() for m in FATAL_API_MARKERS):
-            print(f"  FATAL api error, aborting run: {exc}", file=sys.stderr)
-            raise ApiCreditExhausted(str(exc)) from exc
-        print(f"  screen call failed: {exc}", file=sys.stderr)
-        return ("api_error", str(exc)[:200])
-    meter.record_call(model, msg.usage, purpose="source_screen", agent="reader")
-    if msg.stop_reason == "refusal":
-        _log(None, "refusal")
-        return ("refusal", None)
-    try:
-        text = next(b.text for b in msg.content if b.type == "text")
-        parsed = parse_source_screen(json.loads(text))
-    except (StopIteration, ValueError, TypeError):
-        parsed = None
-    if parsed is None:
-        _log(None, "malformed")
-        return ("malformed", "malformed")
-    _log(parsed["research_source"], parsed["reason"])
-    return ("verdict", parsed)

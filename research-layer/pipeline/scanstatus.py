@@ -20,7 +20,7 @@ DOMAIN = "intelligence"
 # 1.8 = D27 case 3 (2026-08-24). Runtime had reported 1.6 since D36 (contract
 # 1.7, 2026-08-18) without a bump: a ratified contract that the runtime does
 # not report has not shipped.
-CONTRACT_VERSION = "1.8"
+CONTRACT_VERSION = "1.9"
 
 
 class ActionLog:

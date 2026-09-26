@@ -435,20 +435,28 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   elevated fix command. Reading the task setting is fully defensive: not
   registered, no schtasks, odd duration -> silent no-op, so manual runs and
   tests behave identically.
-- `logs/triage_escalated.json` is the advisory escalation skip-set. Escalated
-  cards are never chained, so without it they re-occupy the head of the
-  --limit window every cycle and the backlog behind them is unreachable.
-  Advisory: missing or corrupt -> WARN + skip nothing, never a crash.
-  `--no-skip-escalated` forces a re-review. It is a TRIAGE-cost control only
-  and never a trigger input -- escalated cards still count as pending work.
-  **The file is only ever overwritten when it was ABSENT or read cleanly.** A
-  file that exists but could not be read (corrupt JSON, or a transient
-  sharing lock from AV/the indexer) is left alone -- overwriting it from an
-  empty dict would destroy the history and make the next cycle re-pay for the
-  whole escalated backlog. `--no-skip-escalated` likewise preserves the set;
-  it suppresses the filter, not the history. `times_seen` counts cycles a
-  card has been sighted still waiting on Coen (a high number = blocking the
-  queue for weeks); `first_escalated_utc` never moves.
+- **D44 (Coen, 2026-09-26): triage decides EVERY card; nothing waits for Coen.**
+  A full panel of three unanimous accepts -> accepted. ANY dissent, or a panel
+  still short after bounded in-call re-asks (`MAX_VOTE_ATTEMPTS`), -> rejected
+  `claim_not_supported`, provenance `auto-d44`. A majority rule was offered and
+  rejected (D31's reason: one reviewer spotting overreach must never be
+  outvoted). The escalation skip-set (`logs/triage_escalated.json`), its
+  `--escalated-state` / `--no-skip-escalated` / `--queue` flags and Coen's T3
+  card queue are GONE; the 261 cards it held were resolved under the new rule
+  on 2026-09-26. Each rejection's dissent reasons are appended to
+  `logs/triage_rejections.jsonl` (the chain only records the reason code), so
+  a rejected card can still be audited and revoked. `triage_result.json`
+  still carries `skipped_escalated` (always 0) because loop.py reads it.
+- **D44 sources: accepted by default.** D27 case 3's AI source screen
+  (`relevance.screen_source`, one Sonnet call per discovered source that could
+  BLOCK it on content) is REMOVED, not unwired -- `process_admissions` has no
+  `screen`/`can_spend` parameter (test-guarded). A discovered source that passes
+  the mechanical prefilter (reachable, has articles, not a store/login
+  subdomain) goes straight onto probation and its YIELD decides. The per-item
+  relevance screen still filters its articles. The 97 domains the old screen
+  had blocked were reopened to `proposed` on 2026-09-26 so they re-enter
+  through the prefilter. Code changes reach the RESIDENT scanner only after it
+  is restarted (`run_scanner.ps1`).
 - `no_new_accepted_cards` outcome: triage ran but accepted nothing new for a
   class that fired on pending cards, so the composer would see an unchanged
   corpus. Exits 0 before any metered composer call and still advances the
@@ -490,17 +498,10 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   (Sharpe 1.3 ~ 587 days best case). Do not read a slow record as a weak
   strategy; it may be a large cohort.
 
-## Triage escalations carry their reasons; `--queue` groups them (2026-09-03)
-- Each dissenting reviewer's one-sentence reason is now stored on the
-  skip-set entry (`dissent_reasons`, advisory, additive) and carried across
-  sightings; a `--no-skip-escalated` re-review replaces them with the newer
-  panel's objections. Before this the reasons were read once and discarded.
-- `python -m pipeline.triage_batch --queue [--escalated-state PATH]` prints
-  Coen's T3 backlog grouped by reason, most common first, with times_seen and
-  first-escalation date. Read-only: returns before Registry is constructed.
-  Cards escalated before 2026-09-03 show `(no reason recorded)` until
-  re-reviewed (a one-off `--no-skip-escalated` pass over 331 cards costs
-  ~USD 6 -- Coen's call).
+## Triage escalations -- REMOVED by D44 (2026-09-26)
+- The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone
+  with the queue itself. Dissent reasons now live in
+  `logs/triage_rejections.jsonl`, one row per rejected card.
 
 ## Budget lines (D41, 2026-09-18): pipeline 200, Reader 20, one constant, NO batch-stop
 - `pipeline/budget.py` `PIPELINE_CAP_USD` is THE pipeline cap;

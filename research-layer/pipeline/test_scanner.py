@@ -504,7 +504,7 @@ def test_write_status_matches_convention(tmp_path):
     # then reached 1.7 (D36, 2026-08-18) while this runtime stayed at 1.6 --
     # drift closed here at 1.8 for D27 case 3 (source probation filter,
     # 2026-08-24).
-    assert st["contract_version"] == "1.8"
+    assert st["contract_version"] == "1.9"
     assert st["overall"] == "OK"
     assert st["items"]["budget"] == "OK"
     assert st["pending_tier3"] == 7
