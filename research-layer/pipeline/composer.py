@@ -81,8 +81,10 @@ COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
 # a future tightening of the crypto feed has one place to change. "fx" wired
 # in Track 1; "equity_etf" (Track 2a, spec s4's routing table: `equities` +
 # `cross` cards) wired here. The futures proxy lane (below) is additive to
-# this table, not a member of it -- a futures card is never tagged
-# `equities`, so it can only reach equity_etf via INDEX_FUTURES_PROXY_TOPICS.
+# this table, not a member of it -- a futures-ONLY card can only reach
+# equity_etf via INDEX_FUTURES_PROXY_TOPICS. (A futures card that is ALSO
+# tagged `equities`/`cross` routes natively; the lane then only adds the
+# proxy provenance marker. Measured 2026-09-26: 6 of the lane's 8 were such.)
 #
 # Track 2b addendum (docs/2026-08-27-sp4-track2b-addendum.md, "Routing"):
 # bond_etf routes on `rates` + `cross` per the parent spec's table -- but the
@@ -201,13 +203,30 @@ SPEC_VERSION = 2
 # more accepted futures cards naming an index product that these topics miss
 # (ES/NQ AI-signal and execution cards, the E-mini overnight-drift cluster,
 # VIX ETP / VIX term-structure cards, and ES-as-dataset methodology cards).
-# Topic tags are free-form, so few discriminating topics exist to add
-# ("equity index futures", "overnight drift", "VIX ETP(s)", "VIX term
-# structure" reach about a dozen). Widening the set is a routing change for
-# Coen, not a re-measurement.
+# 22 of the 57 already reach equity_etf NATIVELY (they also carry an
+# `equities` or `cross` tag); only 35 are truly unrouted.
+#
+# WIDENED 2026-09-27 (Coen's call): four discriminating topics added, five
+# strings -- "equity index futures", "overnight drift", "VIX ETP" /
+# "VIX ETPs", "VIX term structure". Each was chosen because every accepted
+# futures card carrying it is about an index-futures product (equity index
+# futures 4/4, overnight drift 7/7, VIX ETP(s) 2/2, VIX term structure 1/1
+# on the pinned prefix); generic co-tags on the same cards ("execution",
+# "signal-based trading", plain "VIX" -- 33 accepted cards) were rejected.
+# Re-measured on the same prefix: the lane now matches 22 accepted cards (8
+# + 14). Only FOUR of the 14 newly reach the proposer --
+# 706194df874a2b8f, 0e672f2fca2331db, 48a05696c46f86e1, b74b993f72406ab5,
+# all futures-only ES/NQ AI-intraday cards from one source. The other ten
+# were already routed natively and only gain the routed_via/proxy_card_ids
+# provenance marker (as 6 of the original 8 already did). 31 truly unrouted
+# index-product cards remain; their topics are generic, so reaching them
+# needs a different mechanism than this declared topic set.
 INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
+    # added 2026-09-27, see WIDENED above
+    "equity index futures", "overnight drift",
+    "VIX ETP", "VIX ETPs", "VIX term structure",
 })
 
 # Track 2b addendum ("Routing"): the futures->metal_etf PROXY lane, same
@@ -1937,10 +1956,11 @@ def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[st
             if set((c.get("tags") or {}).get("asset_classes") or ["cross"]) & eligible_tags
         }
         # Track 2a / spec s10.8: the futures->equity_etf PROXY lane. A
-        # futures-tagged card is not eligible via ROUTING above (futures
-        # cards never carry an "equities" or "cross" tag by definition of
-        # this check), so it can only reach the proposer here, and only when
-        # its topics intersect the declared INDEX_FUTURES_PROXY_TOPICS set.
+        # futures-ONLY card is not eligible via ROUTING above, so it can only
+        # reach the proposer here, and only when its topics intersect the
+        # declared INDEX_FUTURES_PROXY_TOPICS set. (A futures card also tagged
+        # "equities"/"cross" is already eligible above; matching here only
+        # records it in proxy_routed_card_ids -- most of the lane is such.)
         # Additive to propose_input (a dict keyed by card_id, so a card that
         # somehow matched both paths is never double-counted or duplicated).
         if asset_class == "equity_etf":

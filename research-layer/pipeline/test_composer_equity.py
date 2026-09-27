@@ -170,6 +170,12 @@ def test_equity_card_routing(tmp_path):
 # RE-MEASURED block on composer.INDEX_FUTURES_PROXY_TOPICS for the evidence.
 # The test now pins a FIXED chain prefix, not the growing live chain (same
 # fix as test_gen4's writes-nothing guard, dc0dcce8).
+#
+# WIDENED 2026-09-27 (Coen): four discriminating topics added (five strings,
+# see composer.py's WIDENED block). Re-measured on the SAME prefix: 22
+# matches (8 + 14). Only the PROXY_ONLY subset below actually depends on this
+# lane to reach the proposer -- every other match also carries an
+# equities/cross tag and routes natively, gaining only the provenance marker.
 
 # The measurement boundary: the prefix is every chain entry, in file order,
 # before the first one stamped at or after this instant. Scanning in file
@@ -182,25 +188,44 @@ PROXY_PIN_PREFIX_ENTRIES = 53961
 PROXY_PIN_PREFIX_HEAD = (
     "d766fda98f01f03d9f3aaf43edb974202af94b6a96964fc6d63e07aa3c925ef0")
 PROXY_PIN_MATCHES = frozenset({
+    # the 8 of 2026-09-26
     "f3c7efcd1bb41166",
     "852aece92875e506", "544838dcf797e152", "ded07ff41e0aab51",
     "909e5980b2648854", "5e4802082cb656f5",
     "b427631e708f84b4", "633cf1b8809a154d",
+    # +14 from the 2026-09-27 topics
+    "05187255e4a957ed", "0c40b5cc6074aea5", "15e3b05bcb4adf7d",
+    "6f8fa5ca2e813461", "8d403325dfee6a08", "bef4b99475f275ea",
+    "e27373e5f80fedc4",                                  # overnight drift
+    "706194df874a2b8f", "0e672f2fca2331db", "48a05696c46f86e1",
+    "b74b993f72406ab5",                                  # equity index futures
+    "7b93b0af65c06978", "7fed4fcb3981e40e",              # VIX ETP(s)
+    "dbfa1cbf6b2f2ab9",                                  # VIX term structure
+})
+# Matches with NO equities/cross tag: the only cards the lane actually
+# routes (the rest reach equity_etf natively). 2 before the widening, +4.
+PROXY_PIN_PROXY_ONLY = frozenset({
+    "5e4802082cb656f5", "633cf1b8809a154d",
+    "706194df874a2b8f", "0e672f2fca2331db", "48a05696c46f86e1",
+    "b74b993f72406ab5",
 })
 
 
 def test_index_futures_proxy_topics_measured_and_bounded():
-    """Sanity on the declared constant itself: 3-6 topics (build brief
-    2026-08-24), all strings, frozen so it cannot be mutated at runtime."""
+    """Sanity on the declared constant itself: all strings, frozen so it
+    cannot be mutated at runtime. The build brief's 3-6 bound (2026-08-24)
+    was superseded by Coen's widening on 2026-09-27; the exact-set pin below
+    is what keeps any further edit deliberate."""
     topics = composer.INDEX_FUTURES_PROXY_TOPICS
     assert isinstance(topics, frozenset)
-    assert 3 <= len(topics) <= 6
     assert all(isinstance(t, str) and t for t in topics)
     # The measured set, pinned so a future edit is a deliberate re-measurement
     # rather than an accidental drift.
     assert topics == frozenset({
         "S&P 500", "ES futures", "VIX futures",
         "VIX futures term structure", "TVIX", "contango",
+        "equity index futures", "overnight drift",
+        "VIX ETP", "VIX ETPs", "VIX term structure",
     })
 
 
@@ -248,6 +273,12 @@ def test_chain_prefix_has_the_measured_proxy_matches(tmp_path):
     }
     assert len(futures_accepted) == 293
     assert matches == PROXY_PIN_MATCHES
+    native = set(composer.ROUTING["equity_etf"])
+    proxy_only = {
+        cid for cid in matches
+        if not set(futures_accepted[cid]["tags"]["asset_classes"]) & native
+    }
+    assert proxy_only == PROXY_PIN_PROXY_ONLY
 
 
 def test_futures_card_with_matching_topic_proxy_routes(tmp_path):
