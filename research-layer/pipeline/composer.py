@@ -197,10 +197,14 @@ SPEC_VERSION = 2
 # equity_etf runs have routed all eight since 2026-09-01
 # (logs/batch_drift.jsonl: 2026-09-01-133003, 09-18-143037, 09-19-143028).
 # RECALL is the lane's known weakness, not precision: a loose claim-text
-# search (S&P/ES/E-mini/NQ/VIX/VXX/...) finds ~80 more accepted futures cards
-# naming an index product that these topics miss (mostly E-mini
-# microstructure/ES-NQ execution cards). Widening the set is a routing
-# change for Coen, not a re-measurement.
+# search (word-bounded S&P/ES/E-mini/NQ/Nasdaq/Dow/VIX/VXX/XIV/...) finds 57
+# more accepted futures cards naming an index product that these topics miss
+# (ES/NQ AI-signal and execution cards, the E-mini overnight-drift cluster,
+# VIX ETP / VIX term-structure cards, and ES-as-dataset methodology cards).
+# Topic tags are free-form, so few discriminating topics exist to add
+# ("equity index futures", "overnight drift", "VIX ETP(s)", "VIX term
+# structure" reach about a dozen). Widening the set is a routing change for
+# Coen, not a re-measurement.
 INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
