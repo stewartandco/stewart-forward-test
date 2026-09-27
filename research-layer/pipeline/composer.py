@@ -220,7 +220,8 @@ SPEC_VERSION = 2
 # were already routed natively and only gain the routed_via/proxy_card_ids
 # provenance marker (as 6 of the original 8 already did). 31 truly unrouted
 # index-product cards remain; their topics are generic, so reaching them
-# needs a different mechanism than this declared topic set.
+# needs a different mechanism than this declared topic set. CLOSED
+# 2026-09-27 (Coen): those 31 stay unrouted by decision; not an open gap.
 INDEX_FUTURES_PROXY_TOPICS = frozenset({
     "S&P 500", "ES futures", "VIX futures",
     "VIX futures term structure", "TVIX", "contango",
