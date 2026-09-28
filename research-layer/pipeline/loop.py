@@ -11,7 +11,7 @@ outright (see _triggerable_counts). Both _triggerable_counts and _routable_count
 are reported to status; only the former decides.
 
 Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
-\\Morpheus\\25_PipelineLoop (22:30 / 02:30; in \\StewartCo\\ until 2026-09-13)
+\\Morpheus\\25_PipelineLoop (20:00, PT11H since 2026-09-28; in \\StewartCo\\ until 2026-09-13)
 as `python -m pipeline.loop --once`.
 
 Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_cycle_budget | deferred_lock |
