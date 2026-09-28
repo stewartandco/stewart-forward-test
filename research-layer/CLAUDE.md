@@ -484,6 +484,29 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   polite deferrals (distinguished in status items.outcome); nonzero = real
   defect (Sentinel FAILs the digest).
 
+## Quarantine daily catch-up (23_QuarantineDaily, 2026-09-28)
+- **Why:** the daily records ONE date and DEFERS a class whose bar is not
+  published yet (equity ETFs are always a day behind at 08:20: their only
+  refresh is loop stage 0 at 22:30, before the US close; FRED fx lags about a
+  week). Deferred dates were meant to be backfilled by hand `--date` runs and
+  never were: by 2026-09-28 all 253 equity_etf + 19 fx strategies had ZERO
+  forward days (4,764 strategy-days owed). A prose-only rule, now a stage.
+- `run_quarantine.bat` ends with `python -m pipeline.quarantine --catch-up`:
+  every OWED date (a deferred class, a missed day, a `deferred_lock` skip) is
+  recorded through the unchanged `--date` path, oldest first, at most
+  `MAX_CATCHUP_DATES` (10) per run. A date counts as owed only when EVERY asset
+  of the strategy has a bar on it -- the `--date` path's own readiness rule --
+  so a calendar-gap date is never retried forever.
+- A failed date never strands later ones (exceptions included) but makes the
+  run exit 1; the wrapper STILL commits what was recorded, then exits 1.
+- Cost: ~4-7 min per date on the 2026-09 chain (each date re-reads the chain
+  and re-simulates every ready strategy). Steady state is one or two dates a day.
+- Backfilled rows stay visible as backfills in `--review` (write time vs bar
+  date); catch-up records every owed strategy alike, so it is a schedule,
+  never a selection.
+- ⚠ The Ops Sentinel only OBSERVES `23_QuarantineDaily` (existence) as of
+  2026-09-28, so its exit 1 alarms nobody yet. Promoting it is Coen's call.
+
 ## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
 - `python -m pipeline.livegate` judges BOTH arms of the chained
   `quarantine-live-protocol-v1` and, when not `--dry-run`, chains a

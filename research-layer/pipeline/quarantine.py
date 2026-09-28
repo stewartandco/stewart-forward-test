@@ -20,6 +20,11 @@ Usage:
         [--registry registry_log.jsonl] [--data-dir data]
     python -m pipeline.quarantine --review
         [--data-dir data] [--artifacts-dir artifacts]
+    python -m pipeline.quarantine --catch-up
+        records every OWED date through the --date path, oldest first, at
+        most MAX_CATCHUP_DATES per run. The daily ends with it (2026-09-28):
+        a deferred class or a missed day is filled on the next run, for EVERY
+        owed strategy alike, so backfill is a schedule, never a selection.
 
 Conventions:
   * A decision for date D describes what the book DID on D's bar (entries fill
@@ -63,6 +68,7 @@ import sys
 import json
 import hashlib
 import argparse
+import traceback
 from pathlib import Path
 
 from . import cells
@@ -78,6 +84,15 @@ MIN_TRADING_DAYS = 60
 # a forward observation, and is reported as such
 BACKFILL_LAG_DAYS = 2
 MAX_LISTED_GAPS = 12
+# --catch-up re-runs at most this many owed dates per invocation, oldest
+# first; the rest wait for the next run. Each date re-reads the chain and
+# re-simulates every READY strategy (observe_day runs before the `seen` skip):
+# measured 2026-09-28 at ~4-7 min per date on the live chain, holding
+# chain.lock for each date's write phase. Steady state owes one or two dates a
+# day (equity lags a day, FRED fx arrives weekly), so 10 bounds a catch-up
+# after an outage to under an hour. A date refused every run keeps its slot
+# (oldest first) -- that needs a human, and the run exits 1 each time.
+MAX_CATCHUP_DATES = 10
 
 CONE_CAVEAT = (
     "  NOTE: that cone is a terminal-equity distribution over the strategy's\n"
@@ -386,6 +401,85 @@ def _last_bar_date(data_dir: Path, spec: dict) -> str | None:
     return latest
 
 
+def recordable_owed_dates(owed_by_sid: dict[str, dict[str, set[str]]],
+                          universe_by_sid: dict[str, set[str]],
+                          recorded: set[tuple[str, str, str]]) -> list[str]:
+    """Sorted bar dates on which some quarantined strategy is owed a decision
+    the per-date runner CAN record.
+
+    A date counts for a strategy only when EVERY asset in its universe has a
+    bar on it: the per-date runner defers a strategy missing any asset's bar,
+    so a calendar-gap date is not recordable, and counting it would retry it
+    (and fail) on every run. A date with some assets recorded and others not
+    is owed; the runner writes only the missing rows."""
+    dates: set[str] = set()
+    for sid, owed in owed_by_sid.items():
+        universe = universe_by_sid[sid]
+        for date, assets in owed.items():
+            if assets != universe:
+                continue
+            if any((sid, date, a) not in recorded for a in universe):
+                dates.add(date)
+    return sorted(dates)
+
+
+def catch_up(dates: list[str], run_date) -> int:
+    """Record each owed date through `run_date(date) -> exit code`, oldest
+    first, at most MAX_CATCHUP_DATES per run. A failed date never strands the
+    dates after it, but any failure makes the whole run exit 1."""
+    if not dates:
+        print("catch-up: nothing owed")
+        return 0
+    todo = dates[:MAX_CATCHUP_DATES]
+    print(f"catch-up: {len(dates)} owed date(s); recording {len(todo)} "
+          f"({todo[0]} .. {todo[-1]})", flush=True)
+    failed = []
+    for date in todo:
+        print(f"catch-up: --date {date}", flush=True)
+        try:
+            rc = run_date(date)
+        except Exception:
+            # the --date path RAISES on some refusals (a non-identical
+            # duplicate, a writer ValueError); one such date must not strand
+            # every date after it
+            traceback.print_exc(file=sys.stdout)
+            rc = 1
+        if rc != 0:
+            failed.append(date)
+    left = len(dates) - len(todo)
+    if left:
+        print(f"catch-up: {left} owed date(s) left for the next run")
+    if failed:
+        print(f"catch-up: FAILED on {', '.join(failed)}")
+        return 1
+    return 0
+
+
+def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
+                             entered: dict[str, str], specs: dict[str, dict],
+                             data_dir: Path) -> list[str]:
+    """The live inputs to recordable_owed_dates. A strategy with no spec, no
+    entry date or a missing price file is skipped here; --review names it."""
+    owed_by_sid: dict[str, dict[str, set[str]]] = {}
+    universe_by_sid: dict[str, set[str]] = {}
+    for sid in quarantined:
+        spec, since = specs.get(sid), entered.get(sid)
+        if spec is None or since is None:
+            continue
+        last_bar = _last_bar_date(data_dir, spec)
+        owed = _owed_by_date(data_dir, spec, since, last_bar) if last_bar else None
+        if owed is None:
+            # --date would REFUSE a date on a missing file; say so here rather
+            # than let the gap look like "nothing owed"
+            print(f"catch-up: {sid} skipped (price file missing or empty); "
+                  f"--review names it")
+            continue
+        owed_by_sid[sid] = owed
+        universe_by_sid[sid] = set(spec["universe"]["assets"])
+    return recordable_owed_dates(owed_by_sid, universe_by_sid,
+                                 existing_decisions(registry))
+
+
 def _truncated(items: list[str]) -> str:
     """A bounded list that says what it dropped: a silently truncated list
     reads as 'that was all of them'."""
@@ -506,10 +600,13 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--date", help="YYYY-MM-DD; the trading day to record")
     ap.add_argument("--review", action="store_true",
                     help="report progress against the minimum; writes nothing")
+    ap.add_argument("--catch-up", action="store_true",
+                    help="record every owed date (deferred or missed) through "
+                         "the --date path, oldest first")
     args = ap.parse_args(argv)
 
-    if args.review == bool(args.date):
-        print("Give exactly one of --date YYYY-MM-DD or --review.",
+    if sum([args.review, bool(args.date), args.catch_up]) != 1:
+        print("Give exactly one of --date YYYY-MM-DD, --review or --catch-up.",
               file=sys.stderr)
         return 1
     if args.date is not None:
@@ -546,6 +643,13 @@ def run(argv: list[str] | None = None) -> int:
     if args.review:
         return review(registry, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
+
+    if args.catch_up:
+        dates = _owed_dates_for_catch_up(registry, quarantined, entered,
+                                         specs, args.data_dir)
+        base = ["--registry", str(args.registry), "--data-dir",
+                str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
+        return catch_up(dates, lambda d: run(base + ["--date", d]))
 
     if not quarantined:
         print("No strategies in 'quarantine' state.")
