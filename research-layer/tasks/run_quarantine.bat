@@ -13,19 +13,21 @@ REM records YESTERDAY, whose bar is complete, with 20 minutes of slack for the
 REM exchange to publish it.
 REM
 REM This WRITES TO THE HASH CHAIN unattended. It is idempotent per
-REM (strategy_id, date, asset), so a re-run cannot duplicate a row. A day missed
-REM entirely (machine off) is NOT auto-backfilled -- run
-REM `python -m pipeline.quarantine --review` to find gaps, then re-run with an
-REM explicit --date. --review also reports how long after its bar each row was
+REM (strategy_id, date, asset), so a re-run cannot duplicate a row. Since
+REM 2026-09-28 every run ends with `--catch-up`, which records every OWED date
+REM (a deferred class, a missed day, a deferred_lock skip) through the same
+REM --date path, oldest first, up to MAX_CATCHUP_DATES per run. Before that a
+REM deferred date waited for a hand --date run that never came: equity_etf and
+REM fx sat at zero forward days. `--review` still audits gaps. --review also reports how long after its bar each row was
 REM chained, so a backfilled record and a faithfully-kept one stay
 REM distinguishable.
 REM
 REM PER-CLASS CALENDARS (2026-08-27 addendum, see docs/): a spec whose class
 REM has not published the date's bar (FRED-fed FX lags ~a week) is DEFERRED
 REM for the day while on-time classes still record -- that is exit 0, by
-REM design, with "deferred:" lines in the log. Deferred dates are backfilled
-REM with explicit --date runs once the bars publish; `--review` lists what is
-REM owed. A missing price FILE, every-spec-deferred, or a bar restatement is
+REM design, with "deferred:" lines in the log. Deferred dates are recorded by
+REM the `--catch-up` step below once their bars publish; `--review` lists what
+REM is owed. A missing price FILE, every-spec-deferred, or a bar restatement is
 REM still exit 1.
 REM
 REM EXIT CODE IS LOAD-BEARING: Ops Sentinel alarms on a nonzero last result, so
@@ -62,6 +64,14 @@ REM 3. Record it.
 python -m pipeline.quarantine --date %QDATE% >> "%LOG%" 2>&1
 if errorlevel 1 goto :fail
 
+REM 3b. Record every owed date the day's run could not (deferred classes, missed
+REM     days). A catch-up failure must NOT skip step 4: the day's rows and every
+REM     date catch-up did record still get committed, and the failure is carried
+REM     to the task's exit code afterwards.
+set CATCHUP_RC=0
+python -m pipeline.quarantine --catch-up >> "%LOG%" 2>&1
+if errorlevel 1 set CATCHUP_RC=1
+
 REM 4. Persist the witnessed record. Scoped pathspec ONLY -- a concurrent session
 REM    shares this branch and working tree, and an unscoped add would sweep its
 REM    work into this commit. Guarded so a no-change day makes no commit and
@@ -73,9 +83,10 @@ cd /d "%REPO%"
 git diff --quiet -- research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
 if errorlevel 1 (
   git add research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
-  git commit -q -m "quarantine: forward record for %QDATE%" >> "%LOG%" 2>&1
+  git commit -q -m "quarantine: forward record for %QDATE% (+ catch-up)" >> "%LOG%" 2>&1
 )
 
+if "%CATCHUP_RC%"=="1" goto :fail
 echo done, exit 0 >> "%LOG%"
 echo. >> "%LOG%"
 endlocal
