@@ -476,10 +476,15 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   this unconditionally, so the loop detects it next to the pre-spend chain
   verify rather than paying ~$4.20/fire to reach a guaranteed failure. Repair
   the chain manually.
-- Fires 22:30 / 02:30 local (NIGHT, since 2026-09-04 -- was 10:30/15:30/21:30:
-  a cycle needs ~9 GB of commit the desktop does not leave free by day, and no
-  4h window may reach 08:20 QuarantineDaily; quant/tasks/xml/25_PipelineLoop.xml
-  + setup_scheduler.bat carry it) once \Morpheus\25_PipelineLoop (moved from \StewartCo\ on 2026-09-13; the loop's TASK_NAME follows it) is
+- Fires ONCE at 20:00 local with a PT11H window, ending 07:00 (Coen 2026-09-28:
+  PT4H killed every cycle 09-25..27 once the registry passed ~10k strategies --
+  the gauntlet's registry-wide clustering is not deadline-aware -- and the 02:30
+  fire never ran behind the killed 22:30 instance). Was 22:30/02:30 PT4H from
+  2026-09-04 (night: a cycle needs ~9 GB of commit the desktop does not leave
+  free by day -- WATCH the 20:00 start for that; the gauntlet's commit-bounded
+  worker count is the defence). No window may reach 08:20 QuarantineDaily.
+  morpheus-hub/tasks/xml/25_PipelineLoop.xml + apply_retry_settings.ps1's
+  $TIME_LIMIT_OVERRIDES carry it -- change BOTH once \Morpheus\25_PipelineLoop (moved from \StewartCo\ on 2026-09-13; the loop's TASK_NAME follows it) is
   registered (activation Coen-gated per D29); exit 0 covers no_trigger and
   polite deferrals (distinguished in status items.outcome); nonzero = real
   defect (Sentinel FAILs the digest).
@@ -504,8 +509,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - Backfilled rows stay visible as backfills in `--review` (write time vs bar
   date); catch-up records every owed strategy alike, so it is a schedule,
   never a selection.
-- ⚠ The Ops Sentinel only OBSERVES `23_QuarantineDaily` (existence) as of
-  2026-09-28, so its exit 1 alarms nobody yet. Promoting it is Coen's call.
+- The Ops Sentinel health-asserts `23_QuarantineDaily` (`daily`) since
+  2026-09-28 (Coen), so an exit 1 reaches the 09:15 digest; 267009 ("still
+  running" -- a long catch-up) is tolerated for it alone.
 
 ## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
 - `python -m pipeline.livegate` judges BOTH arms of the chained
