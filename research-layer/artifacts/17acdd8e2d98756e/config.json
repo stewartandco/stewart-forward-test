@@ -1,0 +1,115 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "9f9040a0aa79a64c82618b3be41470e4f92275be17a8a762b4614a8315242418",
+  "CAD_1d": "0834db48d730ca96ec34181946077fd15ffd75dd85d47db5d4d2111b9093bcc3",
+  "CHF_1d": "ce94406987248c261d8593f586f4df80cd7ced665ba5b26a9b1f503613446a68",
+  "EUR_1d": "8346ee31dbf1903f577cf663963b4e0ded3713e9143510a8ebaec908e16b5cbc",
+  "GBP_1d": "45a0b3bb2adc46a2619cfa7c2e23f71a15d8f52919088e6769030eb2349a87a2",
+  "JPY_1d": "e1f2d3b1f481cfefb36702a1b41c45abf62cc84eaa725da59d666ffd1401bc73",
+  "MXN_1d": "935c8f35c9eaf9baf4141bed398607d65dc40c605fe37d5a71b6783db93f1e54",
+  "NOK_1d": "04b3ea9f1394a19c19ef45a230822d5a769fe8475fe4f7e0c8193f2e9736d610",
+  "NZD_1d": "0df85d967178f5399e842fbc59e8fe9fb60a591be6b2d878108075e801e5594a",
+  "SEK_1d": "5a1fe8d410fd4c5f85f3e370f3443e63203a326efdef01f5b5208efd1b2e7f49",
+  "SGD_1d": "f2109a476130d8edbfa7e160beabe7afbfdffdb9cb34e8a82a65f72eb5d26145",
+  "ZAR_1d": "618f38800d2e5057c6770819d929b0e4e6d210ceb07f2b956c2ca05fd3f71c2e"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 60,
+     "z_entry": 2.25
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "lookback": 60,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "lookback": 60,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "band_stop"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-29T12:07:19Z",
+  "family": "fx_zscore_mean_reversion_wide_stop",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-29-120032-loop-fx"
+  },
+  "name": "CAD 1d fx_zscore_mean_reversion_wide_stop dboth l60 ze2.25 l60 ze0.5 l60 m3.0 r1.0 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "7d67838f9104f2c1",
+    "89e66b95663d995b",
+    "9a6abe19343ae46f",
+    "bec5e126dff7ccb1",
+    "cd949ab02bf4d352",
+    "cf8f063058f35c92",
+    "eaf4074190391254",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_zscore_mean_reversion_wide_stop-2026-09-29-120032-loop-fx:CAD_1d"
+  },
+  "strategy_id": "17acdd8e2d98756e",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "CAD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
