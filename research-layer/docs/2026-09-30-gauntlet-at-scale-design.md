@@ -88,7 +88,9 @@ would reverse D40's "pipeline public as the trust asset" and is decided there).
 ### 4.2 Recorded-statistics job — `pipeline/gauntlet_stats.py`
 - Scheduled task `\Morpheus\28_GauntletStats`, daily **01:00**, **PT6H**.
 - Computes, over the whole registry, effective trials (`cluster.effective_trials`,
-  method unchanged), the deflated Sharpe and PBO, and chains one
+  method unchanged), the deflated Sharpe, PBO, `plateau_ok` and the
+  Harvey-Liu haircut (the last two are also group-derived and were recorded
+  in v6 verdicts; amended at planning, 2026-09-30), and chains one
   `gauntlet_stats` entry per v6.1 verdict that does not yet have one.
 - Deadline-aware and **resumable**: it checkpoints progress and continues the
   next night. It may lag; the lag is reported (section 7), never hidden.
@@ -116,7 +118,10 @@ gate's name as the reason; pass -> `quarantine`, reason `gauntlet pass`.
 
 ### 5.2 `gauntlet_stats` (statistics job) — new entry type
 `{strategy_id, verdict_entry_hash, trials_n, registered_n, deflated_sharpe,
-pbo, pbo_percentile, cluster_method, data_vintage}`. Exactly one per v6.1
+pbo, pbo_percentile, plateau_ok, haircut, cluster_method, data_vintage}`
+(`plateau_ok` and `haircut` added at planning: both depend on the sibling
+family or on trials_n, both were recorded in v6 verdicts, and dropping them
+would lose that evidence). Exactly one per v6.1
 gauntlet verdict, linked by the verdict entry's hash. It records; it never
 changes a strategy's state.
 
