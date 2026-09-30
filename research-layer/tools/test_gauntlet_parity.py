@@ -1,5 +1,5 @@
 from pipeline import gauntlet_core
-from tools.gauntlet_parity import truncate_bars, GATE_KEYS
+from tools.gauntlet_parity import truncate_bars, GATE_KEYS, chained_base_pass
 
 
 def test_truncate_bars_cuts_each_cell_at_its_recorded_end():
@@ -30,3 +30,19 @@ def test_truncate_bars_is_the_gauntlet_core_one():
 def test_parity_compares_every_gate_metric():
     assert {"oos_edge_per_trade", "edge_decay_pct", "mc_p05_equity", "p_ruin",
             "cost_stress_net_pnl", "train_sharpe"} <= set(GATE_KEYS)
+
+
+def test_base_pass_is_a_chained_pass_or_a_family_kill_burial():
+    passed = {"verdict": "pass", "metrics": {}}
+    assert chained_base_pass(passed, None) is True
+    killed = {"verdict": "fail", "metrics": {"pbo_family_kill": True}}
+    assert chained_base_pass(killed, "pbo_family_kill") is True
+
+
+def test_the_family_kill_flag_alone_is_not_a_base_pass():
+    # The chain flags EVERY member of a killed group, including strategies
+    # that had already failed a gate; only the burial reason says why.
+    flagged_but_failed = {"verdict": "fail", "metrics": {"pbo_family_kill": True}}
+    assert chained_base_pass(flagged_but_failed, "sharpe_floor") is False
+    assert chained_base_pass(flagged_but_failed, None) is False
+    assert chained_base_pass({"verdict": "fail", "metrics": {}}, "sharpe_floor") is False

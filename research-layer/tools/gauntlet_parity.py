@@ -33,7 +33,20 @@ GATE_KEYS = ("is_edge_per_trade", "oos_edge_per_trade", "edge_decay_pct",
              "mc_p05_equity", "p_ruin", "cost_stress_net_pnl", "train_sharpe",
              "is_edge_raw", "oos_edge_raw", "is_vol", "oos_vol")
 
-__all__ = ["GATE_KEYS", "truncate_bars", "main"]
+__all__ = ["GATE_KEYS", "truncate_bars", "chained_base_pass", "main"]
+
+
+def chained_base_pass(verdict: dict, burial_reason: str | None) -> bool:
+    """Did the chained verdict clear the six base gates?
+
+    Yes iff the verdict is a pass, or the strategy was buried for
+    pbo_family_kill (its graveyard state_change reason). The verdict's
+    metrics["pbo_family_kill"] flag is NOT enough: the chain sets it on every
+    member of a killed group, including members that had already failed a
+    gate, and the verdict payload carries no reason. Only the burial says why.
+    """
+    return (verdict["verdict"] == "pass"
+            or burial_reason == "pbo_family_kill")
 
 
 def _end_summary(rec: dict, cur: dict) -> str:
@@ -56,11 +69,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
     # ONE pass over the registry (it is ~68k entries).
-    specs, verdicts = {}, {}
+    specs, verdicts, burial = {}, {}, {}
     for e in Registry(a.registry).entries():
         p = e["payload"]
         if e["entry_type"] == "strategy_registered":
             specs[p["strategy_id"]] = p
+        elif e["entry_type"] == "state_change" and p.get("to") == "graveyard":
+            burial[p["strategy_id"]] = p.get("reason")   # last burial wins
         elif (e["entry_type"] == "verdict" and p.get("stage") == "gauntlet"
               and p["metrics"].get("protocol") == PROTOCOL):
             verdicts[p["strategy_id"]] = p           # last v6 verdict wins
@@ -97,15 +112,17 @@ def main(argv=None) -> int:
         bars = truncate_bars(bars, cfg["data_end"])
         new = evaluate_standalone(spec, _spec_bars(bars, spec), cfg["cutoff"],
                                   perturb=False)
-        old_base_pass = (old["verdict"] == "pass"
-                         or old["metrics"].get("pbo_family_kill") is True)
+        reason = burial.get(sid)
+        old_base_pass = chained_base_pass(old, reason)
+        chained = (old["verdict"] if old["verdict"] == "pass"
+                   else f"{old['verdict']} ({reason})")
         diffs = [(k, old["metrics"].get(k), new["metrics"].get(k))
                  for k in GATE_KEYS
                  if old["metrics"].get(k) != new["metrics"].get(k)]
         ok = (new["passed"] == old_base_pass) and not diffs
         mismatches += not ok
         rec = {i: cfg["data_end"][i] for i in ids}
-        rows.append((sid, old["verdict"], old["metrics"].get("pbo_family_kill"),
+        rows.append((sid, chained, old["metrics"].get("pbo_family_kill"),
                      "PASS" if new["passed"] else f"fail:{new['reason']}",
                      diffs, _end_summary(rec, {i: now_end[i] for i in ids})))
         details.append((sid, [(i, rec[i], now_end[i]) for i in ids]))
