@@ -117,6 +117,26 @@ def _spec_bars(bars_by_cell: dict, spec: dict) -> dict:
     return {a: bars_by_cell[(a, tf)] for a in spec["universe"]["assets"]}
 
 
+def truncate_bars(bars_by_cell: dict, data_end: dict) -> dict:
+    """Cut each cell's bars at the last date a past gauntlet run recorded.
+
+    `bars_by_cell` is {(asset, timeframe): [bar, ...]} as load_cell_data
+    returns it; `data_end` is a bundle's config.json field, {cell_id: last
+    bar date string} with cell_id = cells.cell_id(asset, timeframe)
+    ("BTCUSD_1d") and the date string carried verbatim from the CSV (bare
+    `YYYY-MM-DD` for legacy crypto, `YYYY-MM-DD HH:MM:SS` for fx/etf). The
+    comparison is date-only, like every other boundary in this module. A cell
+    with no recorded end is returned whole: the caller decides whether that
+    is acceptable.
+    """
+    out = {}
+    for cell, bars in bars_by_cell.items():
+        end = data_end.get(cells.cell_id(cell[0], cell[1]))
+        out[cell] = bars if end is None else [
+            b for b in bars if _date_le(str(b["date"]), end)]
+    return out
+
+
 def daily_returns_with_dates(equity: list[tuple[str, float]]
                              ) -> list[tuple[str, float]]:
     """Same values as daily_returns_from_curve, paired with the DATE each
