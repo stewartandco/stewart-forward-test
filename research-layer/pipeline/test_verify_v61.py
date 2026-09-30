@@ -1,0 +1,52 @@
+from .common import entry_hash
+from .test_gauntlet import gauntlet_registry, run_verifier
+
+V61 = "gauntlet-protocol-v6.1: test anchor"
+
+
+def _v61_verdict(reg, sid, verdict="pass", **extra):
+    reg.append("note", {"text": V61})
+    return reg.record_verdict(sid, "gauntlet", verdict,
+                              {"protocol": "gauntlet-protocol-v6.1", **extra}, "0" * 64)
+
+
+def test_a_linked_stats_entry_verifies(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    v = _v61_verdict(reg, spec["strategy_id"])
+    reg.record_state_change(spec["strategy_id"], "quarantine", "gauntlet pass")
+    reg.record_gauntlet_stats(spec["strategy_id"], entry_hash(v),
+                              {"trials_n": 3, "deflated_sharpe": 0.4})
+    r = run_verifier(reg.log_path)
+    assert r.returncode == 0, r.stdout
+
+
+def test_stats_pointing_at_no_verdict_fails(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_gauntlet_stats(spec["strategy_id"], "f" * 64, {"trials_n": 3})
+    assert run_verifier(reg.log_path).returncode != 0
+
+
+def test_a_second_stats_entry_for_one_verdict_fails(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    v = _v61_verdict(reg, spec["strategy_id"])
+    reg.record_state_change(spec["strategy_id"], "quarantine", "gauntlet pass")
+    reg.record_gauntlet_stats(spec["strategy_id"], entry_hash(v), {"trials_n": 3})
+    reg.record_gauntlet_stats(spec["strategy_id"], entry_hash(v), {"trials_n": 4})
+    assert run_verifier(reg.log_path).returncode != 0
+
+
+def test_a_family_kill_after_the_v61_note_fails(tmp_path):
+    reg, spec = gauntlet_registry(tmp_path)
+    _v61_verdict(reg, spec["strategy_id"], "fail", pbo_family_kill=True)
+    reg.record_state_change(spec["strategy_id"], "graveyard", "pbo_family_kill")
+    r = run_verifier(reg.log_path)
+    assert r.returncode != 0 and "pbo_family_kill" in r.stdout
+
+
+def test_a_family_kill_before_the_v61_note_is_history(tmp_path):
+    """The five 2026-08-25/09-03 burials stay valid chain history."""
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "fail",
+                       {"protocol": "gauntlet-protocol-v6", "pbo_family_kill": True}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "graveyard", "pbo_family_kill")
+    assert run_verifier(reg.log_path).returncode == 0

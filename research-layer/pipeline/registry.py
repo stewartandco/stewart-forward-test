@@ -351,6 +351,16 @@ class Registry:
             "metrics": metrics, "artifacts_hash": artifacts_hash,
         })
 
+    def record_gauntlet_stats(self, strategy_id: str, verdict_entry_hash: str,
+                              stats: dict) -> dict:
+        """protocol-v6.1: the registry-wide recorded statistics for ONE
+        gauntlet verdict, chained after it. Records only; never a state."""
+        if strategy_id not in self.strategy_states():
+            raise ValueError(f"unknown strategy {strategy_id!r}")
+        return self.append("gauntlet_stats", {
+            "strategy_id": strategy_id,
+            "verdict_entry_hash": verdict_entry_hash, **stats})
+
     def record_quarantine_decision(self, payload: dict) -> dict:
         """One paper-trading decision, validated and de-duplicated atomically.
 
