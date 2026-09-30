@@ -20,11 +20,65 @@ import ctypes
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # A full gauntlet pass is now well under 1 h; 3 h marks a crashed holder.
 STALE_AFTER_S = 3 * 3600
+
+
+def process_start_time(pid: int) -> str | None:
+    """Creation time of `pid` as ISO-8601 UTC, None when it cannot be read.
+    A pid alone is not an identity on Windows: pids are reused within
+    minutes. (pid, start time) is."""
+    if os.name != "nt":
+        try:
+            import psutil                        # optional on POSIX
+            return datetime.fromtimestamp(psutil.Process(pid).create_time(),
+                                          timezone.utc).isoformat()
+        except Exception:
+            return None
+    try:
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # win64: HANDLE is pointer-sized; the default int conversion would
+        # truncate it, so both calls declare their types.
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        ft_ptr = ctypes.POINTER(ctypes.c_ulonglong)
+        kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p, ft_ptr, ft_ptr,
+                                             ft_ptr, ft_ptr]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        h = kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        try:
+            ft = [ctypes.c_ulonglong() for _ in range(4)]
+            if not kernel32.GetProcessTimes(h, *[ctypes.byref(x) for x in ft]):
+                return None
+            ticks = ft[0].value                  # 100 ns since 1601-01-01 UTC
+            # Integer microseconds: the same process always yields the same
+            # string (no float round-off between two reads).
+            epoch_us = ticks // 10 - 11_644_473_600 * 1_000_000
+            return (datetime(1970, 1, 1, tzinfo=timezone.utc)
+                    + timedelta(microseconds=epoch_us)).isoformat()
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        return None
+
+
+def _same_process(info: dict, pid: int) -> bool:
+    """A lock written before 2026-09-30 carries no start time: keep the pid
+    rule for it (conservative). One that does must match the live process."""
+    recorded = info.get("pid_start_utc")
+    if not recorded:
+        return True
+    live = process_start_time(pid)
+    return live is None or live == recorded
 
 
 class ChainLockHeld(RuntimeError):
@@ -91,7 +145,7 @@ class ChainLock:
         if os.name != "nt":
             try:
                 os.kill(pid, 0)
-                return True
+                return _same_process(info, pid)
             except ProcessLookupError:
                 return False
             except PermissionError:
@@ -116,7 +170,9 @@ class ChainLock:
                 exit_code = ctypes.c_ulong()
                 if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
                     return True         # query itself failed -- conservative
-                return exit_code.value == STILL_ACTIVE
+                if exit_code.value != STILL_ACTIVE:
+                    return False
+                return _same_process(info, pid)
             finally:
                 kernel32.CloseHandle(handle)
         except Exception:
@@ -129,6 +185,7 @@ class ChainLock:
             "pid": os.getpid(),
             "ts_utc": datetime.now(timezone.utc).isoformat(),
             "purpose": self.purpose,
+            "pid_start_utc": process_start_time(os.getpid()),
         })
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
