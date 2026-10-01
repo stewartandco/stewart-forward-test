@@ -44,7 +44,7 @@ all five would have entered quarantine under v6 as written.
 A third fact was found in the same runs and is investigated here, not assumed:
 effective trials fell from 480 clusters over 11,476 strategies (09-28) to 44
 over 11,835 (09-29). A deflated Sharpe computed on 44 is far too lenient. The
-gauntlet's 09-30 20:00 run did chain verdicts against it: 676 v6 verdicts at
+gauntlet did chain verdicts against it: 676 v6 verdicts at
 chain entries 66700-67375 (2026-09-30T22:11-22:22Z, registered_n 11,860; 672
 fail, 4 pass) record trials_n 44, after 1,003 verdicts at 302. They stand, and
 no gate depended on N.
