@@ -10,8 +10,37 @@ Never delete a fresh chain.lock; a stale one (>3h) with a LIVE (or
 unreadable) holder pid is broken by the loop's two-strike rule, but a stale
 lock whose holder pid is provably DEAD (a hard-killed loop, crash) is broken
 on the first sighting -- same dead-pid fast path loop.lock uses.
+- **Locks name their holder by (pid, start time) (2026-09-30).** Every lock file
+  (chain.lock, loop.lock, gauntlet_worker.lock) records `pid_start_utc` beside
+  the pid, and `holder_alive()` treats a LIVE pid whose start time differs as
+  DEAD: Windows reuses pids, and on 2026-09-28 a reused pid made a dead
+  holder look alive and wedged loop.lock and chain.lock. A lock written before
+  this change has no start time and keeps the plain pid rule. A holder whose
+  start time cannot be read counts as alive (conservative).
+- **The gauntlet worker holds chain.lock only for a tail read plus ONE append
+  (~16 ms), once per candidate, and never waits for it.** If another writer
+  holds it the worker defers that candidate (exit 0); it never breaks a lock.
+  HAZARD: a hand-run writer that appends to registry_log.jsonl WITHOUT taking
+  chain.lock inside that ~16 ms window makes the worker see a chain that moved
+  under it. It then writes nothing for that candidate, leaves it queued and
+  counts it as an ERROR, so the run exits 1 and the Ops Sentinel FAILs the
+  digest. That is an alarm on purpose (an unlocked writer is the defect), not a
+  flake. Take chain.lock for every hand-run chain write, as above.
 
 ## Pipeline loop (25_PipelineLoop)
+- **The loop STOPS AT SCREEN (Build 2a, 2026-09-30).** A cycle runs triage,
+  composer and screen; screen moves passers into state `gauntlet` and the
+  standalone gauntlet worker (section below) takes them from there. The
+  loop's own gauntlet stage is skipped by default: `loop.GAUNTLET_IN_LOOP =
+  False`. Setting it True restores the pre-2a stage exactly (registry-wide
+  clustering, v6-labelled verdicts) and is the ROLLBACK path, kept for one week
+  after cutover and then removed. With the stage skipped no
+  `gauntlet_result.json` is written and `deferred_gauntlet` is absent from the
+  status (absence is not a claim). HAZARD: the old `pipeline.gauntlet` still
+  applies the PBO family kill and labels its verdicts v6, so once the v6.1 note
+  is on the chain `verify_registry.py` invariant 12 rejects any verdict it
+  writes for a killed family. Do not flip the flag, and do not hand-run
+  `python -m pipeline.gauntlet`, without Coen's say-so.
 - python -m pipeline.loop --once from the layer root; --dry-run reports the
   trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
   data/) still runs, so a dry run in the live tree refreshes the cells;
@@ -86,6 +115,100 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   guard compares against -- scoping that guard to a single cycle stranded
   cards that a failed composer had never consumed. Absent key -> falls back to
   the pre-triage count.
+
+## Gauntlet worker + recorded statistics (Build 2a, 2026-09-30)
+Design: `docs/2026-09-30-gauntlet-at-scale-design.md`. Why: the gauntlet's first
+phase re-simulated and clustered EVERY registered strategy before judging any
+candidate, was not deadline-aware, and stopped completing as the registry grew.
+Nothing the clustering produces is an input to any gate, so verdicts moved out
+of it.
+- **Protocol records.** `docs/notes/gauntlet-protocol-v6.1.md` (the addendum)
+  and `docs/notes/correction-2026-09-30-pbo-family-kill.md` are chained
+  VERBATIM, and only after Coen approves the exact text, BEFORE the first v6.1
+  verdict. Once chained the chain is the record: never edit the files to
+  "fix" a chained note. The addendum's first line starts
+  `gauntlet-protocol-v6.1: `, and BOTH the worker's refusal check and
+  verifier invariant 12 key on that prefix. With no such note the worker exits
+  1 (`refused_no_protocol_note`) and writes nothing.
+- **Worker: `python -m pipeline.gauntlet_worker --max-workers 6`**, wrapper
+  `tasks/run_gauntlet_worker.bat`, task `\Morpheus\27_GauntletWorker` every 30
+  minutes, 25-minute deadline per run. It judges queued candidates cheapest
+  first with the six standalone gates in `pipeline/gauntlet_core.py`
+  (sharpe_floor 0.4, oos_negative, edge_decay -25%, mc_p05 1.0, p_ruin 0.05,
+  cost_stress; order and thresholds unchanged) and chains each verdict plus its
+  state change as soon as it exists. Its import graph has no clustering or PBO
+  module (a test pins it). Verdicts carry `metrics.protocol
+  gauntlet-protocol-v6.1` and NO registry-wide statistics. The family kill is
+  NOT applied. The wrapper commits `registry_log.jsonl` best-effort, scoped to
+  that one path, skips the commit while chain.lock exists, and never pushes.
+- **Run order and failure rules.** (1) Orphan repair: a v6.1 verdict with no
+  following state change gets the change it implies (fail -> graveyard with the
+  gate as the reason, pass -> quarantine); a verdict is NEVER re-evaluated.
+  (2) The queue. A candidate that raises gets NO verdict, stays queued, and the
+  run exits 1; nothing is skipped or buried because of a crash. The loop's
+  `gauntlet_orphan` pre-spend check still exists, so if a crash ever leaves a
+  v6.1 verdict without its state change the 20:00 loop FAILs on it until the
+  next worker run repairs it.
+- **Locks.** The worker's own instance lock is `logs/gauntlet_worker.lock`
+  (stale after one hour, broken only when stale AND its holder is dead). A
+  second instance defers (exit 0) and NEVER writes the status file, so a wedged
+  holder's status goes stale and the Sentinel catches it. chain.lock rules are
+  in the Chain lock section: held for a tail read plus one append, never
+  waited for, never broken; an unlocked hand-run writer in that window turns
+  into an exit-1 alarm.
+- **Statistics job: `python -m pipeline.gauntlet_stats`**, wrapper
+  `tasks/run_gauntlet_stats.bat`, task `\Morpheus\28_GauntletStats` daily
+  01:00. It computes effective trials, the deflated Sharpe, PBO (recorded only),
+  plateau_ok and the haircut for every v6.1 verdict that has none, on a WEEKLY
+  data vintage (bars truncated at the most recent Sunday, so the simulation
+  cache keys hold all week and each night resumes where the last stopped), and
+  with `--chain` appends ONE `gauntlet_stats` entry per verdict, linked by
+  `verdict_entry_hash`. It records and never changes a strategy's state. It
+  carries the multi-gigabyte work, which is why it runs at 01:00: the worker is
+  memory-light and safe by day. Entries carry `data_vintage`, `data_digest` and
+  `data_end_by_cell`; the vintage names a Sunday but does NOT pin the bars, so
+  compare digests, never vintages.
+- **`--chain` on 28 stays OFF until Coen accepts the effective-trials decision.**
+  The wrapper has no `--chain` and nothing may add one before that. Coen's
+  decision (2026-10-01, option 1) is in the v6.1 addendum: `trials_n` is the
+  larger of the clustering's argmax (`trials_n_raw`) and the highest cluster
+  count already on the chain (`trials_n_floor`, source named by
+  `trials_n_floor_entry_hash`). That is the reason: the argmax moved 302 -> 480
+  -> 44 on a registry that only grew. Confirm the job implements the floor
+  before scheduling `--chain`, and chain the entries only after the
+  480 -> 44 explanation is on record. A `gauntlet_stats` entry is append-only
+  and cannot be corrected, only superseded by a note.
+- **Status files (the Ops Sentinel reads both).** `logs/gauntlet_worker_status.json`:
+  `evaluated`, `deferred_lock`, `queued`, `oldest_queued_age_hours`,
+  `exit_reason`, `ts_utc`. `logs/gauntlet_stats_status.json`: `stats_written`,
+  `verdicts_without_stats`, `oldest_unstatted_verdict_age_hours`,
+  `stopped_at_deadline`. Sentinel `gauntlet_queue` check: FAIL when the worker
+  status is missing or stale, when `exit_reason` is `crashed`,
+  `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
+  48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
+  the Sentinel's `hourly` list, `28_GauntletStats` in `daily`. Do not rename
+  these fields without changing `sc-ops-sentinel` in the same change.
+- **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
+  (routine); 1 = a candidate raised, the run crashed, or setup was refused.
+  Stats: 0 = done, nothing to do, deadline stop, or chain.lock held; 1 = the
+  data or the chain refused the run.
+- **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
+  v6.1 gauntlet verdict of the same strategy, at most one per verdict.
+  Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry
+  `pbo_family_kill` true and no state change may cite it. The five v6 burials
+  before the note stay valid history.
+- **The five** (b09adeb0be6faf4e, 9acf68e5a2ef607d, 7ecf180b7e8b05ce,
+  6aebc4b7f051baba, 15595642e7a2caaa) were buried by the family kill under v6
+  verdicts although v6 retired it. Their graveyard entries STAND. Once the
+  worker is live each is re-tried as a NEW strategy id through the D9 re-trial
+  path, charged to N in full and judged by all six gates from scratch. Never
+  move one out of the graveyard by hand.
+- **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6 verdicts with
+  the standalone battery on bars truncated at each verdict's recorded
+  `data_end` and compares exactly. Read-only; never scheduled. Parity rule:
+  identical verdicts, and metrics bit-identical when compared under the same
+  engine revision (verdicts from before the 2026-08-27 engine change, commit
+  74b9703b, differ from any later run by at most 17 ulps in train_sharpe).
 
 ## Sweep rotation, sibling queues, re-trials (SP5 P2-T4: D6 / D10 / D9)
 - **D6 rotation.** `loop.ROTATION_SIZE` = 12 (spec s5); `loop.ROTATION_CLASSES`
