@@ -122,7 +122,7 @@ def test_worker_skips_a_candidate_whose_state_changed_before_its_write(tmp_path,
                 and e["payload"]["stage"] == "gauntlet"]
 
 
-def test_two_workers_never_chain_the_same_verdict(tmp_path):
+def test_two_workers_never_chain_the_same_verdict(tmp_path, capsys):
     reg, spec, data = _setup(tmp_path)
     (tmp_path / "logs").mkdir()
     inst = ChainLock(tmp_path / "logs", "gauntlet-worker", "other instance",
@@ -132,7 +132,7 @@ def test_two_workers_never_chain_the_same_verdict(tmp_path):
         assert _run(reg, data, tmp_path) == 0
     finally:
         inst.release()
-    assert _status(tmp_path)["exit_reason"] == "deferred_instance"
+    assert "deferred_instance" in capsys.readouterr().out
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
 
 
@@ -382,3 +382,23 @@ def test_a_candidate_whose_metrics_do_not_round_trip_is_errored_not_fatal(tmp_pa
     st = _status(tmp_path)
     assert st["errored"] == 1 and st["exit_reason"] == "candidate_errors"
     assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_deferred_instance_leaves_the_owners_status_file_alone(tmp_path, capsys):
+    """The live instance owns the status file; a deferring second instance must
+    not overwrite it (a wedged owner then goes stale and the Sentinel FAILs)."""
+    reg, spec, data = _setup(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    status_path = logs / "gauntlet_worker_status.json"
+    status_path.write_bytes(b'{"exit_reason": "drained", "ts_utc": "owner"}')
+    before = status_path.read_bytes()
+    inst = ChainLock(logs, "gauntlet-worker", "other instance",
+                     name="gauntlet_worker.lock")
+    inst.acquire()
+    try:
+        assert _run(reg, data, tmp_path) == 0
+    finally:
+        inst.release()
+    assert status_path.read_bytes() == before
+    assert "deferred_instance" in capsys.readouterr().out

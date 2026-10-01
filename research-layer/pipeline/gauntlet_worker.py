@@ -185,10 +185,11 @@ def run(argv: list[str] | None = None) -> int:
               "deferred_not_comparable": 0, "queued": 0,
               "oldest_queued_age_hours": None, "repaired": 0, "exit_reason": None}
 
-    def finish(rc: int, reason: str) -> int:
+    def finish(rc: int, reason: str, write: bool = True) -> int:
         status["exit_reason"] = reason
         status["ts_utc"] = _now().isoformat()
-        _write_status(a.logs_dir, status)
+        if write:
+            _write_status(a.logs_dir, status)
         print(f"gauntlet_worker: {reason} {json.dumps(status, sort_keys=True)}",
               flush=True)
         return rc
@@ -201,13 +202,16 @@ def run(argv: list[str] | None = None) -> int:
     try:
         inst.acquire()
     except ChainLockHeld:
+        # A deferring instance prints but NEVER writes the status file: the live
+        # holder owns it, and if that holder is wedged the file must go stale so
+        # the Sentinel's 90-minute rule FAILs rather than a deferral refreshing it.
         if not (inst.is_stale() and not inst.holder_alive()):
-            return finish(0, "deferred_instance")
+            return finish(0, "deferred_instance", write=False)
         try:
             inst.break_stale()
             inst.acquire()
         except ChainLockHeld:
-            return finish(0, "deferred_instance")
+            return finish(0, "deferred_instance", write=False)
     try:
         registry = Registry(a.registry)
         # The run's ONE full chain read, outside any lock. Everything done
