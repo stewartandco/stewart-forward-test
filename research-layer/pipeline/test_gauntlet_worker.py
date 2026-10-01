@@ -273,3 +273,93 @@ def test_a_chain_write_failure_aborts_the_run_and_still_reports(tmp_path, monkey
     assert not (tmp_path / "logs" / "gauntlet_worker.lock").exists()
     assert not (tmp_path / "logs" / "chain.lock").exists()
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+# ---------------- fix round 1 (Ruling 8): O(tail) chain.lock hold ----------------
+
+def _verdicts(reg):
+    return [e for e in reg.entries() if e["entry_type"] == "verdict"
+            and e["payload"]["stage"] == "gauntlet"]
+
+
+def test_a_foreign_append_before_the_write_is_absorbed(tmp_path, monkeypatch):
+    """Another writer appends (a note: any entry for a DIFFERENT strategy)
+    between the worker's snapshot and its write. advance() must pick it up,
+    so the verdict chains onto it and the chain verifies."""
+    from .common import entry_hash
+    reg, spec, data = _setup(tmp_path)
+    real = gw.evaluate_standalone
+    seen = {}
+    def foreign(*a, **k):
+        out = real(*a, **k)
+        seen["note"] = reg.append("note", {"text": "foreign writer"})
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", foreign)
+    assert _run(reg, data, tmp_path) == 0
+    v = _verdicts(reg)
+    assert len(v) == 1 and v[0]["prev_entry_hash"] == entry_hash(seen["note"])
+    assert run_verifier(reg.log_path).returncode == 0
+    assert _status(tmp_path)["evaluated"] == 1
+
+
+def test_the_same_strategy_moved_by_a_foreign_append_is_skipped(tmp_path, monkeypatch):
+    reg, spec, data = _setup(tmp_path)
+    real = gw.evaluate_standalone
+    def bury(*a, **k):
+        out = real(*a, **k)
+        reg.record_state_change(spec["strategy_id"], "graveyard", "foreign")
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", bury)
+    assert _run(reg, data, tmp_path) == 0
+    assert not _verdicts(reg)
+    assert run_verifier(reg.log_path).returncode == 0
+    assert _status(tmp_path)["evaluated"] == 0
+
+
+def test_no_full_chain_read_happens_under_chain_lock(tmp_path, monkeypatch):
+    """The structural pin for Ruling 8: while logs/chain.lock exists, the
+    worker may not walk the whole chain (entries(), strategy_states(),
+    _head_hash(), snapshot()). Covers the verdict write and orphan repair."""
+    from .registry import Registry
+    reg, spec, data = _setup(tmp_path)
+    lock = tmp_path / "logs" / "chain.lock"
+    for name in ("entries", "strategy_states", "_head_hash", "snapshot"):
+        real = getattr(Registry, name)
+        def guarded(self, *a, _real=real, _name=name, **k):
+            assert not lock.exists(), f"full-chain {_name}() under chain.lock"
+            return _real(self, *a, **k)
+        monkeypatch.setattr(Registry, name, guarded)
+    assert _run(reg, data, tmp_path) == 0
+    assert _status(tmp_path)["evaluated"] == 1
+
+
+def test_orphan_repair_reads_no_full_chain_under_chain_lock(tmp_path, monkeypatch):
+    from .registry import Registry
+    reg, spec, data = _setup(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"protocol": "gauntlet-protocol-v6.1"}, "0" * 64)
+    lock = tmp_path / "logs" / "chain.lock"
+    for name in ("entries", "strategy_states", "_head_hash", "snapshot"):
+        real = getattr(Registry, name)
+        def guarded(self, *a, _real=real, _name=name, **k):
+            assert not lock.exists(), f"full-chain {_name}() under chain.lock"
+            return _real(self, *a, **k)
+        monkeypatch.setattr(Registry, name, guarded)
+    assert _run(reg, data, tmp_path) == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "quarantine"
+    assert _status(tmp_path)["repaired"] == 1
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_chain_that_moved_under_the_lock_is_an_error_not_a_write(tmp_path, monkeypatch):
+    """A continuity break seen by advance() writes NOTHING for the candidate
+    and counts it errored (exit 1)."""
+    from .registry import ChainMoved
+    reg, spec, data = _setup(tmp_path)
+    def moved(self, snap):
+        raise ChainMoved("tail does not link")
+    monkeypatch.setattr(gw.Registry, "advance", moved)
+    assert _run(reg, data, tmp_path) == 1
+    assert not _verdicts(reg)
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+    assert _status(tmp_path)["errored"] == 1

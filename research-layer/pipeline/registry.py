@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 from .common import GENESIS_HASH, canonical_json, entry_hash
 from .lock import FileLock
@@ -191,6 +195,96 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# -- O(tail) chain views (Build 2a; the gauntlet worker's chain.lock hold) --
+#
+# Every typed writer below re-reads the whole log (strategy_states + the head
+# hash) per append. On a 47 MB / 68k-entry chain that is ~3.6 s per gauntlet
+# verdict, held under chain.lock, which starves the loop, the quarantine daily
+# and the scanner (each probes chain.lock once and defers). A ChainSnapshot is
+# ONE full read, taken outside the lock; advance() then parses only the bytes
+# appended since, and record_gauntlet_outcome() appends the verdict and its
+# state change in one shot against the snapshot's head.
+
+class ChainMoved(RuntimeError):
+    """The log is not where the snapshot left it: truncated, rewritten, a
+    tail that does not link, or (at a write) grown since the snapshot. The
+    caller must write nothing and re-read."""
+
+
+@dataclass(frozen=True)
+class ChainSnapshot:
+    """The chain as of `byte_len` bytes: lifecycle states, the strategies
+    holding any gauntlet-stage verdict, and the head entry's hash plus the
+    byte offset where that entry's line starts (so advance() can re-hash it
+    and notice a rewritten head)."""
+    states: Mapping[str, str]
+    gauntlet_judged: frozenset
+    head_hash: str
+    byte_len: int
+    head_offset: int = 0
+
+
+def _fold(states: dict, judged: set, entry: dict) -> None:
+    """Apply one entry to a snapshot's state; the same rule as
+    Registry.strategy_states()."""
+    et, p = entry["entry_type"], entry["payload"]
+    if et == "strategy_registered":
+        states[p["strategy_id"]] = "proposed"
+    elif et == "state_change":
+        states[p["strategy_id"]] = p["to"]
+    elif et == "verdict" and p.get("stage") == "gauntlet":
+        judged.add(p["strategy_id"])
+
+
+def _line_bytes(entry: dict) -> bytes:
+    """Exactly the bytes _append_locked's text-mode write produces for an
+    entry: canonical_json escapes every newline inside a value, so the only
+    raw newline is the terminator, which text mode writes as os.linesep."""
+    return (canonical_json(entry).encode("utf-8")
+            + os.linesep.encode("ascii"))
+
+
+def _make_entry(entry_type: str, payload: dict, prev_hash: str,
+                ts_utc: str | None = None) -> dict:
+    return {
+        "version": 1,
+        "ts_utc": ts_utc or _now_utc(),
+        "entry_type": entry_type,
+        "prev_entry_hash": prev_hash,
+        "payload": payload,
+    }
+
+
+def _verdict_payload(strategy_id: str, stage: str, verdict: str,
+                     metrics: dict, artifacts_hash: str) -> dict:
+    return {"strategy_id": strategy_id, "stage": stage, "verdict": verdict,
+            "metrics": metrics, "artifacts_hash": artifacts_hash}
+
+
+def _state_change_payload(strategy_id: str, frm: str, to: str,
+                          reason: str | None) -> dict:
+    if to not in VALID_TRANSITIONS.get(frm, set()):
+        raise ValueError(f"illegal transition {frm!r} -> {to!r}")
+    return {"strategy_id": strategy_id, "from": frm, "to": to,
+            "reason": reason, "buried_at": frm if to == "graveyard" else None}
+
+
+def _complete_lines(f, start: int, size: int):
+    """(line_start, raw_line) for every COMPLETE, non-blank line of the
+    open binary file `f` from offset `start` up to `size` bytes. A line
+    that crosses `size` or lacks its newline (a writer caught mid-append)
+    is not yielded. The generator RETURNS the offset just past the last
+    complete line (callers read it from StopIteration.value)."""
+    pos = start
+    for raw in f:
+        if pos + len(raw) > size or not raw.endswith(b"\n"):
+            break
+        line_start, pos = pos, pos + len(raw)
+        if raw.strip():
+            yield line_start, raw
+    return pos
+
+
 class Registry:
     def __init__(self, log_path: str | Path):
         self.log_path = Path(log_path)
@@ -226,13 +320,7 @@ class Registry:
         record_quarantine_decision) must take the lock once and come through
         here, never through append().
         """
-        entry = {
-            "version": 1,
-            "ts_utc": ts_utc or _now_utc(),
-            "entry_type": entry_type,
-            "prev_entry_hash": self._head_hash(),
-            "payload": payload,
-        }
+        entry = _make_entry(entry_type, payload, self._head_hash(), ts_utc)
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(canonical_json(entry) + "\n")
         return entry
@@ -334,22 +422,150 @@ class Registry:
         states = self.strategy_states()
         if strategy_id not in states:
             raise ValueError(f"unknown strategy {strategy_id!r}")
-        frm = states[strategy_id]
-        if to not in VALID_TRANSITIONS.get(frm, set()):
-            raise ValueError(f"illegal transition {frm!r} -> {to!r}")
-        return self.append("state_change", {
-            "strategy_id": strategy_id, "from": frm, "to": to,
-            "reason": reason, "buried_at": frm if to == "graveyard" else None,
-        }, ts_utc=ts_utc)
+        return self.append("state_change", _state_change_payload(
+            strategy_id, states[strategy_id], to, reason), ts_utc=ts_utc)
 
     def record_verdict(self, strategy_id: str, stage: str, verdict: str,
                        metrics: dict, artifacts_hash: str) -> dict:
         if strategy_id not in self.strategy_states():
             raise ValueError(f"unknown strategy {strategy_id!r}")
-        return self.append("verdict", {
-            "strategy_id": strategy_id, "stage": stage, "verdict": verdict,
-            "metrics": metrics, "artifacts_hash": artifacts_hash,
-        })
+        return self.append("verdict", _verdict_payload(
+            strategy_id, stage, verdict, metrics, artifacts_hash))
+
+    # -- O(tail) snapshot path (see ChainSnapshot) -------------------------
+
+    def snapshot(self, on_entry: Callable[[dict], None] | None = None
+                 ) -> ChainSnapshot:
+        """ONE full read. Only COMPLETE lines within the size seen at open
+        count, so a concurrent append (or a writer caught mid-line) can
+        never tear it. `on_entry` sees every counted entry in chain order,
+        so a caller can build its own view from this same single read."""
+        states: dict[str, str] = {}
+        judged: set[str] = set()
+        last, head_off = None, 0
+        try:
+            f = self.log_path.open("rb")
+        except FileNotFoundError:
+            return ChainSnapshot(MappingProxyType({}), frozenset(), GENESIS_HASH, 0, 0)
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            lines = _complete_lines(f, 0, size)
+            while True:
+                try:
+                    head_off, raw = next(lines)
+                except StopIteration as stop:
+                    pos = stop.value
+                    break
+                last = json.loads(raw)
+                _fold(states, judged, last)
+                if on_entry is not None:
+                    on_entry(last)
+        head = entry_hash(last) if last is not None else GENESIS_HASH
+        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                             pos, head_off)
+
+    def advance(self, snap: ChainSnapshot) -> ChainSnapshot:
+        """`snap` moved forward over whatever was appended since, parsing
+        only that tail (plus the head line, re-hashed). Raises ChainMoved on
+        a truncated or rewritten log or a tail that does not link."""
+        try:
+            f = self.log_path.open("rb")
+        except FileNotFoundError:
+            if snap.byte_len == 0:
+                return snap
+            raise ChainMoved(f"{self.log_path} is gone") from None
+        states: dict[str, str] | None = None
+        judged: set[str] | None = None
+        head, head_off = snap.head_hash, snap.head_offset
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            if size < snap.byte_len:
+                raise ChainMoved(f"log is {size} bytes, snapshot saw {snap.byte_len}")
+            if snap.byte_len:
+                f.seek(snap.head_offset)
+                line = f.read(snap.byte_len - snap.head_offset)
+                try:
+                    same = (line.endswith(b"\n")
+                            and entry_hash(json.loads(line)) == snap.head_hash)
+                except ValueError:
+                    same = False
+                if not same:
+                    raise ChainMoved("the snapshot's head entry was rewritten")
+            lines = _complete_lines(f, snap.byte_len, size)
+            while True:
+                try:
+                    start, raw = next(lines)
+                except StopIteration as stop:
+                    pos = stop.value
+                    break
+                entry = json.loads(raw)
+                if entry.get("prev_entry_hash") != head:
+                    raise ChainMoved(
+                        f"entry at byte {start} links to "
+                        f"{str(entry.get('prev_entry_hash'))[:12]}, head is {head[:12]}")
+                if states is None:
+                    states, judged = dict(snap.states), set(snap.gauntlet_judged)
+                _fold(states, judged, entry)
+                head, head_off = entry_hash(entry), start
+        if states is None:
+            if pos == snap.byte_len:
+                return snap
+            # only blank lines were appended: same state, longer file
+            return ChainSnapshot(snap.states, snap.gauntlet_judged, head, pos, head_off)
+        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                             pos, head_off)
+
+    def _append_at(self, snap: ChainSnapshot,
+                   items: list[tuple[str, dict]]) -> ChainSnapshot:
+        """Append `items` chained onto snap's head, under the append
+        FileLock, refusing (ChainMoved, nothing written) if the log is not
+        exactly snap.byte_len bytes. Returns the advanced snapshot."""
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.log_path):
+            size = self.log_path.stat().st_size if self.log_path.exists() else 0
+            if size != snap.byte_len:
+                raise ChainMoved(f"log is {size} bytes, snapshot saw "
+                                 f"{snap.byte_len}: appended without chain.lock?")
+            states, judged = dict(snap.states), set(snap.gauntlet_judged)
+            head, pos, head_off = snap.head_hash, snap.byte_len, snap.head_offset
+            out = b""
+            for entry_type, payload in items:
+                entry = _make_entry(entry_type, payload, head)
+                line = _line_bytes(entry)
+                head_off, pos = pos, pos + len(line)
+                head = entry_hash(entry)
+                out += line
+                _fold(states, judged, entry)
+            with self.log_path.open("ab") as f:
+                f.write(out)
+        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                             pos, head_off)
+
+    def record_gauntlet_outcome(self, snap: ChainSnapshot, strategy_id: str,
+                                verdict: str, metrics: dict, artifacts_hash: str,
+                                to: str, reason: str | None) -> ChainSnapshot:
+        """A gauntlet verdict and its state change, appended together against
+        `snap` (which the caller has just advance()d under chain.lock): the
+        same two entries, byte for byte, that record_verdict +
+        record_state_change write, without either one's full-chain read."""
+        if snap.states.get(strategy_id) != "gauntlet":
+            raise ValueError(f"{strategy_id!r} is in state "
+                             f"{snap.states.get(strategy_id)!r}, not 'gauntlet'")
+        if strategy_id in snap.gauntlet_judged:
+            raise ValueError(f"{strategy_id!r} already has a gauntlet verdict")
+        sc = _state_change_payload(strategy_id, "gauntlet", to, reason)
+        return self._append_at(snap, [
+            ("verdict", _verdict_payload(strategy_id, "gauntlet", verdict,
+                                         metrics, artifacts_hash)),
+            ("state_change", sc)])
+
+    def record_state_change_at(self, snap: ChainSnapshot, strategy_id: str,
+                               to: str, reason: str | None) -> ChainSnapshot:
+        """record_state_change against a snapshot (O(tail); same bytes)."""
+        if strategy_id not in snap.states:
+            raise ValueError(f"unknown strategy {strategy_id!r}")
+        return self._append_at(snap, [("state_change", _state_change_payload(
+            strategy_id, snap.states[strategy_id], to, reason))])
 
     def record_gauntlet_stats(self, strategy_id: str, verdict_entry_hash: str,
                               stats: dict) -> dict:

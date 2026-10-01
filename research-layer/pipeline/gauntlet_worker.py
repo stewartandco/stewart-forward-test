@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import deadline as _deadline
 from .chainlock import ChainLock, ChainLockHeld
-from .registry import Registry
+from .registry import ChainMoved, ChainSnapshot, Registry
 from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
@@ -70,42 +70,77 @@ def _row_counts(data_dir: Path, cells) -> dict:
     return out
 
 
-def _gauntlet_verdicts(registry: Registry) -> dict[str, dict]:
-    return {e["payload"]["strategy_id"]: e["payload"] for e in registry.entries()
-            if e["entry_type"] == "verdict" and e["payload"].get("stage") == "gauntlet"}
+class _View:
+    """What the worker needs from the chain, collected during the SAME single
+    read that builds its ChainSnapshot (Registry.snapshot(on_entry=...)), so
+    the two describe the same bytes. Specs are kept only while their strategy
+    can still reach the gauntlet."""
+
+    def __init__(self) -> None:
+        self.has_note = False
+        self.specs: dict[str, dict] = {}       # sid -> spec, registry order
+        self.verdicts: dict[str, dict] = {}    # sid -> last gauntlet verdict
+        self.entered: dict[str, str] = {}      # sid -> ts of its move to 'gauntlet'
+
+    def on_entry(self, e: dict) -> None:
+        et, p = e["entry_type"], e["payload"]
+        if et == "strategy_registered":
+            self.specs[p["strategy_id"]] = p
+        elif et == "state_change":
+            if p.get("to") == "gauntlet":
+                self.entered[p["strategy_id"]] = e["ts_utc"]
+            elif p.get("to") not in ("proposed", "screened"):
+                self.specs.pop(p["strategy_id"], None)
+        elif et == "verdict" and p.get("stage") == "gauntlet":
+            self.verdicts[p["strategy_id"]] = p
+        elif et == "note" and str(p.get("text", "")).startswith(PROTOCOL_V61 + ":"):
+            self.has_note = True
+
+    def queue(self, snap: ChainSnapshot) -> list[dict]:
+        return [spec for sid, spec in self.specs.items()
+                if snap.states.get(sid) == "gauntlet"
+                and sid not in snap.gauntlet_judged]
+
+    def orphans(self, snap: ChainSnapshot) -> list[tuple[str, dict]]:
+        return [(sid, v) for sid, v in self.verdicts.items()
+                if snap.states.get(sid) == "gauntlet"
+                and (v.get("metrics") or {}).get("protocol") == PROTOCOL_V61]
+
+
+def _read(registry: Registry) -> tuple[ChainSnapshot, _View]:
+    """ONE full chain read: the snapshot plus the worker's view of it."""
+    view = _View()
+    snap = registry.snapshot(on_entry=view.on_entry)
+    return snap, view
 
 
 def queue(registry: Registry) -> list[dict]:
     """Every strategy in state 'gauntlet' with no gauntlet verdict, as its
     registered spec, in registry order (the caller sorts cheapest-first)."""
-    states = registry.strategy_states()
-    judged = _gauntlet_verdicts(registry)
-    return [e["payload"] for e in registry.entries()
-            if e["entry_type"] == "strategy_registered"
-            and states.get(e["payload"]["strategy_id"]) == "gauntlet"
-            and e["payload"]["strategy_id"] not in judged]
+    snap, view = _read(registry)
+    return view.queue(snap)
 
 
-def _entered_gauntlet(registry: Registry) -> dict[str, str]:
-    return {e["payload"]["strategy_id"]: e["ts_utc"] for e in registry.entries()
-            if e["entry_type"] == "state_change" and e["payload"].get("to") == "gauntlet"}
-
-
-def _state_and_judged(registry: Registry, sid: str) -> tuple[str | None, bool]:
-    """sid's current state and whether it already has a gauntlet verdict,
-    in ONE pass over the chain (this runs under chain.lock)."""
-    state, judged = None, False
-    for e in registry.entries():
-        p = e["payload"]
-        if p.get("strategy_id") != sid:
-            continue
-        if e["entry_type"] == "strategy_registered":
-            state = "proposed"
-        elif e["entry_type"] == "state_change":
-            state = p["to"]
-        elif e["entry_type"] == "verdict" and p.get("stage") == "gauntlet":
-            judged = True
-    return state, judged
+def _repair(registry: Registry, logs_dir: Path, snap: ChainSnapshot,
+            view: _View) -> tuple[int, ChainSnapshot]:
+    orphans = view.orphans(snap)
+    if not orphans:
+        return 0, snap
+    n = 0
+    with ChainLock(logs_dir, "gauntlet-worker", "orphan repair"):
+        snap = registry.advance(snap)            # O(tail) under the lock
+        for sid, v in orphans:
+            if snap.states.get(sid) != "gauntlet":
+                continue
+            if v["verdict"] == "pass":
+                to, reason = "quarantine", "gauntlet pass"
+            else:
+                to = "graveyard"
+                reason = (v.get("metrics") or {}).get("fail_reason") or "gauntlet fail"
+            snap = registry.record_state_change_at(snap, sid, to, reason)
+            print(f"repaired orphan {sid}: verdict {v['verdict']} -> {to}", flush=True)
+            n += 1
+    return n, snap
 
 
 def repair_orphans(registry: Registry, logs_dir: Path) -> int:
@@ -113,27 +148,8 @@ def repair_orphans(registry: Registry, logs_dir: Path) -> int:
     (a crash between the two writes) gets the state change its verdict
     implies. Idempotent; never re-evaluates. Raises ChainLockHeld when
     another writer holds chain.lock -- the next run repairs."""
-    states = registry.strategy_states()
-    orphans = [(sid, v) for sid, v in _gauntlet_verdicts(registry).items()
-               if states.get(sid) == "gauntlet"
-               and (v.get("metrics") or {}).get("protocol") == PROTOCOL_V61]
-    if not orphans:
-        return 0
-    n = 0
-    with ChainLock(logs_dir, "gauntlet-worker", "orphan repair"):
-        states = registry.strategy_states()
-        for sid, v in orphans:
-            if states.get(sid) != "gauntlet":
-                continue
-            if v["verdict"] == "pass":
-                registry.record_state_change(sid, "quarantine", "gauntlet pass")
-            else:
-                reason = (v.get("metrics") or {}).get("fail_reason") or "gauntlet fail"
-                registry.record_state_change(sid, "graveyard", reason)
-            print(f"repaired orphan {sid}: verdict {v['verdict']} -> state change",
-                  flush=True)
-            n += 1
-    return n
+    snap, view = _read(registry)
+    return _repair(registry, logs_dir, snap, view)[0]
 
 
 def _evaluate_payload(payload: dict) -> dict:
@@ -194,21 +210,23 @@ def run(argv: list[str] | None = None) -> int:
             return finish(0, "deferred_instance")
     try:
         registry = Registry(a.registry)
-        if not any(e["entry_type"] == "note"
-                   and str(e["payload"].get("text", "")).startswith(PROTOCOL_V61 + ":")
-                   for e in registry.entries()):
+        # The run's ONE full chain read, outside any lock. Everything done
+        # under chain.lock from here on advances this snapshot over the tail
+        # appended since (Ruling 8: an O(tail) hold, never O(chain)).
+        snap, view = _read(registry)
+        if not view.has_note:
             print(f"REFUSED: no '{PROTOCOL_V61}:' note on the chain.", flush=True)
             return finish(1, "refused_no_protocol_note")
         try:
-            status["repaired"] = repair_orphans(registry, a.logs_dir)
+            status["repaired"], snap = _repair(registry, a.logs_dir, snap, view)
         except ChainLockHeld:
             print("orphan repair deferred: chain.lock held; the next run repairs",
                   flush=True)
 
-        todo = queue(registry)
+        todo = view.queue(snap)
+        del view
         rows = _row_counts(a.data_dir, {c for s in todo for c in _cells(s)})
         todo.sort(key=lambda s: cost_key(s, rows))
-        entered = _entered_gauntlet(registry)
         budget = _deadline.DeadlineBudget(
             (_now() + timedelta(minutes=a.deadline_minutes)).isoformat())
 
@@ -248,12 +266,18 @@ def run(argv: list[str] | None = None) -> int:
             """The write block, identical on both paths: under a short
             chain.lock hold, re-check the candidate is still queued, write its
             bundle, chain the verdict, then its state change."""
+            nonlocal snap
             spec = prep["payload"]["spec"]
             sid = spec["strategy_id"]
             r["metrics"]["fail_reason"] = r["reason"]
             try:
                 with ChainLock(a.logs_dir, "gauntlet-worker", f"verdict {sid}"):
-                    state, judged = _state_and_judged(registry, sid)
+                    try:
+                        snap = registry.advance(snap)
+                    except ChainMoved:
+                        errored(sid)
+                        return
+                    state, judged = snap.states.get(sid), sid in snap.gauntlet_judged
                     if state != "gauntlet" or judged:
                         print(f"{sid}  skipped: moved on before its write "
                               f"(state {state}, judged {judged})", flush=True)
@@ -266,15 +290,20 @@ def run(argv: list[str] | None = None) -> int:
                         a.artifacts_dir, spec, r["oos_trades"], r["mc_summary"],
                         r["metrics"], a.cutoff, prep["hashes"], prep["data_end"],
                         {}, protocol=PROTOCOL_V61)
-                    registry.record_verdict(
-                        sid, "gauntlet", "pass" if r["passed"] else "fail",
-                        r["metrics"], bundle_hash(bundle, names=ARTIFACT_NAMES))
-                    if r["passed"]:
-                        registry.record_state_change(sid, "quarantine", "gauntlet pass")
-                        status["passed"] += 1
-                    else:
-                        registry.record_state_change(sid, "graveyard", r["reason"])
-                        status["failed_gates"] += 1
+                    to, reason = (("quarantine", "gauntlet pass") if r["passed"]
+                                  else ("graveyard", r["reason"]))
+                    try:
+                        snap = registry.record_gauntlet_outcome(
+                            snap, sid, "pass" if r["passed"] else "fail",
+                            r["metrics"], bundle_hash(bundle, names=ARTIFACT_NAMES),
+                            to, reason)
+                    except ChainMoved:
+                        # someone appended without chain.lock between the
+                        # advance and the write: nothing was written; the
+                        # next candidate's advance() absorbs their entry
+                        errored(sid)
+                        return
+                    status["passed" if r["passed"] else "failed_gates"] += 1
                     status["evaluated"] += 1
                     print(f"{sid}  {'PASS' if r['passed'] else 'FAIL ' + str(r['reason'])}",
                           flush=True)
@@ -318,7 +347,8 @@ def run(argv: list[str] | None = None) -> int:
             finally:
                 budget.record(len(chunk), time.time() - t0)
 
-        left = queue(registry)
+        snap_end, view_end = _read(registry)          # outside the lock
+        left, entered = view_end.queue(snap_end), view_end.entered
         status["queued"] = len(left)
         now = _now()
         ages = []
