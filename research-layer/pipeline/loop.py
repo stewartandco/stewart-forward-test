@@ -79,7 +79,7 @@ TRIAGE_CEILING = 200
 TRIAGE_LIMIT = TRIAGE_CEILING
 
 # Build 2a (2026-09-30): the gauntlet left the loop for its own worker
-# (pipeline/gauntlet_worker.py, \Morpheus_GauntletWorker). True restores
+# (pipeline/gauntlet_worker.py, \Morpheus\27_GauntletWorker). True restores
 # the pre-2a stage exactly -- the rollback path, kept one week after cutover.
 GAUNTLET_IN_LOOP = False
 
