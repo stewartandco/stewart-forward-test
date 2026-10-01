@@ -660,15 +660,14 @@ class _FailSecondVerifyRunner(FakeRunner):
         return super().__call__(argv, **kw)
 
 
-def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path, monkeypatch):
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+def test_chain_invalid_after_the_last_stage_aborts_and_does_not_advance_watermark(tmp_path):
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = _FailSecondVerifyRunner()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 1
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
-                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.composer", "pipeline.screen"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "chain_invalid"
     assert status["overall"] == "FAIL"
@@ -1110,11 +1109,18 @@ def _stage_call(fr, module):
                 and c[c.index("-m") + 1] == module)
 
 
-def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(tmp_path, monkeypatch):
+@pytest.mark.parametrize("in_loop, stages", [
+    (False, ("pipeline.screen",)),                      # default path
+    (True, ("pipeline.screen", "pipeline.gauntlet")),   # rollback path
+])
+def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
+        tmp_path, monkeypatch, in_loop, stages):
     """Phase 3 step 3. With a live task window the loop derives
-    start + window - SAFETY_MARGIN_S and hands it to both chain-writing
-    stages as --deadline-utc, so neither can run into the PT4H kill."""
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+    start + window - SAFETY_MARGIN_S and hands it to every chain-writing
+    stage it runs as --deadline-utc, so none can run into the PT4H kill.
+    By default the stage is the screen alone; GAUNTLET_IN_LOOP adds the
+    gauntlet (rollback)."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", in_loop)
     from . import deadline as dl
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: 4 * 3600)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
@@ -1123,7 +1129,7 @@ def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
     t0 = dl._wall_now_utc()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
-    for module in ("pipeline.screen", "pipeline.gauntlet"):
+    for module in stages:
         c = _stage_call(fr, module)
         assert "--deadline-utc" in c, c
         d = dl._parse_iso(c[c.index("--deadline-utc") + 1])
@@ -1132,15 +1138,14 @@ def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
         assert abs(ahead - expect) < 30, (ahead, expect)
 
 
-def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path, monkeypatch):
+def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path):
     """No registered task (tests, a hand run, a fresh clone): the stages get
     exactly today's argv. The module-wide stub already returns None."""
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
-    for module in ("pipeline.screen", "pipeline.gauntlet"):
+    for module in ("pipeline.screen",):
         assert "--deadline-utc" not in _stage_call(fr, module)
 
 
@@ -2062,7 +2067,6 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     """2026-09-11 22:30: fx cells were 20 days behind crypto because the
     tradfi snapshot was a hand step nobody ran. The loop now takes it as its
     own stage 0, before anything reads the chain."""
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     root = _with_producer(monkeypatch, tmp_path)
@@ -2083,7 +2087,7 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     assert fr.call_kwargs[0]["cwd"] == str(layer)
     assert _modules(fr) == ["pipeline.tradfi_data", "pipeline.triage_batch",
                             "pipeline.composer", "pipeline.composer",
-                            "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.screen"]
 
 
 def test_stage0_precedes_the_first_registry_read(tmp_path, monkeypatch):
@@ -2303,15 +2307,14 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert "watermark" not in st.get("classes", {}).get("fx", {})     # nothing banked
 
 
-def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp_path, monkeypatch):
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp_path):
     layer = _layer_with_two_registered_cells(tmp_path, "2026-09-04 00:00:00",
                                              "2026-09-10 00:00:00")   # 6 days, allowed
     fr = FakeRunner()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
-                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.composer", "pipeline.screen"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
 
