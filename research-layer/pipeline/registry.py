@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 from .common import GENESIS_HASH, canonical_json, entry_hash
 from .lock import FileLock
@@ -191,6 +195,148 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# -- O(tail) chain views (Build 2a; the gauntlet worker's chain.lock hold) --
+#
+# Every typed writer below re-reads the whole log (strategy_states + the head
+# hash) per append. On a 47 MB / 68k-entry chain that is ~3.6 s per gauntlet
+# verdict, held under chain.lock, which starves the loop, the quarantine daily
+# and the scanner (each probes chain.lock once and defers). A ChainSnapshot is
+# ONE full read, taken outside the lock; advance() then parses only the bytes
+# appended since, and record_gauntlet_outcome() appends the verdict and its
+# state change in one shot against the snapshot's head.
+
+class ChainMoved(RuntimeError):
+    """The log is not where the snapshot left it: truncated, rewritten, a
+    tail that does not link, or (at a write) grown since the snapshot. The
+    caller must write nothing and re-read."""
+
+
+class UnstableEntry(ValueError):
+    """An entry whose canonical JSON does not survive a parse: re-serializing
+    the parsed line gives different bytes (e.g. a dict with non-string keys,
+    which canonical_json sorts BEFORE stringifying). Its on-disk hash would
+    differ from its in-memory one, so anything chained after it would be a
+    broken link. Refused before anything is written."""
+
+
+PROTOCOL_V61 = "gauntlet-protocol-v6.1"
+# Ruling 10: at most this many gauntlet_stats entries per chain.lock hold.
+# The batch writer refuses more, so a caller cannot hold the lock for an
+# unbounded append; it chunks and releases chain.lock between chunks.
+STATS_BATCH_MAX = 200
+
+
+@dataclass(frozen=True)
+class ChainSnapshot:
+    """The chain as of `byte_len` bytes: lifecycle states, the strategies
+    holding any gauntlet-stage verdict, and the head entry's hash plus the
+    byte offset where that entry's line starts (so advance() can re-hash it
+    and notice a rewritten head).
+
+    With `tracks_stats` (snapshot(track_stats=True); Build 2a task 7) it also
+    carries every v6.1 gauntlet verdict's entry hash -> strategy id and the
+    set of verdict hashes that already have a gauntlet_stats entry -- exactly
+    what verify_registry.py invariant 11 checks. Off by default: it hashes
+    every v6.1 verdict, which only the statistics job needs to pay for."""
+    states: Mapping[str, str]
+    gauntlet_judged: frozenset
+    head_hash: str
+    byte_len: int
+    head_offset: int = 0
+    tracks_stats: bool = False
+    v61_verdicts: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}))
+    statted: frozenset = frozenset()
+
+
+def _fold(states: dict, judged: set, entry: dict,
+          v61: dict | None = None, statted: set | None = None) -> None:
+    """Apply one entry to a snapshot's state; the same rule as
+    Registry.strategy_states(). `v61`/`statted` (None = not tracked) follow
+    verify_registry.py invariant 11: a gauntlet verdict whose metrics carry
+    protocol v6.1 is keyed by the hash of the PARSED entry."""
+    et, p = entry["entry_type"], entry["payload"]
+    if et == "strategy_registered":
+        states[p["strategy_id"]] = "proposed"
+    elif et == "state_change":
+        states[p["strategy_id"]] = p["to"]
+    elif et == "verdict" and p.get("stage") == "gauntlet":
+        judged.add(p["strategy_id"])
+        m = p.get("metrics")
+        if (v61 is not None and isinstance(m, dict)
+                and m.get("protocol") == PROTOCOL_V61):
+            v61[entry_hash(entry)] = p.get("strategy_id")
+    elif et == "gauntlet_stats" and statted is not None:
+        vh = p.get("verdict_entry_hash")
+        if isinstance(vh, str):
+            statted.add(vh)
+
+
+def _tracked(snap: "ChainSnapshot"):
+    """Mutable copies of snap's stats view, or (None, None) if untracked."""
+    if not snap.tracks_stats:
+        return None, None
+    return dict(snap.v61_verdicts), set(snap.statted)
+
+
+def _snap(states, judged, head, pos, head_off, v61, statted) -> "ChainSnapshot":
+    if v61 is None:
+        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                             pos, head_off)
+    return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                         pos, head_off, True, MappingProxyType(v61),
+                         frozenset(statted))
+
+
+def _line_bytes(entry: dict) -> bytes:
+    """Exactly the bytes _append_locked's text-mode write produces for an
+    entry: canonical_json escapes every newline inside a value, so the only
+    raw newline is the terminator, which text mode writes as os.linesep."""
+    return (canonical_json(entry).encode("utf-8")
+            + os.linesep.encode("ascii"))
+
+
+def _make_entry(entry_type: str, payload: dict, prev_hash: str,
+                ts_utc: str | None = None) -> dict:
+    return {
+        "version": 1,
+        "ts_utc": ts_utc or _now_utc(),
+        "entry_type": entry_type,
+        "prev_entry_hash": prev_hash,
+        "payload": payload,
+    }
+
+
+def _verdict_payload(strategy_id: str, stage: str, verdict: str,
+                     metrics: dict, artifacts_hash: str) -> dict:
+    return {"strategy_id": strategy_id, "stage": stage, "verdict": verdict,
+            "metrics": metrics, "artifacts_hash": artifacts_hash}
+
+
+def _state_change_payload(strategy_id: str, frm: str, to: str,
+                          reason: str | None) -> dict:
+    if to not in VALID_TRANSITIONS.get(frm, set()):
+        raise ValueError(f"illegal transition {frm!r} -> {to!r}")
+    return {"strategy_id": strategy_id, "from": frm, "to": to,
+            "reason": reason, "buried_at": frm if to == "graveyard" else None}
+
+
+def _complete_lines(f, start: int, size: int):
+    """(line_start, raw_line) for every COMPLETE, non-blank line of the
+    open binary file `f` from offset `start` up to `size` bytes. A line
+    that crosses `size` or lacks its newline (a writer caught mid-append)
+    is not yielded. The generator RETURNS the offset just past the last
+    complete line (callers read it from StopIteration.value)."""
+    pos = start
+    for raw in f:
+        if pos + len(raw) > size or not raw.endswith(b"\n"):
+            break
+        line_start, pos = pos, pos + len(raw)
+        if raw.strip():
+            yield line_start, raw
+    return pos
+
+
 class Registry:
     def __init__(self, log_path: str | Path):
         self.log_path = Path(log_path)
@@ -226,13 +372,7 @@ class Registry:
         record_quarantine_decision) must take the lock once and come through
         here, never through append().
         """
-        entry = {
-            "version": 1,
-            "ts_utc": ts_utc or _now_utc(),
-            "entry_type": entry_type,
-            "prev_entry_hash": self._head_hash(),
-            "payload": payload,
-        }
+        entry = _make_entry(entry_type, payload, self._head_hash(), ts_utc)
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(canonical_json(entry) + "\n")
         return entry
@@ -334,22 +474,212 @@ class Registry:
         states = self.strategy_states()
         if strategy_id not in states:
             raise ValueError(f"unknown strategy {strategy_id!r}")
-        frm = states[strategy_id]
-        if to not in VALID_TRANSITIONS.get(frm, set()):
-            raise ValueError(f"illegal transition {frm!r} -> {to!r}")
-        return self.append("state_change", {
-            "strategy_id": strategy_id, "from": frm, "to": to,
-            "reason": reason, "buried_at": frm if to == "graveyard" else None,
-        }, ts_utc=ts_utc)
+        return self.append("state_change", _state_change_payload(
+            strategy_id, states[strategy_id], to, reason), ts_utc=ts_utc)
 
     def record_verdict(self, strategy_id: str, stage: str, verdict: str,
                        metrics: dict, artifacts_hash: str) -> dict:
         if strategy_id not in self.strategy_states():
             raise ValueError(f"unknown strategy {strategy_id!r}")
-        return self.append("verdict", {
-            "strategy_id": strategy_id, "stage": stage, "verdict": verdict,
-            "metrics": metrics, "artifacts_hash": artifacts_hash,
-        })
+        return self.append("verdict", _verdict_payload(
+            strategy_id, stage, verdict, metrics, artifacts_hash))
+
+    # -- O(tail) snapshot path (see ChainSnapshot) -------------------------
+
+    def snapshot(self, on_entry: Callable[[dict], None] | None = None,
+                 track_stats: bool = False) -> ChainSnapshot:
+        """ONE full read. Only COMPLETE lines within the size seen at open
+        count, so a concurrent append (or a writer caught mid-line) can
+        never tear it. `on_entry` sees every counted entry in chain order,
+        so a caller can build its own view from this same single read.
+        `track_stats` adds the v6.1 verdict / gauntlet_stats view (see
+        ChainSnapshot)."""
+        states: dict[str, str] = {}
+        judged: set[str] = set()
+        v61, statted = ({}, set()) if track_stats else (None, None)
+        last, head_off = None, 0
+        try:
+            f = self.log_path.open("rb")
+        except FileNotFoundError:
+            return _snap({}, set(), GENESIS_HASH, 0, 0, v61, statted)
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            lines = _complete_lines(f, 0, size)
+            while True:
+                try:
+                    head_off, raw = next(lines)
+                except StopIteration as stop:
+                    pos = stop.value
+                    break
+                last = json.loads(raw)
+                _fold(states, judged, last, v61, statted)
+                if on_entry is not None:
+                    on_entry(last)
+        head = entry_hash(last) if last is not None else GENESIS_HASH
+        return _snap(states, judged, head, pos, head_off, v61, statted)
+
+    def advance(self, snap: ChainSnapshot) -> ChainSnapshot:
+        """`snap` moved forward over whatever was appended since, parsing
+        only that tail (plus the head line, re-hashed). Raises ChainMoved on
+        a truncated or rewritten log or a tail that does not link."""
+        try:
+            f = self.log_path.open("rb")
+        except FileNotFoundError:
+            if snap.byte_len == 0:
+                return snap
+            raise ChainMoved(f"{self.log_path} is gone") from None
+        states: dict[str, str] | None = None
+        judged: set[str] | None = None
+        v61 = statted = None
+        head, head_off = snap.head_hash, snap.head_offset
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            if size < snap.byte_len:
+                raise ChainMoved(f"log is {size} bytes, snapshot saw {snap.byte_len}")
+            if snap.byte_len:
+                f.seek(snap.head_offset)
+                line = f.read(snap.byte_len - snap.head_offset)
+                try:
+                    same = (line.endswith(b"\n")
+                            and entry_hash(json.loads(line)) == snap.head_hash)
+                except ValueError:
+                    same = False
+                if not same:
+                    raise ChainMoved("the snapshot's head entry was rewritten")
+            lines = _complete_lines(f, snap.byte_len, size)
+            while True:
+                try:
+                    start, raw = next(lines)
+                except StopIteration as stop:
+                    pos = stop.value
+                    break
+                entry = json.loads(raw)
+                if entry.get("prev_entry_hash") != head:
+                    raise ChainMoved(
+                        f"entry at byte {start} links to "
+                        f"{str(entry.get('prev_entry_hash'))[:12]}, head is {head[:12]}")
+                if states is None:
+                    states, judged = dict(snap.states), set(snap.gauntlet_judged)
+                    v61, statted = _tracked(snap)
+                _fold(states, judged, entry, v61, statted)
+                head, head_off = entry_hash(entry), start
+        if states is None:
+            if pos == snap.byte_len:
+                return snap
+            # only blank lines were appended: same state, longer file
+            return _snap(dict(snap.states), snap.gauntlet_judged, head, pos,
+                         head_off, *_tracked(snap))
+        return _snap(states, judged, head, pos, head_off, v61, statted)
+
+    def _append_at(self, snap: ChainSnapshot,
+                   items: list[tuple[str, dict]]) -> ChainSnapshot:
+        """Append `items` chained onto snap's head, under the append
+        FileLock, refusing (ChainMoved, nothing written) if the log is not
+        exactly snap.byte_len bytes. Returns the advanced snapshot."""
+        # Build and check every line BEFORE the lock. Each hash, and so each
+        # next prev_entry_hash, comes from the PARSED line -- what the verifier,
+        # snapshot() and advance() all hash -- never from the in-memory dict.
+        states, judged = dict(snap.states), set(snap.gauntlet_judged)
+        v61, statted = _tracked(snap)
+        head, pos, head_off = snap.head_hash, snap.byte_len, snap.head_offset
+        out = b""
+        for entry_type, payload in items:
+            text = canonical_json(_make_entry(entry_type, payload, head))
+            parsed = json.loads(text)
+            if canonical_json(parsed) != text:
+                raise UnstableEntry(
+                    f"{entry_type} for {payload.get('strategy_id')!r} does not "
+                    f"round-trip through JSON (non-string dict keys?); nothing "
+                    f"written")
+            line = _line_bytes(parsed)
+            head_off, pos = pos, pos + len(line)
+            head = entry_hash(parsed)
+            out += line
+            _fold(states, judged, parsed, v61, statted)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.log_path):
+            size = self.log_path.stat().st_size if self.log_path.exists() else 0
+            if size != snap.byte_len:
+                raise ChainMoved(f"log is {size} bytes, snapshot saw "
+                                 f"{snap.byte_len}: appended without chain.lock?")
+            with self.log_path.open("ab") as f:
+                f.write(out)
+        return _snap(states, judged, head, pos, head_off, v61, statted)
+
+    def record_gauntlet_outcome(self, snap: ChainSnapshot, strategy_id: str,
+                                verdict: str, metrics: dict, artifacts_hash: str,
+                                to: str, reason: str | None) -> ChainSnapshot:
+        """A gauntlet verdict and its state change, appended together against
+        `snap` (which the caller has just advance()d under chain.lock): the
+        same two entries, byte for byte, that record_verdict +
+        record_state_change write, without either one's full-chain read."""
+        if snap.states.get(strategy_id) != "gauntlet":
+            raise ValueError(f"{strategy_id!r} is in state "
+                             f"{snap.states.get(strategy_id)!r}, not 'gauntlet'")
+        if strategy_id in snap.gauntlet_judged:
+            raise ValueError(f"{strategy_id!r} already has a gauntlet verdict")
+        sc = _state_change_payload(strategy_id, "gauntlet", to, reason)
+        return self._append_at(snap, [
+            ("verdict", _verdict_payload(strategy_id, "gauntlet", verdict,
+                                         metrics, artifacts_hash)),
+            ("state_change", sc)])
+
+    def record_state_change_at(self, snap: ChainSnapshot, strategy_id: str,
+                               to: str, reason: str | None) -> ChainSnapshot:
+        """record_state_change against a snapshot (O(tail); same bytes)."""
+        if strategy_id not in snap.states:
+            raise ValueError(f"unknown strategy {strategy_id!r}")
+        return self._append_at(snap, [("state_change", _state_change_payload(
+            strategy_id, snap.states[strategy_id], to, reason))])
+
+    def record_gauntlet_stats(self, strategy_id: str, verdict_entry_hash: str,
+                              stats: dict) -> dict:
+        """protocol-v6.1: the registry-wide recorded statistics for ONE
+        gauntlet verdict, chained after it. Records only; never a state."""
+        if strategy_id not in self.strategy_states():
+            raise ValueError(f"unknown strategy {strategy_id!r}")
+        return self.append("gauntlet_stats", {
+            "strategy_id": strategy_id,
+            "verdict_entry_hash": verdict_entry_hash, **stats})
+
+    def record_gauntlet_stats_batch(
+            self, snap: ChainSnapshot,
+            items: list[tuple[str, str, dict]]) -> ChainSnapshot:
+        """Ruling 10: many gauntlet_stats entries in ONE append, against a
+        snapshot taken with track_stats=True. The caller holds chain.lock;
+        this advances the snapshot over the tail (O(tail), never O(chain)),
+        DROPS every item whose verdict already has a stats entry (chained
+        since the caller's read -- the re-check that keeps it one per
+        verdict), validates the rest as verify_registry.py invariant 11
+        will, and appends them through _append_at: the same bytes a
+        record_gauntlet_stats call per item writes. Any refusal raises
+        before anything is written. At most STATS_BATCH_MAX items, so one
+        chain.lock hold stays bounded; the caller chunks."""
+        if not snap.tracks_stats:
+            raise ValueError("record_gauntlet_stats_batch needs a snapshot "
+                             "taken with track_stats=True")
+        if len(items) > STATS_BATCH_MAX:
+            raise ValueError(f"{len(items)} stats entries in one hold; at most "
+                             f"{STATS_BATCH_MAX} (chunk and release chain.lock "
+                             f"between chunks)")
+        snap = self.advance(snap)
+        seen: set[str] = set()
+        payloads = []
+        for sid, vh, stats in items:
+            if not isinstance(vh, str) or snap.v61_verdicts.get(vh) != sid:
+                raise ValueError(f"{str(vh)[:12]} is not a v6.1 gauntlet verdict "
+                                 f"of {sid!r}; nothing written")
+            if vh in seen:
+                raise ValueError(f"verdict {vh[:12]} appears twice in one "
+                                 f"stats batch; nothing written")
+            seen.add(vh)
+            if vh in snap.statted:
+                continue                  # already chained: one per verdict
+            payloads.append(("gauntlet_stats", {
+                "strategy_id": sid, "verdict_entry_hash": vh, **stats}))
+        if not payloads:
+            return snap
+        return self._append_at(snap, payloads)
 
     def record_quarantine_decision(self, payload: dict) -> dict:
         """One paper-trading decision, validated and de-duplicated atomically.

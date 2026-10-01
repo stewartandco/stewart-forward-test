@@ -53,7 +53,6 @@ import time
 import hashlib
 import argparse
 from pathlib import Path
-import contextlib
 import numpy as np
 import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -75,13 +74,24 @@ from .plateau import annualized_sharpe, qualifies, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
+from .gauntlet_core import (FAIL_ORDER, SR_FLOOR, DECAY_MIN_PCT, MC_PATHS,
+                            MC_P05_MIN, RUIN_LEVEL, P_RUIN_MAX, DEFAULT_CUTOFF,
+                            PURGE_BARS, _date_le, split_trades, contributions,
+                            compound, window_vol, _spec_bars,
+                            daily_returns_with_dates,
+                            _annualized_sharpe_from_returns, era_summary,
+                            stressed, _benchmark_relative,
+                            write_gauntlet_artifacts, evaluate_gates,
+                            # pool sizing lives in the core so the worker's
+                            # verdict path never imports this module
+                            GAUNTLET_PRIOR_S_PER_CANDIDATE,
+                            GAUNTLET_CHUNK_PER_WORKER, WORKER_COMMIT_MB,
+                            WORKER_COMMIT_HEADROOM_MB, WORKER_BLAS_ENV,
+                            worker_count, available_commit_mb, worker_env)
+# The worker's note marker, imported rather than re-spelled (Ruling 23).
+from .gauntlet_core import PROTOCOL_V61
 
 PROTOCOL = "gauntlet-protocol-v6"
-DECAY_MIN_PCT = -25.0
-MC_PATHS = 2000
-MC_P05_MIN = 1.0
-RUIN_LEVEL = 0.5
-P_RUIN_MAX = 0.05
 # protocol-v3: DSR_MIN no longer gates THIS stage. It is retained verbatim as
 # the threshold for the quarantine -> live gate, computed on the quarantine
 # forward record. See docs/2026-08-16-gen3-design.md rev 2.
@@ -89,14 +99,7 @@ P_RUIN_MAX = 0.05
 # gauntlet gate; it is amended by the chained protocol-v3 note, and the SCHEMA
 # text itself is updated in this plan's verifier task.
 DSR_MIN = 0.95
-DEFAULT_CUTOFF = "2023-12-31"
 
-# protocol-v4 additions. SR_FLOOR is knowingly non-binding today — every one of
-# the 43 strategies that has ever reached this stage scored at least 0.577 on
-# the train window, and all 24 sub-0.4 specs died at the screen. It is adopted
-# so the two pipelines read identically, and it will bite if the screen is ever
-# loosened.
-SR_FLOOR = 0.4
 # protocol-v5 withdraws v4's fixed 0.20 / 0.50 lines. They presupposed that a
 # family with no persistent skill differences scores about 0.5, which is false
 # in this implementation at small odd family sizes and only approximate
@@ -115,7 +118,6 @@ PBO_KILL_PCTILE = 0.95   # >= this kills the whole sibling group
 # and a deliberate deep run can still ask for 200 via --pbo-null-draws.
 PBO_NULL_DRAWS = 50
 CSCV_SPLITS = 16
-PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 
 # Below this many shared calendar days, an "intersection" is not a common
 # history worth clustering on -- it is noise dressed as a trial count. A real
@@ -125,28 +127,8 @@ PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 # whatever few days happen to overlap the shortest-lived pair.
 MIN_TRIALS_COMMON_DAYS = 100
 
-# The fixed order in which gates are evaluated and reported. 'dsr' is
-# DELIBERATELY ABSENT: protocol-v4 still computes and records the deflated
-# Sharpe, but it does not gate entry to paper trading and — new in v4 — it no
-# longer ranks siblings either; neighbourhood floor does. Adding it back here
-# is a protocol change and needs its own pre-declared chained note.
-# protocol-v6: SIX gates, and every input to every one of them is a property
-# of the STRATEGY ALONE -- its own trades, its own returns, its own train
-# Sharpe, its own trades re-run at doubled slippage. No gate reads a sibling, a
-# group, a neighbour, a grid position or a family statistic. 'pbo',
-# 'pbo_underpowered' and 'plateau' were removed because each decided a
-# strategy's fate on something other than its own performance; all three are
-# still COMPUTED and RECORDED. 'dsr' remains deliberately absent, as it has
-# been since v3. Reintroducing any group-level input here contradicts v6's
-# founding principle and needs its own pre-declared chained note saying so.
-FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
-              "p_ruin", "cost_stress")
 
 
-# Phase 3 step 1 deadline tuning. The prior is judged only until the first
-# chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
-# fx cycle's observed wall per candidate (~150 min / 499), rounded up.
-GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 # PBO (after the candidates): one permutation null per LIVE family, pure
 # Python, ~50 draws -- the 2026-09-03 15:30 cycle spent 108 min on 325 of 366
 # families and was killed by the PT4H wall at group 325 with every verdict
@@ -157,58 +139,6 @@ GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 # started, and the next run picks them up. Families already measured keep
 # their verdicts. A family is judged in one pass or not at all.
 PBO_NULL_PRIOR_S = 60.0
-GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
-# Memory envelope for the worker pool (2026-09-03 incident: a worker died
-# with "OpenBLAS error: Memory allocation still failed after 10 retries" and
-# the pool reported BrokenProcessPool; Windows had logged the parent at 9.6 GB
-# of commit during clustering, on a box already ~52 GB into a 64 GB commit
-# limit). Measured the same day: a spawned worker commits 279 MB at import
-# with OpenBLAS's default 8 threads and 54 MB with 1 (341 vs 116 MB after
-# its first BLAS call). One candidate at a time on small arrays gains nothing
-# from a BLAS thread pool, so workers get one thread each; the count of
-# workers is bounded by the commit actually available, not only by cores.
-WORKER_COMMIT_MB = 512       # per-worker envelope: 116 MB baseline + one run_spec
-WORKER_COMMIT_HEADROOM_MB = 2048   # left for the parent (PBO, verdict writes) + the box
-WORKER_BLAS_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
-                   "MKL_NUM_THREADS": "1"}
-
-
-def worker_count(n_cpu: int, avail_commit_mb: int | None) -> int:
-    """Workers = cpu_count - 2 (two cores stay free for the hub, the dashes
-    and gbp -- the workspace's standing hazard), then no more than the
-    available commit can carry at WORKER_COMMIT_MB each after the headroom.
-    Never fewer than 1: max_workers <= 1 is the serial reference path."""
-    base = max(1, n_cpu - 2)
-    if avail_commit_mb is None:
-        return base
-    fits = (avail_commit_mb - WORKER_COMMIT_HEADROOM_MB) // WORKER_COMMIT_MB
-    return max(1, min(base, fits))
-
-
-def available_commit_mb() -> int | None:
-    """Commit the OS can still hand out (Windows: GlobalMemoryStatusEx
-    ullAvailPageFile, i.e. commit limit minus commit charge). None where
-    that is unknowable; callers then fall back to the core count alone."""
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes
-
-        class _MS(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
-                        ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
-                        ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
-                        ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
-                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
-        m = _MS()
-        m.dwLength = ctypes.sizeof(m)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
-            return None
-        return int(m.ullAvailPageFile // 2**20)
-    except Exception:
-        return None
-
-
 def private_commit_mb() -> int | None:
     """This process's private commit (Windows PROCESS_MEMORY_COUNTERS_EX
     PrivateUsage -- the figure the Resource-Exhaustion-Detector reports).
@@ -238,79 +168,8 @@ def private_commit_mb() -> int | None:
         return None
 
 
-@contextlib.contextmanager
-def worker_env():
-    """Set WORKER_BLAS_ENV for the duration of a pool. Spawned workers read
-    these at THEIR numpy import, so inheriting the environment is the only
-    reliable way in; the parent's own BLAS loaded long ago and is unaffected.
-    Restored afterwards so nothing leaks into the caller's process."""
-    prev = {k: os.environ.get(k) for k in WORKER_BLAS_ENV}
-    os.environ.update(WORKER_BLAS_ENV)
-    try:
-        yield
-    finally:
-        for k, v in prev.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 GAUNTLET_RESERVE_FRAC = 0.25           # of the budget left when candidates begin
 GAUNTLET_RESERVE_MIN_S = 60.0          # ...never less than this, for PBO + writes
-
-
-def _date_le(a: str, b: str) -> bool:
-    """Date-only `a <= b`, ignoring any time-of-day suffix either string may
-    carry (`YYYY-MM-DD HH:MM:SS` vs bare `YYYY-MM-DD` -- see
-    daily_returns_with_dates' own docstring on why this repo's CSVs disagree
-    on format: legacy crypto is bare-dated, the fx snapshot adapter and the
-    modern ...USDT grid are timestamped).
-
-    Batch review rider (SP4): every cutoff-boundary comparison in this module
-    now goes through this ONE helper, so a suffixed bar compares the same way
-    everywhere instead of date-only in some call sites (train_returns, the
-    PBO family matrix -- both slice from daily_returns_with_dates' already-
-    normalised series) and raw-string in others (split_trades, window_vol,
-    _benchmark_relative used to compare `entry_date`/`date` to `cutoff`
-    directly). A bare-dated string is unaffected by the `[:10]` slice, so
-    every production crypto comparison this repo has ever recorded a verdict
-    against is byte-identical before and after; only a time-suffixed bar
-    landing exactly on the cutoff date can change side."""
-    return a[:10] <= b[:10]
-
-
-def split_trades(trades: list[dict], cutoff: str) -> tuple[list, list]:
-    is_t = [t for t in trades if _date_le(t["entry_date"], cutoff)]
-    oos_t = [t for t in trades if not _date_le(t["entry_date"], cutoff)]
-    return is_t, oos_t
-
-
-def contributions(trades: list[dict]) -> list[float]:
-    """Per-trade portfolio contribution: return_net x notional_frac."""
-    return [t["return_net"] * t["notional_frac"] for t in trades]
-
-
-def compound(contribs: list[float]) -> float:
-    eq = 1.0
-    for c in contribs:
-        eq *= 1 + c
-    return eq - 1
-
-
-def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> float:
-    """Equal-weight mean annualized realized volatility across assets, over
-    bars with lo < date <= hi. Returns 0.0 when no window has enough bars."""
-    vols = []
-    for a in assets:
-        closes = [b["close"] for b in bars_by_asset[a]
-                  if not _date_le(b["date"], lo) and _date_le(b["date"], hi)]
-        if len(closes) < 3:
-            continue
-        rets = [math.log(closes[i] / closes[i - 1])
-                for i in range(1, len(closes))]
-        m = sum(rets) / len(rets)
-        vols.append(math.sqrt(sum((r - m) ** 2 for r in rets) / len(rets))
-                    * math.sqrt(365))
-    return sum(vols) / len(vols) if vols else 0.0
 
 
 def _pbo_metrics_fields(pbo_status: dict | None) -> dict:
@@ -368,98 +227,24 @@ def evaluate_spec(is_trades: list[dict], oos_trades: list[dict],
     independent trials (clusters); registered_n is the raw registration count.
     The edge-decay gate compares VOLATILITY-NORMALIZED per-trade edge, so a
     shrinking opportunity set is not scored as strategy decay."""
-    is_c = contributions(is_trades)
-    oos_c = contributions(oos_trades)
-    is_raw = sum(is_c) / len(is_c) if is_c else 0.0
-    oos_raw = sum(oos_c) / len(oos_c) if oos_c else 0.0
-    oos_net = compound(oos_c)
-
-    is_edge = is_raw / is_vol if is_vol > 0 else 0.0
-    oos_edge = oos_raw / oos_vol if oos_vol > 0 else 0.0
-    decay = ((oos_edge - is_edge) / abs(is_edge) * 100
-             if is_edge > 0 and oos_vol > 0 else None)
-
-    mc = bootstrap_paths(is_c + oos_c, MC_PATHS, seed, RUIN_LEVEL)
-    mc_p05 = percentile(mc["terminals"], 0.05)
-
+    passed, reason, metrics, mc_summary = evaluate_gates(
+        is_trades, oos_trades, stress_oos_trades, is_vol, oos_vol,
+        seed, train_sharpe)
     sr_hat = sharpe(daily_returns)
     _, _, skew, kurt = moments(daily_returns)
     sr_star = expected_max_sharpe(trials_n, trials_sr_var)
-    dsr = psr(sr_hat, sr_star, len(daily_returns), skew, kurt)
-
-    stress_net = compound(contributions(stress_oos_trades))
-
-    metrics = {
-        "is_edge_per_trade": is_edge,
-        "oos_edge_per_trade": oos_edge,
-        "edge_decay_pct": decay,
-        "mc_p05_equity": mc_p05,
-        "p_ruin": mc["p_ruin"],
-        "deflated_sharpe": dsr,
+    metrics.update({
+        "deflated_sharpe": psr(sr_hat, sr_star, len(daily_returns), skew, kurt),
         "sibling_group_n": group_n if group_n is not None else trials_n,
-        "cost_stress_net_pnl": stress_net,
         "trials_n": trials_n,
-        # no fallback: registered_n exists to be the honest raw registration
-        # count that trials_n no longer is (clusters <= registrations), so an
-        # omitted value records null rather than a fabricated number.
         "registered_n": registered_n,
-        # recorded so a recorded deflated_sharpe is reproducible from the
-        # entry alone: under v3 the variance comes from cluster
-        # representatives, which needs the clustering and every strategy's
-        # daily returns to recompute.
         "trials_sr_var": trials_sr_var,
         "expected_max_sharpe": sr_star,
-        # in-entry discriminator: trials_n means "registered strategies" under
-        # v2 and "clusters" under v3, under the same key.
         "protocol": PROTOCOL,
-        "is_edge_raw": is_raw,
-        "oos_edge_raw": oos_raw,
-        "is_vol": is_vol,
-        "oos_vol": oos_vol,
-        # protocol-v4: the train-window annualized Sharpe the floor gate read.
-        # protocol-v5: the sibling group's CSCV result is now a STATUS, not a
-        # bare number -- the observed value alone cannot be read without the
-        # null it was judged against, and a chained verdict must not require a
-        # reader to recompute one. Both are None when the caller did not
-        # supply them.
-        "train_sharpe": train_sharpe,
         **_pbo_metrics_fields(pbo_status),
-        # protocol-v6: neighbourhood qualification is still computed and still
-        # recorded; it stopped gating and stopped selecting. Kept because the
-        # next protocol argument will need the evidence, and a verdict that
-        # quietly dropped it would destroy that evidence generation by
-        # generation.
         "plateau_ok": plateau_ok,
-    }
-    mc_summary = {"seed": seed, "paths": MC_PATHS,
-                  "p05": mc_p05,
-                  "p25": percentile(mc["terminals"], 0.25),
-                  "p50": percentile(mc["terminals"], 0.50),
-                  "p75": percentile(mc["terminals"], 0.75),
-                  "p_ruin": mc["p_ruin"], "ruin_level": RUIN_LEVEL}
-
-    # FAIL_ORDER drives the sequence rather than merely documenting it. Both
-    # drift directions are closed, and only one of them fails loudly on its
-    # own: a gate declared but not computed raises KeyError below, but a gate
-    # computed and NOT declared would simply never be evaluated - silently
-    # fail-open, the dangerous direction - so the assertion catches it. Every
-    # value is an already-computed scalar, so eager evaluation has no cost or
-    # side effect.
-    checks = {"sharpe_floor": train_sharpe is None or train_sharpe >= SR_FLOOR,
-              "oos_negative": oos_net > 0,
-              "edge_decay": decay is not None and decay > DECAY_MIN_PCT,
-              "mc_p05": mc_p05 > MC_P05_MIN,
-              "p_ruin": mc["p_ruin"] < P_RUIN_MAX,
-              "cost_stress": stress_net > 0,
-              }
-    assert checks.keys() == set(FAIL_ORDER), (
-        f"gate battery and FAIL_ORDER disagree: "
-        f"computed-not-declared={sorted(checks.keys() - set(FAIL_ORDER))}, "
-        f"declared-not-computed={sorted(set(FAIL_ORDER) - checks.keys())}")
-    for name in FAIL_ORDER:
-        if not checks[name]:
-            return False, name, metrics, mc_summary
-    return True, None, metrics, mc_summary
+    })
+    return passed, reason, metrics, mc_summary
 
 
 def select_survivors(rows: list[dict], grids_by_group: dict,
@@ -484,79 +269,9 @@ def select_survivors(rows: list[dict], grids_by_group: dict,
     return {r["sid"] for r in rows if r["passed"]}, set()
 
 
-def _spec_bars(bars_by_cell: dict, spec: dict) -> dict:
-    """The bars of the spec's OWN cell, keyed by asset for run_spec.
-
-    A spec with no declared timeframe is a legacy daily, matching the screen.
-    """
-    tf = spec["universe"].get("timeframe", "1d")
-    return {a: bars_by_cell[(a, tf)] for a in spec["universe"]["assets"]}
-
-
 def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:
     return [equity[i][1] / equity[i - 1][1] - 1
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
-
-
-def daily_returns_with_dates(equity: list[tuple[str, float]]
-                             ) -> list[tuple[str, float]]:
-    """Same values as daily_returns_from_curve, paired with the DATE each
-    return is attributed to (equity[i]'s date, for the step from i-1 to i).
-
-    A run whose specs are ALREADY on one shared calendar never needs the
-    dates. Two things break that: a mixed-class run pools a 24x7 calendar
-    with a 5-day fx calendar, and a same-class run can still be ragged --
-    registered specs on assets with genuinely different history starts
-    (fx pairs each have their own real inception date; the crypto grid's
-    five assets were listed on different days too). cluster.correlation
-    compares series BY INDEX, so the dates are the only way to find what
-    those series actually share (spec s10.6).
-
-    FAILURE THIS GUARDS AGAINST (real run, 2026-08-24): a bar's `date` string
-    is carried through verbatim from its CSV, and this repo's CSVs do not
-    all agree on format -- the legacy BTCUSD_1d.csv (what real crypto specs
-    actually register against, spec s10.9) is bare `YYYY-MM-DD`, while the
-    fx snapshot adapter and the modern ...USDT grid write `YYYY-MM-DD
-    HH:MM:SS`. Two overlapping calendars (1999-2026, both sides) whose keys
-    never compare equal intersect to an empty set -- "intersection ... is
-    only 0 day(s)" across 455 real strategies -- not because the calendars
-    disagreed, but because the STRINGS did. Normalising every key to
-    date-only HERE, in the one place every dated return series is built,
-    closes it by construction: every downstream consumer (intersect_returns,
-    era_summary's date-string comparisons) sees one format no matter which
-    CSV convention produced the bar."""
-    return [(str(equity[i][0])[:10], equity[i][1] / equity[i - 1][1] - 1)
-            for i in range(1, len(equity)) if equity[i - 1][1] > 0]
-
-
-def _annualized_sharpe_from_returns(rets: list[float]) -> float | None:
-    """Same math as plateau.annualized_sharpe (sample mean / sample stdev,
-    annualized by TRADING_DAYS), taking an already-computed return series
-    instead of an equity curve.
-
-    SP4 Task P1: this lets train_sharpe and the PBO family matrix be derived
-    straight from a spec's dated-returns series -- real or served from
-    simcache -- without ever needing that spec's equity curve. When `rets`
-    is exactly the per-step series plateau.annualized_sharpe would itself
-    derive from an equity curve (as daily_returns_with_dates/
-    daily_returns_from_curve already do throughout this file), the output is
-    identical. The one behavioural nuance: callers here always slice the
-    DATE-NORMALISED series (daily_returns_with_dates strips any time suffix
-    to date-only -- see its docstring), so a source date carrying a time
-    suffix now compares against `cutoff` the same way the clustering
-    intersection already does elsewhere in this module, rather than by raw
-    string. Production crypto data is bare-dated (spec s10.9) and every
-    pinned fixture's cutoff falls outside its data range, so this is a
-    no-op in every case this repo currently exercises; it would only differ
-    from the pre-P1 behaviour for a time-suffixed source with a bar landing
-    exactly on the cutoff date."""
-    if len(rets) < 30:
-        return None
-    mean = sum(rets) / len(rets)
-    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
-    if var <= 0:
-        return None
-    return mean / math.sqrt(var) * math.sqrt(TRADING_DAYS)
 
 
 def intersect_returns(dated_by_id: dict[str, list[tuple[str, float]]]
@@ -658,19 +373,6 @@ def _raise_too_short_intersection(
         f"class pairing left almost no shared history: {detail}.{hint}")
 
 
-def era_summary(trades: list[dict], eras: tuple[tuple[str, str, str], ...]
-                ) -> dict[str, dict]:
-    """Per-era {n_trades, net_pnl}, bucketed by entry_date, for a class whose
-    CLASSES entry declares eras (fx first, spec §6). RECORDED, never gated:
-    protocol-v6 has no era gate, and this replaces no FAIL_ORDER member."""
-    out = {}
-    for name, start, end in eras:
-        bucket = [t for t in trades if start <= t["entry_date"] <= end]
-        out[name] = {"n_trades": len(bucket),
-                     "net_pnl": compound(contributions(bucket))}
-    return out
-
-
 def check_aligned(returns_by_id: dict[str, list[float]]) -> None:
     """Fail closed on ragged return series before clustering.
 
@@ -689,12 +391,6 @@ def check_aligned(returns_by_id: dict[str, list[float]]) -> None:
             + ", ".join(f"{sid}={n}" for sid, n in sorted(lengths.items())))
 
 
-def stressed(spec: dict) -> dict:
-    s = json.loads(json.dumps(spec))
-    s["cost_model"]["slippage_ticks"] *= 2
-    return s
-
-
 BENCHMARK_BASIS = {
     "fx": "price returns, carry excluded on both sides",
     # crypto is DORMANT until SP5 Phase 3 flips CLASSES["crypto"]["benchmark"];
@@ -702,61 +398,6 @@ BENCHMARK_BASIS = {
     "crypto": "price returns, staking/funding yield excluded on both sides",
 }
 _DEFAULT_BASIS = "price returns, dividends excluded on both sides"
-
-
-def _benchmark_relative(spec: dict, spec_bars: dict, strategy_net: float,
-                        cutoff: str) -> dict | None:
-    """B1 (SP4 Track 2a addendum, pre-registered 2026-08-26,
-    `docs/2026-08-24-sp4-track2a-addendum.md`): RECORDED, NOT GATED
-    same-OOS-window buy-and-hold control against the cell's own asset, for
-    every class whose CLASSES entry declares `benchmark: "self"`. Returns
-    None (no key written at all) for every other class -- absence means
-    not applicable, never a null placeholder, per the addendum's own
-    no-null-placeholder convention.
-
-    `strategy_net` is the candidate's OOS net exactly as evaluate_spec's
-    own `oos_net` (compound(contributions(oos_trades))) -- the caller must
-    pass the SAME figure the oos_negative gate read, computed the same way,
-    never recomputed by a different formula here.
-
-    The control buys the cell's own single asset at the first OOS bar's
-    open and sells at the last OOS bar's close -- the same `date > cutoff`
-    fence split_trades applies to trades -- net of ONE round trip of the
-    class's own cost model: `per_side = commission_per_side + slippage_ticks`
-    charged on both sides, the exact formula engine.simulate_asset applies
-    to every real trade (engine.py's `net = gross - 2 * per_side`). No
-    financing: short_financing_per_year only ever accrues on a SHORT
-    position, and a buy-and-hold control is definitionally long.
-
-    SP5 D3: the recorded `basis` string is per-class (BENCHMARK_BASIS) --
-    it names exactly what a price-only control cannot see for that class
-    (dividends for the ETF classes, carry for fx), on every verdict.
-    """
-    asset_class = spec["universe"].get("asset_class", "crypto")
-    class_spec = cells.CLASSES.get(asset_class, {})
-    if class_spec.get("benchmark") != "self":
-        return None
-    assets = spec["universe"]["assets"]
-    if len(assets) != 1:
-        raise ValueError(
-            f"{spec['strategy_id']}: benchmark-relative control needs "
-            f"exactly one asset per cell for class {asset_class!r} "
-            f"(benchmark: 'self'), got {assets!r}")
-    bars = spec_bars[assets[0]]
-    oos_bars = [b for b in bars if not _date_le(b["date"], cutoff)]
-    if not oos_bars:
-        raise ValueError(
-            f"{spec['strategy_id']}: no OOS bars for {assets[0]!r} after "
-            f"cutoff {cutoff} -- cannot compute the benchmark-relative "
-            f"control")
-    entry_px, exit_px = oos_bars[0]["open"], oos_bars[-1]["close"]
-    cost_model = class_spec["cost_model"]
-    per_side = cost_model["commission_per_side"] + cost_model["slippage_ticks"]
-    buy_hold_net = (exit_px / entry_px - 1) - 2 * per_side
-    return {"window": "oos", "strategy_net": strategy_net,
-            "buy_hold_net": buy_hold_net,
-            "excess": strategy_net - buy_hold_net,
-            "basis": BENCHMARK_BASIS.get(asset_class, _DEFAULT_BASIS)}
 
 
 def _as_list(rets) -> list[float]:
@@ -970,30 +611,171 @@ def _run_candidates(payloads: list[dict], max_workers: int,
     return results
 
 
-def write_gauntlet_artifacts(art_dir: Path, spec: dict, oos_trades: list[dict],
-                             mc_summary: dict, metrics: dict, cutoff: str,
-                             data_hashes: dict, data_end: dict,
-                             group_context: dict) -> Path:
-    import csv
-    bundle = art_dir / spec["strategy_id"] / "gauntlet"
-    bundle.mkdir(parents=True, exist_ok=True)
-    with (bundle / "oos_trades.csv").open("w", newline="",
-                                          encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["asset", "side", "entry_date",
-                                          "entry_px", "exit_date", "exit_px",
-                                          "exit_reason", "return_net",
-                                          "notional_frac"],
-                           lineterminator="\n", extrasaction="ignore")
-        w.writeheader()
-        w.writerows(oos_trades)
-    (bundle / "mc_summary.json").write_text(
-        json.dumps(mc_summary, indent=1, sort_keys=True), encoding="utf-8")
-    (bundle / "config.json").write_text(json.dumps(
-        {"protocol": PROTOCOL, "cutoff": cutoff, "metrics": metrics,
-         "data_sha256": data_hashes, "data_end": data_end,
-         "group_context": group_context,
-         "spec": spec}, indent=1, sort_keys=True), encoding="utf-8")
-    return bundle
+def registry_series(all_specs: list[dict], bars_by_cell: dict,
+                    data_hashes: dict[str, str], cache,
+                    candidate_sids: set[str],
+                    full_results: dict[str, dict] | None = None):
+    """The registry-wide re-simulation, moved out of run() unchanged
+    (Build 2a task 7) so gauntlet_stats.py runs the SAME pass.
+
+    Returns (dated_returns_by_sid, equity_len_by_sid, sim_cache_hits,
+    sim_cache_misses). A candidate (sid in `candidate_sids`) is always
+    simulated fresh and its full run_spec result is stored in
+    `full_results` when the caller passes a dict (run() needs the
+    trades); every other spec is served from `cache` when it can be."""
+    if full_results is None:
+        full_results = {}
+    dated_returns_by_sid: dict[str, Series] = {}
+    equity_len_by_sid: dict[str, int] = {}
+    sim_cache_hits = sim_cache_misses = 0
+    for s in all_specs:
+        sid = s["strategy_id"]
+        if sid in candidate_sids:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            full_results[sid] = res
+            dated_returns_by_sid[sid] = Series.from_pairs(
+                daily_returns_with_dates(res["equity"]))
+            equity_len_by_sid[sid] = len(res["equity"])
+            continue
+        tf = s["universe"].get("timeframe", "1d")
+        data_shas = {a: data_hashes[cells.cell_id(a, tf)]
+                    for a in s["universe"]["assets"]}
+        # SP4 batch review rider: the cached series also depends on the
+        # RESOLVED periods_per_year (engine.run_spec derives it the same way
+        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
+        # vol_target's realized-vol sizing), so it must be part of the key or
+        # a SESSION_PERIODS edit would silently serve a stale series instead
+        # of missing. See simcache.cache_key's own docstring.
+        periods_per_year = cells.SESSION_PERIODS.get(
+            s["universe"].get("session"), 365)
+        key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
+        hit = cache.get(key)
+        if hit is not None:
+            dated_returns_by_sid[sid] = hit["series"]
+            equity_len_by_sid[sid] = hit["equity_len"]
+            sim_cache_hits += 1
+        else:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            series = Series.from_pairs(daily_returns_with_dates(res["equity"]))
+            dated_returns_by_sid[sid] = series
+            equity_len_by_sid[sid] = len(res["equity"])
+            cache.put(key, series, len(res["equity"]))
+            sim_cache_misses += 1
+    return dated_returns_by_sid, equity_len_by_sid, sim_cache_hits, sim_cache_misses
+
+
+def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
+                     all_specs: list[dict]) -> dict:
+    """Alignment + effective trials over the registry-wide series, moved
+    out of run() unchanged (Build 2a task 7) so gauntlet_stats.py clusters
+    by the SAME method. Returns trials_n, cluster_labels, trials_var,
+    trials_alignment, trials_common_days, registered_n, and returns_by_id
+    (the aligned series the clustering and the deflated Sharpe read)."""
+    # A run whose registered specs are ALREADY on one shared calendar (today:
+    # every real crypto chain, which has only ever registered the legacy
+    # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
+    # prior arithmetic: native per-spec calendars, no intersection, so this
+    # stays byte-identical and regression-covered by test_gauntlet.py.
+    #
+    # Two things make that assumption false and must intersect FIRST, before
+    # check_aligned ever runs, not after it raises:
+    #   - classes_present > 1: a 24x7 crypto calendar pooled with a 5-day fx
+    #     calendar (spec s10.6);
+    #   - ragged (real dry-run finding, 2026-08-24): registered specs on the
+    #     SAME class can still have genuinely different calendars. 12 fx
+    #     pairs each start on their own real inception date (most G10 pairs
+    #     1971, EUR 1999, ZAR/SGD 1980/81, MXN 1993) with NO duplicate dates
+    #     anywhere (verified: every pinned CSV's row count equals its unique
+    #     date count) -- the raggedness is genuine history, not a bug. The
+    #     same landmine exists latently for crypto too the moment a
+    #     generation ever registers the full 5-asset ...USDT grid together
+    #     (BTCUSDT/ETHUSDT: 3272 bars; SOLUSDT: 2182; XRPUSDT: 3012; BNBUSDT:
+    #     3191 -- different listing dates), just never triggered because
+    #     production has only ever used the same-length legacy pair. Gating
+    #     on raggedness rather than on class alone closes that landmine too.
+    # cluster.correlation compares series BY INDEX, so any of the above must
+    # be trimmed to the dates every series actually shares before clustering,
+    # else k and the recorded deflated Sharpe are silently wrong -- or, before
+    # this fix, check_aligned simply refused the whole run.
+    classes_present = {s["universe"].get("asset_class", "crypto")
+                       for s in all_specs}
+    # equity_len_by_sid carries the ORIGINAL equity curve length for every
+    # sid regardless of source (fresh run or simcache hit -- simcache.put
+    # records it alongside the returns series precisely so this check does
+    # not need the equity itself), so the ragged/not-ragged decision is
+    # unaffected by which specs happened to be cached this pass.
+    raw_lengths = equity_len_by_sid
+    ragged = len(set(raw_lengths.values())) > 1
+    if len(classes_present) > 1 or ragged:
+        dated_by_id = dated_returns_by_sid
+        returns_by_id, common_dates = intersect_returns(dated_by_id)
+        trials_alignment, trials_common_days = "intersection", len(common_dates)
+        if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
+            _raise_too_short_intersection(dated_by_id, common_dates)
+    else:
+        # Same values daily_returns_from_curve(equity) would give: stripping
+        # the (already date-normalised) date off each entry of the exact
+        # series that function's own formula produces.
+        returns_by_id = {sid: series.rets
+                         for sid, series in dated_returns_by_sid.items()}
+        trials_alignment, trials_common_days = "native", None
+    registered_n = len(all_specs)
+
+    # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
+    # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
+    # trials. A sibling sweep is one idea at several settings, and pooling
+    # structurally different families put real edge dispersion into a term
+    # meant to hold sampling noise.
+    check_aligned(returns_by_id)
+    t_et0 = time.time()
+    trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
+    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
+          f"(pure clustering, inside the clustering stage)", flush=True)
+    print(f"effective trials: {trials_n} clusters over {registered_n} "
+          f"registered strategies")
+    return {"trials_n": trials_n, "cluster_labels": cluster_labels,
+            "trials_var": trials_var, "trials_alignment": trials_alignment,
+            "trials_common_days": trials_common_days,
+            "registered_n": registered_n, "returns_by_id": returns_by_id}
+
+
+def sibling_families(all_specs: list[dict], train_sharpe: dict,
+                     screen_tc_fail: set[str]) -> tuple[dict, dict]:
+    """(family_by_group, grids_by_group): each sibling group's members with
+    their swept-axis coordinates and train Sharpe, and the grid of every
+    axis that actually varies within the group. Moved out of run()
+    unchanged (Build 2a task 7); plateau.qualifies reads both."""
+    from .composer import SWEEPABLE_TYPES
+    from .blocks import BLOCK_TYPES
+    family_by_group, grids_by_group = {}, {}
+    for s in all_specs:
+        sid, g = s["strategy_id"], s["provenance"]["sibling_group_id"]
+        axes = {}
+        for b in s["blocks"]:
+            key = (b["role"], b["type"])
+            if key not in SWEEPABLE_TYPES:
+                continue
+            for p, v in b["params"].items():
+                if isinstance(BLOCK_TYPES[key].get(p, {}).get("grid"), list):
+                    axes[f"{b['type']}.{p}"] = v
+                    grids_by_group.setdefault(g, {})[f"{b['type']}.{p}"] = \
+                        BLOCK_TYPES[key][p]["grid"]
+        family_by_group.setdefault(g, []).append(
+            {"sid": sid, "axes": axes, "score": train_sharpe[sid],
+             "screen_trade_count_fail": sid in screen_tc_fail,
+             "gauntlet_passed": False})
+
+    # Prune axes that do not actually vary within a group, or a fixed parameter
+    # generates phantom neighbours: a whole family sitting at atr_len=14 would
+    # otherwise be read as a swept axis with every sibling its own island.
+    for g, fam in family_by_group.items():
+        varying = {a for a in grids_by_group.get(g, {})
+                   if len({s["axes"].get(a) for s in fam}) > 1}
+        grids_by_group[g] = {a: v for a, v in grids_by_group.get(g, {}).items()
+                             if a in varying}
+        for s in fam:
+            s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
+    return family_by_group, grids_by_group
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -1061,6 +843,18 @@ def run(argv: list[str] | None = None) -> int:
               f"(dry-run is allowed).")
         return 1
 
+    # Ruling 23 (C1): once a "gauntlet-protocol-v6.1:" note is chained, this
+    # stage applies NO family kill. v6 retired it and verify_registry's
+    # invariant 12 rejects any later verdict that carries pbo_family_kill
+    # true, or state change that cites it, so the rollback path
+    # (GAUNTLET_IN_LOOP=True after the note) must never write one: an
+    # INVALID entry on the append-only chain would wedge the loop for good.
+    # Detected exactly as pipeline.gauntlet_worker detects the same note.
+    v61_noted = any(
+        e["entry_type"] == "note"
+        and str(e["payload"].get("text", "")).startswith(PROTOCOL_V61 + ":")
+        for e in registry.entries())
+
     all_specs = [e["payload"] for e in registry.entries()
                  if e["entry_type"] == "strategy_registered"]
     candidates = [s for s in all_specs
@@ -1122,111 +916,26 @@ def run(argv: list[str] | None = None) -> int:
     cache = simcache.SimCache(simcache_dir)
     t_cluster0 = time.time()      # SP4 Task P5: covers sim-cache + clustering
     full_results: dict[str, dict] = {}          # candidates only (need trades)
-    dated_returns_by_sid: dict[str, Series] = {}
-    equity_len_by_sid: dict[str, int] = {}
-    sim_cache_hits = sim_cache_misses = 0
-    for s in all_specs:
-        sid = s["strategy_id"]
-        if sid in candidate_sids:
-            res = run_spec(s, _spec_bars(bars_by_cell, s))
-            full_results[sid] = res
-            dated_returns_by_sid[sid] = Series.from_pairs(
-                daily_returns_with_dates(res["equity"]))
-            equity_len_by_sid[sid] = len(res["equity"])
-            continue
-        tf = s["universe"].get("timeframe", "1d")
-        data_shas = {a: data_hashes[cells.cell_id(a, tf)]
-                    for a in s["universe"]["assets"]}
-        # SP4 batch review rider: the cached series also depends on the
-        # RESOLVED periods_per_year (engine.run_spec derives it the same way
-        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
-        # vol_target's realized-vol sizing), so it must be part of the key or
-        # a SESSION_PERIODS edit would silently serve a stale series instead
-        # of missing. See simcache.cache_key's own docstring.
-        periods_per_year = cells.SESSION_PERIODS.get(
-            s["universe"].get("session"), 365)
-        key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
-        hit = cache.get(key)
-        if hit is not None:
-            dated_returns_by_sid[sid] = hit["series"]
-            equity_len_by_sid[sid] = hit["equity_len"]
-            sim_cache_hits += 1
-        else:
-            res = run_spec(s, _spec_bars(bars_by_cell, s))
-            series = Series.from_pairs(daily_returns_with_dates(res["equity"]))
-            dated_returns_by_sid[sid] = series
-            equity_len_by_sid[sid] = len(res["equity"])
-            cache.put(key, series, len(res["equity"]))
-            sim_cache_misses += 1
+    (dated_returns_by_sid, equity_len_by_sid, sim_cache_hits,
+     sim_cache_misses) = registry_series(all_specs, bars_by_cell, data_hashes,
+                                         cache, candidate_sids,
+                                         full_results=full_results)
     print(f"sim cache: {sim_cache_hits} hit(s), {sim_cache_misses} miss(es) "
           f"over {len(all_specs) - len(candidate_sids)} non-candidate "
           f"registered strategies")
 
-    # A run whose registered specs are ALREADY on one shared calendar (today:
-    # every real crypto chain, which has only ever registered the legacy
-    # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
-    # prior arithmetic: native per-spec calendars, no intersection, so this
-    # stays byte-identical and regression-covered by test_gauntlet.py.
-    #
-    # Two things make that assumption false and must intersect FIRST, before
-    # check_aligned ever runs, not after it raises:
-    #   - classes_present > 1: a 24x7 crypto calendar pooled with a 5-day fx
-    #     calendar (spec s10.6);
-    #   - ragged (real dry-run finding, 2026-08-24): registered specs on the
-    #     SAME class can still have genuinely different calendars. 12 fx
-    #     pairs each start on their own real inception date (most G10 pairs
-    #     1971, EUR 1999, ZAR/SGD 1980/81, MXN 1993) with NO duplicate dates
-    #     anywhere (verified: every pinned CSV's row count equals its unique
-    #     date count) -- the raggedness is genuine history, not a bug. The
-    #     same landmine exists latently for crypto too the moment a
-    #     generation ever registers the full 5-asset ...USDT grid together
-    #     (BTCUSDT/ETHUSDT: 3272 bars; SOLUSDT: 2182; XRPUSDT: 3012; BNBUSDT:
-    #     3191 -- different listing dates), just never triggered because
-    #     production has only ever used the same-length legacy pair. Gating
-    #     on raggedness rather than on class alone closes that landmine too.
-    # cluster.correlation compares series BY INDEX, so any of the above must
-    # be trimmed to the dates every series actually shares before clustering,
-    # else k and the recorded deflated Sharpe are silently wrong -- or, before
-    # this fix, check_aligned simply refused the whole run.
-    classes_present = {s["universe"].get("asset_class", "crypto")
-                       for s in all_specs}
-    # equity_len_by_sid carries the ORIGINAL equity curve length for every
-    # sid regardless of source (fresh run or simcache hit -- simcache.put
-    # records it alongside the returns series precisely so this check does
-    # not need the equity itself), so the ragged/not-ragged decision is
-    # unaffected by which specs happened to be cached this pass.
-    raw_lengths = equity_len_by_sid
-    ragged = len(set(raw_lengths.values())) > 1
-    if len(classes_present) > 1 or ragged:
-        dated_by_id = dated_returns_by_sid
-        returns_by_id, common_dates = intersect_returns(dated_by_id)
-        trials_alignment, trials_common_days = "intersection", len(common_dates)
-        if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
-            _raise_too_short_intersection(dated_by_id, common_dates)
-    else:
-        # Same values daily_returns_from_curve(equity) would give: stripping
-        # the (already date-normalised) date off each entry of the exact
-        # series that function's own formula produces.
-        returns_by_id = {sid: series.rets
-                         for sid, series in dated_returns_by_sid.items()}
-        trials_alignment, trials_common_days = "native", None
+    clustered = cluster_registry(dated_returns_by_sid, equity_len_by_sid,
+                                 all_specs)
+    returns_by_id = clustered["returns_by_id"]
+    trials_alignment = clustered["trials_alignment"]
+    trials_common_days = clustered["trials_common_days"]
+    trials_n, cluster_labels, trials_var = (
+        clustered["trials_n"], clustered["cluster_labels"],
+        clustered["trials_var"])
+    registered_n = clustered["registered_n"]
     group_n: dict[str, int] = {}
     for g in group_of.values():
         group_n[g] = group_n.get(g, 0) + 1
-    registered_n = len(all_specs)
-
-    # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
-    # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
-    # trials. A sibling sweep is one idea at several settings, and pooling
-    # structurally different families put real edge dispersion into a term
-    # meant to hold sampling noise.
-    check_aligned(returns_by_id)
-    t_et0 = time.time()
-    trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
-    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
-          f"(pure clustering, inside the clustering stage)", flush=True)
-    print(f"effective trials: {trials_n} clusters over {registered_n} "
-          f"registered strategies")
     t_cluster = time.time() - t_cluster0
     print(f"[gauntlet] clustering done in {t_cluster:.1f}s "
           f"(cache {sim_cache_hits} hits / {sim_cache_misses} misses)",
@@ -1256,36 +965,8 @@ def run(argv: list[str] | None = None) -> int:
     train_sharpe = {s["strategy_id"]: _annualized_sharpe_from_returns(
         train_returns(s["strategy_id"])) for s in all_specs}
 
-    from .composer import SWEEPABLE_TYPES
-    from .blocks import BLOCK_TYPES
-    family_by_group, grids_by_group = {}, {}
-    for s in all_specs:
-        sid, g = s["strategy_id"], s["provenance"]["sibling_group_id"]
-        axes = {}
-        for b in s["blocks"]:
-            key = (b["role"], b["type"])
-            if key not in SWEEPABLE_TYPES:
-                continue
-            for p, v in b["params"].items():
-                if isinstance(BLOCK_TYPES[key].get(p, {}).get("grid"), list):
-                    axes[f"{b['type']}.{p}"] = v
-                    grids_by_group.setdefault(g, {})[f"{b['type']}.{p}"] = \
-                        BLOCK_TYPES[key][p]["grid"]
-        family_by_group.setdefault(g, []).append(
-            {"sid": sid, "axes": axes, "score": train_sharpe[sid],
-             "screen_trade_count_fail": sid in screen_tc_fail,
-             "gauntlet_passed": False})
-
-    # Prune axes that do not actually vary within a group, or a fixed parameter
-    # generates phantom neighbours: a whole family sitting at atr_len=14 would
-    # otherwise be read as a swept axis with every sibling its own island.
-    for g, fam in family_by_group.items():
-        varying = {a for a in grids_by_group.get(g, {})
-                   if len({s["axes"].get(a) for s in fam}) > 1}
-        grids_by_group[g] = {a: v for a, v in grids_by_group.get(g, {}).items()
-                             if a in varying}
-        for s in fam:
-            s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
+    family_by_group, grids_by_group = sibling_families(
+        all_specs, train_sharpe, screen_tc_fail)
 
     # SP4 Task P2: evaluate every candidate's gate battery + corroborating
     # metrics in a worker pool, standalone (protocol-v6's own founding
@@ -1483,8 +1164,11 @@ def run(argv: list[str] | None = None) -> int:
               + f"  -> {res['verdict']}")
         if gi % 25 == 0 or gi == n_groups:
             print(f"[gauntlet] pbo group {gi}/{n_groups}", flush=True)
-    killed_groups = {g for g, r in pbo_by_group.items()
-                     if r["verdict"] == "kill"}
+    killed_groups = set() if v61_noted else {
+        g for g, r in pbo_by_group.items() if r["verdict"] == "kill"}
+    if v61_noted and any(r["verdict"] == "kill" for r in pbo_by_group.values()):
+        print(f"  ({PROTOCOL_V61} is chained: a 'kill' PBO verdict is recorded "
+              f"only; no family kill is applied)")
     for g in sorted(killed_groups):
         print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f}, "
               f"the {pbo_by_group[g]['percentile']:.0%} percentile of its own "
@@ -1568,7 +1252,8 @@ def run(argv: list[str] | None = None) -> int:
                 "cluster_labels": cluster_labels}
             bundle = write_gauntlet_artifacts(
                 args.artifacts_dir, s, oos_t, mc_summary, metrics,
-                args.cutoff, data_hashes, data_end, group_context)
+                args.cutoff, data_hashes, data_end, group_context,
+                protocol=PROTOCOL)
             registry.record_verdict(
                 sid, "gauntlet", "pass" if passed else "fail", metrics,
                 bundle_hash(bundle, names=("oos_trades.csv",

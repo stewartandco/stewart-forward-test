@@ -48,6 +48,16 @@ invariants:
      the legacy registrations are history, not defects, and the walk is in
      chain order so nothing earlier can trip a rule armed later. Every block
      type must still be chained (invariant 6, unchanged)
+ 11. gauntlet-protocol-v6.1: a `gauntlet_stats` entry must point, by
+     verdict_entry_hash (pipeline.common.entry_hash of the verdict entry), at
+     an EARLIER gauntlet verdict of the SAME strategy whose metrics carry
+     protocol gauntlet-protocol-v6.1, and a verdict has at most one stats
+     entry
+ 12. gauntlet-protocol-v6.1: AFTER the chained `gauntlet-protocol-v6.1:` note
+     (first line of a `note` entry) no gauntlet verdict may carry
+     pbo_family_kill true and no state_change may cite it as its reason. The
+     rule is armed at the note, so the five burials made under v6 before it
+     stay valid chain history
 
 Usage:
     python verify_registry.py [path/to/registry_log.jsonl]
@@ -78,6 +88,9 @@ from pipeline.registry import (is_sha256_hex,                  # noqa: E402
 # Invariant 10 reads the SAME retired-type table the engine and the composer
 # refuse from; a second list here would be two tables that must stay equal.
 from pipeline.blocks import RETIRED_TYPES                      # noqa: E402
+# Invariant 11 links a stats entry to a verdict by the WRITER's hash, so the
+# verifier uses the writer's function, not a third copy.
+from pipeline.common import entry_hash                         # noqa: E402
 
 # Invariant 8 recomputes fingerprints for FROZEN entries against the LIVE
 # block grammar, so it is fair to ask whether a future grammar edit could
@@ -214,6 +227,9 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
     buried_at_of: dict[str, str] = {}         # strategy_id -> stage it was buried from
     unverified_windows: list[str] = []        # invariant 8, evidence missing
     v7_note_line: int | None = None           # invariant 10, armed at the note
+    v61_note_line: int | None = None          # invariant 12, armed at the note
+    v61_verdicts: dict[str, str] = {}         # verdict entry hash -> strategy_id
+    statted: set[str] = set()                 # verdict hashes that have stats
     snapshots: dict[str, set] = {}          # date -> assets fully provenanced
 
     cutoff_cache: dict[str, str | None] = {}
@@ -517,12 +533,32 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                 if (v7_note_line is None and isinstance(text, str)
                         and text.startswith("exit-rules-v7:")):
                     v7_note_line = lineno
+                # Invariant 12's marker, same first-line rule and same
+                # first-occurrence-arms behaviour as invariant 10's.
+                if (v61_note_line is None and isinstance(text, str)
+                        and text.startswith("gauntlet-protocol-v6.1:")):
+                    v61_note_line = lineno
 
             elif etype in ("verdict", "state_change"):
                 sid = as_key(lineno, payload.get("strategy_id"),
                              f"{etype} strategy_id")
                 if sid is not None and sid not in strategies:
                     fail(lineno, f"{etype} for unregistered strategy {sid!r}")
+                m = payload.get("metrics")
+                m = m if isinstance(m, dict) else {}
+                if v61_note_line is not None:
+                    if (etype == "verdict" and payload.get("stage") == "gauntlet"
+                            and m.get("pbo_family_kill")):
+                        fail(lineno, "invariant 12: gauntlet verdict applies "
+                             f"pbo_family_kill after gauntlet-protocol-v6.1 "
+                             f"(note line {v61_note_line}); v6 retired it")
+                    if (etype == "state_change"
+                            and payload.get("reason") == "pbo_family_kill"):
+                        fail(lineno, "invariant 12: state_change cites "
+                             "pbo_family_kill after gauntlet-protocol-v6.1")
+                if (etype == "verdict" and payload.get("stage") == "gauntlet"
+                        and m.get("protocol") == "gauntlet-protocol-v6.1"):
+                    v61_verdicts[entry_hash(entry)] = payload.get("strategy_id")
                 if etype == "state_change" and sid in strategies:
                     frm, to = payload.get("from"), payload.get("to")
                     cur = state.get(sid)
@@ -540,6 +576,21 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                             # cutoff (composer.burying_cutoff's argument)
                             ba = payload.get("buried_at") or frm
                             buried_at_of[sid] = ba if isinstance(ba, str) else ""
+
+            elif etype == "gauntlet_stats":
+                # Invariant 11. vh must be a string before it is looked up or
+                # stored: an unhashable hand-appended value would raise out of
+                # the walk and leave every later entry unverified.
+                vh = payload.get("verdict_entry_hash")
+                sid = payload.get("strategy_id")
+                if not isinstance(vh, str) or v61_verdicts.get(vh) != sid:
+                    fail(lineno, "invariant 11: gauntlet_stats does not point at "
+                         f"an earlier v6.1 gauntlet verdict of {sid!r}")
+                elif vh in statted:
+                    fail(lineno, "invariant 11: second gauntlet_stats for "
+                         f"verdict {vh[:12]}")
+                else:
+                    statted.add(vh)
 
     n_bad = len(bad_lines)
     print()
@@ -564,6 +615,11 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
           + (f"note at line {v7_note_line}; version 2 enforced after it"
              if v7_note_line is not None else
              "no note on the chain; version 1 stands"))
+    print(f"  gauntlet-v6.1     : "
+          + (f"note at line {v61_note_line}; no pbo_family_kill enforced after it"
+             if v61_note_line is not None else
+             "no note on the chain; v6 history stands")
+          + f"; {len(statted)} stats entries linked")
     print(f"  Strategies        : {len(strategies)}")
     if strategies:
         funnel: dict[str, int] = {}

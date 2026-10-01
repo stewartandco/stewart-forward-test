@@ -78,6 +78,11 @@ TRIAGE_CEILING = 200
 # governing the maximum.
 TRIAGE_LIMIT = TRIAGE_CEILING
 
+# Build 2a (2026-09-30): the gauntlet left the loop for its own worker
+# (pipeline/gauntlet_worker.py, \Morpheus\27_GauntletWorker). True restores
+# the pre-2a stage exactly -- the rollback path, kept one week after cutover.
+GAUNTLET_IN_LOOP = False
+
 # Cycle-time model, kept in ONE place. MIN_TASK_WINDOW_S is DERIVED from
 # TRIAGE_LIMIT deliberately: the two drifting apart is its own bug. At limit
 # 200 a cycle needs ~129 min, so the old hardcoded PT2H threshold would have
@@ -505,9 +510,13 @@ def _gauntlet_orphans(registry: Registry) -> list[str]:
     parsing; if that check ever moves to a shared helper, both should use it.
     """
     states = registry.strategy_states()
+    # v6.1 verdicts are the gauntlet worker's: it repairs its own orphans
+    # (pipeline/gauntlet_worker.py), so they never block the loop.
     verdicted = {e["payload"]["strategy_id"] for e in registry.entries()
                  if e["entry_type"] == "verdict"
-                 and e["payload"].get("stage") == "gauntlet"}
+                 and e["payload"].get("stage") == "gauntlet"
+                 and (e["payload"].get("metrics") or {}).get("protocol")
+                 != "gauntlet-protocol-v6.1"}
     return sorted(sid for sid, st in states.items()
                   if st == "gauntlet" and sid in verdicted)
 
@@ -1568,14 +1577,18 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.screen", rc,
                                    _fresh_counts())
 
-    # 4e. gauntlet (chain-writing)
-    gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv, *deadline_argv]
-    rc, lock_lost = _lock_and_run("pipeline.gauntlet", gauntlet_argv)
-    if lock_lost:
-        return _defer_midcycle_lock("pipeline.gauntlet")
-    if rc != 0:
-        return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc,
-                                   _fresh_counts())
+    # 4e. gauntlet (chain-writing). Skipped by default since Build 2a: the
+    # gauntlet worker owns it. With the stage skipped no gauntlet_result.json
+    # is written, and _deadline_items omits deferred_gauntlet (absence is
+    # not a claim).
+    if GAUNTLET_IN_LOOP:
+        gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv, *deadline_argv]
+        rc, lock_lost = _lock_and_run("pipeline.gauntlet", gauntlet_argv)
+        if lock_lost:
+            return _defer_midcycle_lock("pipeline.gauntlet")
+        if rc != 0:
+            return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc,
+                                       _fresh_counts())
 
     # 4f. chain verify again, post-gauntlet (spec s6): the loop's OWN writes
     # this cycle must satisfy the same invariants a human session's would.

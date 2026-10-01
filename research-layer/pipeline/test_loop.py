@@ -338,7 +338,8 @@ def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, mon
         f"and keep counting toward the next trigger")
 
 
-def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
+def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
@@ -659,14 +660,14 @@ class _FailSecondVerifyRunner(FakeRunner):
         return super().__call__(argv, **kw)
 
 
-def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path):
+def test_chain_invalid_after_the_last_stage_aborts_and_does_not_advance_watermark(tmp_path):
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = _FailSecondVerifyRunner()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 1
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
-                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.composer", "pipeline.screen"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "chain_invalid"
     assert status["overall"] == "FAIL"
@@ -1108,10 +1109,18 @@ def _stage_call(fr, module):
                 and c[c.index("-m") + 1] == module)
 
 
-def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(tmp_path, monkeypatch):
+@pytest.mark.parametrize("in_loop, stages", [
+    (False, ("pipeline.screen",)),                      # default path
+    (True, ("pipeline.screen", "pipeline.gauntlet")),   # rollback path
+])
+def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
+        tmp_path, monkeypatch, in_loop, stages):
     """Phase 3 step 3. With a live task window the loop derives
-    start + window - SAFETY_MARGIN_S and hands it to both chain-writing
-    stages as --deadline-utc, so neither can run into the PT4H kill."""
+    start + window - SAFETY_MARGIN_S and hands it to every chain-writing
+    stage it runs as --deadline-utc, so none can run into the PT4H kill.
+    By default the stage is the screen alone; GAUNTLET_IN_LOOP adds the
+    gauntlet (rollback)."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", in_loop)
     from . import deadline as dl
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: 4 * 3600)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
@@ -1120,7 +1129,7 @@ def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
     t0 = dl._wall_now_utc()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
-    for module in ("pipeline.screen", "pipeline.gauntlet"):
+    for module in stages:
         c = _stage_call(fr, module)
         assert "--deadline-utc" in c, c
         d = dl._parse_iso(c[c.index("--deadline-utc") + 1])
@@ -1136,14 +1145,15 @@ def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path):
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
-    for module in ("pipeline.screen", "pipeline.gauntlet"):
+    for module in ("pipeline.screen",):
         assert "--deadline-utc" not in _stage_call(fr, module)
 
 
-def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_path):
+def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_path, monkeypatch):
     """A cycle that CHOSE to stop is routine, not a failure: outcome stays
     cycle_complete, overall OK, and the status names the stage and count so
     the digest can tell it from a cycle that ran everything."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner(stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
@@ -2077,7 +2087,7 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     assert fr.call_kwargs[0]["cwd"] == str(layer)
     assert _modules(fr) == ["pipeline.tradfi_data", "pipeline.triage_batch",
                             "pipeline.composer", "pipeline.composer",
-                            "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.screen"]
 
 
 def test_stage0_precedes_the_first_registry_read(tmp_path, monkeypatch):
@@ -2304,7 +2314,7 @@ def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
-                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.composer", "pipeline.screen"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
 
@@ -2438,3 +2448,54 @@ def test_window_reader_returns_none_on_undecodable_output(monkeypatch):
     monkeypatch.undo()
     monkeypatch.setattr(loop.subprocess, "run", lambda *a, **k: _Proc(b"\xff\xfe\x00\xd8garbage"))
     assert loop._live_task_window_s(r"\Morpheus\25_PipelineLoop") is None
+
+
+# -- Build 2a task 6: the loop stops at the screen -----------------------------
+
+def test_the_loop_stops_at_the_screen_by_default(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
+                            "pipeline.composer", "pipeline.screen"]
+
+
+def test_the_rollback_flag_restores_the_gauntlet_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr)[-1] == "pipeline.gauntlet"
+
+
+def test_a_v61_orphan_is_the_workers_not_the_loops(tmp_path):
+    from .test_gauntlet import gauntlet_registry
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"protocol": "gauntlet-protocol-v6.1"}, "0" * 64)
+    assert loop._gauntlet_orphans(reg) == []
+
+
+def test_a_v6_orphan_still_counts_for_the_loop(tmp_path):
+    from .test_gauntlet import gauntlet_registry
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"protocol": "gauntlet-protocol-v6"}, "0" * 64)
+    assert loop._gauntlet_orphans(reg) == [spec["strategy_id"]]
+
+
+def test_a_completed_cycle_without_the_gauntlet_stage_reports_no_deferred_gauntlet(tmp_path):
+    """The stage did not run, so there is no gauntlet_result.json: the cycle
+    still completes OK and the status carries no deferred_gauntlet item at
+    all (never a fabricated 0). The screen's own report is untouched."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["overall"] == "OK"
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert "deferred_gauntlet" not in status["items"]
+    assert status["items"]["deferred_screen"] == "0"
