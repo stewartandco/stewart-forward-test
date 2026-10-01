@@ -338,7 +338,8 @@ def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, mon
         f"and keep counting toward the next trigger")
 
 
-def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
+def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
@@ -659,7 +660,8 @@ class _FailSecondVerifyRunner(FakeRunner):
         return super().__call__(argv, **kw)
 
 
-def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path):
+def test_chain_invalid_after_gauntlet_aborts_and_does_not_advance_watermark(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = _FailSecondVerifyRunner()
@@ -1112,6 +1114,7 @@ def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
     """Phase 3 step 3. With a live task window the loop derives
     start + window - SAFETY_MARGIN_S and hands it to both chain-writing
     stages as --deadline-utc, so neither can run into the PT4H kill."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     from . import deadline as dl
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: 4 * 3600)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
@@ -1129,9 +1132,10 @@ def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
         assert abs(ahead - expect) < 30, (ahead, expect)
 
 
-def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path):
+def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path, monkeypatch):
     """No registered task (tests, a hand run, a fresh clone): the stages get
     exactly today's argv. The module-wide stub already returns None."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
@@ -1140,10 +1144,11 @@ def test_loop_passes_no_deadline_when_there_is_no_task_window(tmp_path):
         assert "--deadline-utc" not in _stage_call(fr, module)
 
 
-def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_path):
+def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_path, monkeypatch):
     """A cycle that CHOSE to stop is routine, not a failure: outcome stays
     cycle_complete, overall OK, and the status names the stage and count so
     the digest can tell it from a cycle that ran everything."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner(stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
@@ -2057,6 +2062,7 @@ def test_stage0_snapshot_runs_first_with_the_declared_classes(tmp_path, monkeypa
     """2026-09-11 22:30: fx cells were 20 days behind crypto because the
     tradfi snapshot was a hand step nobody ran. The loop now takes it as its
     own stage 0, before anything reads the chain."""
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     root = _with_producer(monkeypatch, tmp_path)
@@ -2297,7 +2303,8 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert "watermark" not in st.get("classes", {}).get("fx", {})     # nothing banked
 
 
-def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp_path):
+def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer = _layer_with_two_registered_cells(tmp_path, "2026-09-04 00:00:00",
                                              "2026-09-10 00:00:00")   # 6 days, allowed
     fr = FakeRunner()
@@ -2438,3 +2445,54 @@ def test_window_reader_returns_none_on_undecodable_output(monkeypatch):
     monkeypatch.undo()
     monkeypatch.setattr(loop.subprocess, "run", lambda *a, **k: _Proc(b"\xff\xfe\x00\xd8garbage"))
     assert loop._live_task_window_s(r"\Morpheus\25_PipelineLoop") is None
+
+
+# -- Build 2a task 6: the loop stops at the screen -----------------------------
+
+def test_the_loop_stops_at_the_screen_by_default(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
+                            "pipeline.composer", "pipeline.screen"]
+
+
+def test_the_rollback_flag_restores_the_gauntlet_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr)[-1] == "pipeline.gauntlet"
+
+
+def test_a_v61_orphan_is_the_workers_not_the_loops(tmp_path):
+    from .test_gauntlet import gauntlet_registry
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"protocol": "gauntlet-protocol-v6.1"}, "0" * 64)
+    assert loop._gauntlet_orphans(reg) == []
+
+
+def test_a_v6_orphan_still_counts_for_the_loop(tmp_path):
+    from .test_gauntlet import gauntlet_registry
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"protocol": "gauntlet-protocol-v6"}, "0" * 64)
+    assert loop._gauntlet_orphans(reg) == [spec["strategy_id"]]
+
+
+def test_a_completed_cycle_without_the_gauntlet_stage_reports_no_deferred_gauntlet(tmp_path):
+    """The stage did not run, so there is no gauntlet_result.json: the cycle
+    still completes OK and the status carries no deferred_gauntlet item at
+    all (never a fabricated 0). The screen's own report is untouched."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert status["overall"] == "OK"
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert "deferred_gauntlet" not in status["items"]
+    assert status["items"]["deferred_screen"] == "0"
