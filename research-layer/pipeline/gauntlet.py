@@ -53,7 +53,6 @@ import time
 import hashlib
 import argparse
 from pathlib import Path
-import contextlib
 import numpy as np
 import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -82,7 +81,13 @@ from .gauntlet_core import (FAIL_ORDER, SR_FLOOR, DECAY_MIN_PCT, MC_PATHS,
                             daily_returns_with_dates,
                             _annualized_sharpe_from_returns, era_summary,
                             stressed, _benchmark_relative,
-                            write_gauntlet_artifacts, evaluate_gates)
+                            write_gauntlet_artifacts, evaluate_gates,
+                            # pool sizing lives in the core so the worker's
+                            # verdict path never imports this module
+                            GAUNTLET_PRIOR_S_PER_CANDIDATE,
+                            GAUNTLET_CHUNK_PER_WORKER, WORKER_COMMIT_MB,
+                            WORKER_COMMIT_HEADROOM_MB, WORKER_BLAS_ENV,
+                            worker_count, available_commit_mb, worker_env)
 
 PROTOCOL = "gauntlet-protocol-v6"
 # protocol-v3: DSR_MIN no longer gates THIS stage. It is retained verbatim as
@@ -122,10 +127,6 @@ MIN_TRIALS_COMMON_DAYS = 100
 
 
 
-# Phase 3 step 1 deadline tuning. The prior is judged only until the first
-# chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
-# fx cycle's observed wall per candidate (~150 min / 499), rounded up.
-GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 # PBO (after the candidates): one permutation null per LIVE family, pure
 # Python, ~50 draws -- the 2026-09-03 15:30 cycle spent 108 min on 325 of 366
 # families and was killed by the PT4H wall at group 325 with every verdict
@@ -136,58 +137,6 @@ GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 # started, and the next run picks them up. Families already measured keep
 # their verdicts. A family is judged in one pass or not at all.
 PBO_NULL_PRIOR_S = 60.0
-GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
-# Memory envelope for the worker pool (2026-09-03 incident: a worker died
-# with "OpenBLAS error: Memory allocation still failed after 10 retries" and
-# the pool reported BrokenProcessPool; Windows had logged the parent at 9.6 GB
-# of commit during clustering, on a box already ~52 GB into a 64 GB commit
-# limit). Measured the same day: a spawned worker commits 279 MB at import
-# with OpenBLAS's default 8 threads and 54 MB with 1 (341 vs 116 MB after
-# its first BLAS call). One candidate at a time on small arrays gains nothing
-# from a BLAS thread pool, so workers get one thread each; the count of
-# workers is bounded by the commit actually available, not only by cores.
-WORKER_COMMIT_MB = 512       # per-worker envelope: 116 MB baseline + one run_spec
-WORKER_COMMIT_HEADROOM_MB = 2048   # left for the parent (PBO, verdict writes) + the box
-WORKER_BLAS_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
-                   "MKL_NUM_THREADS": "1"}
-
-
-def worker_count(n_cpu: int, avail_commit_mb: int | None) -> int:
-    """Workers = cpu_count - 2 (two cores stay free for the hub, the dashes
-    and gbp -- the workspace's standing hazard), then no more than the
-    available commit can carry at WORKER_COMMIT_MB each after the headroom.
-    Never fewer than 1: max_workers <= 1 is the serial reference path."""
-    base = max(1, n_cpu - 2)
-    if avail_commit_mb is None:
-        return base
-    fits = (avail_commit_mb - WORKER_COMMIT_HEADROOM_MB) // WORKER_COMMIT_MB
-    return max(1, min(base, fits))
-
-
-def available_commit_mb() -> int | None:
-    """Commit the OS can still hand out (Windows: GlobalMemoryStatusEx
-    ullAvailPageFile, i.e. commit limit minus commit charge). None where
-    that is unknowable; callers then fall back to the core count alone."""
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes
-
-        class _MS(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
-                        ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
-                        ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
-                        ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
-                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
-        m = _MS()
-        m.dwLength = ctypes.sizeof(m)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
-            return None
-        return int(m.ullAvailPageFile // 2**20)
-    except Exception:
-        return None
-
-
 def private_commit_mb() -> int | None:
     """This process's private commit (Windows PROCESS_MEMORY_COUNTERS_EX
     PrivateUsage -- the figure the Resource-Exhaustion-Detector reports).
@@ -217,22 +166,6 @@ def private_commit_mb() -> int | None:
         return None
 
 
-@contextlib.contextmanager
-def worker_env():
-    """Set WORKER_BLAS_ENV for the duration of a pool. Spawned workers read
-    these at THEIR numpy import, so inheriting the environment is the only
-    reliable way in; the parent's own BLAS loaded long ago and is unaffected.
-    Restored afterwards so nothing leaks into the caller's process."""
-    prev = {k: os.environ.get(k) for k in WORKER_BLAS_ENV}
-    os.environ.update(WORKER_BLAS_ENV)
-    try:
-        yield
-    finally:
-        for k, v in prev.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 GAUNTLET_RESERVE_FRAC = 0.25           # of the budget left when candidates begin
 GAUNTLET_RESERVE_MIN_S = 60.0          # ...never less than this, for PBO + writes
 
