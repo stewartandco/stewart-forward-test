@@ -30,6 +30,14 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - plateau_ok: plateau.qualifies over the family, as the gauntlet recorded it.
 - haircut: harvey_liu_haircut(train Sharpe, train years, trials_n), window
   "train", as _evaluate_candidate recorded it.
+- effective trials are FLOORED at the highest k ever recorded on the chain
+  (Ruling 20, Coen option 1): the silhouette argmax is unstable on a growing
+  registry (302 -> 480 -> 44), and a lower N would flatter every later
+  deflated Sharpe. Each entry records trials_n_raw (this run's argmax, method
+  unchanged), trials_n_floor + trials_n_floor_entry_hash (the chain max BEFORE
+  this run and the entry that supplied it, or null), and trials_n =
+  max(raw, floor), the figure the deflated Sharpe AND the haircut use.
+  trials_sr_var stays this run's. See _View.on_entry for what counts.
 
 Resumable: the simulation is the expensive part and the simcache keeps every
 series simulated before a deadline stop, keyed by the bars THROUGH the
@@ -117,6 +125,13 @@ def data_digest_of(hashes: dict[str, str]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+# Ruling 20: only these gauntlet protocols recorded a CLUSTER count in
+# metrics.trials_n. No protocol / v2 hold a registration count (excluded), and
+# v6.1 verdicts carry no trials_n.
+FLOOR_PROTOCOLS = ("gauntlet-protocol-v3", "gauntlet-protocol-v4",
+                   "gauntlet-protocol-v5", "gauntlet-protocol-v6")
+
+
 class _View:
     """What the job needs from the chain, collected in the same single read
     that builds its ChainSnapshot."""
@@ -125,6 +140,15 @@ class _View:
         self.specs: list[dict] = []
         self.screen_tc_fail: set[str] = set()
         self.verdicts: list[dict] = []        # v6.1 gauntlet verdicts, chain order
+        # Ruling 20: the highest k recorded ON THE CHAIN so far, and the hash
+        # of the entry that supplied it (the first, on a tie).
+        self.trials_floor: int | None = None
+        self.trials_floor_hash: str | None = None
+
+    def _floor_candidate(self, n, e: dict) -> None:
+        if (isinstance(n, int) and not isinstance(n, bool)
+                and (self.trials_floor is None or n > self.trials_floor)):
+            self.trials_floor, self.trials_floor_hash = n, entry_hash(e)
 
     def on_entry(self, e: dict) -> None:
         et, p = e["entry_type"], e["payload"]
@@ -133,8 +157,12 @@ class _View:
         elif (et == "state_change" and p.get("to") == "graveyard"
               and p.get("reason") == "trade_count"):
             self.screen_tc_fail.add(p["strategy_id"])
+        elif et == "gauntlet_stats":
+            self._floor_candidate(p.get("trials_n_raw"), e)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             m = p.get("metrics")
+            if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
+                self._floor_candidate(m.get("trials_n"), e)
             if isinstance(m, dict) and m.get("protocol") == PROTOCOL_V61:
                 self.verdicts.append({"vh": entry_hash(e), "sid": p["strategy_id"],
                                       "verdict": p.get("verdict"),
@@ -181,9 +209,15 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
 def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   train_sharpe: float | None, clustered: dict, pbo: dict,
                   plateau_ok: bool, vintage: str, data_digest: str,
-                  data_end_by_cell: dict[str, str]) -> dict:
-    """The gauntlet_stats payload (less strategy_id / verdict_entry_hash)."""
-    trials_n, trials_var = clustered["trials_n"], clustered["trials_var"]
+                  data_end_by_cell: dict[str, str],
+                  trials_floor: int | None = None,
+                  trials_floor_hash: str | None = None) -> dict:
+    """The gauntlet_stats payload (less strategy_id / verdict_entry_hash).
+    `trials_floor` / `trials_floor_hash` are the chain max before this run
+    and the entry that supplied it (Ruling 20), the same for every entry of
+    a run."""
+    trials_raw, trials_var = clustered["trials_n"], clustered["trials_var"]
+    trials_n = max(trials_raw, trials_floor or 0)
     r = _as_list(dsr_rets)      # clustered["returns_by_id"][sid] (Ruling 11)
     sr_hat = sharpe(r)
     _, _, skew, kurt = moments(r)
@@ -195,6 +229,9 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
     n_train_points = len(train_rets) + 1 if train_rets else 0
     return {
         "trials_n": trials_n,
+        "trials_n_raw": trials_raw,
+        "trials_n_floor": trials_floor,
+        "trials_n_floor_entry_hash": trials_floor_hash,
         "registered_n": clustered["registered_n"],
         "trials_sr_var": trials_var,
         "expected_max_sharpe": sr_star,
@@ -347,6 +384,10 @@ def run(argv: list[str] | None = None) -> int:
         status.update({k: clustered[k] for k in
                        ("trials_n", "registered_n", "trials_common_days")})
         extra["trials_alignment"] = clustered["trials_alignment"]
+        # Ruling 20: ONE floor per run, from the read above, before chaining.
+        floor, floor_hash = view.trials_floor, view.trials_floor_hash
+        extra["trials_n_floor"] = floor
+        extra["trials_n_effective"] = max(clustered["trials_n"], floor or 0)
 
         train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
                  for s in all_specs}
@@ -413,7 +454,8 @@ def run(argv: list[str] | None = None) -> int:
                 items.append((sid, v["vh"], verdict_stats(
                     sid, clustered["returns_by_id"][sid], train[sid],
                     train_sharpe[sid], clustered,
-                    pbo, ok, vintage, data_digest, own_ends(sid))))
+                    pbo, ok, vintage, data_digest, own_ends(sid),
+                    floor, floor_hash)))
             if len(items) >= STATS_BATCH_MAX:
                 stop = flush()
                 if stop is not None:

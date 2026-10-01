@@ -447,3 +447,181 @@ def test_no_clustering_starts_after_the_deadline(tmp_path, monkeypatch):
     assert st["stopped_at_deadline"] is True and st["exit_reason"] == "deadline"
     assert st["verdicts_without_stats"] == 1
     assert sum(1 for _ in reg.entries()) == n
+
+
+# ------- Ruling 20 (Coen, option 1): effective trials floored at the chain max -------
+
+def _v61_sweep(tmp_path):
+    """The v4 sweep registry judged by the v6.1 worker; NOT yet statted.
+    Returns (registry, data dir, logs dir, cutoff)."""
+    from .registry import Registry
+    from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF
+    from .test_gauntlet_worker import V61
+    from .test_screen import write_data_dir
+    from . import gauntlet_worker as gw
+    source, _ = v4_sweep_registry(tmp_path)
+    d = tmp_path / "floor"
+    d.mkdir()
+    shutil.copyfile(source.log_path, d / "reg.jsonl")
+    write_data_dir(d, {"BTCUSD": v4_bars()})
+    reg = Registry(d / "reg.jsonl")
+    reg.append("note", {"text": V61})
+    assert gw.run(["--registry", str(reg.log_path), "--data-dir", str(d / "data"),
+                   "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
+                   "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
+    return reg, d / "data", d / "logs", V4_CUTOFF
+
+
+def _stat_args(reg, data, logs, cutoff):
+    return ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--logs-dir", str(logs), "--cutoff", cutoff, "--chain"]
+
+
+def _chain_verdict(reg, sid, metrics, stage="gauntlet"):
+    """Append a gauntlet-stage verdict with `metrics`; returns its entry hash."""
+    from .common import entry_hash
+    e = reg.append("verdict", {"strategy_id": sid, "stage": stage, "verdict": "fail",
+                               "metrics": metrics, "artifacts_hash": "0" * 64})
+    return entry_hash(e)
+
+
+def _a_sid(reg):
+    return next(e["payload"]["strategy_id"] for e in reg.entries()
+                if e["entry_type"] == "strategy_registered")
+
+
+def _stats_payloads(reg):
+    return [e["payload"] for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
+
+
+def _spy_clustering(monkeypatch, trials_n=None):
+    """Capture cluster_registry's output (the job's own call); optionally force
+    its raw k, leaving trials_var as that run's clustering computed it."""
+    from . import gauntlet
+    seen = {}
+    real = gauntlet.cluster_registry
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        if trials_n is not None:
+            out = {**out, "trials_n": trials_n}
+        seen.clear()
+        seen.update(out)
+        return out
+    monkeypatch.setattr(gs, "cluster_registry", spy)
+    return seen
+
+
+def test_trials_n_is_floored_at_a_v6_verdicts_cluster_count(tmp_path, monkeypatch, capsys):
+    """A v6 verdict on the chain recorded trials_n = 302; this run's argmax is
+    smaller. The entry records raw, floor, the floor entry's hash and
+    trials_n = 302, and the deflated Sharpe AND the haircut use 302 -- not
+    the raw k."""
+    import pytest
+    from .stats import (moments, sharpe, psr, expected_max_sharpe,
+                        harvey_liu_haircut, inv_normal_cdf)
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    floor_hash = _chain_verdict(reg, _a_sid(reg),
+                                {"protocol": "gauntlet-protocol-v6", "trials_n": 302})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    raw = seen["trials_n"]
+    assert 1 < raw < 302 and seen["trials_var"] > 0
+    stats = _stats_payloads(reg)
+    assert len(stats) > 1
+    differs_dsr = differs_haircut = 0
+    for p in stats:
+        assert p["trials_n_raw"] == raw
+        assert p["trials_n_floor"] == 302 and p["trials_n_floor_entry_hash"] == floor_hash
+        assert p["trials_n"] == 302
+        assert p["trials_sr_var"] == seen["trials_var"]          # this run's clustering
+        r = list(seen["returns_by_id"][p["strategy_id"]])
+        _, _, skew, kurt = moments(r)
+        sr_hat = sharpe(r)
+        floored = psr(sr_hat, expected_max_sharpe(302, seen["trials_var"]),
+                      len(r), skew, kurt)
+        at_raw = psr(sr_hat, expected_max_sharpe(raw, seen["trials_var"]),
+                     len(r), skew, kurt)
+        assert p["expected_max_sharpe"] == expected_max_sharpe(302, seen["trials_var"])
+        assert p["deflated_sharpe"] == floored
+        differs_dsr += floored != at_raw
+        h = p["haircut"]
+        if h["sr_observed"] > 0 and h["p_raw"] is not None:
+            # recover the train t_years from the recorded p_raw, then redo the
+            # haircut at the floor and at the raw k
+            t_stat = inv_normal_cdf(1.0 - h["p_raw"] / 2.0)
+            t_years = (t_stat / h["sr_observed"]) ** 2
+            at_floor = harvey_liu_haircut(h["sr_observed"], t_years, 302)
+            at_raw_h = harvey_liu_haircut(h["sr_observed"], t_years, raw)
+            assert h["p_adjusted"] == min(1.0, h["p_raw"] * 302)
+            assert h["sr_haircut"] == pytest.approx(at_floor["sr_haircut"], abs=1e-6)
+            differs_haircut += h["sr_haircut"] != pytest.approx(
+                at_raw_h["sr_haircut"], abs=1e-6)
+    assert differs_dsr, "the fixture must separate the floored DSR from the raw-k DSR"
+    assert differs_haircut, "the fixture must separate the floored haircut from the raw-k one"
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_verdict_without_a_cluster_count_protocol_is_no_floor(tmp_path, monkeypatch, capsys):
+    """Protocol-None and protocol-v2 verdicts hold REGISTRATION counts (and a
+    v6.1 verdict holds no trials_n): all excluded, so with no v3+ verdict and
+    no earlier stats entry the floor is None and trials_n is the raw k. A bool
+    or a string under a qualifying protocol is not an int and is ignored."""
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    sid = _a_sid(reg)
+    _chain_verdict(reg, sid, {"trials_n": 56})                         # no protocol
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v2", "trials_n": 99})
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v6.1", "trials_n": 400})
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v6", "trials_n": True})
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v5", "trials_n": "302"})
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v6", "trials_n": 777},
+                   stage="screened")                                   # not gauntlet-stage
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    stats = _stats_payloads(reg)
+    assert stats
+    for p in stats:
+        assert p["trials_n_raw"] == p["trials_n"] == seen["trials_n"]
+        assert p["trials_n_floor"] is None and p["trials_n_floor_entry_hash"] is None
+
+
+def test_a_raw_k_above_the_floor_stands(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    floor_hash = _chain_verdict(reg, _a_sid(reg),
+                                {"protocol": "gauntlet-protocol-v3", "trials_n": 1})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    assert seen["trials_n"] > 1
+    for p in _stats_payloads(reg):
+        assert p["trials_n_raw"] == p["trials_n"] == seen["trials_n"]
+        assert p["trials_n_floor"] == 1 and p["trials_n_floor_entry_hash"] == floor_hash
+
+
+def test_the_floor_is_monotone_across_runs(tmp_path, monkeypatch, capsys):
+    """A second run's floor includes the first run's trials_n_raw (no v3+
+    verdict at all on this chain), so a smaller second argmax cannot lower N."""
+    from .common import entry_hash
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    _spy_clustering(monkeypatch, trials_n=77)            # run 1's raw k
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    first = [e for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
+    assert first and all(e["payload"]["trials_n_raw"] == 77 for e in first)
+    assert all(e["payload"]["trials_n_floor"] is None for e in first)
+    # a new v6.1 verdict to stat on the second night
+    _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v6.1"})
+    seen = _spy_clustering(monkeypatch)                  # run 2: the real, smaller k
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    assert seen["trials_n"] < 77
+    new = _stats_payloads(reg)[len(first):]
+    assert len(new) == 1
+    p = new[0]
+    assert p["trials_n_raw"] == seen["trials_n"]
+    assert p["trials_n_floor"] == 77 and p["trials_n"] == 77
+    assert p["trials_n_floor_entry_hash"] == entry_hash(first[0])   # first to supply it
+    assert run_verifier(reg.log_path).returncode == 0
