@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import deadline as _deadline
 from .chainlock import ChainLock, ChainLockHeld
-from .registry import ChainMoved, ChainSnapshot, Registry
+from .registry import ChainMoved, ChainSnapshot, Registry, UnstableEntry
 from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
@@ -297,10 +297,13 @@ def run(argv: list[str] | None = None) -> int:
                             snap, sid, "pass" if r["passed"] else "fail",
                             r["metrics"], bundle_hash(bundle, names=ARTIFACT_NAMES),
                             to, reason)
-                    except ChainMoved:
-                        # someone appended without chain.lock between the
-                        # advance and the write: nothing was written; the
-                        # next candidate's advance() absorbs their entry
+                    except (ChainMoved, UnstableEntry):
+                        # ChainMoved: someone appended without chain.lock
+                        # between the advance and the write; the next
+                        # candidate's advance() absorbs their entry.
+                        # UnstableEntry: this candidate's metrics do not
+                        # round-trip through JSON. Either way nothing was
+                        # written and the candidate stays queued.
                         errored(sid)
                         return
                     status["passed" if r["passed"] else "failed_gates"] += 1

@@ -211,6 +211,14 @@ class ChainMoved(RuntimeError):
     caller must write nothing and re-read."""
 
 
+class UnstableEntry(ValueError):
+    """An entry whose canonical JSON does not survive a parse: re-serializing
+    the parsed line gives different bytes (e.g. a dict with non-string keys,
+    which canonical_json sorts BEFORE stringifying). Its on-disk hash would
+    differ from its in-memory one, so anything chained after it would be a
+    broken link. Refused before anything is written."""
+
+
 @dataclass(frozen=True)
 class ChainSnapshot:
     """The chain as of `byte_len` bytes: lifecycle states, the strategies
@@ -520,22 +528,31 @@ class Registry:
         """Append `items` chained onto snap's head, under the append
         FileLock, refusing (ChainMoved, nothing written) if the log is not
         exactly snap.byte_len bytes. Returns the advanced snapshot."""
+        # Build and check every line BEFORE the lock. Each hash, and so each
+        # next prev_entry_hash, comes from the PARSED line -- what the verifier,
+        # snapshot() and advance() all hash -- never from the in-memory dict.
+        states, judged = dict(snap.states), set(snap.gauntlet_judged)
+        head, pos, head_off = snap.head_hash, snap.byte_len, snap.head_offset
+        out = b""
+        for entry_type, payload in items:
+            text = canonical_json(_make_entry(entry_type, payload, head))
+            parsed = json.loads(text)
+            if canonical_json(parsed) != text:
+                raise UnstableEntry(
+                    f"{entry_type} for {payload.get('strategy_id')!r} does not "
+                    f"round-trip through JSON (non-string dict keys?); nothing "
+                    f"written")
+            line = _line_bytes(parsed)
+            head_off, pos = pos, pos + len(line)
+            head = entry_hash(parsed)
+            out += line
+            _fold(states, judged, parsed)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(self.log_path):
             size = self.log_path.stat().st_size if self.log_path.exists() else 0
             if size != snap.byte_len:
                 raise ChainMoved(f"log is {size} bytes, snapshot saw "
                                  f"{snap.byte_len}: appended without chain.lock?")
-            states, judged = dict(snap.states), set(snap.gauntlet_judged)
-            head, pos, head_off = snap.head_hash, snap.byte_len, snap.head_offset
-            out = b""
-            for entry_type, payload in items:
-                entry = _make_entry(entry_type, payload, head)
-                line = _line_bytes(entry)
-                head_off, pos = pos, pos + len(line)
-                head = entry_hash(entry)
-                out += line
-                _fold(states, judged, entry)
             with self.log_path.open("ab") as f:
                 f.write(out)
         return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,

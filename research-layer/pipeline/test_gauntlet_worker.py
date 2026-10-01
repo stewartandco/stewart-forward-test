@@ -363,3 +363,22 @@ def test_a_chain_that_moved_under_the_lock_is_an_error_not_a_write(tmp_path, mon
     assert not _verdicts(reg)
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
     assert _status(tmp_path)["errored"] == 1
+
+
+def test_a_candidate_whose_metrics_do_not_round_trip_is_errored_not_fatal(tmp_path, monkeypatch):
+    """Ruling 9's refusal is per candidate: nothing is chained for it, the
+    run exits 1, and it does not crash the worker (a crash would block every
+    later run on the same cheapest-first candidate)."""
+    reg, spec, data = _setup(tmp_path)
+    real = gw.evaluate_standalone
+    def int_keys(*a, **k):
+        out = real(*a, **k)
+        out["metrics"]["m"] = {9: 1.0, 10: 2.0}
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", int_keys)
+    assert _run(reg, data, tmp_path) == 1
+    assert not _verdicts(reg)
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+    st = _status(tmp_path)
+    assert st["errored"] == 1 and st["exit_reason"] == "candidate_errors"
+    assert run_verifier(reg.log_path).returncode == 0

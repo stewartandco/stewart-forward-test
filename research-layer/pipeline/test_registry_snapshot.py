@@ -173,3 +173,41 @@ def test_outcome_chains_onto_the_snapshot_head(tmp_path):
     assert tail[0]["prev_entry_hash"] == snap.head_hash
     assert tail[1]["prev_entry_hash"] == entry_hash(tail[0])
     assert tail[1]["payload"]["buried_at"] == "gauntlet"
+
+
+# ---------------- fix round 2 (Ruling 9): hash the serialized line ----------------
+
+def test_outcome_refuses_metrics_that_do_not_round_trip(tmp_path):
+    """canonical_json sorts keys BEFORE stringifying them, so a dict with
+    int keys {9, 10} serializes 9-then-10 but parses back as "10"-then-"9":
+    the line on disk would not hash to what the in-memory entry hashes to,
+    and the state change chained after it would be a permanent broken link.
+    Refuse before writing anything."""
+    from .registry import UnstableEntry
+    reg, spec = gauntlet_registry(tmp_path)
+    snap = reg.snapshot()
+    before = reg.log_path.read_bytes()
+    with pytest.raises(UnstableEntry):
+        reg.record_gauntlet_outcome(snap, spec["strategy_id"], "fail",
+                                    {"protocol": "gauntlet-protocol-v6.1",
+                                     "m": {9: 1.0, 10: 2.0}},
+                                    "0" * 64, "graveyard", "oos_negative")
+    assert reg.log_path.read_bytes() == before
+    assert not (tmp_path / "reg.jsonl.lock").exists()
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_outcome_hashes_the_line_not_the_dict(tmp_path):
+    """Regression pin: a value canonical_json stringifies (default=str) is
+    stable and still verifies, and the returned snapshot's head matches a
+    fresh read. (Not discriminating on its own -- default=str hashes the same
+    in memory and parsed; the non-string-key test above is the one that
+    separates line-hash from dict-hash.)"""
+    import datetime as dt
+    reg, spec = gauntlet_registry(tmp_path)
+    new = reg.record_gauntlet_outcome(
+        reg.snapshot(), spec["strategy_id"], "fail",
+        {"protocol": "gauntlet-protocol-v6.1", "when": dt.date(2026, 10, 1)},
+        "0" * 64, "graveyard", "oos_negative")
+    _same(new, reg.snapshot())
+    assert run_verifier(reg.log_path).returncode == 0
