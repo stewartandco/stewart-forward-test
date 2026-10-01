@@ -1405,3 +1405,59 @@ def test_every_self_benchmark_class_made_a_basis_decision():
             f"class {cls!r} declares benchmark 'self' but has neither its own "
             f"BENCHMARK_BASIS entry nor a pinned seat in "
             f"_DEFAULT_BASIS_CLASSES -- decide its basis wording deliberately")
+
+
+# ------- Ruling 23 (C1): no family kill once the v6.1 note is chained -------
+
+def _run_with_forced_family_kill(tmp_path, monkeypatch, chain_v61_note):
+    """dead_and_live_family_registry with the live family's PBO percentile
+    forced to 1.0 (>= PBO_KILL_PCTILE), so the old stage WOULD kill it.
+    `chain_v61_note` appends a "gauntlet-protocol-v6.1:" note first: the
+    GAUNTLET_IN_LOOP=True rollback path after cutover step 2."""
+    from .gauntlet import run as gauntlet_run
+    from .test_gauntlet import v4_bars, V4_CUTOFF, write_data_dir, run_verifier
+
+    reg, live_sids, dead_sids, live_group, dead_group = \
+        dead_and_live_family_registry(tmp_path)
+    if chain_v61_note:
+        reg.append("note", {"text": "gauntlet-protocol-v6.1: test anchor"})
+    monkeypatch.setattr(gauntlet_mod, "percentile_of", lambda null, v: 1.0)
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
+                                     "ETHUSD": _flat_like(v4_bars())})
+    rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art"),
+                       "--cutoff", V4_CUTOFF, "--pbo-null-draws", "8"])
+    assert rc == 0
+    verdicts = {e["payload"]["strategy_id"]: e["payload"]
+                for e in reg.entries() if e["entry_type"] == "verdict"
+                and e["payload"].get("stage") == "gauntlet"}
+    reasons = {e["payload"]["strategy_id"]: e["payload"]["reason"]
+               for e in reg.entries() if e["entry_type"] == "state_change"
+               and e["payload"]["to"] in ("graveyard", "quarantine")}
+    live = [verdicts[sid] for sid in live_sids.values()]
+    assert all(v["metrics"]["pbo_verdict"] == "kill" for v in live), \
+        "fixture bug: the forced percentile did not make the family a kill"
+    return reg, live, reasons, live_sids, run_verifier(reg.log_path)
+
+
+def test_rollback_stage_after_the_v61_note_applies_no_family_kill(
+        tmp_path, monkeypatch):
+    reg, live, reasons, live_sids, vr = _run_with_forced_family_kill(
+        tmp_path, monkeypatch, chain_v61_note=True)
+    assert all(v["metrics"]["pbo_family_kill"] is False for v in live)
+    assert "pbo_family_kill" not in reasons.values()
+    assert any(v["verdict"] == "pass" for v in live), \
+        "a gate-passer of a 'kill' family must still pass after the note"
+    assert vr.returncode == 0, vr.stdout
+    assert "VALID" in vr.stdout
+
+
+def test_old_stage_without_the_v61_note_still_kills_the_family(
+        tmp_path, monkeypatch):
+    """The control: the same fixture with no note still applies the kill,
+    so the test above can fail."""
+    reg, live, reasons, live_sids, vr = _run_with_forced_family_kill(
+        tmp_path, monkeypatch, chain_v61_note=False)
+    assert all(v["metrics"]["pbo_family_kill"] is True for v in live)
+    assert "pbo_family_kill" in {reasons[s] for s in live_sids.values()}
+    assert vr.returncode == 0, vr.stdout   # no note: v6 history, still VALID

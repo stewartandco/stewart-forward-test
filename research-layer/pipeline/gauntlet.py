@@ -88,6 +88,8 @@ from .gauntlet_core import (FAIL_ORDER, SR_FLOOR, DECAY_MIN_PCT, MC_PATHS,
                             GAUNTLET_CHUNK_PER_WORKER, WORKER_COMMIT_MB,
                             WORKER_COMMIT_HEADROOM_MB, WORKER_BLAS_ENV,
                             worker_count, available_commit_mb, worker_env)
+# The worker's note marker, imported rather than re-spelled (Ruling 23).
+from .gauntlet_core import PROTOCOL_V61
 
 PROTOCOL = "gauntlet-protocol-v6"
 # protocol-v3: DSR_MIN no longer gates THIS stage. It is retained verbatim as
@@ -841,6 +843,18 @@ def run(argv: list[str] | None = None) -> int:
               f"(dry-run is allowed).")
         return 1
 
+    # Ruling 23 (C1): once a "gauntlet-protocol-v6.1:" note is chained, this
+    # stage applies NO family kill. v6 retired it and verify_registry's
+    # invariant 12 rejects any later verdict that carries pbo_family_kill
+    # true, or state change that cites it, so the rollback path
+    # (GAUNTLET_IN_LOOP=True after the note) must never write one: an
+    # INVALID entry on the append-only chain would wedge the loop for good.
+    # Detected exactly as pipeline.gauntlet_worker detects the same note.
+    v61_noted = any(
+        e["entry_type"] == "note"
+        and str(e["payload"].get("text", "")).startswith(PROTOCOL_V61 + ":")
+        for e in registry.entries())
+
     all_specs = [e["payload"] for e in registry.entries()
                  if e["entry_type"] == "strategy_registered"]
     candidates = [s for s in all_specs
@@ -1150,8 +1164,11 @@ def run(argv: list[str] | None = None) -> int:
               + f"  -> {res['verdict']}")
         if gi % 25 == 0 or gi == n_groups:
             print(f"[gauntlet] pbo group {gi}/{n_groups}", flush=True)
-    killed_groups = {g for g, r in pbo_by_group.items()
-                     if r["verdict"] == "kill"}
+    killed_groups = set() if v61_noted else {
+        g for g, r in pbo_by_group.items() if r["verdict"] == "kill"}
+    if v61_noted and any(r["verdict"] == "kill" for r in pbo_by_group.values()):
+        print(f"  ({PROTOCOL_V61} is chained: a 'kill' PBO verdict is recorded "
+              f"only; no family kill is applied)")
     for g in sorted(killed_groups):
         print(f"  PBO FAMILY KILL: {g} at {pbo_by_group[g]['pbo']:.3f}, "
               f"the {pbo_by_group[g]['percentile']:.0%} percentile of its own "
