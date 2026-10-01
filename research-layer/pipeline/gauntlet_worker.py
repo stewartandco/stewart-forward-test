@@ -38,6 +38,12 @@ PRIOR_S_PER_CANDIDATE = GAUNTLET_PRIOR_S_PER_CANDIDATE
 # at 25 minutes plus one chunk's overrun, and the task fires every 30.
 INSTANCE_STALE_AFTER_S = 3600
 ARTIFACT_NAMES = ("oos_trades.csv", "mc_summary.json", "config.json")
+# I2 (final review): the judged bundles the wrapper must commit with the
+# registry. One repo-relative path per line, appended after each verdict
+# write; tasks/run_gauntlet_worker.bat commits registry_log.jsonl plus these
+# in ONE pathspec-scoped commit and clears the list only after that commit
+# succeeded. logs/ is gitignored.
+COMMIT_LIST = "gauntlet_worker_commit_paths.txt"
 
 
 def _now() -> datetime:
@@ -159,6 +165,40 @@ def _evaluate_payload(payload: dict) -> dict:
                                payload["cutoff"], payload["perturb"])
 
 
+def _record_bundle(logs_dir: Path, repo_root: Path, bundle: Path) -> None:
+    """Queue one judged bundle for the wrapper's scoped commit. A bundle
+    outside the repo (a test's tmp dir) cannot be committed and is not
+    listed. A failure to append is a disk failure and aborts the run like
+    any other (exit 1, 'crashed'), so it is never silent."""
+    try:
+        rel = Path(bundle).resolve().relative_to(Path(repo_root).resolve())
+    except ValueError:
+        print(f"bundle {bundle} is outside {repo_root}: not queued for commit",
+              flush=True)
+        return
+    with (Path(logs_dir) / COMMIT_LIST).open("a", encoding="utf-8",
+                                             newline="\n") as f:
+        f.write(rel.as_posix() + "\n")
+
+
+def _prune_commit_list(logs_dir: Path, repo_root: Path) -> None:
+    """Drop duplicates and paths that no longer exist from the commit list,
+    so one deleted bundle dir can never make the wrapper's `git add` fail
+    (an unmatched pathspec is fatal to the whole add) on every later run."""
+    p = Path(logs_dir) / COMMIT_LIST
+    if not p.exists():
+        return
+    lines = p.read_text(encoding="utf-8").splitlines()
+    keep = list(dict.fromkeys(
+        ln.strip() for ln in lines
+        if ln.strip() and (Path(repo_root) / ln.strip()).exists()))
+    if keep != lines:
+        tmp = p.with_suffix(".txt.tmp")
+        tmp.write_text("".join(k + "\n" for k in keep), encoding="utf-8",
+                       newline="\n")
+        tmp.replace(p)
+
+
 def _write_status(logs_dir: Path, status: dict) -> None:
     p = logs_dir / "gauntlet_worker_status.json"
     tmp = p.with_suffix(".json.tmp")
@@ -172,6 +212,8 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--data-dir", type=Path, default=LAYER / "data")
     ap.add_argument("--artifacts-dir", type=Path, default=LAYER / "artifacts")
     ap.add_argument("--logs-dir", type=Path, default=LAYER / "logs")
+    ap.add_argument("--repo-root", type=Path, default=LAYER.parent,
+                    help="git root the commit list's paths are relative to")
     ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
     ap.add_argument("--deadline-minutes", type=float, default=25.0)
     ap.add_argument("--no-perturb", dest="perturb", action="store_false")
@@ -213,6 +255,7 @@ def run(argv: list[str] | None = None) -> int:
         except ChainLockHeld:
             return finish(0, "deferred_instance", write=False)
     try:
+        _prune_commit_list(a.logs_dir, a.repo_root)
         registry = Registry(a.registry)
         # The run's ONE full chain read, outside any lock. Everything done
         # under chain.lock from here on advances this snapshot over the tail
@@ -310,6 +353,7 @@ def run(argv: list[str] | None = None) -> int:
                         # written and the candidate stays queued.
                         errored(sid)
                         return
+                    _record_bundle(a.logs_dir, a.repo_root, bundle)
                     status["passed" if r["passed"] else "failed_gates"] += 1
                     status["evaluated"] += 1
                     print(f"{sid}  {'PASS' if r['passed'] else 'FAIL ' + str(r['reason'])}",

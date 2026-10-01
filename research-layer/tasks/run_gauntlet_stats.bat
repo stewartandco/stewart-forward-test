@@ -32,7 +32,9 @@ if exist "%LAYER%\logs\chain.lock" (
   echo chain.lock held, commit skipped >> "%LOG%"
   goto :done
 )
-git diff --quiet -- research-layer/registry_log.jsonl
+rem vs HEAD, not the index: a registry change another session staged is
+rem still uncommitted and still ours to commit.
+git diff --quiet HEAD -- research-layer/registry_log.jsonl
 if errorlevel 1 (
   git commit -q -m "gauntlet stats: %DATE%" -- research-layer/registry_log.jsonl >> "%LOG%" 2>&1
 )

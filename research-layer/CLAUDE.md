@@ -143,8 +143,12 @@ of it.
   state change as soon as it exists. Its import graph has no clustering or PBO
   module (a test pins it). Verdicts carry `metrics.protocol
   gauntlet-protocol-v6.1` and NO registry-wide statistics. The family kill is
-  NOT applied. The wrapper commits `registry_log.jsonl` best-effort, scoped to
-  that one path, skips the commit while chain.lock exists, and never pushes.
+  NOT applied. After each verdict write the worker appends the judged bundle's
+  repo-relative path to `logs/gauntlet_worker_commit_paths.txt`; the wrapper
+  commits `registry_log.jsonl` plus those bundles best-effort in ONE commit,
+  scoped by `--pathspec-from-file` (never argv, never anything another session
+  staged), and clears the list only after that commit succeeds. It skips the
+  commit while chain.lock exists (the list is kept) and never pushes.
 - **Run order and failure rules.** (1) Orphan repair: a v6.1 verdict with no
   following state change gets the change it implies (fail -> graveyard with the
   gate as the reason, pass -> quarantine); a verdict is NEVER re-evaluated.

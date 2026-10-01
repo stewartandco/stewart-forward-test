@@ -402,3 +402,53 @@ def test_a_deferred_instance_leaves_the_owners_status_file_alone(tmp_path, capsy
         inst.release()
     assert status_path.read_bytes() == before
     assert "deferred_instance" in capsys.readouterr().out
+
+
+# ---- I2 (final review): judged bundles are queued for the wrapper's commit ----
+
+def _commit_list(tmp_path):
+    p = tmp_path / "logs" / gw.COMMIT_LIST
+    return p.read_text(encoding="utf-8").splitlines() if p.exists() else None
+
+
+def test_each_judged_bundle_is_listed_repo_relative_for_the_commit(tmp_path):
+    reg, a, b, data = _two_candidates(tmp_path)
+    assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path)) == 0
+    # cheapest first: B's bundle is written (and listed) before A's
+    assert _commit_list(tmp_path) == [f"art/{b['strategy_id']}/gauntlet",
+                                      f"art/{a['strategy_id']}/gauntlet"]
+    for line in _commit_list(tmp_path):
+        assert (tmp_path / line / "config.json").exists()
+
+
+def test_a_candidate_with_no_verdict_lists_no_bundle(tmp_path, monkeypatch):
+    reg, spec, data = _setup(tmp_path)
+    monkeypatch.setattr(gw, "evaluate_standalone",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path)) == 1
+    assert _commit_list(tmp_path) is None
+
+
+def test_the_list_accumulates_until_the_wrapper_clears_it(tmp_path):
+    """The worker only appends: an earlier run's uncommitted entries (a
+    skipped commit) survive the next run, deduplicated."""
+    reg, spec, data = _setup(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    old = tmp_path / "art" / "0123456789abcdef" / "gauntlet"
+    old.mkdir(parents=True)
+    (logs / gw.COMMIT_LIST).write_text(
+        "art/0123456789abcdef/gauntlet\n"
+        "art/0123456789abcdef/gauntlet\n"          # duplicate -> pruned
+        "art/deadbeefdeadbeef/gauntlet\n",         # missing dir -> pruned
+        encoding="utf-8")
+    assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path)) == 0
+    assert _commit_list(tmp_path) == ["art/0123456789abcdef/gauntlet",
+                                      f"art/{spec['strategy_id']}/gauntlet"]
+
+
+def test_a_bundle_outside_the_repo_root_is_not_listed(tmp_path):
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path / "elsewhere")) == 0
+    assert _status(tmp_path)["evaluated"] == 1
+    assert _commit_list(tmp_path) is None
