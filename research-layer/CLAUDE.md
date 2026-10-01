@@ -153,10 +153,19 @@ of it.
   following state change gets the change it implies (fail -> graveyard with the
   gate as the reason, pass -> quarantine); a verdict is NEVER re-evaluated.
   (2) The queue. A candidate that raises gets NO verdict, stays queued, and the
-  run exits 1; nothing is skipped or buried because of a crash. The loop's
-  `gauntlet_orphan` pre-spend check still exists, so if a crash ever leaves a
-  v6.1 verdict without its state change the 20:00 loop FAILs on it until the
-  next worker run repairs it.
+  run exits 1; nothing is skipped or buried because of a crash. A v6.1 orphan
+  is caught ONLY by the worker's own repair at the start of each run: the
+  loop's `gauntlet_orphan` pre-spend check (`loop._gauntlet_orphans`)
+  deliberately EXCLUDES v6.1 verdicts, so the 20:00 loop never sees one, and
+  an orphan is judged, so it is not counted in the status `queued` or
+  `oldest_queued_age_hours`. If the repair itself raises (a chain or disk
+  failure, or a chain that moved under chain.lock) the run exits 1 with
+  `exit_reason` `crashed`, and the Sentinel FAILs both the task result and the
+  `gauntlet_queue` check. If chain.lock is held the repair is deferred to the
+  next run with only a log line (`orphan repair deferred` in
+  `logs/gauntlet-worker-run.log`, `repaired` 0); nothing alarms on a deferral
+  alone. (Under the GAUNTLET_IN_LOOP rollback, `pipeline.gauntlet` refuses on
+  any orphan, v6.1 included, and exits 1.)
 - **Locks.** The worker's own instance lock is `logs/gauntlet_worker.lock`
   (stale after one hour, broken only when stale AND its holder is dead). A
   second instance defers (exit 0) and NEVER writes the status file, so a wedged
@@ -175,7 +184,15 @@ of it.
   carries the multi-gigabyte work, which is why it runs at 01:00: the worker is
   memory-light and safe by day. Entries carry `data_vintage`, `data_digest` and
   `data_end_by_cell`; the vintage names a Sunday but does NOT pin the bars, so
-  compare digests, never vintages.
+  compare digests, never vintages. A clustering pass starts only when the
+  time left covers its estimate (the last measured duration, `cluster_s` in
+  its status file, else a 2 h prior), and each PBO null only when the time
+  left covers the measured mean (`pbo_null_mean_s`, else 60 s); a pass that
+  does not fit is a deadline stop. One instance at a time
+  (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
+  the 01:00 task, defers with exit 0 and never touches the status file.
+  The status reports `trials_n_raw` (this run's argmax) and
+  `trials_n_effective` (the floored N the entries use).
 - **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on
   cutover step 7 (the wrapper has no `--chain` today). Coen's effective-trials
   decision (2026-10-01, option 1) is in the v6.1 addendum and IS implemented
@@ -202,12 +219,13 @@ of it.
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
-  the Sentinel's `hourly` list, `28_GauntletStats` in `daily`. Do not rename
+  the Sentinel's `hourly` list (267009, still running at the 09:15 digest, is
+  tolerated for it alone), `28_GauntletStats` in `daily`. Do not rename
   these fields without changing `sc-ops-sentinel` in the same change.
 - **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
   (routine); 1 = a candidate raised, the run crashed, or setup was refused.
-  Stats: 0 = done, nothing to do, deadline stop, or chain.lock held; 1 = the
-  data or the chain refused the run.
+  Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
+  instance running; 1 = the data or the chain refused the run.
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
   Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry
