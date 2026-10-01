@@ -211,3 +211,145 @@ def test_outcome_hashes_the_line_not_the_dict(tmp_path):
         "0" * 64, "graveyard", "oos_negative")
     _same(new, reg.snapshot())
     assert run_verifier(reg.log_path).returncode == 0
+
+
+# ---------------- Task 7 (Ruling 10): batched gauntlet_stats ----------------
+
+V61_NOTE = "gauntlet-protocol-v6.1: test anchor"
+
+
+def _statted_registry(tmp_path, name="reg.jsonl"):
+    """Five siblings, each with a v6.1 gauntlet verdict and its state change.
+    Returns (registry, [(sid, verdict_entry_hash), ...])."""
+    from .test_gauntlet import v4_sweep_registry
+    d = tmp_path / name.replace(".jsonl", "")
+    d.mkdir()
+    reg, by_lb = v4_sweep_registry(d)
+    reg.append("note", {"text": V61_NOTE})
+    out = []
+    for lb, sid in sorted(by_lb.items()):
+        v = reg.record_verdict(sid, "gauntlet", "fail",
+                               {"protocol": "gauntlet-protocol-v6.1",
+                                "fail_reason": "oos_negative"}, "0" * 64)
+        reg.record_state_change(sid, "graveyard", "oos_negative")
+        out.append((sid, entry_hash(v)))
+    return reg, out
+
+
+def _stats(i):
+    return {"trials_n": 3 + i, "deflated_sharpe": 0.25 * i, "pbo": None,
+            "cluster_method": "effective_trials/v3 correlation-distance",
+            "data_vintage": "2026-09-27"}
+
+
+def test_stats_snapshot_tracks_v61_verdicts_and_stats(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    reg.record_gauntlet_stats(vs[0][0], vs[0][1], _stats(0))
+    snap = reg.snapshot(track_stats=True)
+    assert dict(snap.v61_verdicts) == {vh: sid for sid, vh in vs}
+    assert snap.statted == {vs[0][1]}
+    # the default snapshot does not pay for hashing every verdict
+    plain = reg.snapshot()
+    assert not plain.tracks_stats and not plain.v61_verdicts
+
+
+def test_stats_batch_is_byte_identical_to_sequential_calls(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry_mod, "_now_utc", lambda: FIXED_TS)
+    ra, vs = _statted_registry(tmp_path)
+    rb = Registry(tmp_path / "twin.jsonl")
+    rb.log_path.write_bytes(ra.log_path.read_bytes())
+    for i, (sid, vh) in enumerate(vs):
+        ra.record_gauntlet_stats(sid, vh, _stats(i))
+    new = rb.record_gauntlet_stats_batch(
+        rb.snapshot(track_stats=True),
+        [(sid, vh, _stats(i)) for i, (sid, vh) in enumerate(vs)])
+    assert rb.log_path.read_bytes() == ra.log_path.read_bytes()
+    fresh = rb.snapshot(track_stats=True)
+    _same(new, fresh)
+    assert new.statted == fresh.statted == {vh for _, vh in vs}
+    r = run_verifier(rb.log_path)
+    assert r.returncode == 0, r.stdout
+
+
+def test_stats_batch_drops_a_verdict_that_already_has_stats(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    snap = reg.snapshot(track_stats=True)
+    # chained by someone else AFTER the snapshot was taken: the batch must
+    # see it on the advanced tail and drop the item, not write a second one
+    reg.record_gauntlet_stats(vs[0][0], vs[0][1], _stats(0))
+    before = reg.log_path.read_bytes()
+    new = reg.record_gauntlet_stats_batch(snap, [(vs[0][0], vs[0][1], _stats(9))])
+    assert reg.log_path.read_bytes() == before          # nothing written
+    new = reg.record_gauntlet_stats_batch(
+        new, [(sid, vh, _stats(1)) for sid, vh in vs[:2]])
+    stats = [e for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
+    assert [e["payload"]["verdict_entry_hash"] for e in stats] == [vs[0][1], vs[1][1]]
+    assert stats[0]["payload"]["trials_n"] == 3       # the first one stands
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_stats_batch_refuses_a_duplicate_within_the_batch(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    before = reg.log_path.read_bytes()
+    sid, vh = vs[0]
+    with pytest.raises(ValueError):
+        reg.record_gauntlet_stats_batch(reg.snapshot(track_stats=True),
+                                        [(sid, vh, _stats(0)), (sid, vh, _stats(1))])
+    assert reg.log_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ["unknown_hash", "wrong_sid", "v6_verdict"])
+def test_stats_batch_refuses_what_the_verifier_would(tmp_path, case):
+    reg, vs = _statted_registry(tmp_path)
+    if case == "unknown_hash":
+        item = (vs[0][0], "f" * 64, _stats(0))
+    elif case == "wrong_sid":
+        item = (vs[1][0], vs[0][1], _stats(0))
+    else:
+        # a verdict that is NOT v6.1 cannot carry a gauntlet_stats entry
+        from .test_gauntlet import gauntlet_registry
+        r2, spec = gauntlet_registry(tmp_path / "v6")
+        v = r2.record_verdict(spec["strategy_id"], "gauntlet", "fail",
+                              {"protocol": "gauntlet-protocol-v6"}, "0" * 64)
+        reg, item = r2, (spec["strategy_id"], entry_hash(v), _stats(0))
+    before = reg.log_path.read_bytes()
+    with pytest.raises(ValueError):
+        reg.record_gauntlet_stats_batch(reg.snapshot(track_stats=True),
+                                        [vs[2] + (_stats(2),), item]
+                                        if case != "v6_verdict" else [item])
+    assert reg.log_path.read_bytes() == before
+
+
+def test_stats_batch_refuses_an_untracked_snapshot_or_an_oversized_batch(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    before = reg.log_path.read_bytes()
+    with pytest.raises(ValueError):
+        reg.record_gauntlet_stats_batch(reg.snapshot(), [vs[0] + (_stats(0),)])
+    too_many = [vs[0] + (_stats(0),)] * (registry_mod.STATS_BATCH_MAX + 1)
+    with pytest.raises(ValueError):
+        reg.record_gauntlet_stats_batch(reg.snapshot(track_stats=True), too_many)
+    assert reg.log_path.read_bytes() == before
+
+
+def test_stats_batch_refuses_a_log_that_grew_without_linking(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    snap = reg.snapshot(track_stats=True)
+    bad = {"version": 1, "ts_utc": FIXED_TS, "entry_type": "note",
+           "prev_entry_hash": "f" * 64, "payload": {"text": "forked"}}
+    with reg.log_path.open("a", encoding="utf-8") as f:
+        f.write(registry_mod.canonical_json(bad) + "\n")
+    before = reg.log_path.read_bytes()
+    with pytest.raises(ChainMoved):
+        reg.record_gauntlet_stats_batch(snap, [vs[0] + (_stats(0),)])
+    assert reg.log_path.read_bytes() == before
+
+
+def test_advance_tracks_stats_over_the_tail(tmp_path):
+    reg, vs = _statted_registry(tmp_path)
+    snap = reg.snapshot(track_stats=True)
+    reg.record_gauntlet_stats(vs[3][0], vs[3][1], _stats(3))
+    adv = reg.advance(snap)
+    fresh = reg.snapshot(track_stats=True)
+    _same(adv, fresh)
+    assert adv.statted == fresh.statted == {vs[3][1]}
+    assert dict(adv.v61_verdicts) == dict(fresh.v61_verdicts)

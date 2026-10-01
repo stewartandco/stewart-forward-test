@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -219,22 +219,42 @@ class UnstableEntry(ValueError):
     broken link. Refused before anything is written."""
 
 
+PROTOCOL_V61 = "gauntlet-protocol-v6.1"
+# Ruling 10: at most this many gauntlet_stats entries per chain.lock hold.
+# The batch writer refuses more, so a caller cannot hold the lock for an
+# unbounded append; it chunks and releases chain.lock between chunks.
+STATS_BATCH_MAX = 200
+
+
 @dataclass(frozen=True)
 class ChainSnapshot:
     """The chain as of `byte_len` bytes: lifecycle states, the strategies
     holding any gauntlet-stage verdict, and the head entry's hash plus the
     byte offset where that entry's line starts (so advance() can re-hash it
-    and notice a rewritten head)."""
+    and notice a rewritten head).
+
+    With `tracks_stats` (snapshot(track_stats=True); Build 2a task 7) it also
+    carries every v6.1 gauntlet verdict's entry hash -> strategy id and the
+    set of verdict hashes that already have a gauntlet_stats entry -- exactly
+    what verify_registry.py invariant 11 checks. Off by default: it hashes
+    every v6.1 verdict, which only the statistics job needs to pay for."""
     states: Mapping[str, str]
     gauntlet_judged: frozenset
     head_hash: str
     byte_len: int
     head_offset: int = 0
+    tracks_stats: bool = False
+    v61_verdicts: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}))
+    statted: frozenset = frozenset()
 
 
-def _fold(states: dict, judged: set, entry: dict) -> None:
+def _fold(states: dict, judged: set, entry: dict,
+          v61: dict | None = None, statted: set | None = None) -> None:
     """Apply one entry to a snapshot's state; the same rule as
-    Registry.strategy_states()."""
+    Registry.strategy_states(). `v61`/`statted` (None = not tracked) follow
+    verify_registry.py invariant 11: a gauntlet verdict whose metrics carry
+    protocol v6.1 is keyed by the hash of the PARSED entry."""
     et, p = entry["entry_type"], entry["payload"]
     if et == "strategy_registered":
         states[p["strategy_id"]] = "proposed"
@@ -242,6 +262,30 @@ def _fold(states: dict, judged: set, entry: dict) -> None:
         states[p["strategy_id"]] = p["to"]
     elif et == "verdict" and p.get("stage") == "gauntlet":
         judged.add(p["strategy_id"])
+        m = p.get("metrics")
+        if (v61 is not None and isinstance(m, dict)
+                and m.get("protocol") == PROTOCOL_V61):
+            v61[entry_hash(entry)] = p.get("strategy_id")
+    elif et == "gauntlet_stats" and statted is not None:
+        vh = p.get("verdict_entry_hash")
+        if isinstance(vh, str):
+            statted.add(vh)
+
+
+def _tracked(snap: "ChainSnapshot"):
+    """Mutable copies of snap's stats view, or (None, None) if untracked."""
+    if not snap.tracks_stats:
+        return None, None
+    return dict(snap.v61_verdicts), set(snap.statted)
+
+
+def _snap(states, judged, head, pos, head_off, v61, statted) -> "ChainSnapshot":
+    if v61 is None:
+        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                             pos, head_off)
+    return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
+                         pos, head_off, True, MappingProxyType(v61),
+                         frozenset(statted))
 
 
 def _line_bytes(entry: dict) -> bytes:
@@ -442,19 +486,22 @@ class Registry:
 
     # -- O(tail) snapshot path (see ChainSnapshot) -------------------------
 
-    def snapshot(self, on_entry: Callable[[dict], None] | None = None
-                 ) -> ChainSnapshot:
+    def snapshot(self, on_entry: Callable[[dict], None] | None = None,
+                 track_stats: bool = False) -> ChainSnapshot:
         """ONE full read. Only COMPLETE lines within the size seen at open
         count, so a concurrent append (or a writer caught mid-line) can
         never tear it. `on_entry` sees every counted entry in chain order,
-        so a caller can build its own view from this same single read."""
+        so a caller can build its own view from this same single read.
+        `track_stats` adds the v6.1 verdict / gauntlet_stats view (see
+        ChainSnapshot)."""
         states: dict[str, str] = {}
         judged: set[str] = set()
+        v61, statted = ({}, set()) if track_stats else (None, None)
         last, head_off = None, 0
         try:
             f = self.log_path.open("rb")
         except FileNotFoundError:
-            return ChainSnapshot(MappingProxyType({}), frozenset(), GENESIS_HASH, 0, 0)
+            return _snap({}, set(), GENESIS_HASH, 0, 0, v61, statted)
         with f:
             size = os.fstat(f.fileno()).st_size
             lines = _complete_lines(f, 0, size)
@@ -465,12 +512,11 @@ class Registry:
                     pos = stop.value
                     break
                 last = json.loads(raw)
-                _fold(states, judged, last)
+                _fold(states, judged, last, v61, statted)
                 if on_entry is not None:
                     on_entry(last)
         head = entry_hash(last) if last is not None else GENESIS_HASH
-        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
-                             pos, head_off)
+        return _snap(states, judged, head, pos, head_off, v61, statted)
 
     def advance(self, snap: ChainSnapshot) -> ChainSnapshot:
         """`snap` moved forward over whatever was appended since, parsing
@@ -484,6 +530,7 @@ class Registry:
             raise ChainMoved(f"{self.log_path} is gone") from None
         states: dict[str, str] | None = None
         judged: set[str] | None = None
+        v61 = statted = None
         head, head_off = snap.head_hash, snap.head_offset
         with f:
             size = os.fstat(f.fileno()).st_size
@@ -513,15 +560,16 @@ class Registry:
                         f"{str(entry.get('prev_entry_hash'))[:12]}, head is {head[:12]}")
                 if states is None:
                     states, judged = dict(snap.states), set(snap.gauntlet_judged)
-                _fold(states, judged, entry)
+                    v61, statted = _tracked(snap)
+                _fold(states, judged, entry, v61, statted)
                 head, head_off = entry_hash(entry), start
         if states is None:
             if pos == snap.byte_len:
                 return snap
             # only blank lines were appended: same state, longer file
-            return ChainSnapshot(snap.states, snap.gauntlet_judged, head, pos, head_off)
-        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
-                             pos, head_off)
+            return _snap(dict(snap.states), snap.gauntlet_judged, head, pos,
+                         head_off, *_tracked(snap))
+        return _snap(states, judged, head, pos, head_off, v61, statted)
 
     def _append_at(self, snap: ChainSnapshot,
                    items: list[tuple[str, dict]]) -> ChainSnapshot:
@@ -532,6 +580,7 @@ class Registry:
         # next prev_entry_hash, comes from the PARSED line -- what the verifier,
         # snapshot() and advance() all hash -- never from the in-memory dict.
         states, judged = dict(snap.states), set(snap.gauntlet_judged)
+        v61, statted = _tracked(snap)
         head, pos, head_off = snap.head_hash, snap.byte_len, snap.head_offset
         out = b""
         for entry_type, payload in items:
@@ -546,7 +595,7 @@ class Registry:
             head_off, pos = pos, pos + len(line)
             head = entry_hash(parsed)
             out += line
-            _fold(states, judged, parsed)
+            _fold(states, judged, parsed, v61, statted)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(self.log_path):
             size = self.log_path.stat().st_size if self.log_path.exists() else 0
@@ -555,8 +604,7 @@ class Registry:
                                  f"{snap.byte_len}: appended without chain.lock?")
             with self.log_path.open("ab") as f:
                 f.write(out)
-        return ChainSnapshot(MappingProxyType(states), frozenset(judged), head,
-                             pos, head_off)
+        return _snap(states, judged, head, pos, head_off, v61, statted)
 
     def record_gauntlet_outcome(self, snap: ChainSnapshot, strategy_id: str,
                                 verdict: str, metrics: dict, artifacts_hash: str,
@@ -593,6 +641,45 @@ class Registry:
         return self.append("gauntlet_stats", {
             "strategy_id": strategy_id,
             "verdict_entry_hash": verdict_entry_hash, **stats})
+
+    def record_gauntlet_stats_batch(
+            self, snap: ChainSnapshot,
+            items: list[tuple[str, str, dict]]) -> ChainSnapshot:
+        """Ruling 10: many gauntlet_stats entries in ONE append, against a
+        snapshot taken with track_stats=True. The caller holds chain.lock;
+        this advances the snapshot over the tail (O(tail), never O(chain)),
+        DROPS every item whose verdict already has a stats entry (chained
+        since the caller's read -- the re-check that keeps it one per
+        verdict), validates the rest as verify_registry.py invariant 11
+        will, and appends them through _append_at: the same bytes a
+        record_gauntlet_stats call per item writes. Any refusal raises
+        before anything is written. At most STATS_BATCH_MAX items, so one
+        chain.lock hold stays bounded; the caller chunks."""
+        if not snap.tracks_stats:
+            raise ValueError("record_gauntlet_stats_batch needs a snapshot "
+                             "taken with track_stats=True")
+        if len(items) > STATS_BATCH_MAX:
+            raise ValueError(f"{len(items)} stats entries in one hold; at most "
+                             f"{STATS_BATCH_MAX} (chunk and release chain.lock "
+                             f"between chunks)")
+        snap = self.advance(snap)
+        seen: set[str] = set()
+        payloads = []
+        for sid, vh, stats in items:
+            if not isinstance(vh, str) or snap.v61_verdicts.get(vh) != sid:
+                raise ValueError(f"{str(vh)[:12]} is not a v6.1 gauntlet verdict "
+                                 f"of {sid!r}; nothing written")
+            if vh in seen:
+                raise ValueError(f"verdict {vh[:12]} appears twice in one "
+                                 f"stats batch; nothing written")
+            seen.add(vh)
+            if vh in snap.statted:
+                continue                  # already chained: one per verdict
+            payloads.append(("gauntlet_stats", {
+                "strategy_id": sid, "verdict_entry_hash": vh, **stats}))
+        if not payloads:
+            return snap
+        return self._append_at(snap, payloads)
 
     def record_quarantine_decision(self, payload: dict) -> dict:
         """One paper-trading decision, validated and de-duplicated atomically.

@@ -609,6 +609,173 @@ def _run_candidates(payloads: list[dict], max_workers: int,
     return results
 
 
+def registry_series(all_specs: list[dict], bars_by_cell: dict,
+                    data_hashes: dict[str, str], cache,
+                    candidate_sids: set[str],
+                    full_results: dict[str, dict] | None = None):
+    """The registry-wide re-simulation, moved out of run() unchanged
+    (Build 2a task 7) so gauntlet_stats.py runs the SAME pass.
+
+    Returns (dated_returns_by_sid, equity_len_by_sid, sim_cache_hits,
+    sim_cache_misses). A candidate (sid in `candidate_sids`) is always
+    simulated fresh and its full run_spec result is stored in
+    `full_results` when the caller passes a dict (run() needs the
+    trades); every other spec is served from `cache` when it can be."""
+    if full_results is None:
+        full_results = {}
+    dated_returns_by_sid: dict[str, Series] = {}
+    equity_len_by_sid: dict[str, int] = {}
+    sim_cache_hits = sim_cache_misses = 0
+    for s in all_specs:
+        sid = s["strategy_id"]
+        if sid in candidate_sids:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            full_results[sid] = res
+            dated_returns_by_sid[sid] = Series.from_pairs(
+                daily_returns_with_dates(res["equity"]))
+            equity_len_by_sid[sid] = len(res["equity"])
+            continue
+        tf = s["universe"].get("timeframe", "1d")
+        data_shas = {a: data_hashes[cells.cell_id(a, tf)]
+                    for a in s["universe"]["assets"]}
+        # SP4 batch review rider: the cached series also depends on the
+        # RESOLVED periods_per_year (engine.run_spec derives it the same way
+        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
+        # vol_target's realized-vol sizing), so it must be part of the key or
+        # a SESSION_PERIODS edit would silently serve a stale series instead
+        # of missing. See simcache.cache_key's own docstring.
+        periods_per_year = cells.SESSION_PERIODS.get(
+            s["universe"].get("session"), 365)
+        key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
+        hit = cache.get(key)
+        if hit is not None:
+            dated_returns_by_sid[sid] = hit["series"]
+            equity_len_by_sid[sid] = hit["equity_len"]
+            sim_cache_hits += 1
+        else:
+            res = run_spec(s, _spec_bars(bars_by_cell, s))
+            series = Series.from_pairs(daily_returns_with_dates(res["equity"]))
+            dated_returns_by_sid[sid] = series
+            equity_len_by_sid[sid] = len(res["equity"])
+            cache.put(key, series, len(res["equity"]))
+            sim_cache_misses += 1
+    return dated_returns_by_sid, equity_len_by_sid, sim_cache_hits, sim_cache_misses
+
+
+def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
+                     all_specs: list[dict]) -> dict:
+    """Alignment + effective trials over the registry-wide series, moved
+    out of run() unchanged (Build 2a task 7) so gauntlet_stats.py clusters
+    by the SAME method. Returns trials_n, cluster_labels, trials_var,
+    trials_alignment, trials_common_days, registered_n, and returns_by_id
+    (the aligned series the clustering and the deflated Sharpe read)."""
+    # A run whose registered specs are ALREADY on one shared calendar (today:
+    # every real crypto chain, which has only ever registered the legacy
+    # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
+    # prior arithmetic: native per-spec calendars, no intersection, so this
+    # stays byte-identical and regression-covered by test_gauntlet.py.
+    #
+    # Two things make that assumption false and must intersect FIRST, before
+    # check_aligned ever runs, not after it raises:
+    #   - classes_present > 1: a 24x7 crypto calendar pooled with a 5-day fx
+    #     calendar (spec s10.6);
+    #   - ragged (real dry-run finding, 2026-08-24): registered specs on the
+    #     SAME class can still have genuinely different calendars. 12 fx
+    #     pairs each start on their own real inception date (most G10 pairs
+    #     1971, EUR 1999, ZAR/SGD 1980/81, MXN 1993) with NO duplicate dates
+    #     anywhere (verified: every pinned CSV's row count equals its unique
+    #     date count) -- the raggedness is genuine history, not a bug. The
+    #     same landmine exists latently for crypto too the moment a
+    #     generation ever registers the full 5-asset ...USDT grid together
+    #     (BTCUSDT/ETHUSDT: 3272 bars; SOLUSDT: 2182; XRPUSDT: 3012; BNBUSDT:
+    #     3191 -- different listing dates), just never triggered because
+    #     production has only ever used the same-length legacy pair. Gating
+    #     on raggedness rather than on class alone closes that landmine too.
+    # cluster.correlation compares series BY INDEX, so any of the above must
+    # be trimmed to the dates every series actually shares before clustering,
+    # else k and the recorded deflated Sharpe are silently wrong -- or, before
+    # this fix, check_aligned simply refused the whole run.
+    classes_present = {s["universe"].get("asset_class", "crypto")
+                       for s in all_specs}
+    # equity_len_by_sid carries the ORIGINAL equity curve length for every
+    # sid regardless of source (fresh run or simcache hit -- simcache.put
+    # records it alongside the returns series precisely so this check does
+    # not need the equity itself), so the ragged/not-ragged decision is
+    # unaffected by which specs happened to be cached this pass.
+    raw_lengths = equity_len_by_sid
+    ragged = len(set(raw_lengths.values())) > 1
+    if len(classes_present) > 1 or ragged:
+        dated_by_id = dated_returns_by_sid
+        returns_by_id, common_dates = intersect_returns(dated_by_id)
+        trials_alignment, trials_common_days = "intersection", len(common_dates)
+        if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
+            _raise_too_short_intersection(dated_by_id, common_dates)
+    else:
+        # Same values daily_returns_from_curve(equity) would give: stripping
+        # the (already date-normalised) date off each entry of the exact
+        # series that function's own formula produces.
+        returns_by_id = {sid: series.rets
+                         for sid, series in dated_returns_by_sid.items()}
+        trials_alignment, trials_common_days = "native", None
+    registered_n = len(all_specs)
+
+    # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
+    # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
+    # trials. A sibling sweep is one idea at several settings, and pooling
+    # structurally different families put real edge dispersion into a term
+    # meant to hold sampling noise.
+    check_aligned(returns_by_id)
+    t_et0 = time.time()
+    trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
+    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
+          f"(pure clustering, inside the clustering stage)", flush=True)
+    print(f"effective trials: {trials_n} clusters over {registered_n} "
+          f"registered strategies")
+    return {"trials_n": trials_n, "cluster_labels": cluster_labels,
+            "trials_var": trials_var, "trials_alignment": trials_alignment,
+            "trials_common_days": trials_common_days,
+            "registered_n": registered_n, "returns_by_id": returns_by_id}
+
+
+def sibling_families(all_specs: list[dict], train_sharpe: dict,
+                     screen_tc_fail: set[str]) -> tuple[dict, dict]:
+    """(family_by_group, grids_by_group): each sibling group's members with
+    their swept-axis coordinates and train Sharpe, and the grid of every
+    axis that actually varies within the group. Moved out of run()
+    unchanged (Build 2a task 7); plateau.qualifies reads both."""
+    from .composer import SWEEPABLE_TYPES
+    from .blocks import BLOCK_TYPES
+    family_by_group, grids_by_group = {}, {}
+    for s in all_specs:
+        sid, g = s["strategy_id"], s["provenance"]["sibling_group_id"]
+        axes = {}
+        for b in s["blocks"]:
+            key = (b["role"], b["type"])
+            if key not in SWEEPABLE_TYPES:
+                continue
+            for p, v in b["params"].items():
+                if isinstance(BLOCK_TYPES[key].get(p, {}).get("grid"), list):
+                    axes[f"{b['type']}.{p}"] = v
+                    grids_by_group.setdefault(g, {})[f"{b['type']}.{p}"] = \
+                        BLOCK_TYPES[key][p]["grid"]
+        family_by_group.setdefault(g, []).append(
+            {"sid": sid, "axes": axes, "score": train_sharpe[sid],
+             "screen_trade_count_fail": sid in screen_tc_fail,
+             "gauntlet_passed": False})
+
+    # Prune axes that do not actually vary within a group, or a fixed parameter
+    # generates phantom neighbours: a whole family sitting at atr_len=14 would
+    # otherwise be read as a swept axis with every sibling its own island.
+    for g, fam in family_by_group.items():
+        varying = {a for a in grids_by_group.get(g, {})
+                   if len({s["axes"].get(a) for s in fam}) > 1}
+        grids_by_group[g] = {a: v for a, v in grids_by_group.get(g, {}).items()
+                             if a in varying}
+        for s in fam:
+            s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
+    return family_by_group, grids_by_group
+
+
 def run(argv: list[str] | None = None) -> int:
     import hashlib
     from .screen import (assert_cells_comparable, bundle_hash, comparable_cells,
@@ -735,111 +902,26 @@ def run(argv: list[str] | None = None) -> int:
     cache = simcache.SimCache(simcache_dir)
     t_cluster0 = time.time()      # SP4 Task P5: covers sim-cache + clustering
     full_results: dict[str, dict] = {}          # candidates only (need trades)
-    dated_returns_by_sid: dict[str, Series] = {}
-    equity_len_by_sid: dict[str, int] = {}
-    sim_cache_hits = sim_cache_misses = 0
-    for s in all_specs:
-        sid = s["strategy_id"]
-        if sid in candidate_sids:
-            res = run_spec(s, _spec_bars(bars_by_cell, s))
-            full_results[sid] = res
-            dated_returns_by_sid[sid] = Series.from_pairs(
-                daily_returns_with_dates(res["equity"]))
-            equity_len_by_sid[sid] = len(res["equity"])
-            continue
-        tf = s["universe"].get("timeframe", "1d")
-        data_shas = {a: data_hashes[cells.cell_id(a, tf)]
-                    for a in s["universe"]["assets"]}
-        # SP4 batch review rider: the cached series also depends on the
-        # RESOLVED periods_per_year (engine.run_spec derives it the same way
-        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
-        # vol_target's realized-vol sizing), so it must be part of the key or
-        # a SESSION_PERIODS edit would silently serve a stale series instead
-        # of missing. See simcache.cache_key's own docstring.
-        periods_per_year = cells.SESSION_PERIODS.get(
-            s["universe"].get("session"), 365)
-        key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
-        hit = cache.get(key)
-        if hit is not None:
-            dated_returns_by_sid[sid] = hit["series"]
-            equity_len_by_sid[sid] = hit["equity_len"]
-            sim_cache_hits += 1
-        else:
-            res = run_spec(s, _spec_bars(bars_by_cell, s))
-            series = Series.from_pairs(daily_returns_with_dates(res["equity"]))
-            dated_returns_by_sid[sid] = series
-            equity_len_by_sid[sid] = len(res["equity"])
-            cache.put(key, series, len(res["equity"]))
-            sim_cache_misses += 1
+    (dated_returns_by_sid, equity_len_by_sid, sim_cache_hits,
+     sim_cache_misses) = registry_series(all_specs, bars_by_cell, data_hashes,
+                                         cache, candidate_sids,
+                                         full_results=full_results)
     print(f"sim cache: {sim_cache_hits} hit(s), {sim_cache_misses} miss(es) "
           f"over {len(all_specs) - len(candidate_sids)} non-candidate "
           f"registered strategies")
 
-    # A run whose registered specs are ALREADY on one shared calendar (today:
-    # every real crypto chain, which has only ever registered the legacy
-    # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
-    # prior arithmetic: native per-spec calendars, no intersection, so this
-    # stays byte-identical and regression-covered by test_gauntlet.py.
-    #
-    # Two things make that assumption false and must intersect FIRST, before
-    # check_aligned ever runs, not after it raises:
-    #   - classes_present > 1: a 24x7 crypto calendar pooled with a 5-day fx
-    #     calendar (spec s10.6);
-    #   - ragged (real dry-run finding, 2026-08-24): registered specs on the
-    #     SAME class can still have genuinely different calendars. 12 fx
-    #     pairs each start on their own real inception date (most G10 pairs
-    #     1971, EUR 1999, ZAR/SGD 1980/81, MXN 1993) with NO duplicate dates
-    #     anywhere (verified: every pinned CSV's row count equals its unique
-    #     date count) -- the raggedness is genuine history, not a bug. The
-    #     same landmine exists latently for crypto too the moment a
-    #     generation ever registers the full 5-asset ...USDT grid together
-    #     (BTCUSDT/ETHUSDT: 3272 bars; SOLUSDT: 2182; XRPUSDT: 3012; BNBUSDT:
-    #     3191 -- different listing dates), just never triggered because
-    #     production has only ever used the same-length legacy pair. Gating
-    #     on raggedness rather than on class alone closes that landmine too.
-    # cluster.correlation compares series BY INDEX, so any of the above must
-    # be trimmed to the dates every series actually shares before clustering,
-    # else k and the recorded deflated Sharpe are silently wrong -- or, before
-    # this fix, check_aligned simply refused the whole run.
-    classes_present = {s["universe"].get("asset_class", "crypto")
-                       for s in all_specs}
-    # equity_len_by_sid carries the ORIGINAL equity curve length for every
-    # sid regardless of source (fresh run or simcache hit -- simcache.put
-    # records it alongside the returns series precisely so this check does
-    # not need the equity itself), so the ragged/not-ragged decision is
-    # unaffected by which specs happened to be cached this pass.
-    raw_lengths = equity_len_by_sid
-    ragged = len(set(raw_lengths.values())) > 1
-    if len(classes_present) > 1 or ragged:
-        dated_by_id = dated_returns_by_sid
-        returns_by_id, common_dates = intersect_returns(dated_by_id)
-        trials_alignment, trials_common_days = "intersection", len(common_dates)
-        if len(common_dates) < MIN_TRIALS_COMMON_DAYS:
-            _raise_too_short_intersection(dated_by_id, common_dates)
-    else:
-        # Same values daily_returns_from_curve(equity) would give: stripping
-        # the (already date-normalised) date off each entry of the exact
-        # series that function's own formula produces.
-        returns_by_id = {sid: series.rets
-                         for sid, series in dated_returns_by_sid.items()}
-        trials_alignment, trials_common_days = "native", None
+    clustered = cluster_registry(dated_returns_by_sid, equity_len_by_sid,
+                                 all_specs)
+    returns_by_id = clustered["returns_by_id"]
+    trials_alignment = clustered["trials_alignment"]
+    trials_common_days = clustered["trials_common_days"]
+    trials_n, cluster_labels, trials_var = (
+        clustered["trials_n"], clustered["cluster_labels"],
+        clustered["trials_var"])
+    registered_n = clustered["registered_n"]
     group_n: dict[str, int] = {}
     for g in group_of.values():
         group_n[g] = group_n.get(g, 0) + 1
-    registered_n = len(all_specs)
-
-    # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
-    # and is still recorded, so it is computed against EFFECTIVELY INDEPENDENT
-    # trials. A sibling sweep is one idea at several settings, and pooling
-    # structurally different families put real edge dispersion into a term
-    # meant to hold sampling noise.
-    check_aligned(returns_by_id)
-    t_et0 = time.time()
-    trials_n, cluster_labels, trials_var = effective_trials(returns_by_id)
-    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
-          f"(pure clustering, inside the clustering stage)", flush=True)
-    print(f"effective trials: {trials_n} clusters over {registered_n} "
-          f"registered strategies")
     t_cluster = time.time() - t_cluster0
     print(f"[gauntlet] clustering done in {t_cluster:.1f}s "
           f"(cache {sim_cache_hits} hits / {sim_cache_misses} misses)",
@@ -869,36 +951,8 @@ def run(argv: list[str] | None = None) -> int:
     train_sharpe = {s["strategy_id"]: _annualized_sharpe_from_returns(
         train_returns(s["strategy_id"])) for s in all_specs}
 
-    from .composer import SWEEPABLE_TYPES
-    from .blocks import BLOCK_TYPES
-    family_by_group, grids_by_group = {}, {}
-    for s in all_specs:
-        sid, g = s["strategy_id"], s["provenance"]["sibling_group_id"]
-        axes = {}
-        for b in s["blocks"]:
-            key = (b["role"], b["type"])
-            if key not in SWEEPABLE_TYPES:
-                continue
-            for p, v in b["params"].items():
-                if isinstance(BLOCK_TYPES[key].get(p, {}).get("grid"), list):
-                    axes[f"{b['type']}.{p}"] = v
-                    grids_by_group.setdefault(g, {})[f"{b['type']}.{p}"] = \
-                        BLOCK_TYPES[key][p]["grid"]
-        family_by_group.setdefault(g, []).append(
-            {"sid": sid, "axes": axes, "score": train_sharpe[sid],
-             "screen_trade_count_fail": sid in screen_tc_fail,
-             "gauntlet_passed": False})
-
-    # Prune axes that do not actually vary within a group, or a fixed parameter
-    # generates phantom neighbours: a whole family sitting at atr_len=14 would
-    # otherwise be read as a swept axis with every sibling its own island.
-    for g, fam in family_by_group.items():
-        varying = {a for a in grids_by_group.get(g, {})
-                   if len({s["axes"].get(a) for s in fam}) > 1}
-        grids_by_group[g] = {a: v for a, v in grids_by_group.get(g, {}).items()
-                             if a in varying}
-        for s in fam:
-            s["axes"] = {a: v for a, v in s["axes"].items() if a in varying}
+    family_by_group, grids_by_group = sibling_families(
+        all_specs, train_sharpe, screen_tc_fail)
 
     # SP4 Task P2: evaluate every candidate's gate battery + corroborating
     # metrics in a worker pool, standalone (protocol-v6's own founding
