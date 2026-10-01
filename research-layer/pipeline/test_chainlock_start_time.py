@@ -38,3 +38,14 @@ def test_a_legacy_lock_without_start_time_keeps_the_pid_rule(tmp_path):
     (tmp_path / "chain.lock").write_text(json.dumps({
         "holder": "loop", "pid": os.getpid(), "ts_utc": "x", "purpose": "x"}))
     assert ChainLock(tmp_path, "probe", "probe").holder_alive() is True
+
+
+def test_a_live_pid_whose_start_time_cannot_be_read_reads_alive(tmp_path, monkeypatch):
+    """Conservative: a LIVE pid whose start time is unreadable now (access
+    denied, a racing exit) is never mistaken for dead, even though the lock
+    recorded a start time that would otherwise have to match."""
+    (tmp_path / "chain.lock").write_text(json.dumps({
+        "holder": "loop", "pid": os.getpid(), "ts_utc": "2026-09-27T15:13:04+00:00",
+        "purpose": "x", "pid_start_utc": "2001-01-01T00:00:00+00:00"}))
+    monkeypatch.setattr(chainlock, "process_start_time", lambda pid: None)
+    assert ChainLock(tmp_path, "probe", "probe").holder_alive() is True
