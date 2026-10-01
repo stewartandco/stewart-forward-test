@@ -47,7 +47,14 @@ statistic already written. Chaining follows Ruling 10: one full chain read
 outside chain.lock; under it, an O(tail) advance, a re-check that drops any
 verdict already statted, and at most STATS_BATCH_MAX entries per hold.
 
-Exit 0: done, nothing to do, stopped at the deadline, or chain.lock held.
+Deadline (I5): clustering starts only when the time left covers its
+estimate (the last measured duration, persisted in the status as cluster_s,
+else CLUSTER_PRIOR_S); each PBO null likewise (pbo_null_mean_s, else
+gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
+One instance at a time (logs/gauntlet_stats.lock); a second one defers.
+
+Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
+another instance running (that one owns the status file; it is not touched).
 Exit 1: the data or the chain refused the run (status exit_reason says why).
 """
 from __future__ import annotations
@@ -76,17 +83,29 @@ from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
 # calls the gauntlet's own functions rather than a copy.
 from .gauntlet import cluster_registry, registry_series, sibling_families
 from .gauntlet import (CSCV_SPLITS, PBO_MIN_DISTINCT, PBO_PASS_PCTILE,
-                       PBO_KILL_PCTILE, PBO_NULL_DRAWS, _as_list)
+                       PBO_KILL_PCTILE, PBO_NULL_DRAWS, PBO_NULL_PRIOR_S, _as_list)
 
 LAYER = Path(__file__).resolve().parent.parent
 CLUSTER_METHOD = "effective_trials/v3 correlation-distance"
 # Specs per registry_series call; the deadline is checked between calls,
 # so a cold night overruns it by at most one chunk's simulations.
 SERIES_CHUNK = 10
+# I5 (final review): a clustering pass is started only when the time left
+# covers an estimate of it -- the last measured duration (status `cluster_s`,
+# carried forward across runs), or this prior before one has been measured
+# (about 1.5 h at 11.8k strategies, Ruling 13). Each PBO null likewise needs
+# the measured mean (status `pbo_null_mean_s`) or gauntlet's PBO_NULL_PRIOR_S.
+CLUSTER_PRIOR_S = 2 * 3600.0
+# The job's own instance lock (M2). A run is bounded at 5.75 h inside PT6H,
+# so a lock older than 7 h is stale; it is broken only when its holder is
+# also dead, exactly as the worker's.
+INSTANCE_LOCK = "gauntlet_stats.lock"
+INSTANCE_STALE_AFTER_S = 7 * 3600
 STATUS_NAME = "gauntlet_stats_status.json"
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
-                 "oldest_unstatted_verdict_age_hours", "trials_n", "registered_n",
-                 "trials_common_days", "stopped_at_deadline", "chained")
+                 "oldest_unstatted_verdict_age_hours", "trials_n_raw",
+                 "trials_n_effective", "registered_n", "trials_common_days",
+                 "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s")
 
 
 def vintage_date(today: date) -> str:
@@ -146,7 +165,8 @@ class _View:
         self.trials_floor_hash: str | None = None
 
     def _floor_candidate(self, n, e: dict) -> None:
-        if (isinstance(n, int) and not isinstance(n, bool)
+        # A cluster count is a positive int; anything else is no floor.
+        if (isinstance(n, int) and not isinstance(n, bool) and n > 0
                 and (self.trials_floor is None or n > self.trials_floor)):
             self.trials_floor, self.trials_floor_hash = n, entry_hash(e)
 
@@ -177,10 +197,15 @@ def _age_hours(ts: str | None, now: datetime) -> float | None:
 
 
 def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
-              draws: int) -> dict:
+              draws: int, null_fits=None, null_times: list | None = None
+              ) -> dict | None:
     """One family's PBO with gauntlet.run's helpers and arguments, recorded
     values only. `pbo_status` says which of run()'s paths was taken without
-    naming a gate outcome: not_measured_dead_group / underpowered / measured."""
+    naming a gate outcome: not_measured_dead_group / underpowered / measured.
+
+    I5: `null_fits()` is asked before the permutation null is built; False
+    returns None (the caller stops at the deadline, nothing recorded for the
+    family). Each null's measured duration is appended to `null_times`."""
     series = {s["sid"]: train[s["sid"]] for s in fam}
     res = cscv_pbo(series, s=CSCV_SPLITS)
     n_distinct = distinct_configs(series)
@@ -192,9 +217,14 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     elif res["pbo"] is None or n_distinct < PBO_MIN_DISTINCT:
         out["pbo_status"] = "underpowered"
     else:
+        if null_fits is not None and not null_fits():
+            return None
+        t0 = time.time()
         null = permutation_null(
             series, s=CSCV_SPLITS, draws=draws,
             seed=int(hashlib.sha256(g.encode()).hexdigest()[:8], 16))
+        if null_times is not None:
+            null_times.append(time.time() - t0)
         out["pbo_null_draws"] = len(null)
         if not null:
             out["pbo_status"] = "underpowered"
@@ -258,6 +288,22 @@ def _write_status(logs_dir: Path, status: dict) -> None:
     tmp.replace(p)
 
 
+def _prior_timings(logs_dir: Path) -> tuple[float | None, float | None]:
+    """(cluster_s, pbo_null_mean_s) persisted by the last run that wrote a
+    status; None for a missing, unreadable or non-positive value."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(st, dict):
+        return None, None
+
+    def pos(v):
+        return (float(v) if isinstance(v, (int, float))
+                and not isinstance(v, bool) and v > 0 else None)
+    return pos(st.get("cluster_s")), pos(st.get("pbo_null_mean_s"))
+
+
 def _fmt(v) -> str:
     return "-" if v is None else str(v)
 
@@ -291,16 +337,20 @@ def run(argv: list[str] | None = None) -> int:
     a.logs_dir.mkdir(parents=True, exist_ok=True)
     simcache_dir = a.simcache_dir or (a.registry.resolve().parent / "simcache")
     vintage = vintage_date(date.today())
+    prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
-              "oldest_unstatted_verdict_age_hours": 0.0, "trials_n": None,
+              "oldest_unstatted_verdict_age_hours": 0.0, "trials_n_raw": None,
+              "trials_n_effective": None,
               "registered_n": None, "trials_common_days": None,
               "stopped_at_deadline": False, "chained": bool(a.chain),
+              # carried forward until this run measures its own (I5)
+              "cluster_s": prior_cluster_s, "pbo_null_mean_s": prior_null_s,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
     pending: list[dict] = []
 
-    def finish(rc: int, reason: str) -> int:
+    def finish(rc: int, reason: str, write: bool = True) -> int:
         left = [v for v in pending if v["vh"] not in done]
         now = datetime.now(timezone.utc)
         ages = [h for h in (_age_hours(v["ts_utc"], now) for v in left)
@@ -310,18 +360,49 @@ def run(argv: list[str] | None = None) -> int:
             round(max(ages), 2) if ages else 0.0)
         status["exit_reason"] = reason
         status["ts_utc"] = now.isoformat()
-        _write_status(a.logs_dir, status)
-        if a.report is not None:
-            _write_report(a.report, status, extra)
+        if write:
+            _write_status(a.logs_dir, status)
+            if a.report is not None:
+                _write_report(a.report, status, extra)
         print(f"gauntlet_stats: {reason} {json.dumps(status, sort_keys=True)}",
               flush=True)
         return rc
 
+    # M2: one stats job at a time. A second instance (a hand --chain run
+    # beside the 01:00 task) defers, exits 0 and never touches the status or
+    # the report: the live instance owns them. Without this, run B could read
+    # its trials floor before run A's entries are chained and record a lower
+    # N after A's, breaking the addendum's "trials_n never falls".
+    inst = ChainLock(a.logs_dir, "gauntlet-stats", "stats run",
+                     stale_after_s=INSTANCE_STALE_AFTER_S, name=INSTANCE_LOCK)
+    try:
+        inst.acquire()
+    except ChainLockHeld:
+        if not (inst.is_stale() and not inst.holder_alive()):
+            return finish(0, "deferred_instance", write=False)
+        try:
+            inst.break_stale()
+            inst.acquire()
+        except ChainLockHeld:
+            return finish(0, "deferred_instance", write=False)
+    try:
+        return _run_locked(a, t_end, vintage, simcache_dir, status, extra, done,
+                           pending, finish, prior_cluster_s, prior_null_s)
+    finally:
+        inst.release()
+
+
+def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
+                extra: dict, done: set, pending: list, finish,
+                prior_cluster_s: float | None,
+                prior_null_s: float | None) -> int:
+    """run()'s body, under the instance lock. `pending` is filled IN PLACE so
+    run()'s finish() sees it."""
     try:
         registry = Registry(a.registry)
         view = _View()
         snap = registry.snapshot(on_entry=view.on_entry, track_stats=True)
-        pending = [v for v in view.verdicts if v["vh"] not in snap.statted]
+        pending[:] = [v for v in view.verdicts if v["vh"] not in snap.statted]
         all_specs = view.specs
         by_class: dict[str, int] = {}
         for s in all_specs:
@@ -369,25 +450,32 @@ def run(argv: list[str] | None = None) -> int:
         print(f"sim cache: {hits} hit(s), {misses} miss(es) over {len(all_specs)} "
               f"registered strategies", flush=True)
 
-        # Ruling 14: an over-long last chunk must not start a clustering pass
-        # the PT6H wall would kill with no status written.
-        if time.time() >= t_end:
+        # Ruling 14 + I5: never start a clustering pass the PT6H wall would
+        # kill with no status written. The time left must cover the estimate
+        # (last measured duration, else CLUSTER_PRIOR_S), not merely be > 0.
+        cluster_est = prior_cluster_s or CLUSTER_PRIOR_S
+        left_s = t_end - time.time()
+        if left_s < cluster_est:
             status["stopped_at_deadline"] = True
-            print(f"DEADLINE: all {len(dated)} series ready and cached, but no "
-                  f"time left to cluster; the next run starts there.", flush=True)
+            print(f"DEADLINE: all {len(dated)} series ready and cached, but "
+                  f"{max(left_s, 0.0):.0f}s left is under the clustering estimate "
+                  f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
+        t_cluster0 = time.time()
         try:
             clustered = cluster_registry(dated, eq_len, all_specs)
         except ValueError as exc:
             print(f"REFUSED: clustering: {exc}", flush=True)
             return finish(1, "cluster_refused")
-        status.update({k: clustered[k] for k in
-                       ("trials_n", "registered_n", "trials_common_days")})
-        extra["trials_alignment"] = clustered["trials_alignment"]
+        status["cluster_s"] = round(time.time() - t_cluster0, 1)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
+        status.update({"trials_n_raw": clustered["trials_n"],
+                       "trials_n_effective": max(clustered["trials_n"], floor or 0),
+                       "registered_n": clustered["registered_n"],
+                       "trials_common_days": clustered["trials_common_days"]})
+        extra["trials_alignment"] = clustered["trials_alignment"]
         extra["trials_n_floor"] = floor
-        extra["trials_n_effective"] = max(clustered["trials_n"], floor or 0)
 
         train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
                  for s in all_specs}
@@ -437,6 +525,18 @@ def run(argv: list[str] | None = None) -> int:
                 items = rest
             return None
 
+        # I5: each family's null is started only when the time left covers
+        # the measured mean null (this run's, else the last run's, else the
+        # gauntlet's prior). A family that does not fit is a deadline stop.
+        null_times: list[float] = []
+
+        def null_rate() -> float:
+            return (sum(null_times) / len(null_times) if null_times
+                    else prior_null_s or PBO_NULL_PRIOR_S)
+
+        def null_fits() -> bool:
+            return t_end - time.time() >= null_rate()
+
         for g, fam in family_by_group.items():
             todo = pending_by_group.get(g)
             if not todo:
@@ -445,7 +545,16 @@ def run(argv: list[str] | None = None) -> int:
                 status["stopped_at_deadline"] = True
                 break
             live = any(v["verdict"] == "pass" for v in todo)
-            pbo = group_pbo(g, fam, train, live, a.pbo_null_draws)
+            pbo = group_pbo(g, fam, train, live, a.pbo_null_draws,
+                            null_fits=null_fits, null_times=null_times)
+            if null_times:
+                status["pbo_null_mean_s"] = round(null_rate(), 3)
+            if pbo is None:
+                status["stopped_at_deadline"] = True
+                print(f"DEADLINE: family {g}'s PBO null (~{null_rate():.0f}s) does "
+                      f"not fit the time left; it and later families are statted "
+                      f"by the next run.", flush=True)
+                break
             grids = grids_by_group.get(g, {})
             for v in todo:
                 sid = v["sid"]

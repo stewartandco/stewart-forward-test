@@ -55,14 +55,15 @@ def test_the_stats_job_uses_the_gauntlets_own_clustering(tmp_path, monkeypatch):
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--logs-dir", str(tmp_path / "logs"), "--report", str(rep)]) == 0
     assert seen, "the stats job did not call gauntlet.cluster_registry"
-    assert f"| trials_n | {seen['trials_n']} |" in rep.read_text(encoding="utf-8")
+    assert f"| trials_n_raw | {seen['trials_n']} |" in rep.read_text(encoding="utf-8")
 
 
 # ---------------- beyond the brief ----------------
 
 STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
-               "oldest_unstatted_verdict_age_hours", "trials_n", "registered_n",
-               "trials_common_days", "stopped_at_deadline", "chained"}
+               "oldest_unstatted_verdict_age_hours", "trials_n_raw",
+               "trials_n_effective", "registered_n", "trials_common_days",
+               "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s"}
 
 
 def _status(tmp_path):
@@ -625,3 +626,240 @@ def test_the_floor_is_monotone_across_runs(tmp_path, monkeypatch, capsys):
     assert p["trials_n_floor"] == 77 and p["trials_n"] == 77
     assert p["trials_n_floor_entry_hash"] == entry_hash(first[0])   # first to supply it
     assert run_verifier(reg.log_path).returncode == 0
+
+
+# ------- I5 (final review): estimate-based clustering / PBO-null deadline -------
+
+class _FrozenClock:
+    """gauntlet_stats' only clock read is time.time(); frozen unless a test
+    advances it, so 'time left' is exactly --deadline-hours."""
+    now = 1_000_000_000.0
+
+    @classmethod
+    def time(cls):
+        return cls.now
+
+
+def _frozen(monkeypatch):
+    _FrozenClock.now = 1_000_000_000.0
+    monkeypatch.setattr(gs, "time", _FrozenClock)
+    return _FrozenClock
+
+
+def _count_clustering(monkeypatch, advance_s=0.0):
+    from . import gauntlet
+    calls = []
+
+    def spy(*a, **k):
+        calls.append(1)
+        out = gauntlet.cluster_registry(*a, **k)
+        _FrozenClock.now += advance_s
+        return out
+    monkeypatch.setattr(gs, "cluster_registry", spy)
+    return calls
+
+
+def _seed_status(tmp_path, **kv):
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / gs.STATUS_NAME).write_text(json.dumps(kv), encoding="utf-8")
+
+
+def _stats_run(reg, data, tmp_path, hours):
+    return gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(tmp_path / "logs"), "--chain",
+                   "--deadline-hours", str(hours)])
+
+
+def test_clustering_is_skipped_when_time_left_is_under_the_prior(tmp_path, monkeypatch):
+    """No measured duration yet: the 2 h prior applies. 1.9 h left is a
+    deadline stop (exit 0, status written) with no clustering pass started;
+    2.1 h left clusters."""
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+    _frozen(monkeypatch)
+    calls = _count_clustering(monkeypatch)
+    assert gs.CLUSTER_PRIOR_S == 7200.0
+    assert _stats_run(reg, data, tmp_path, 1.9) == 0
+    assert not calls
+    st = _status(tmp_path)
+    assert st["stopped_at_deadline"] is True and st["exit_reason"] == "deadline"
+    assert st["verdicts_without_stats"] == 1 and st["cluster_s"] is None
+    assert sum(1 for _ in reg.entries()) == n
+    assert _stats_run(reg, data, tmp_path, 2.1) == 0
+    assert calls == [1]
+    assert _status(tmp_path)["exit_reason"] == "done"
+
+
+def test_the_last_measured_clustering_time_is_the_estimate(tmp_path, monkeypatch):
+    """A persisted cluster_s replaces the prior in both directions, is carried
+    forward by a run that does not cluster, and is re-measured by one that does."""
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    _frozen(monkeypatch)
+    calls = _count_clustering(monkeypatch, advance_s=1234.0)
+    _seed_status(tmp_path, cluster_s=10000.0)          # longer than the prior
+    assert _stats_run(reg, data, tmp_path, 2.5) == 0   # 9000 s left < 10000 s
+    assert not calls
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deadline" and st["cluster_s"] == 10000.0
+    _seed_status(tmp_path, cluster_s=600.0)            # shorter than the prior
+    assert _stats_run(reg, data, tmp_path, 0.5) == 0   # 1800 s left >= 600 s
+    assert calls == [1]
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "done" and st["cluster_s"] == 1234.0
+
+
+def _live_family_v61(tmp_path):
+    """test_gauntlet_classes' live family (five DISTINCT r-multiple series on
+    BTCUSD, at least one gate-passer, so the stats job builds a real
+    permutation null for it) plus its dead ETHUSD family, judged by the v6.1
+    worker and not yet statted."""
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    from .test_gauntlet_classes import dead_and_live_family_registry, _flat_like
+    from .test_gauntlet_worker import V61
+    from .test_screen import write_data_dir
+    from . import gauntlet_worker as gw
+    reg, live_sids, _, _, _ = dead_and_live_family_registry(tmp_path)
+    reg.append("note", {"text": V61})
+    data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
+                                     "ETHUSD": _flat_like(v4_bars())})
+    logs = tmp_path / "logs"
+    assert gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--artifacts-dir", str(tmp_path / "art"), "--logs-dir", str(logs),
+                   "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
+    return reg, data, logs, V4_CUTOFF
+
+
+def test_a_pbo_null_that_does_not_fit_is_a_deadline_stop(tmp_path, monkeypatch, capsys):
+    """A live family that builds a real permutation null. Clustering is
+    estimated at 1 s (persisted); the null at gauntlet's PBO_NULL_PRIOR_S
+    (60 s). 36 s left: the null does not fit -> deadline stop, exit 0, nothing
+    chained for that family. 72 s left: it fits and every verdict is statted."""
+    from .gauntlet import PBO_NULL_PRIOR_S
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    assert PBO_NULL_PRIOR_S == 60.0
+    clock = _frozen(monkeypatch)
+    _count_clustering(monkeypatch)
+    args = _stat_args(reg, data, logs, cutoff)
+    (logs / gs.STATUS_NAME).write_text(json.dumps({"cluster_s": 1.0}), encoding="utf-8")
+    capsys.readouterr()
+    assert gs.run(args + ["--deadline-hours", "0.01"]) == 0
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["stopped_at_deadline"] is True and st["exit_reason"] == "deadline"
+    assert st["verdicts_without_stats"] > 0
+    assert st["pbo_null_mean_s"] is None
+    # the dead family (no null needed) may be statted; the live one is not
+    assert all(p["pbo_null_draws"] == 0 for p in _stats_payloads(reg))
+    assert "PBO null" in capsys.readouterr().out
+    clock.now = 1_000_000_000.0
+    # the frozen clock measured clustering at 0 s, which is no estimate;
+    # restore the 1 s one so only the null's budget is under test
+    (logs / gs.STATUS_NAME).write_text(json.dumps({"cluster_s": 1.0}), encoding="utf-8")
+    assert gs.run(args + ["--deadline-hours", "0.02"]) == 0
+    capsys.readouterr()
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["exit_reason"] == "done" and st["verdicts_without_stats"] == 0
+    stats = _stats_payloads(reg)
+    assert stats and any(p["pbo_null_draws"] > 0 for p in stats), \
+        "fixture bug: no family built a null"
+    assert st["pbo_null_mean_s"] is not None
+
+
+def test_group_pbo_asks_before_the_null_and_times_it():
+    import random
+    rng = random.Random(7)
+    fam = [{"sid": f"s{i}"} for i in range(6)]
+    train = {f"s{i}": [rng.gauss(0.0005 * i, 0.01) for _ in range(400)]
+             for i in range(6)}
+    assert gs.group_pbo("g", fam, train, live=True, draws=10,
+                        null_fits=lambda: False) is None
+    times = []
+    out = gs.group_pbo("g", fam, train, live=True, draws=10,
+                       null_fits=lambda: True, null_times=times)
+    assert out["pbo_status"] == "measured" and len(times) == 1
+    # no null is built for a dead family, so nothing is asked
+    asked = []
+    gs.group_pbo("g", fam, train, live=False, draws=10,
+                 null_fits=lambda: asked.append(1) or False)
+    assert not asked
+
+
+# ------- M2 (final review): one stats job at a time -------
+
+def test_a_second_stats_instance_defers_and_leaves_the_status_alone(tmp_path, capsys):
+    from .chainlock import ChainLock
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+    logs = tmp_path / "logs"
+    status_path = logs / gs.STATUS_NAME
+    status_path.write_bytes(b'{"exit_reason": "done", "ts_utc": "owner"}')
+    before = status_path.read_bytes()
+    rep = tmp_path / "report.md"
+    owner = ChainLock(logs, "gauntlet-stats", "other instance", name=gs.INSTANCE_LOCK)
+    owner.acquire()
+    try:
+        assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--logs-dir", str(logs), "--chain", "--report", str(rep)]) == 0
+    finally:
+        owner.release()
+    assert status_path.read_bytes() == before
+    assert not rep.exists()
+    assert sum(1 for _ in reg.entries()) == n
+    assert "deferred_instance" in capsys.readouterr().out
+    # the lock is released after a real run, so the next one is not deferred
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(logs), "--chain"]) == 0
+    assert _status(tmp_path)["stats_written"] == 1
+    assert not (logs / gs.INSTANCE_LOCK).exists()
+
+
+def test_a_stale_stats_lock_with_a_dead_holder_is_broken(tmp_path):
+    import os
+    import time as real_time
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    logs = tmp_path / "logs"
+    lock = logs / gs.INSTANCE_LOCK
+    lock.write_text(json.dumps({"holder": "gauntlet-stats", "pid": 2 ** 30,
+                                "ts_utc": "x", "purpose": "crashed run"}))
+    old = real_time.time() - gs.INSTANCE_STALE_AFTER_S - 60
+    os.utime(lock, (old, old))
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(logs), "--chain"]) == 0
+    assert _status(tmp_path)["stats_written"] == 1
+
+
+# ------- T7b minors: positive floor only; unambiguous status fields -------
+
+def test_a_non_positive_cluster_count_is_never_a_floor(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    sid = _a_sid(reg)
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v6", "trials_n": 0})
+    _chain_verdict(reg, sid, {"protocol": "gauntlet-protocol-v4", "trials_n": -5})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    stats = _stats_payloads(reg)
+    assert stats
+    for p in stats:
+        assert p["trials_n_floor"] is None and p["trials_n_floor_entry_hash"] is None
+        assert p["trials_n"] == p["trials_n_raw"] == seen["trials_n"]
+
+
+def test_the_status_reports_raw_and_effective_trials(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v6", "trials_n": 302})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert "trials_n" not in st
+    assert st["trials_n_raw"] == seen["trials_n"] < 302
+    assert st["trials_n_effective"] == 302
