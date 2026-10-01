@@ -213,14 +213,28 @@ Test-first; builder and verifier separate (standing rules).
 ## 10. Cutover and rollback
 
 1. Build in the `feat/gauntlet-at-scale` worktree; suite green; cold review.
-2. Coen approves the exact addendum and correction texts; both are chained.
-3. Merge between 07:00 and 20:00 (outside the loop's window). The loop now
-   ends at screen.
-4. Coen registers `27_GauntletWorker` and `28_GauntletStats` (elevated);
-   the Sentinel manifest and the queue-age check are updated in the same pass.
-5. Watch: the backlog drains (expected within hours), the queue-age check
+2. Coen approves the exact addendum and correction texts.
+3. Merge `feat/gauntlet-at-scale` between 07:00 and 20:00 (outside the loop's
+   window). The loop now ends at screen.
+4. Chain the correction note, then the v6.1 addendum, between 07:00 and 20:00
+   with no loop running.
+5. Merge morpheus-hub; Coen registers `27_GauntletWorker` and
+   `28_GauntletStats` (elevated).
+6. Confirm `logs/gauntlet_worker_status.json` exists AND that 28 has run once;
+   only then merge the Sentinel branch (manifest and queue-age check), so the
+   09:15 digest never FAILs on a task or a status file that does not exist yet.
+7. Watch: the backlog drains (expected within hours), the queue-age check
    reads green.
-6. D9 re-trials of the five.
+8. D9 re-trials of the five.
+
+The order is merge first (Ruling 23) because, with the new code merged and no
+v6.1 note yet, the worker refuses and the loop stops at screen, so nothing is
+judged between merge and chaining, whereas a note chained before the merge
+would let a 20:00 fire of the old code apply the family kill after it and
+write an entry that invariant 12 rejects, on an append-only chain.
 
 Rollback: re-enable the loop's gauntlet stage via its flag, which restores the
-current behaviour. v6.1 entries already chained remain valid under the addendum.
+pre-2a stage, and disable `27_GauntletWorker` and `28_GauntletStats`. Once the
+v6.1 note is chained, that stage applies no family kill (it reads the note), so
+its verdicts stay valid under invariant 12. v6.1 entries already chained remain
+valid under the addendum.

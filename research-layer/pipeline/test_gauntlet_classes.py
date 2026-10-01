@@ -1413,7 +1413,7 @@ def _run_with_forced_family_kill(tmp_path, monkeypatch, chain_v61_note):
     """dead_and_live_family_registry with the live family's PBO percentile
     forced to 1.0 (>= PBO_KILL_PCTILE), so the old stage WOULD kill it.
     `chain_v61_note` appends a "gauntlet-protocol-v6.1:" note first: the
-    GAUNTLET_IN_LOOP=True rollback path after cutover step 2."""
+    GAUNTLET_IN_LOOP=True rollback path once the note is chained."""
     from .gauntlet import run as gauntlet_run
     from .test_gauntlet import v4_bars, V4_CUTOFF, write_data_dir, run_verifier
 

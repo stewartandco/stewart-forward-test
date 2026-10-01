@@ -36,15 +36,16 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   clustering, v6-labelled verdicts) and is the ROLLBACK path, kept for one week
   after cutover and then removed. With the stage skipped no
   `gauntlet_result.json` is written and `deferred_gauntlet` is absent from the
-  status (absence is not a claim). HAZARD: the old `pipeline.gauntlet` still
-  applies the PBO family kill and labels its verdicts v6, so once the v6.1 note
-  is on the chain `verify_registry.py` invariant 12 rejects any verdict it
-  writes for a killed family, and the loop's post-gauntlet verify then returns
-  `chain_invalid` (exit 1, watermark not advanced). The chain is append-only,
-  so the offending entry stays and every later fire's pre-triage verify fails
-  too: the loop is wedged until the chain is repaired by Coen. Do not flip the
-  flag, and do not hand-run `python -m pipeline.gauntlet`, without Coen's
-  say-so.
+  status (absence is not a claim). The old `pipeline.gauntlet` labels its
+  verdicts v6 and reruns the registry-wide clustering. Since Ruling 23
+  (2026-10-01) it applies NO family kill once a `gauntlet-protocol-v6.1:` note
+  is on the chain (`pbo_family_kill` false on every verdict, never a reason),
+  because `verify_registry.py` invariant 12 rejects one after the note: the
+  loop's verify would return `chain_invalid` and, the chain being append-only,
+  every later fire would fail too. Before the note it still applies the kill,
+  which is why the cutover merges the code BEFORE chaining the note. Do not
+  flip the flag, and do not hand-run `python -m pipeline.gauntlet`, without
+  Coen's say-so.
 - python -m pipeline.loop --once from the layer root; --dry-run reports the
   trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
   data/) still runs, so a dry run in the live tree refreshes the cells;
