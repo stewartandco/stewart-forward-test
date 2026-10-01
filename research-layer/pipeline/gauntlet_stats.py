@@ -104,6 +104,19 @@ def bars_through_sha256(path: Path, vintage: str) -> str:
     return hashlib.sha256(b"".join(l + b"\n" for l in [header] + kept)).hexdigest()
 
 
+def data_digest_of(hashes: dict[str, str]) -> str:
+    """ONE digest of everything a run read: sha256 over the sorted
+    `<cell_id>:<bars_through_sha256>` lines (each newline-terminated) of
+    EVERY cell the run used -- the registry-wide input to clustering.
+
+    Ruling 14: `data_vintage` names a Sunday but does not pin the bars. fx
+    rows (FRED, about a week late) and equity_etf rows (a day late) dated on
+    or before that Sunday keep arriving during the week, so two entries with
+    one vintage can rest on different data; this digest tells them apart."""
+    body = "".join(f"{cid}:{h}\n" for cid, h in sorted(hashes.items()))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 class _View:
     """What the job needs from the chain, collected in the same single read
     that builds its ChainSnapshot."""
@@ -167,7 +180,8 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
 
 def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   train_sharpe: float | None, clustered: dict, pbo: dict,
-                  plateau_ok: bool, vintage: str) -> dict:
+                  plateau_ok: bool, vintage: str, data_digest: str,
+                  data_end_by_cell: dict[str, str]) -> dict:
     """The gauntlet_stats payload (less strategy_id / verdict_entry_hash)."""
     trials_n, trials_var = clustered["trials_n"], clustered["trials_var"]
     r = _as_list(dsr_rets)      # clustered["returns_by_id"][sid] (Ruling 11)
@@ -195,6 +209,8 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                         window="train"),
         "cluster_method": CLUSTER_METHOD,
         "data_vintage": vintage,
+        "data_digest": data_digest,
+        "data_end_by_cell": data_end_by_cell,
     }
 
 
@@ -295,6 +311,7 @@ def run(argv: list[str] | None = None) -> int:
         hashes = {cells.cell_id(asset, tf): bars_through_sha256(
                       a.data_dir / f"{asset}_{tf}.csv", vintage)
                   for asset, tf in bars_by_cell}
+        data_digest = data_digest_of(hashes)
 
         cache = simcache.SimCache(simcache_dir)
         dated, eq_len = {}, {}
@@ -315,6 +332,13 @@ def run(argv: list[str] | None = None) -> int:
         print(f"sim cache: {hits} hit(s), {misses} miss(es) over {len(all_specs)} "
               f"registered strategies", flush=True)
 
+        # Ruling 14: an over-long last chunk must not start a clustering pass
+        # the PT6H wall would kill with no status written.
+        if time.time() >= t_end:
+            status["stopped_at_deadline"] = True
+            print(f"DEADLINE: all {len(dated)} series ready and cached, but no "
+                  f"time left to cluster; the next run starts there.", flush=True)
+            return finish(0, "deadline")
         try:
             clustered = cluster_registry(dated, eq_len, all_specs)
         except ValueError as exc:
@@ -332,6 +356,14 @@ def run(argv: list[str] | None = None) -> int:
             all_specs, train_sharpe, view.screen_tc_fail)
         group_of = {s["strategy_id"]: s["provenance"]["sibling_group_id"]
                     for s in all_specs}
+        spec_of = {s["strategy_id"]: s for s in all_specs}
+
+        def own_ends(sid: str) -> dict[str, str]:
+            """The strategy's OWN cells' truncated data ends (Ruling 14)."""
+            u = spec_of[sid]["universe"]
+            tf = u.get("timeframe", "1d")
+            return {cid: data_end[cid] for cid in sorted(
+                {cells.cell_id(asset, tf) for asset in u["assets"]})}
         pending_by_group: dict[str, list[dict]] = {}
         for v in pending:
             pending_by_group.setdefault(group_of[v["sid"]], []).append(v)
@@ -381,7 +413,7 @@ def run(argv: list[str] | None = None) -> int:
                 items.append((sid, v["vh"], verdict_stats(
                     sid, clustered["returns_by_id"][sid], train[sid],
                     train_sharpe[sid], clustered,
-                    pbo, ok, vintage)))
+                    pbo, ok, vintage, data_digest, own_ends(sid))))
             if len(items) >= STATS_BATCH_MAX:
                 stop = flush()
                 if stop is not None:

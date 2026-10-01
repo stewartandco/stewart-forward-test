@@ -333,3 +333,117 @@ def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path,
             assert st[sid][k] == m[k], (sid, k, st[sid][k], m[k])
     r = run_verifier(r61.log_path)
     assert r.returncode == 0, r.stdout
+
+
+# ---------------- fix round (Ruling 14): pin the data, not just the date ----------------
+
+def _mixed_twin(tmp_path, name, drop_eur_row):
+    """The mixed-class registry judged by the worker, then statted with
+    --chain, on bars that are identical except that one EUR row (a weekday
+    long BEFORE any vintage Sunday) can be withheld -- an fx row that arrives
+    late, as FRED's do. A mid-history row, not the last one: withholding the
+    last would end EUR a day before GBP, and the same-class same-day rule
+    (assert_cells_comparable) refuses that run outright."""
+    import datetime as dt
+    from .registry import Registry
+    from .test_gauntlet_classes import (mixed_class_gauntlet_registry,
+                                        _daily_bars, _weekday_bars)
+    from .test_gauntlet_worker import V61
+    from .test_screen import write_data_dir
+    from . import gauntlet_worker as gw
+    # ONE source registry, copied: the fixture's card_id hashes the clock,
+    # so registries built separately can carry different strategy ids
+    src = tmp_path / "src"
+    if not (src / "reg.jsonl").exists():
+        src.mkdir(exist_ok=True)
+        _, c, g, e = mixed_class_gauntlet_registry(src)
+        (src / "sids.json").write_text(json.dumps(
+            {"crypto": c["strategy_id"], "gbp": g["strategy_id"],
+             "eur": e["strategy_id"]}), encoding="utf-8")
+    sids = json.loads((src / "sids.json").read_text(encoding="utf-8"))
+    d = tmp_path / name
+    d.mkdir()
+    shutil.copyfile(src / "reg.jsonl", d / "reg.jsonl")
+    reg = Registry(d / "reg.jsonl")
+    reg.append("note", {"text": V61})
+    eur = _weekday_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31))
+    if drop_eur_row:
+        eur = [b for b in eur if b["date"] != "2020-03-02"]
+    data = write_data_dir(d, {
+        "BTCUSD": _daily_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31)),
+        "GBP": _walk_weekday_bars(dt.date(2015, 1, 1), dt.date(2020, 12, 31)),
+        "EUR": eur})
+    cutoff = "2020-06-30"
+    assert gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
+                   "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(d / "logs"), "--cutoff", cutoff, "--chain"]) == 0
+    stats = {e["payload"]["strategy_id"]: e["payload"]
+             for e in Registry(reg.log_path).entries()
+             if e["entry_type"] == "gauntlet_stats"}
+    return stats, sids
+
+
+def test_a_late_fx_row_changes_the_digest_not_the_vintage(tmp_path, capsys):
+    late, sids = _mixed_twin(tmp_path, "late", drop_eur_row=True)
+    full, _ = _mixed_twin(tmp_path, "full", drop_eur_row=False)
+    again, _ = _mixed_twin(tmp_path, "again", drop_eur_row=False)
+    capsys.readouterr()
+    crypto = sids["crypto"]
+    # (a) same vintage, different bars -> different digest, on EVERY entry,
+    # including the crypto strategy whose own cell did not change
+    assert late[crypto]["data_vintage"] == full[crypto]["data_vintage"]
+    assert late[crypto]["data_digest"] != full[crypto]["data_digest"]
+    # (b) identical bars -> identical digest
+    assert full[crypto]["data_digest"] == again[crypto]["data_digest"]
+    # one digest per run: identical across that run's entries
+    for run_stats in (late, full):
+        assert len({p["data_digest"] for p in run_stats.values()}) == 1
+        assert all(len(p["data_digest"]) == 64 for p in run_stats.values())
+
+
+def test_each_entry_records_its_own_cells_data_end(tmp_path, capsys):
+    late, sids = _mixed_twin(tmp_path, "late", drop_eur_row=True)
+    capsys.readouterr()
+    # (c) the strategy's OWN cells only, at the truncated data end
+    assert late[sids["crypto"]]["data_end_by_cell"] == {"BTCUSD_1d": "2020-12-31"}
+    assert late[sids["gbp"]]["data_end_by_cell"] == {"GBP_1d": "2020-12-31"}
+    assert late[sids["eur"]]["data_end_by_cell"] == {"EUR_1d": "2020-12-31"}
+
+
+def test_no_clustering_starts_after_the_deadline(tmp_path, monkeypatch):
+    """(d) the deadline passes during the LAST series chunk: the job must
+    stop with a status before cluster_registry, never start a pass the PT6H
+    wall would kill with no status written."""
+    import time as real_time
+    from . import gauntlet
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    expired = {"now": False}
+    real_series = gauntlet.registry_series
+
+    def series_then_expire(*a, **k):
+        out = real_series(*a, **k)
+        expired["now"] = True                 # the chunk overran the deadline
+        return out
+
+    class _Clock:
+        @staticmethod
+        def time():
+            return real_time.time() + (10 ** 9 if expired["now"] else 0)
+
+    called = []
+    monkeypatch.setattr(gs, "registry_series", series_then_expire)
+    monkeypatch.setattr(gs, "time", _Clock)
+    monkeypatch.setattr(gs, "cluster_registry",
+                        lambda *a, **k: called.append(1) or gauntlet.cluster_registry(*a, **k))
+    n = sum(1 for _ in reg.entries())
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(tmp_path / "logs"), "--chain"]) == 0
+    assert expired["now"] and not called
+    st = _status(tmp_path)
+    assert st["stopped_at_deadline"] is True and st["exit_reason"] == "deadline"
+    assert st["verdicts_without_stats"] == 1
+    assert sum(1 for _ in reg.entries()) == n
