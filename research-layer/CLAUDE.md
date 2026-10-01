@@ -39,8 +39,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   status (absence is not a claim). HAZARD: the old `pipeline.gauntlet` still
   applies the PBO family kill and labels its verdicts v6, so once the v6.1 note
   is on the chain `verify_registry.py` invariant 12 rejects any verdict it
-  writes for a killed family. Do not flip the flag, and do not hand-run
-  `python -m pipeline.gauntlet`, without Coen's say-so.
+  writes for a killed family, and the loop's post-gauntlet verify then returns
+  `chain_invalid` (exit 1, watermark not advanced). The chain is append-only,
+  so the offending entry stays and every later fire's pre-triage verify fails
+  too: the loop is wedged until the chain is repaired by Coen. Do not flip the
+  flag, and do not hand-run `python -m pipeline.gauntlet`, without Coen's
+  say-so.
 - python -m pipeline.loop --once from the layer root; --dry-run reports the
   trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
   data/) still runs, so a dry run in the live tree refreshes the cells;
@@ -168,21 +172,29 @@ of it.
   memory-light and safe by day. Entries carry `data_vintage`, `data_digest` and
   `data_end_by_cell`; the vintage names a Sunday but does NOT pin the bars, so
   compare digests, never vintages.
-- **`--chain` on 28 stays OFF until Coen accepts the effective-trials decision.**
-  The wrapper has no `--chain` and nothing may add one before that. Coen's
-  decision (2026-10-01, option 1) is in the v6.1 addendum: `trials_n` is the
-  larger of the clustering's argmax (`trials_n_raw`) and the highest cluster
-  count already on the chain (`trials_n_floor`, source named by
-  `trials_n_floor_entry_hash`). That is the reason: the argmax moved 302 -> 480
-  -> 44 on a registry that only grew. Confirm the job implements the floor
-  before scheduling `--chain`, and chain the entries only after the
-  480 -> 44 explanation is on record. A `gauntlet_stats` entry is append-only
-  and cannot be corrected, only superseded by a note.
+- **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on
+  cutover step 7 (the wrapper has no `--chain` today). Coen's effective-trials
+  decision (2026-10-01, option 1) is in the v6.1 addendum and IS implemented
+  and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is the larger of
+  the clustering's argmax (`trials_n_raw`) and the highest cluster count
+  already on the chain (`trials_n_floor`, source named by
+  `trials_n_floor_entry_hash`). Reason: the argmax moved 302 -> 480 -> 44 on a
+  registry that only grew, and a falling N flatters the deflated Sharpe.
+  Chain the entries only after the 480 -> 44 explanation is on record. A
+  `gauntlet_stats` entry is append-only and cannot be corrected, only
+  superseded by a note.
+- **`FLOOR_PROTOCOLS` in `gauntlet_stats.py` is an explicit v3-v6 whitelist**
+  of the protocols whose `trials_n` counts as a cluster count (an unknown
+  protocol string may be a registration count, so the floor is not inferred).
+  Any FUTURE gauntlet protocol that records cluster counts MUST add itself to
+  `FLOOR_PROTOCOLS` in the same change, or its higher k silently fails to raise
+  the floor and the recorded deflated Sharpe is flattered.
 - **Status files (the Ops Sentinel reads both).** `logs/gauntlet_worker_status.json`:
   `evaluated`, `deferred_lock`, `queued`, `oldest_queued_age_hours`,
   `exit_reason`, `ts_utc`. `logs/gauntlet_stats_status.json`: `stats_written`,
   `verdicts_without_stats`, `oldest_unstatted_verdict_age_hours`,
-  `stopped_at_deadline`. Sentinel `gauntlet_queue` check: FAIL when the worker
+  `stopped_at_deadline`. Sentinel `gauntlet_queue` check (on the UNMERGED
+  `sc-ops-sentinel` branch `feat/gauntlet-queue-check` until cutover): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
@@ -205,10 +217,18 @@ of it.
   move one out of the graveyard by hand.
 - **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6 verdicts with
   the standalone battery on bars truncated at each verdict's recorded
-  `data_end` and compares exactly. Read-only; never scheduled. Parity rule:
-  identical verdicts, and metrics bit-identical when compared under the same
-  engine revision (verdicts from before the 2026-08-27 engine change, commit
-  74b9703b, differ from any later run by at most 17 ulps in train_sharpe).
+  `data_end` and compares ELEVEN gate metrics exactly (is_edge_per_trade,
+  oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin,
+  cost_stress_net_pnl, train_sharpe, is_edge_raw, oos_edge_raw, is_vol,
+  oos_vol). It does NOT compare walkforward, era_summary, regime or
+  perturbation, so "bit-identical" means those eleven only. Read-only; never
+  scheduled. Parity rule: identical verdicts, and metrics bit-identical when
+  compared under the same engine revision. Observed: in the 17 pre-change
+  verdicts compared (of 818 pre-change v6 verdicts on the chain at the time of
+  writing, "pre-change" = dated before the 2026-08-26T23:19Z engine change,
+  commit 74b9703b), the eleven metrics differed by at most 17 ulps (train_sharpe);
+  six of the 17 were bit-identical on them. All 48 compared verdicts after the
+  change were bit-identical on them.
 
 ## Sweep rotation, sibling queues, re-trials (SP5 P2-T4: D6 / D10 / D9)
 - **D6 rotation.** `loop.ROTATION_SIZE` = 12 (spec s5); `loop.ROTATION_CLASSES`
