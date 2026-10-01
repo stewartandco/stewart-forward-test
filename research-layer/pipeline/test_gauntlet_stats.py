@@ -258,3 +258,78 @@ def test_a_crash_leaves_a_status_saying_so(tmp_path, monkeypatch):
                 "--logs-dir", str(tmp_path / "logs"), "--chain"])
     st = _status(tmp_path)
     assert st["exit_reason"] == "crashed" and st["verdicts_without_stats"] == 1
+
+
+def _walk_weekday_bars(start, end, seed=11, price=1.30):
+    """Weekday fx bars with a seeded random walk, so ma_cross trades and the
+    strategy's returns differ between its full history and the window it
+    shares with the other classes."""
+    import datetime as dt
+    import random
+    rng = random.Random(seed)
+    bars, d = [], start
+    while d <= end:
+        if d.weekday() < 5:
+            o = price
+            price = max(0.5, price * (1 + rng.gauss(0.0002, 0.006)))
+            bars.append({"date": d.isoformat(), "open": o,
+                         "high": max(o, price) * 1.001, "low": min(o, price) * 0.999,
+                         "close": price, "volume": 0.0})
+        d += dt.timedelta(days=1)
+    return bars
+
+
+def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path, capsys):
+    """Ruling 11: crypto + two fx strategies with unequal history starts, so
+    clustering intersects and the DSR input is the intersection-trimmed
+    series, not the strategy's own full history. The job must record exactly
+    the deflated Sharpe gauntlet.run recorded for every strategy, and the
+    alignment it was computed on."""
+    import datetime as dt
+    from .gauntlet import run as gauntlet_run
+    from .registry import Registry
+    from .test_gauntlet import run_verifier
+    from .test_gauntlet_classes import (mixed_class_gauntlet_registry,
+                                        _daily_bars, _weekday_bars)
+    from .test_gauntlet_worker import V61
+    from .test_screen import write_data_dir
+    from . import gauntlet_worker as gw
+    src = tmp_path / "src"
+    src.mkdir()
+    source, crypto_spec, gbp_spec, eur_spec = mixed_class_gauntlet_registry(src)
+    bars = {"BTCUSD": _daily_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31)),
+            "GBP": _walk_weekday_bars(dt.date(2015, 1, 1), dt.date(2020, 12, 31)),
+            "EUR": _weekday_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31))}
+    cutoff = "2020-06-30"
+    old, new = tmp_path / "v6", tmp_path / "v61"
+    for d in (old, new):
+        d.mkdir()
+        shutil.copyfile(source.log_path, d / "reg.jsonl")
+        write_data_dir(d, bars)
+    assert gauntlet_run(["--registry", str(old / "reg.jsonl"),
+                         "--data-dir", str(old / "data"),
+                         "--artifacts-dir", str(old / "art"),
+                         "--cutoff", cutoff, "--no-perturb"]) == 0
+    r61 = Registry(new / "reg.jsonl")
+    r61.append("note", {"text": V61})
+    assert gw.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
+                   "--artifacts-dir", str(new / "art"), "--logs-dir", str(new / "logs"),
+                   "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
+    assert gs.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
+                   "--logs-dir", str(new / "logs"), "--cutoff", cutoff,
+                   "--chain"]) == 0
+    capsys.readouterr()
+    v6 = {e["payload"]["strategy_id"]: e["payload"]["metrics"]
+          for e in Registry(old / "reg.jsonl").entries()
+          if e["entry_type"] == "verdict" and e["payload"]["stage"] == "gauntlet"}
+    st = {e["payload"]["strategy_id"]: e["payload"] for e in r61.entries()
+          if e["entry_type"] == "gauntlet_stats"}
+    assert set(st) == set(v6) and len(st) == 3
+    gbp = gbp_spec["strategy_id"]
+    assert v6[gbp]["trials_alignment"] == "intersection"
+    for sid, m in v6.items():
+        for k in ("deflated_sharpe", "trials_n", "trials_sr_var",
+                  "expected_max_sharpe", "trials_alignment", "trials_common_days"):
+            assert st[sid][k] == m[k], (sid, k, st[sid][k], m[k])
+    r = run_verifier(r61.log_path)
+    assert r.returncode == 0, r.stdout

@@ -15,7 +15,12 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   the sibling families are gauntlet.sibling_families. Nothing is re-derived.
 - deflated Sharpe: evaluate_spec's formula, psr(sharpe(r),
   expected_max_sharpe(trials_n, trials_var), len(r), skew, kurt), over the
-  strategy's own dated returns on the vintage.
+  SAME series gauntlet.run passed evaluate_spec as daily_returns:
+  cluster_registry's returns_by_id[sid] -- intersection-trimmed when classes
+  are mixed or calendars ragged, native otherwise (Ruling 11; a different
+  window would make v6 and v6.1 DSRs on one chain incomparable). The
+  alignment used is recorded beside it (trials_alignment,
+  trials_common_days), as v6 recorded it in metrics.
 - PBO: the helpers and arguments of gauntlet.run's PBO section (train
   window, CSCV_SPLITS, the group-id-seeded permutation null, which -- as
   there -- is built only for a family with a passing verdict in this batch
@@ -160,12 +165,12 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
-def verdict_stats(sid: str, series, train_rets: list[float],
+def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   train_sharpe: float | None, clustered: dict, pbo: dict,
                   plateau_ok: bool, vintage: str) -> dict:
     """The gauntlet_stats payload (less strategy_id / verdict_entry_hash)."""
     trials_n, trials_var = clustered["trials_n"], clustered["trials_var"]
-    r = _as_list(series.rets)
+    r = _as_list(dsr_rets)      # clustered["returns_by_id"][sid] (Ruling 11)
     sr_hat = sharpe(r)
     _, _, skew, kurt = moments(r)
     sr_star = expected_max_sharpe(trials_n, trials_var)
@@ -374,7 +379,8 @@ def run(argv: list[str] | None = None) -> int:
                 sibling = next(x for x in fam if x["sid"] == sid)
                 ok, _ = qualifies(sibling, fam, grids)
                 items.append((sid, v["vh"], verdict_stats(
-                    sid, dated[sid], train[sid], train_sharpe[sid], clustered,
+                    sid, clustered["returns_by_id"][sid], train[sid],
+                    train_sharpe[sid], clustered,
                     pbo, ok, vintage)))
             if len(items) >= STATS_BATCH_MAX:
                 stop = flush()
