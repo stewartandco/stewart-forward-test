@@ -194,17 +194,18 @@ of it.
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's argmax) and
   `trials_n_effective` (the floored N the entries use).
-- **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on
-  cutover step 7 (the wrapper has no `--chain` today). Coen's effective-trials
-  decision (2026-10-01, option 1) is in the v6.1 addendum and IS implemented
-  and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is the larger of
-  the clustering's argmax (`trials_n_raw`) and the highest cluster count
-  already on the chain (`trials_n_floor`, source named by
+- **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on the
+  plan's cutover step 7 (the `--chain` gate; the public spec's section 10
+  numbers its steps differently) (the wrapper has no `--chain` today). Coen's
+  effective-trials decision (2026-10-01, option 1) is in the v6.1 addendum and
+  IS implemented and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is
+  the larger of the clustering's argmax (`trials_n_raw`) and the highest cluster
+  count already on the chain (`trials_n_floor`, source named by
   `trials_n_floor_entry_hash`). Reason: the argmax moved 302 -> 480 -> 44 on a
-  registry that only grew, and a falling N flatters the deflated Sharpe.
-  Chain the entries only after the 480 -> 44 explanation is on record. A
-  `gauntlet_stats` entry is append-only and cannot be corrected, only
-  superseded by a note.
+  registry that only grew, and a falling N flatters the deflated Sharpe. Chain
+  the entries only after the 480 -> 44 explanation is on record. A
+  `gauntlet_stats` entry is append-only and cannot be corrected, only superseded
+  by a note.
 - **`FLOOR_PROTOCOLS` in `gauntlet_stats.py` is an explicit v3-v6 whitelist**
   of the protocols whose `trials_n` counts as a cluster count (an unknown
   protocol string may be a registration count, so the floor is not inferred).

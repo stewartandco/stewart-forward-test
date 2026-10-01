@@ -1,7 +1,7 @@
 @echo off
 setlocal
 rem 28_GauntletStats - gauntlet recorded statistics (Build 2a), daily 01:00.
-rem No --chain until Cutover step 7: this job records nothing on the chain yet.
+rem No --chain until the plan's cutover step 7 (the --chain gate): this job records nothing on the chain yet.
 rem Exit code is load-bearing: the Ops Sentinel FAILs the digest on nonzero, so
 rem the exit code is ALWAYS the python step's code and never a git result.
 rem Registered by the owner (elevated) from morpheus-hub\tasks\xml\28_GauntletStats.xml.
