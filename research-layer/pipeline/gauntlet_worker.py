@@ -6,6 +6,10 @@ gates (gauntlet_core), chaining each verdict and state change as soon as it
 exists, until its own deadline. Computes no clustering and no PBO: nothing on
 this module's import graph can (test_gauntlet_worker pins it).
 
+A verdict whose write finds chain.lock held is KEPT (in memory, this run
+only) and its write retried between chunks and in a final drain pass; it is
+never waited for and never persisted across runs.
+
 Exit 0: drained, stopped at the deadline, or deferred on a lock (routine).
 Exit 1: a candidate raised, or setup was refused. The Ops Sentinel alarms on 1.
 """
@@ -44,6 +48,19 @@ ARTIFACT_NAMES = ("oos_trades.csv", "mc_summary.json", "config.json")
 # in ONE pathspec-scoped commit and clears the list only after that commit
 # succeeded. logs/ is gitignored.
 COMMIT_LIST = "gauntlet_worker_commit_paths.txt"
+# Verdicts evaluated but not yet written because chain.lock was held are
+# retried in a final drain pass, inside this slice of the run's budget (the
+# chunk loop holds it back, so no chunk is started into it). The drain makes
+# one non-blocking acquire attempt every DRAIN_INTERVAL_S and stops at the
+# reserve or the deadline, whichever comes first. Rationale in the 2026-10-02
+# worker-retry report: it outlasts a scanner card batch several times over,
+# costs ~5% of a 25-minute run, and cannot rescue the loop's hours-long screen
+# hold or a quarantine catch-up, which no affordable reserve could.
+DRAIN_RESERVE_S = 75.0
+DRAIN_INTERVAL_S = 5.0
+# Injectable so tests drive the drain on a fake clock instead of sleeping.
+_monotonic = time.monotonic
+_sleep = time.sleep
 
 
 def _now() -> datetime:
@@ -225,9 +242,16 @@ def run(argv: list[str] | None = None) -> int:
     status = {"evaluated": 0, "passed": 0, "failed_gates": 0, "errored": 0,
               "deferred_lock": 0, "deferred_deadline": 0,
               "deferred_not_comparable": 0, "queued": 0,
-              "oldest_queued_age_hours": None, "repaired": 0, "exit_reason": None}
+              "oldest_queued_age_hours": None, "repaired": 0, "exit_reason": None,
+              "retried_written": 0, "dropped_stale": 0}
+    # Evaluated verdicts whose write found chain.lock held, oldest first. Each
+    # holds only what its write needs (spec, data provenance, the result);
+    # this run only, never persisted: the next run re-evaluates from scratch.
+    pending: list[dict] = []
 
     def finish(rc: int, reason: str, write: bool = True) -> int:
+        # deferred_lock = verdicts evaluated this run and still unwritten.
+        status["deferred_lock"] = len(pending)
         status["exit_reason"] = reason
         status["ts_utc"] = _now().isoformat()
         if write:
@@ -275,7 +299,8 @@ def run(argv: list[str] | None = None) -> int:
         rows = _row_counts(a.data_dir, {c for s in todo for c in _cells(s)})
         todo.sort(key=lambda s: cost_key(s, rows))
         budget = _deadline.DeadlineBudget(
-            (_now() + timedelta(minutes=a.deadline_minutes)).isoformat())
+            (_now() + timedelta(minutes=a.deadline_minutes)).isoformat(),
+            reserve_s=DRAIN_RESERVE_S, clock=_monotonic)
 
         max_workers = 1
         if a.max_workers > 1:
@@ -309,12 +334,16 @@ def run(argv: list[str] | None = None) -> int:
                                 "cutoff": a.cutoff, "perturb": a.perturb},
                     "hashes": hashes, "data_end": data_end}
 
-        def chain(prep: dict, r: dict) -> None:
-            """The write block, identical on both paths: under a short
-            chain.lock hold, re-check the candidate is still queued, write its
-            bundle, chain the verdict, then its state change."""
+        def write(item: dict) -> str:
+            """The ONE write block, for first attempts and retries alike: one
+            non-blocking chain.lock attempt; under that short hold, re-check
+            the candidate is still queued on the advanced snapshot, write its
+            bundle, chain the verdict, then its state change. Returns
+            'written', 'held' (chain.lock taken by another writer; nothing
+            done), 'stale' (moved on or judged meanwhile; nothing written) or
+            'errored' (counted; nothing written; stays queued)."""
             nonlocal snap
-            spec = prep["payload"]["spec"]
+            spec, r = item["spec"], item["r"]
             sid = spec["strategy_id"]
             r["metrics"]["fail_reason"] = r["reason"]
             try:
@@ -323,19 +352,19 @@ def run(argv: list[str] | None = None) -> int:
                         snap = registry.advance(snap)
                     except ChainMoved:
                         errored(sid)
-                        return
+                        return "errored"
                     state, judged = snap.states.get(sid), sid in snap.gauntlet_judged
                     if state != "gauntlet" or judged:
                         print(f"{sid}  skipped: moved on before its write "
                               f"(state {state}, judged {judged})", flush=True)
-                        return
+                        return "stale"
                     # The bundle is written only once the candidate is known
                     # to be ours to judge: a bundle on disk is what a chained
                     # artifacts_hash and invariant 8's cutoff read refer to,
                     # so a skipped candidate must never overwrite one.
                     bundle = write_gauntlet_artifacts(
                         a.artifacts_dir, spec, r["oos_trades"], r["mc_summary"],
-                        r["metrics"], a.cutoff, prep["hashes"], prep["data_end"],
+                        r["metrics"], a.cutoff, item["hashes"], item["data_end"],
                         {}, protocol=PROTOCOL_V61)
                     to, reason = (("quarantine", "gauntlet pass") if r["passed"]
                                   else ("graveyard", r["reason"]))
@@ -352,15 +381,66 @@ def run(argv: list[str] | None = None) -> int:
                         # round-trip through JSON. Either way nothing was
                         # written and the candidate stays queued.
                         errored(sid)
-                        return
+                        return "errored"
                     _record_bundle(a.logs_dir, a.repo_root, bundle)
                     status["passed" if r["passed"] else "failed_gates"] += 1
                     status["evaluated"] += 1
                     print(f"{sid}  {'PASS' if r['passed'] else 'FAIL ' + str(r['reason'])}",
                           flush=True)
+                    return "written"
             except ChainLockHeld:
-                print(f"{sid}  deferred: chain.lock held; next run", flush=True)
-                status["deferred_lock"] += 1
+                return "held"
+
+        def chain(prep: dict, r: dict) -> None:
+            """First write attempt for a fresh result. If chain.lock is held
+            the result is kept for a retry this run, with only what its write
+            needs (not the bars), and NO bundle is written yet."""
+            item = {"spec": prep["payload"]["spec"], "hashes": prep["hashes"],
+                    "data_end": prep["data_end"], "r": r}
+            if write(item) == "held":
+                print(f"{item['spec']['strategy_id']}  deferred: chain.lock held; "
+                      f"kept for a retry this run", flush=True)
+                pending.append(item)
+
+        def retry_pending() -> None:
+            """One retry pass over the kept results, oldest first. Each write
+            is one non-blocking attempt; the first 'held' ends the pass (the
+            lock is someone else's right now), leaving the rest kept. Never
+            starts a write once the deadline has passed."""
+            while pending:
+                rem = budget.remaining_s()
+                if rem is not None and rem <= 0:
+                    return
+                out = write(pending[0])
+                if out == "held":
+                    return
+                item = pending.pop(0)
+                if out == "written":
+                    status["retried_written"] += 1
+                elif out == "stale":
+                    status["dropped_stale"] += 1
+                # 'errored' was counted by write(); the candidate stays queued
+
+        def final_drain() -> None:
+            """Bounded non-blocking retries, DRAIN_INTERVAL_S apart, for at
+            most DRAIN_RESERVE_S and never past the deadline. Never waits on,
+            polls inside, or breaks chain.lock."""
+            if not pending:
+                return
+            stop_at = _monotonic() + DRAIN_RESERVE_S
+            rem = budget.remaining_s()
+            if rem is not None:
+                stop_at = min(stop_at, _monotonic() + rem)
+            n0, attempts = len(pending), 0
+            while pending and _monotonic() < stop_at:
+                retry_pending()
+                attempts += 1
+                if not pending or stop_at - _monotonic() <= DRAIN_INTERVAL_S:
+                    break
+                _sleep(DRAIN_INTERVAL_S)
+            print(f"gauntlet_worker: final drain, {attempts} pass(es), "
+                  f"{n0 - len(pending)} of {n0} kept verdict(s) resolved",
+                  flush=True)
 
         def errored(sid: str) -> None:
             traceback.print_exc(file=sys.stdout)
@@ -395,8 +475,18 @@ def run(argv: list[str] | None = None) -> int:
                                 errored(prep["payload"]["spec"]["strategy_id"])
                                 continue
                             chain(prep, r)
+                # The chunk is done and the next is not yet dispatched: one
+                # opportunistic retry of what earlier holds left unwritten.
+                # (Inside the timed block, so its writes count against the
+                # measured rate: conservative for the deadline.)
+                retry_pending()
             finally:
                 budget.record(len(chunk), time.time() - t0)
+
+        final_drain()
+        for item in pending:
+            print(f"{item['spec']['strategy_id']}  deferred: chain.lock held "
+                  f"through the run; not written, stays queued", flush=True)
 
         snap_end, view_end = _read(registry)          # outside the lock
         left, entered = view_end.queue(snap_end), view_end.entered
@@ -412,7 +502,7 @@ def run(argv: list[str] | None = None) -> int:
             return finish(1, "candidate_errors")
         if status["deferred_deadline"]:
             return finish(0, "deadline")
-        if status["deferred_lock"]:
+        if pending:
             return finish(0, "deferred_lock")
         return finish(0, "drained")
     except Exception:

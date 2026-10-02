@@ -19,7 +19,18 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   start time cannot be read counts as alive (conservative).
 - **The gauntlet worker holds chain.lock only for a tail read plus ONE append
   (~16 ms), once per candidate, and never waits for it.** If another writer
-  holds it the worker defers that candidate (exit 0); it never breaks a lock.
+  holds it the worker KEEPS that candidate's evaluated result in memory (no
+  bundle written yet) and retries the write later in the SAME run: once after
+  each chunk, before the next is dispatched, then in a final drain pass of
+  non-blocking attempts every `DRAIN_INTERVAL_S` (5 s) inside a reserved
+  `DRAIN_RESERVE_S` (75 s) that the chunk loop holds back, never past the
+  deadline (2026-10-02; before that every such result was discarded: 0
+  verdicts written per overnight run while 48-120 were evaluated). Each retry
+  re-checks on the advanced snapshot exactly what the first write does; a
+  candidate another writer moved or judged meanwhile is dropped unwritten
+  (`dropped_stale`). Results still unwritten at the end stay queued
+  (`deferred_lock`, exit 0) and are NEVER persisted: the next run re-evaluates
+  them. It never sleep-polls inside, waits on, or breaks a lock.
   HAZARD: a hand-run writer that appends to registry_log.jsonl WITHOUT taking
   chain.lock inside that ~16 ms window makes the worker see a chain that moved
   under it. It then writes nothing for that candidate, leaves it queued and
@@ -172,8 +183,10 @@ of it.
   second instance defers (exit 0) and NEVER writes the status file, so a wedged
   holder's status goes stale and the Sentinel catches it. chain.lock rules are
   in the Chain lock section: held for a tail read plus one append, never
-  waited for, never broken; an unlocked hand-run writer in that window turns
-  into an exit-1 alarm.
+  waited for, never broken; a write that finds it held is kept and retried
+  within the same run (between chunks, then a <= 75 s final drain inside the
+  deadline), never carried to the next run; an unlocked hand-run writer in
+  that window turns into an exit-1 alarm.
 - **Statistics job: `python -m pipeline.gauntlet_stats`**, wrapper
   `tasks/run_gauntlet_stats.bat`, task `\Morpheus\28_GauntletStats` daily
   01:00. It computes effective trials, the deflated Sharpe, PBO (recorded only),
@@ -214,7 +227,15 @@ of it.
   the floor and the recorded deflated Sharpe is flattered.
 - **Status files (the Ops Sentinel reads both).** `logs/gauntlet_worker_status.json`:
   `evaluated`, `deferred_lock`, `queued`, `oldest_queued_age_hours`,
-  `exit_reason`, `ts_utc`. `logs/gauntlet_stats_status.json`: `stats_written`,
+  `exit_reason`, `ts_utc` (the Sentinel's fields). Their meanings since
+  2026-10-02: `evaluated` = verdicts CHAINED this run, first attempt or retry;
+  `retried_written` = of those, the ones written on a retry after chain.lock
+  was held at the first attempt; `dropped_stale` = kept results dropped
+  unwritten because another writer moved or judged the candidate before the
+  retry; `deferred_lock` = evaluated results STILL unwritten at the end of the
+  run (they stay queued; `exit_reason` `deferred_lock` when nothing worse
+  happened). No new `exit_reason` value was added.
+  `logs/gauntlet_stats_status.json`: `stats_written`,
   `verdicts_without_stats`, `oldest_unstatted_verdict_age_hours`,
   `stopped_at_deadline`. Sentinel `gauntlet_queue` check (on the UNMERGED
   `sc-ops-sentinel` branch `feat/gauntlet-queue-check` until cutover): FAIL when the worker
