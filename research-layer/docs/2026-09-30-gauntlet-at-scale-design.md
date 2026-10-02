@@ -147,9 +147,21 @@ D9 re-trials, and Morpheus's display (its historical `dsr` gate label).
 - **A candidate that raises** gets no verdict; the run exits 1 (Sentinel FAIL)
   and the candidate stays queued, so the queue-age check names it if it keeps
   failing. Nothing is skipped or buried because of a crash.
-- **`chain.lock`** is held only for one candidate's two writes. If another
-  writer holds it, the worker defers that candidate to its next run and exits
-  0; it never waits and never breaks a lock.
+- **`chain.lock`** is held only for one candidate's two writes. It is never
+  waited on and never broken. If another writer holds it, the worker keeps
+  that candidate's evaluated result in memory, with no bundle written, and
+  retries the write later in the same run: once after each chunk, before the
+  next is dispatched, then in a final drain pass of non-blocking attempts
+  every 5 s inside a 75 s reserve the chunk loop holds back, never past the
+  deadline. Each retry re-checks, on the advanced snapshot, that the
+  candidate is still in `gauntlet` with no verdict; a candidate moved or
+  judged meanwhile is dropped unwritten. Results still unwritten at the end
+  of the run stay queued (exit 0) and are never persisted: the next run
+  re-evaluates them. This rescues only short holds (scanner/inbox card
+  batches). The loop's hours-long overnight screen hold and long quarantine
+  catch-ups still leave whole runs unwritten. (Amended 2026-10-02: until then
+  a held lock deferred the candidate to the next run and its evaluation was
+  discarded.)
 - **PID reuse.** Locks additionally record the holder process's start time;
   `holder_alive()` treats a live pid with a different start time as dead. (On
   2026-09-28 a reused pid wedged `loop.lock` and `chain.lock`.)
@@ -164,7 +176,15 @@ D9 re-trials, and Morpheus's display (its historical `dsr` gate label).
 ## 7. Status and monitoring
 
 - `logs/gauntlet_worker_status.json`: `evaluated`, `deferred_lock`, `queued`,
-  `oldest_queued_age_hours`, `exit_reason`.
+  `oldest_queued_age_hours`, `exit_reason`, `retried_written`,
+  `dropped_stale`. `evaluated` = verdicts chained this run, on a first
+  attempt or a retry; `retried_written` = those written on a retry after
+  chain.lock was held at the first attempt; `dropped_stale` = kept results
+  dropped unwritten because another writer moved or judged the candidate
+  first; `deferred_lock` = evaluated results still unwritten at the end of
+  the run. (Amended 2026-10-02: `retried_written` and `dropped_stale` added;
+  `deferred_lock` previously counted first attempts that met the lock. No
+  new `exit_reason` value.)
 - `logs/gauntlet_stats_status.json`: `stats_written`, `verdicts_without_stats`,
   `oldest_unstatted_verdict_age_hours`, `stopped_at_deadline`.
 - Ops Sentinel (`sc-ops-sentinel`): `27_GauntletWorker` in `hourly`;

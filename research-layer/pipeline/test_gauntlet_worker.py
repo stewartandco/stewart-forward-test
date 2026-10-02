@@ -5,14 +5,38 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from . import gauntlet_worker as gw
-from .chainlock import ChainLock
+from .chainlock import ChainLock, ChainLockHeld
 from .common import content_id
 from .test_gauntlet import gauntlet_registry, run_verifier
 from .test_screen import write_data_dir, dated_target_hit_bars
 
 V61 = "gauntlet-protocol-v6.1: test anchor"
 LAYER = Path(__file__).resolve().parent.parent
+
+
+class FakeClock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, s):
+        self.t += s
+
+
+@pytest.fixture(autouse=True)
+def drain_clock(monkeypatch):
+    """Every run here uses a fake monotonic clock whose sleep advances it, so
+    the final drain pass (bounded, spaced retries of verdicts kept under a
+    held chain.lock) never really sleeps. Same pattern as test_deadline."""
+    clock = FakeClock()
+    monkeypatch.setattr(gw, "_monotonic", clock)
+    monkeypatch.setattr(gw, "_sleep", clock.advance)
+    return clock
 
 
 def _setup(tmp_path, note=True):
@@ -76,6 +100,7 @@ def test_a_held_chain_lock_defers_and_exits_0(tmp_path):
         held.release()
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
     assert _status(tmp_path)["deferred_lock"] == 1
+    assert _status(tmp_path)["exit_reason"] == "deferred_lock"
 
 
 def test_a_raising_candidate_exits_1_and_stays_queued(tmp_path, monkeypatch):
@@ -255,7 +280,8 @@ def test_status_file_carries_every_key(tmp_path):
     assert set(_status(tmp_path)) == {
         "ts_utc", "evaluated", "passed", "failed_gates", "errored",
         "deferred_lock", "deferred_deadline", "deferred_not_comparable",
-        "queued", "oldest_queued_age_hours", "repaired", "exit_reason"}
+        "queued", "oldest_queued_age_hours", "repaired", "exit_reason",
+        "retried_written", "dropped_stale"}
 
 
 def test_a_chain_write_failure_aborts_the_run_and_still_reports(tmp_path, monkeypatch):
@@ -452,3 +478,233 @@ def test_a_bundle_outside_the_repo_root_is_not_listed(tmp_path):
     assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path / "elsewhere")) == 0
     assert _status(tmp_path)["evaluated"] == 1
     assert _commit_list(tmp_path) is None
+
+
+# ---- 2026-10-02: a verdict whose write meets a held chain.lock is kept ----
+# ---- and retried in the same run, never discarded, never persisted     ----
+
+def _other_writer(logs, on_refusal=None):
+    """A real chain.lock held by another writer (the scanner), plus a
+    ChainLock subclass for the worker that records every chain.lock attempt
+    (fake-clock time) and, the first time the worker is refused, lets the
+    other writer act (`on_refusal`) and optionally finish."""
+    other = ChainLock(logs, "scanner", "card batch")
+    attempts = []
+
+    class Spied(ChainLock):
+        def acquire(self):
+            if self.path.name == "chain.lock":
+                attempts.append(gw._monotonic())
+            try:
+                super().acquire()
+            except ChainLockHeld:
+                if self.path.name == "chain.lock" and on_refusal is not None:
+                    on_refusal(other)
+                raise
+    return other, attempts, Spied
+
+
+def _bundle_spy(monkeypatch):
+    calls = []
+    real = gw.write_gauntlet_artifacts
+
+    def spy(art_dir, spec, *a, **k):
+        calls.append(spec["strategy_id"])
+        return real(art_dir, spec, *a, **k)
+    monkeypatch.setattr(gw, "write_gauntlet_artifacts", spy)
+    return calls
+
+
+def _lock_after_first_evaluation(monkeypatch, other):
+    """The other writer takes chain.lock right after the FIRST candidate is
+    evaluated, i.e. just before that candidate's first write attempt."""
+    real = gw.evaluate_standalone
+    seen = []
+
+    def evaluate(*a, **k):
+        out = real(*a, **k)
+        if not seen:
+            other.acquire()
+        seen.append(1)
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", evaluate)
+
+
+def test_a_held_first_write_is_retried_before_the_next_chunk_same_run(tmp_path, monkeypatch):
+    """B (cheaper) is evaluated, its write finds chain.lock held, the other
+    writer then finishes. B's verdict must be chained in THIS run by the
+    retry after its chunk, BEFORE A's chunk is dispatched (so B precedes A on
+    the chain), with its bundle written exactly once."""
+    reg, a, b, data = _two_candidates(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(
+        logs, on_refusal=lambda o: o.release())
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    _lock_after_first_evaluation(monkeypatch, other)
+    bundles = _bundle_spy(monkeypatch)
+    assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path)) == 0
+    sa, sb = a["strategy_id"], b["strategy_id"]
+    assert _gauntlet_writes(reg) == [("verdict", sb), ("state_change", sb),
+                                     ("verdict", sa), ("state_change", sa)]
+    assert bundles == [sb, sa]                       # each bundle exactly once
+    st = _status(tmp_path)
+    assert st["retried_written"] == 1 and st["evaluated"] == 2
+    assert st["deferred_lock"] == 0 and st["dropped_stale"] == 0
+    assert st["exit_reason"] == "drained" and st["queued"] == 0
+    assert _commit_list(tmp_path) == [f"art/{sb}/gauntlet", f"art/{sa}/gauntlet"]
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_lock_held_all_run_writes_nothing_and_keeps_every_candidate_queued(tmp_path, monkeypatch, drain_clock):
+    reg, a, b, data = _two_candidates(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(logs)
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    bundles = _bundle_spy(monkeypatch)
+    before = reg.log_path.read_bytes()
+    other.acquire()
+    try:
+        assert _run(reg, data, tmp_path, "--repo-root", str(tmp_path)) == 0
+    finally:
+        other.release()
+    assert reg.log_path.read_bytes() == before
+    assert bundles == []
+    assert not (tmp_path / "art").exists() or not any((tmp_path / "art").iterdir())
+    states = reg.strategy_states()
+    assert states[a["strategy_id"]] == states[b["strategy_id"]] == "gauntlet"
+    st = _status(tmp_path)
+    assert st["deferred_lock"] == 2 and st["evaluated"] == 0
+    assert st["retried_written"] == 0 and st["queued"] == 2
+    assert st["exit_reason"] == "deferred_lock"
+    assert _commit_list(tmp_path) is None
+    # the drain retried, spaced, inside the reserve only (deadline 25 min)
+    drain = [t for t in attempts if t > attempts[0]]
+    assert len(drain) >= 5
+    assert drain_clock.t - 1000.0 <= gw.DRAIN_RESERVE_S
+
+
+def test_a_candidate_moved_on_while_kept_is_dropped_stale_not_written(tmp_path, monkeypatch):
+    """The other writer, while holding chain.lock, judges the candidate out of
+    'gauntlet' and releases. The retry re-checks on the advanced snapshot and
+    drops it: no verdict, no bundle, dropped_stale 1."""
+    reg, spec, data = _setup(tmp_path)
+    sid = spec["strategy_id"]
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    def bury_then_release(o):
+        if o._acquired:
+            reg.record_state_change(sid, "graveyard", "other writer")
+            o.release()
+    other, attempts, Spied = _other_writer(logs, on_refusal=bury_then_release)
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    _lock_after_first_evaluation(monkeypatch, other)
+    bundles = _bundle_spy(monkeypatch)
+    assert _run(reg, data, tmp_path) == 0
+    assert not _verdicts(reg)
+    assert bundles == []
+    assert reg.strategy_states()[sid] == "graveyard"
+    st = _status(tmp_path)
+    assert st["dropped_stale"] == 1 and st["retried_written"] == 0
+    assert st["evaluated"] == 0 and st["deferred_lock"] == 0
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_the_final_drain_stops_before_the_deadline(tmp_path, monkeypatch, drain_clock):
+    """Deadline 120 s; the evaluation itself eats 100 of them (fake clock), so
+    only ~20 s remain for the drain, less than its reserve. It must make
+    spaced attempts and never start one, or sleep, past the deadline."""
+    reg, spec, data = _setup(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(logs)
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    real = gw.evaluate_standalone
+
+    def slow(*a, **k):
+        out = real(*a, **k)
+        drain_clock.advance(100.0)
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", slow)
+    deadline = drain_clock.t + 120.0
+    other.acquire()
+    try:
+        assert _run(reg, data, tmp_path, "--deadline-minutes", "2") == 0
+    finally:
+        other.release()
+    assert len(attempts) >= 3                     # first write + spaced retries
+    assert all(t < deadline for t in attempts)
+    assert drain_clock.t < deadline             # no sleep runs into it either
+    gaps = sorted({round(t2 - t1, 6) for t1, t2 in zip(attempts, attempts[1:])} - {0.0})
+    assert gaps == [gw.DRAIN_INTERVAL_S]
+    st = _status(tmp_path)
+    assert st["deferred_lock"] == 1 and st["exit_reason"] == "deferred_lock"
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+def test_the_chunk_loop_holds_the_drain_reserve_back(tmp_path):
+    """A deadline that covers one candidate's prior but not prior + reserve
+    starts no chunk: the reserve is the drain's, never a chunk's."""
+    reg, spec, data = _setup(tmp_path)
+    minutes = (gw.PRIOR_S_PER_CANDIDATE + gw.DRAIN_RESERVE_S / 2) / 60
+    assert _run(reg, data, tmp_path, "--deadline-minutes", f"{minutes}") == 0
+    assert _status(tmp_path)["deferred_deadline"] == 1
+
+
+def test_no_retry_write_starts_after_the_deadline(tmp_path, monkeypatch, drain_clock):
+    """The chunk overran: the evaluation ended past the deadline, and the
+    other writer released chain.lock right after the refusal. The
+    between-chunk retry must not start a write past the deadline: the result
+    stays unwritten (deferred_lock) and the candidate stays queued."""
+    reg, spec, data = _setup(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(logs, on_refusal=lambda o: o.release())
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    real = gw.evaluate_standalone
+
+    def overrun(*a, **k):
+        out = real(*a, **k)
+        drain_clock.advance(200.0)                  # deadline is 120 s
+        other.acquire()
+        return out
+    monkeypatch.setattr(gw, "evaluate_standalone", overrun)
+    before = reg.log_path.read_bytes()
+    assert _run(reg, data, tmp_path, "--deadline-minutes", "2") == 0
+    assert reg.log_path.read_bytes() == before
+    assert len(attempts) == 1                       # the first write only
+    st = _status(tmp_path)
+    assert st["deferred_lock"] == 1 and st["retried_written"] == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+def test_the_pool_path_keeps_and_retries_a_held_write(tmp_path, monkeypatch):
+    """The scheduled default (--max-workers > 1): both candidates in one
+    pooled chunk; chain.lock is held at the first write and the other writer
+    finishes right after the refusal. The kept verdict is written by the retry
+    after the chunk, in the same run, with one bundle per candidate."""
+    reg, a, b, data = _two_candidates(tmp_path)
+    monkeypatch.setattr(gw, "worker_count", lambda n_cpu, avail: 2)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(logs, on_refusal=lambda o: o.release())
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    bundles = _bundle_spy(monkeypatch)
+    other.acquire()
+    try:
+        rc = gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art"),
+                     "--logs-dir", str(logs), "--no-perturb", "--max-workers", "2"])
+    finally:
+        other.release()
+    assert rc == 0
+    assert sorted(bundles) == sorted([a["strategy_id"], b["strategy_id"]])
+    st = _status(tmp_path)
+    assert st["evaluated"] == 2 and st["retried_written"] == 1
+    assert st["deferred_lock"] == 0 and st["exit_reason"] == "drained"
+    states = reg.strategy_states()
+    assert states[a["strategy_id"]] in ("quarantine", "graveyard")
+    assert states[b["strategy_id"]] in ("quarantine", "graveyard")
+    assert run_verifier(reg.log_path).returncode == 0
