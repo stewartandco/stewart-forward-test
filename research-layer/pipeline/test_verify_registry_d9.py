@@ -27,7 +27,10 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from . import composer
+from .blocks import is_exit_rules_v7_note
 from .common import content_id
 from .registry import Registry
 from .test_pipeline import make_strategy, register_example_blocks
@@ -574,10 +577,6 @@ def test_an_unrelated_note_does_not_arm_the_rule(tmp_path):
 # blocks.is_exit_rules_v7_note) a spec must be version 2 and carry no
 # blocks.RETIRED_TYPES block. Before the note nothing changes.
 
-import pytest
-
-from .blocks import is_exit_rules_v7_note
-
 
 def _refused_and_untouched(reg, spec, match):
     before = reg.log_path.read_bytes()
@@ -664,3 +663,56 @@ def test_register_strategy_is_armed_only_by_the_verifiers_marker(tmp_path):
     assert reg.exit_rules_v7_chained()
     assert is_exit_rules_v7_note(V7_NOTE_TEXT)
     assert not is_exit_rules_v7_note(" exit-rules-v7: leading space")
+
+
+# The positive-only memo (review B-I1): after the first True, later calls
+# re-read the one marker line instead of re-walking the chain.
+
+def test_a_second_call_does_not_walk_the_chain(tmp_path, monkeypatch):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    reg.register_strategy(spec_variant(spec, version=2))   # walks once
+    walks = []
+    real = reg._find_v7_note_offset
+    monkeypatch.setattr(reg, "_find_v7_note_offset",
+                        lambda: walks.append(1) or real())
+    assert reg.exit_rules_v7_chained()
+    with pytest.raises(ValueError, match="version 1 after exit-rules-v7"):
+        reg.register_strategy(spec_variant(spec, version=1, window_min=45))
+    assert walks == []
+
+
+def test_false_is_never_memoised(tmp_path):
+    reg, spec = seeded(tmp_path)
+    assert not reg.exit_rules_v7_chained()
+    chain_v7_note(reg)                 # appended after a False answer
+    assert reg.exit_rules_v7_chained()
+    with pytest.raises(ValueError, match="version 1 after exit-rules-v7"):
+        reg.register_strategy(spec_variant(spec, version=1))
+
+
+def test_a_replaced_file_is_walked_again(tmp_path, monkeypatch):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    assert reg.exit_rules_v7_chained()
+    walks = []
+    real = reg._find_v7_note_offset
+    monkeypatch.setattr(reg, "_find_v7_note_offset",
+                        lambda: walks.append(1) or real())
+
+    # replaced by a chain with NO note: the memo's line is not the marker,
+    # the chain is walked again, and v1 registers as before the note
+    other, _ = seeded(tmp_path / "other")
+    reg.log_path.write_bytes(other.log_path.read_bytes())
+    assert not reg.exit_rules_v7_chained()
+    assert walks == [1]
+    reg.register_strategy(spec_variant(spec, version=1))
+
+    # rewritten so the marker sits at a DIFFERENT offset: walked again, found
+    other.append("note", {"text": "unrelated note first"})
+    chain_v7_note(other)
+    reg.log_path.write_bytes(other.log_path.read_bytes())
+    assert reg.exit_rules_v7_chained()
+    assert walks == [1, 1, 1]          # one walk per call while unmemoised
+    assert reg.exit_rules_v7_chained()
+    assert walks == [1, 1, 1]          # memoised again at the new offset

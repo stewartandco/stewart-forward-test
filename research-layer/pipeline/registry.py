@@ -341,6 +341,9 @@ def _complete_lines(f, start: int, size: int):
 class Registry:
     def __init__(self, log_path: str | Path):
         self.log_path = Path(log_path)
+        # exit_rules_v7_chained()'s positive-only memo: the byte offset of the
+        # exit-rules-v7 marker line, re-validated on every use.
+        self._v7_note_offset: int | None = None
 
     # -- chain mechanics ---------------------------------------------------
 
@@ -494,16 +497,57 @@ class Registry:
     def exit_rules_v7_chained(self) -> bool:
         """True once the chain holds the exit-rules-v7 note, detected exactly
         as verify_registry.py invariant 10 detects it: a `note` entry whose
-        payload text passes blocks.is_exit_rules_v7_note. Stops at the first
-        occurrence, which is the one that arms the rule."""
-        for e in self.entries():
-            if not isinstance(e, dict) or e.get("entry_type") != "note":
-                continue
-            payload = e.get("payload")
-            if isinstance(payload, dict) and is_exit_rules_v7_note(
-                    payload.get("text")):
+        payload text passes blocks.is_exit_rules_v7_note.
+
+        Only a TRUE answer is memoised, as the byte offset of the first marker
+        line: on an append-only chain False can become True but True can never
+        become False. A later call re-reads that one line (one seek, one
+        parse) instead of re-walking ~33k lines, which cost ~1 s per
+        register_strategy and ~27 min on a 1,600-spec composer run. If the
+        line no longer holds the marker (the file was replaced or rewritten),
+        the memo is dropped and the chain is walked again."""
+        off = self._v7_note_offset
+        if off is not None:
+            if self._v7_marker_at(off):
                 return True
-        return False
+            self._v7_note_offset = None
+        off = self._find_v7_note_offset()
+        if off is None:
+            return False
+        self._v7_note_offset = off
+        return True
+
+    @staticmethod
+    def _is_v7_marker_line(raw: bytes) -> bool:
+        if not raw.strip():
+            return False
+        e = json.loads(raw)
+        if not isinstance(e, dict) or e.get("entry_type") != "note":
+            return False
+        payload = e.get("payload")
+        return isinstance(payload, dict) and is_exit_rules_v7_note(
+            payload.get("text"))
+
+    def _find_v7_note_offset(self) -> int | None:
+        """Byte offset of the FIRST marker line, or None. The full walk; reads
+        lines exactly as entries() does (blank lines skipped)."""
+        if not self.log_path.exists():
+            return None
+        pos = 0
+        with self.log_path.open("rb") as f:
+            for raw in f:
+                if self._is_v7_marker_line(raw):
+                    return pos
+                pos += len(raw)
+        return None
+
+    def _v7_marker_at(self, off: int) -> bool:
+        try:
+            with self.log_path.open("rb") as f:
+                f.seek(off)
+                return self._is_v7_marker_line(f.readline())
+        except (OSError, ValueError):
+            return False
 
     def record_state_change(self, strategy_id: str, to: str,
                             reason: str | None = None,
