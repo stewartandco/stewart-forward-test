@@ -168,6 +168,20 @@ of it.
   scoped by `--pathspec-from-file` (never argv, never anything another session
   staged), and clears the list only after that commit succeeds. It skips the
   commit while chain.lock exists (the list is kept) and never pushes.
+- **⚠ NEVER run `git merge`, `checkout`, `switch`, `reset` or `stash` in the
+  LIVE tree while a worker run is in its git step (incident 2026-10-02 12:21).**
+  `logs/gauntlet_worker.lock` is released when the python process exits, but
+  `run_gauntlet_worker.bat` runs `git add` / `git commit` AFTER that. A merge
+  started in that gap collided with the wrapper's commit ("unable to unlink old
+  'research-layer/registry_log.jsonl': Invalid argument"), and the chain file
+  was left at HEAD: the run's 48 uncommitted verdicts vanished from disk. The
+  chain stayed VALID (a clean truncation) and the next run re-judged the same
+  48 to identical verdicts on unchanged data, but on a day the data refreshed
+  in between the re-judgement could differ. Before any such git command in the
+  live tree, ALL of: the last line of `logs/gauntlet-worker-run.log` is the
+  current run's `==== ... exit N ====` line; no `.git/index.lock`,
+  `logs/gauntlet_worker.lock` or `logs/chain.lock`; `git diff --cached` is
+  empty; and the next :00/:30 fire is more than a few minutes away.
 - **Run order and failure rules.** (1) Orphan repair: a v6.1 verdict with no
   following state change gets the change it implies (fail -> graveyard with the
   gate as the reason, pass -> quarantine); a verdict is NEVER re-evaluated.
