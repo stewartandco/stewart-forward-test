@@ -1,0 +1,286 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "GBP_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "GBP_1d": "45a0b3bb2adc46a2619cfa7c2e23f71a15d8f52919088e6769030eb2349a87a2"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.0486233692210258,
+   "excess": -0.056263292650695705,
+   "strategy_net": -0.007639923429669904,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.010218637541021924,
+  "edge_decay_pct": -123.46225033471687,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 18,
+    "net_pnl": -0.034203607959216176
+   },
+   "post_2022": {
+    "n_trades": 15,
+    "net_pnl": 0.011635784759906453
+   },
+   "pre_gfc": {
+    "n_trades": 24,
+    "net_pnl": 0.09222727413986465
+   },
+   "tightening": {
+    "n_trades": 9,
+    "net_pnl": -0.0001304410781711729
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 40,
+   "stop": 50
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 5,
+   "stop": 8
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.02847663848812731,
+  "is_edge_raw": 0.003252692229088066,
+  "is_vol": 0.11422318088717537,
+  "mc_p05_equity": 0.7823257031405997,
+  "oos_edge_per_trade": -0.006681260208996766,
+  "oos_edge_raw": -0.0005295768174893717,
+  "oos_vol": 0.0792630134022113,
+  "open_at_end": false,
+  "p_ruin": 0.0005,
+  "perturbation": {
+   "base_score": 0.14932338882418245,
+   "dense_only": true,
+   "mean_ratio": 0.9676671993935355,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 1.0297588532600461,
+     "score": 0.1537670816404941,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 1.032154654669441,
+     "score": 0.15412483082589468,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.14932338882418245,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.14932338882418245,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.0315924391636826,
+     "score": 0.15404087890132534,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.9890040728738996,
+     "score": 0.14768143972244938,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 0.7788784465234653,
+     "score": 0.1163047691169986,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 0.8799491286577492,
+     "score": 0.13139698588406162,
+     "to": 0.9
+    }
+   ],
+   "worst_ratio": 0.7788784465234653
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 13,
+     "net": -0.006884498627361839,
+     "win_rate": 0.3076923076923077,
+     "wins": 4
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.14932338882418245,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 15,
+     "net": 0.26243038038721306
+    },
+    {
+     "min_equity": 0.8861942798371026,
+     "n_trades": 39,
+     "net": 0.022733060579073143
+    },
+    {
+     "min_equity": 0.9287005382354103,
+     "n_trades": 36,
+     "net": 0.0075788596516397164
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-25T04:52:07Z",
+  "family": "fx_vol_filtered_tstat_trend_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-25-043929-loop-fx"
+  },
+  "name": "GBP 1d fx_vol_filtered_tstat_trend_long dlong ml90 tm2.5 ml200 l120 mp0.8 ml50 ml90 te0.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "3d4db3693d78d717",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_vol_filtered_tstat_trend_long-2026-09-25-043929-loop-fx:GBP_1d"
+  },
+  "strategy_id": "a4cc263c4b4d1d58",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "GBP"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
