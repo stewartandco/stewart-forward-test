@@ -24,8 +24,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   each chunk, before the next is dispatched, then in a final drain pass of
   non-blocking attempts every `DRAIN_INTERVAL_S` (5 s) inside a reserved
   `DRAIN_RESERVE_S` (75 s) that the chunk loop holds back, never past the
-  deadline (2026-10-02; before that every such result was discarded: 0
-  verdicts written per overnight run while 48-120 were evaluated). Each retry
+  deadline (2026-10-02; before that every such result was discarded). The
+  measurement that motivated the change: overnight runs on 2026-10-01/02
+  wrote 0 verdicts each while evaluating 48-120. **The retries rescue only
+  SHORT holds** (scanner/inbox card batches and similar). The loop's screen
+  stage holds chain.lock for hours overnight, and a long quarantine catch-up
+  holds it for minutes per date. Those holds still leave whole runs with
+  `deferred_lock` equal to their evaluated count; the results are discarded
+  at the end of the run and the next run re-evaluates those candidates. So
+  the overnight zero-write runs are NOT fixed by this. Each retry
   re-checks on the advanced snapshot exactly what the first write does; a
   candidate another writer moved or judged meanwhile is dropped unwritten
   (`dropped_stale`). Results still unwritten at the end stay queued
