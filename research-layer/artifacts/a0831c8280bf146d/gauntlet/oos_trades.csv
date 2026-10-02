@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+ZAR,short,2025-04-09 00:00:00,0.05045994237474581,2025-05-02 00:00:00,0.05425229487207309,stop,-0.07643271558053556,1.0
