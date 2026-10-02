@@ -190,6 +190,20 @@ def retired_reason(role: str, btype: str) -> str | None:
     return RETIRED_TYPES.get((role, btype))
 
 
+# The chained note that arms the retirement above (verify_registry.py
+# invariant 10). ONE rule, called by both the verifier's walk and
+# Registry.register_strategy's write-time guard, so the two can never disagree
+# about whether the chain is past the note: a note entry is the marker when
+# its text STARTS with this prefix (its first line, never a substring, so an
+# incident note that mentions the rule does not arm it), and a non-string text
+# is never the marker. First occurrence arms; callers handle that.
+EXIT_RULES_V7_NOTE_PREFIX = "exit-rules-v7:"
+
+
+def is_exit_rules_v7_note(text: object) -> bool:
+    return isinstance(text, str) and text.startswith(EXIT_RULES_V7_NOTE_PREFIX)
+
+
 def validate_block(role: str, btype: str, params: dict, *, version: int = 1) -> list[str]:
     """Return error strings; empty list = valid. `version` is the spec's
     registration version: retired types are errors for version >= 2 and

@@ -357,6 +357,15 @@ of it.
   verifier is checking with strictly less evidence, so unreadable = report
   `window not verifiable` and PASS. A verifier that failed there would call
   the chain corrupt every time an artifact bundle was pruned.
+- **`Registry.register_strategy` enforces invariant 10 at WRITE time
+  (2026-10-02).** Once the chain holds the exit-rules-v7 note (detected by
+  `blocks.is_exit_rules_v7_note`, the verifier's own rule) it raises
+  `ValueError` before any write for a spec that is not version 2 or carries a
+  `blocks.RETIRED_TYPES` block. Why: the verifier only reports a violation
+  after it is chained, so a hand-run writer (e.g. re-registering one of the
+  five's version-1 `exit/time_stop` compositions) would leave the append-only
+  chain INVALID for good. Verifier tests that need such an entry write it with
+  a raw `reg.append`.
 - **The window leg is not a chain fact.** The verifier reads the cutoff from
   `artifacts/` and the data end from `data/`, defaulting to beside the log and
   overridable with `--artifacts-dir`/`--data-dir` (the loop passes both). Run

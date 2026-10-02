@@ -87,7 +87,8 @@ from pipeline.registry import (is_sha256_hex,                  # noqa: E402
                                QUARANTINE_SNAPSHOT_DIGEST_KEYS)
 # Invariant 10 reads the SAME retired-type table the engine and the composer
 # refuse from; a second list here would be two tables that must stay equal.
-from pipeline.blocks import RETIRED_TYPES                      # noqa: E402
+from pipeline.blocks import (RETIRED_TYPES,                    # noqa: E402
+                             is_exit_rules_v7_note)
 # Invariant 11 links a stats entry to a verdict by the WRITER's hash, so the
 # verifier uses the writer's function, not a third copy.
 from pipeline.common import entry_hash                         # noqa: E402
@@ -530,8 +531,9 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                 # schema; the walk never dereferences it. First occurrence
                 # arms; a second copy of the note changes nothing.
                 text = payload.get("text")
-                if (v7_note_line is None and isinstance(text, str)
-                        and text.startswith("exit-rules-v7:")):
+                # The rule itself lives in blocks.is_exit_rules_v7_note,
+                # shared with Registry.register_strategy's write-time guard.
+                if v7_note_line is None and is_exit_rules_v7_note(text):
                     v7_note_line = lineno
                 # Invariant 12's marker, same first-line rule and same
                 # first-occurrence-arms behaviour as invariant 10's.

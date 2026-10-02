@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from .blocks import RETIRED_TYPES, is_exit_rules_v7_note
 from .common import GENESIS_HASH, canonical_json, entry_hash
 from .lock import FileLock
 
@@ -466,7 +467,43 @@ class Registry:
         for b in spec.get("blocks", []):
             if (b["role"], b["type"]) not in registered_blocks:
                 raise ValueError(f"block type {b['role']}/{b['type']} not registered")
+        # verify_registry.py invariant 10, enforced BEFORE the write. The
+        # verifier can only report a violation once it is chained, and the
+        # chain is append-only: one hand-run writer registering a version-1
+        # or retired-type spec after the exit-rules-v7 note would leave the
+        # chain INVALID for good (and the loop's pre-spend verify refusing
+        # every later fire). Same table and same note rule as the verifier;
+        # with no note on the chain nothing here changes.
+        if self.exit_rules_v7_chained():
+            sid = spec.get("strategy_id")
+            problems = []
+            v = spec.get("version")
+            if v != 2:
+                problems.append(f"version {v!r} after exit-rules-v7; every "
+                                f"registration after the note must be version 2")
+            for b in spec.get("blocks", []):
+                reason = RETIRED_TYPES.get((b["role"], b["type"]))
+                if reason is not None:
+                    problems.append(f"retired block type {b['role']}/{b['type']} "
+                                    f"after exit-rules-v7 -- {reason}")
+            if problems:
+                raise ValueError(f"strategy {sid}: " + "; ".join(problems)
+                                 + " (verify_registry.py invariant 10)")
         return self.append("strategy_registered", spec)
+
+    def exit_rules_v7_chained(self) -> bool:
+        """True once the chain holds the exit-rules-v7 note, detected exactly
+        as verify_registry.py invariant 10 detects it: a `note` entry whose
+        payload text passes blocks.is_exit_rules_v7_note. Stops at the first
+        occurrence, which is the one that arms the rule."""
+        for e in self.entries():
+            if not isinstance(e, dict) or e.get("entry_type") != "note":
+                continue
+            payload = e.get("payload")
+            if isinstance(payload, dict) and is_exit_rules_v7_note(
+                    payload.get("text")):
+                return True
+        return False
 
     def record_state_change(self, strategy_id: str, to: str,
                             reason: str | None = None,
