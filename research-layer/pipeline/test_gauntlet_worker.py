@@ -678,3 +678,33 @@ def test_no_retry_write_starts_after_the_deadline(tmp_path, monkeypatch, drain_c
     st = _status(tmp_path)
     assert st["deferred_lock"] == 1 and st["retried_written"] == 0
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+def test_the_pool_path_keeps_and_retries_a_held_write(tmp_path, monkeypatch):
+    """The scheduled default (--max-workers > 1): both candidates in one
+    pooled chunk; chain.lock is held at the first write and the other writer
+    finishes right after the refusal. The kept verdict is written by the retry
+    after the chunk, in the same run, with one bundle per candidate."""
+    reg, a, b, data = _two_candidates(tmp_path)
+    monkeypatch.setattr(gw, "worker_count", lambda n_cpu, avail: 2)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other, attempts, Spied = _other_writer(logs, on_refusal=lambda o: o.release())
+    monkeypatch.setattr(gw, "ChainLock", Spied)
+    bundles = _bundle_spy(monkeypatch)
+    other.acquire()
+    try:
+        rc = gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                     "--artifacts-dir", str(tmp_path / "art"),
+                     "--logs-dir", str(logs), "--no-perturb", "--max-workers", "2"])
+    finally:
+        other.release()
+    assert rc == 0
+    assert sorted(bundles) == sorted([a["strategy_id"], b["strategy_id"]])
+    st = _status(tmp_path)
+    assert st["evaluated"] == 2 and st["retried_written"] == 1
+    assert st["deferred_lock"] == 0 and st["exit_reason"] == "drained"
+    states = reg.strategy_states()
+    assert states[a["strategy_id"]] in ("quarantine", "graveyard")
+    assert states[b["strategy_id"]] in ("quarantine", "graveyard")
+    assert run_verifier(reg.log_path).returncode == 0
