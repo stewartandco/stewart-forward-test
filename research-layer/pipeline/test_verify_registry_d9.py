@@ -27,7 +27,10 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from . import composer
+from .blocks import is_exit_rules_v7_note
 from .common import content_id
 from .registry import Registry
 from .test_pipeline import make_strategy, register_example_blocks
@@ -472,6 +475,16 @@ def spec_variant(spec, *, version, extra_blocks=(), window_min=30):
 TIME_STOP = {"role": "exit", "type": "time_stop", "params": {"max_bars": 5}}
 
 
+def raw_register(reg, spec):
+    """Chain a strategy_registered entry WITHOUT Registry.register_strategy.
+
+    register_strategy refuses what invariant 10 rejects (the write-time guard
+    tested at the end of this module), so a test of the VERIFIER writes the
+    bad entry the way a hand-run writer that bypasses the guard would: a raw
+    append. The verifier must still catch it, whoever wrote it."""
+    return reg.append("strategy_registered", spec)
+
+
 def test_retired_types_are_the_two_the_design_names():
     assert set(RETIRED_TYPES) == {("exit", "time_stop"), ("stop", "pct_stop")}
 
@@ -497,7 +510,7 @@ def test_a_version_1_registration_after_the_note_fails(tmp_path):
     reg, spec = seeded(tmp_path)
     chain_v7_note(reg)
     late = spec_variant(spec, version=1)
-    reg.register_strategy(late)
+    raw_register(reg, late)
 
     out = run_verifier(reg.log_path)
     assert out.returncode == 1, out.stdout
@@ -510,7 +523,7 @@ def test_a_registration_with_no_version_after_the_note_fails(tmp_path):
     chain_v7_note(reg)
     late = spec_variant(spec, version=1)
     del late["version"]
-    reg.register_strategy(late)
+    raw_register(reg, late)
 
     out = run_verifier(reg.log_path)
     assert out.returncode == 1, out.stdout
@@ -522,7 +535,7 @@ def test_a_version_2_registration_with_a_retired_type_after_the_note_fails(tmp_p
     register_time_stop_type(reg)
     chain_v7_note(reg)
     late = spec_variant(spec, version=2, extra_blocks=[TIME_STOP])
-    reg.register_strategy(late)
+    raw_register(reg, late)
 
     out = run_verifier(reg.log_path)
     assert out.returncode == 1, out.stdout
@@ -552,3 +565,154 @@ def test_an_unrelated_note_does_not_arm_the_rule(tmp_path):
 
     out = run_verifier(reg.log_path)
     assert out.returncode == 0, out.stdout
+
+
+# ------------- invariant 10 at WRITE time: Registry.register_strategy -------
+#
+# The verifier only reports an invariant-10 violation after it is chained, and
+# the chain is append-only, so one bad registration leaves it INVALID for good
+# (and the loop's pre-spend verify answers chain_invalid on every later fire).
+# register_strategy therefore refuses, BEFORE any write, exactly what invariant
+# 10 would reject: after the note (detected by the verifier's own rule,
+# blocks.is_exit_rules_v7_note) a spec must be version 2 and carry no
+# blocks.RETIRED_TYPES block. Before the note nothing changes.
+
+
+def _refused_and_untouched(reg, spec, match):
+    before = reg.log_path.read_bytes()
+    with pytest.raises(ValueError, match=match):
+        reg.register_strategy(spec)
+    assert reg.log_path.read_bytes() == before
+
+
+def test_register_strategy_refuses_version_1_after_the_note(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    _refused_and_untouched(reg, spec_variant(spec, version=1),
+                           r"version 1 after exit-rules-v7")
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_register_strategy_refuses_a_missing_version_after_the_note(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=2)
+    del late["version"]
+    _refused_and_untouched(reg, late, r"version None after exit-rules-v7")
+
+
+@pytest.mark.parametrize("retired", sorted(RETIRED_TYPES))
+def test_register_strategy_refuses_a_retired_type_after_the_note(tmp_path,
+                                                                 retired):
+    role, btype = retired
+    reg, spec = seeded(tmp_path)
+    # registered on the tmp chain, so the ONLY reason left to refuse is the
+    # retired type itself (the "not registered" refusal would mask it)
+    reg.register_block_type({"role": role, "type": btype,
+                             "params_schema": {}})
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=2, extra_blocks=[
+        {"role": role, "type": btype, "params": {}}])
+    _refused_and_untouched(reg, late, rf"retired block type {role}/{btype}")
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_register_strategy_refuses_v2_time_stop_after_the_note(tmp_path):
+    """The case the five buried compositions would hit: version raised to 2,
+    exit/time_stop kept."""
+    reg, spec = seeded(tmp_path)
+    register_time_stop_type(reg)
+    chain_v7_note(reg)
+    _refused_and_untouched(
+        reg, spec_variant(spec, version=2, extra_blocks=[TIME_STOP]),
+        r"retired block type exit/time_stop")
+
+
+def test_register_strategy_accepts_a_clean_version_2_after_the_note(tmp_path):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    late = spec_variant(spec, version=2)
+    entry = reg.register_strategy(late)
+    assert entry["payload"]["strategy_id"] == late["strategy_id"]
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
+
+
+def test_register_strategy_accepts_version_1_before_the_note(tmp_path):
+    """No note on the chain: behaviour is unchanged, a version-1 spec carrying
+    a retired type still registers (the legacy history)."""
+    reg, spec = seeded(tmp_path)
+    register_time_stop_type(reg)
+    old = spec_variant(spec, version=1, extra_blocks=[TIME_STOP])
+    reg.register_strategy(old)
+    assert reg.strategy_states()[old["strategy_id"]] == "proposed"
+    assert not reg.exit_rules_v7_chained()
+
+
+def test_register_strategy_is_armed_only_by_the_verifiers_marker(tmp_path):
+    """A note that mentions the rule, or a malformed note, does not arm the
+    guard -- the same notes test_an_unrelated_note_does_not_arm_the_rule shows
+    leave the verifier unarmed. One rule, one function."""
+    reg, spec = seeded(tmp_path)
+    reg.append("note", {"text": "incident: see exit-rules-v7: for context"})
+    reg.append("note", {"text": 42})
+    reg.append("note", "not a mapping")
+    assert not reg.exit_rules_v7_chained()
+    reg.register_strategy(spec_variant(spec, version=1))
+    chain_v7_note(reg)
+    assert reg.exit_rules_v7_chained()
+    assert is_exit_rules_v7_note(V7_NOTE_TEXT)
+    assert not is_exit_rules_v7_note(" exit-rules-v7: leading space")
+
+
+# The positive-only memo (review B-I1): after the first True, later calls
+# re-read the one marker line instead of re-walking the chain.
+
+def test_a_second_call_does_not_walk_the_chain(tmp_path, monkeypatch):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    reg.register_strategy(spec_variant(spec, version=2))   # walks once
+    walks = []
+    real = reg._find_v7_note_offset
+    monkeypatch.setattr(reg, "_find_v7_note_offset",
+                        lambda: walks.append(1) or real())
+    assert reg.exit_rules_v7_chained()
+    with pytest.raises(ValueError, match="version 1 after exit-rules-v7"):
+        reg.register_strategy(spec_variant(spec, version=1, window_min=45))
+    assert walks == []
+
+
+def test_false_is_never_memoised(tmp_path):
+    reg, spec = seeded(tmp_path)
+    assert not reg.exit_rules_v7_chained()
+    chain_v7_note(reg)                 # appended after a False answer
+    assert reg.exit_rules_v7_chained()
+    with pytest.raises(ValueError, match="version 1 after exit-rules-v7"):
+        reg.register_strategy(spec_variant(spec, version=1))
+
+
+def test_a_replaced_file_is_walked_again(tmp_path, monkeypatch):
+    reg, spec = seeded(tmp_path)
+    chain_v7_note(reg)
+    assert reg.exit_rules_v7_chained()
+    walks = []
+    real = reg._find_v7_note_offset
+    monkeypatch.setattr(reg, "_find_v7_note_offset",
+                        lambda: walks.append(1) or real())
+
+    # replaced by a chain with NO note: the memo's line is not the marker,
+    # the chain is walked again, and v1 registers as before the note
+    other, _ = seeded(tmp_path / "other")
+    reg.log_path.write_bytes(other.log_path.read_bytes())
+    assert not reg.exit_rules_v7_chained()
+    assert walks == [1]
+    reg.register_strategy(spec_variant(spec, version=1))
+
+    # rewritten so the marker sits at a DIFFERENT offset: walked again, found
+    other.append("note", {"text": "unrelated note first"})
+    chain_v7_note(other)
+    reg.log_path.write_bytes(other.log_path.read_bytes())
+    assert reg.exit_rules_v7_chained()
+    assert walks == [1, 1, 1]          # one walk per call while unmemoised
+    assert reg.exit_rules_v7_chained()
+    assert walks == [1, 1, 1]          # memoised again at the new offset

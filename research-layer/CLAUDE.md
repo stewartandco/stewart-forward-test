@@ -235,10 +235,16 @@ of it.
   before the note stay valid history.
 - **The five** (b09adeb0be6faf4e, 9acf68e5a2ef607d, 7ecf180b7e8b05ce,
   6aebc4b7f051baba, 15595642e7a2caaa) were buried by the family kill under v6
-  verdicts although v6 retired it. Their graveyard entries STAND. Once the
-  worker is live each is re-tried as a NEW strategy id through the D9 re-trial
-  path, charged to N in full and judged by all six gates from scratch. Never
-  move one out of the graveyard by hand.
+  verdicts although v6 retired it. Their graveyard entries STAND. All five are
+  version 1 with `exit/time_stop`, so after exit-rules-v7 (chain line 32897)
+  the buried compositions themselves can never be registered again (invariant
+  10; `register_strategy` refuses them). From the
+  `correction-2026-10-02-retrial-path` note (`docs/notes/`; it applies once it
+  is chained, after Coen's approval) each is re-tried inside the D8/D9 unified
+  re-run, in exit-rules-v7's D15(b) form: a version-2 composition with a
+  permitted exit set, a NEW strategy id charged to N in full, screened and
+  then judged by all six gates from scratch. That replaces the old "once the
+  worker is live" trigger. Never move one out of the graveyard by hand.
 - **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6 verdicts with
   the standalone battery on bars truncated at each verdict's recorded
   `data_end` and compares ELEVEN gate metrics exactly (is_edge_per_trade,
@@ -357,6 +363,15 @@ of it.
   verifier is checking with strictly less evidence, so unreadable = report
   `window not verifiable` and PASS. A verifier that failed there would call
   the chain corrupt every time an artifact bundle was pruned.
+- **`Registry.register_strategy` enforces invariant 10 at WRITE time
+  (2026-10-02).** Once the chain holds the exit-rules-v7 note (detected by
+  `blocks.is_exit_rules_v7_note`, the verifier's own rule) it raises
+  `ValueError` before any write for a spec that is not version 2 or carries a
+  `blocks.RETIRED_TYPES` block. Why: the verifier only reports a violation
+  after it is chained, so a hand-run writer (e.g. re-registering one of the
+  five's version-1 `exit/time_stop` compositions) would leave the append-only
+  chain INVALID for good. Verifier tests that need such an entry write it with
+  a raw `reg.append`.
 - **The window leg is not a chain fact.** The verifier reads the cutoff from
   `artifacts/` and the data end from `data/`, defaulting to beside the log and
   overridable with `--artifacts-dir`/`--data-dir` (the loop passes both). Run
