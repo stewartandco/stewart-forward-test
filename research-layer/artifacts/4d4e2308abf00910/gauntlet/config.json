@@ -1,0 +1,279 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CAD_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "CAD_1d": "0834db48d730ca96ec34181946077fd15ffd75dd85d47db5d4d2111b9093bcc3"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.05899872701555867,
+   "excess": 0.057690624758585364,
+   "strategy_net": -0.0013081022569733092,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.0027057598488868795,
+  "edge_decay_pct": -201.39436749416123,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 22,
+    "net_pnl": 0.0005122220168556346
+   },
+   "post_2022": {
+    "n_trades": 18,
+    "net_pnl": -0.09052887628687156
+   },
+   "pre_gfc": {
+    "n_trades": 37,
+    "net_pnl": 0.24305581552847322
+   },
+   "tightening": {
+    "n_trades": 19,
+    "net_pnl": -0.021235380790946334
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 101,
+   "stop": 73
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 5,
+   "stop": 2
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0022840724889572265,
+  "is_edge_raw": 0.00018019387947708102,
+  "is_vol": 0.07889148892964731,
+  "mc_p05_equity": 0.6187413796479166,
+  "oos_edge_per_trade": -0.002315920853286325,
+  "oos_edge_raw": -0.00013884147306321773,
+  "oos_vol": 0.05995087132023518,
+  "open_at_end": false,
+  "p_ruin": 0.007,
+  "perturbation": {
+   "base_score": 0.03206583396957902,
+   "dense_only": true,
+   "mean_ratio": 1.1621950175791658,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 0.10693780798253992,
+     "score": 0.0034290499958388476,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 2.2339164906194515,
+     "score": 0.07163239529010797,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.03206583396957902,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0803168084185149,
+     "score": 0.03464125941329361,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.9750773077813475,
+     "score": 0.03126666705882079,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.0,
+     "score": 0.03206583396957902,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 1.0,
+     "ratio": 1.7391167082523076,
+     "score": 0.055766227620539295,
+     "to": 0.9
+    }
+   ],
+   "worst_ratio": 0.10693780798253992
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 7,
+     "net": -0.0009718903114425241,
+     "win_rate": 0.14285714285714285,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.03206583396957902,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9525196891892558,
+     "n_trades": 44,
+     "net": 0.03760895475620136
+    },
+    {
+     "min_equity": 0.7640575704074708,
+     "n_trades": 73,
+     "net": -0.028381340856328957
+    },
+    {
+     "min_equity": 0.9805296713086284,
+     "n_trades": 57,
+     "net": 0.022126121129140024
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 1.0
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-27T14:39:11Z",
+  "family": "fx_vol_filtered_trend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-27-143029-loop-fx"
+  },
+  "name": "CAD 1d fx_vol_filtered_trend dlong ml90 tm2.5 ml100 l120 mp1.0 ml50 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1c11d61fbf10b3a0",
+    "2243c5930df5c5be",
+    "2b3f58223fa36979",
+    "303001052725c19f",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "d0fc8344bd267d47",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_vol_filtered_trend-2026-09-27-143029-loop-fx:CAD_1d"
+  },
+  "strategy_id": "4d4e2308abf00910",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "CAD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+CHF,long,2024-07-31 00:00:00,1.1367511651699442,2024-11-22 00:00:00,1.11781801922647,signal:ma_crossunder,-0.01695548848647436,1.0
+CHF,long,2025-04-04 00:00:00,1.1700011700011699,2025-12-01 00:00:00,1.2445550715619167,signal:ma_crossunder,0.06342121966397027,1.0
