@@ -1,0 +1,279 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "NOK_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "NOK_1d": "04b3ea9f1394a19c19ef45a230822d5a769fe8475fe4f7e0c8193f2e9736d610"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.08634567824539616,
+   "excess": -0.05775223267044868,
+   "strategy_net": 0.028593445574947474,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.026337914598387746,
+  "edge_decay_pct": 0.6832524192089907,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 15,
+    "net_pnl": 0.07173136655164214
+   },
+   "post_2022": {
+    "n_trades": 14,
+    "net_pnl": -0.02892570420930851
+   },
+   "pre_gfc": {
+    "n_trades": 19,
+    "net_pnl": 0.1917520740562273
+   },
+   "tightening": {
+    "n_trades": 23,
+    "net_pnl": -0.1795511751606773
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 71,
+   "stop": 40
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 8,
+   "stop": 3
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.024221533646266554,
+  "is_edge_raw": 0.0031631239709606486,
+  "is_vol": 0.130591399254696,
+  "mc_p05_equity": 0.7659763893528694,
+  "oos_edge_per_trade": 0.02438702786087419,
+  "oos_edge_raw": 0.0028684038505699633,
+  "oos_vol": 0.11762006698536412,
+  "open_at_end": false,
+  "p_ruin": 0.0015,
+  "perturbation": {
+   "base_score": 0.17479579919012544,
+   "dense_only": true,
+   "mean_ratio": 0.8171459402690109,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 0.8957930256788053,
+     "score": 0.15658085783246734,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 0.814477288153392,
+     "score": 0.14236720850497825,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.9633243467599801,
+     "score": 0.16838504907121626,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0473540686280738,
+     "score": 0.18307309146087367,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.601043686762015,
+     "score": 0.10505991157574585,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.6790196341945689,
+     "score": 0.1186897796248263,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.6,
+     "ratio": 0.7190095317062412,
+     "score": 0.12567984571991025,
+     "to": 0.7
+    }
+   ],
+   "worst_ratio": 0.601043686762015
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 10,
+     "net": 0.04417624738028724,
+     "win_rate": 0.4,
+     "wins": 4
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 1,
+     "net": -0.012623805024017642,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.17479579919012544,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 32,
+     "net": 0.3372106711318235
+    },
+    {
+     "min_equity": 0.9206731251949561,
+     "n_trades": 34,
+     "net": 0.11721345216566528
+    },
+    {
+     "min_equity": 0.8885206014113397,
+     "n_trades": 45,
+     "net": -0.10331736252085683
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.6
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-27T14:39:11Z",
+  "family": "fx_vol_filtered_trend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-27-143029-loop-fx"
+  },
+  "name": "NOK 1d fx_vol_filtered_trend dlong ml90 tm2.5 ml100 l120 mp0.6 ml50 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1c11d61fbf10b3a0",
+    "2243c5930df5c5be",
+    "2b3f58223fa36979",
+    "303001052725c19f",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "d0fc8344bd267d47",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_vol_filtered_trend-2026-09-27-143029-loop-fx:NOK_1d"
+  },
+  "strategy_id": "98704c5006e89b96",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "NOK"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
