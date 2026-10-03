@@ -263,7 +263,9 @@ of it.
   distinct configs), passing verdict or not; before, only for a family with a
   pass in the batch, so siblings statted on different nights could differ.
   Each result is cached in `logs/gauntlet_stats_pbo_cache.json` per (family,
-  vintage, data_digest, inputs sha); only the current vintage is kept and an
+  vintage, data_digest, inputs sha, `pbo_code_sha()` = PBO code + constants
+  + `PBO_CACHE_REV`); only the current vintage is kept, a failed write is
+  logged and the run continues uncached, and an
   unreadable file is an empty cache. Measured on a copy: the 10-03 backlog
   (2,193 verdicts, 286 families) needs ~32,300 s of nulls, about two nights.
 - **chain.lock held at a flush (step 7, T7):** the computed entries are KEPT
