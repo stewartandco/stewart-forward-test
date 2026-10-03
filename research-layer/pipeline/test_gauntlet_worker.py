@@ -708,3 +708,19 @@ def test_the_pool_path_keeps_and_retries_a_held_write(tmp_path, monkeypatch):
     assert states[a["strategy_id"]] in ("quarantine", "graveyard")
     assert states[b["strategy_id"]] in ("quarantine", "graveyard")
     assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_the_v61_amendment_note_is_not_the_v61_note(tmp_path):
+    """Step 7: gauntlet-protocol-v6.1-amendment-1 (docs/notes/, chained after
+    Coen's approval) must not stand in for the v6.1 addendum. With only the
+    amendment on the chain the worker still refuses and writes nothing."""
+    reg, spec, data = _setup(tmp_path, note=False)
+    text = (LAYER / "docs" / "notes"
+            / "gauntlet-protocol-v6.1-amendment-1.md").read_text(encoding="utf-8")
+    assert text.startswith("gauntlet-protocol-v6.1-amendment-1: ")
+    reg.append("note", {"text": text})
+    n = sum(1 for _ in reg.entries())
+    assert _run(reg, data, tmp_path) == 1
+    assert _status(tmp_path)["exit_reason"] == "refused_no_protocol_note"
+    assert sum(1 for _ in reg.entries()) == n
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
