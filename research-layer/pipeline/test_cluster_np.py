@@ -483,3 +483,213 @@ def test_effective_trials_duplicate_dense_sweep():
         assert 8 <= len(series) <= 21
         assert effective_trials(series) == _effective_trials_ref(series), \
             f"case {case}"
+
+
+# ---------------- step 7 (2026-10-03): V2 bookkeeping + memory ----------------
+# The array bookkeeping in _agglomerate_np and the in-place distance arithmetic
+# must change NO result (v6.1, chain entry 68486, fixes the method). The real-
+# data proof is tools/verify_cluster_identity.py; these hold the contract in
+# the suite.
+
+from . import cluster as _cluster
+
+
+def _fresh_key(S, sizes, active, i):
+    """The ORIGINAL per-element re-scan of slot i: (round(d, 12), lo, hi) over
+    every active j in the 2e-12 window, compared in a Python loop. Slot
+    numbers stand in for min ids (the slot invariant)."""
+    avg = S[i] / (sizes[i] * sizes)
+    avg[~active] = np.inf
+    avg[i] = np.inf
+    raw = avg.min()
+    if raw == np.inf:
+        return None
+    best = None
+    for j in np.flatnonzero(avg <= raw + 2e-12):
+        j = int(j)
+        key = (round(float(avg[j]), 12), min(i, j), max(i, j))
+        if best is None or key < best:
+            best = key
+    return best
+
+
+def _cache_checker(seen):
+    """An _after_merge hook asserting, for EVERY active row, that the cached
+    key equals a fresh re-scan (and the cached partner is that key's other
+    slot). Counts merges checked into seen['merges']."""
+    def check(S, sizes, active, cd, clo, chi, cj):
+        seen["merges"] = seen.get("merges", 0) + 1
+        for i in np.flatnonzero(active):
+            i = int(i)
+            fresh = _fresh_key(S, sizes, active, i)
+            cached = (float(cd[i]), int(clo[i]), int(chi[i]))
+            assert cached == fresh, (
+                f"merge {seen['merges']}: row {i} cached {cached} != fresh {fresh}")
+            assert int(cj[i]) == (fresh[2] if fresh[1] == i else fresh[1])
+    return check
+
+
+def test_agglomerate_np_cache_matches_a_fresh_rescan_after_every_merge():
+    """The O(1) tie-only update is invisible to every history comparison (a
+    stale key there is only ever too HIGH, and the keep row holds the true
+    minimum), so this asserts the invariant itself. Fixture: slots 0..3 with
+    d(0,1) = 0.5 + 8e-13, d(0,2) = d(0,3) = 0.5 and (1, 3) merging first.
+    Row 0 caches partner 2 (key (0.5, 0, 2)); after the merge its average
+    to slot 1 is 0.5 + 4e-13, which rounds to 0.5 and wins on (lo, hi):
+    the fresh key is (0.5, 0, 1). Only the tie update records that."""
+    ids = ["a" * 16, "b" * 16, "c" * 16, "d" * 16]
+    D = np.array([[0.0, 0.5 + 8e-13, 0.5, 0.5],
+                  [0.5 + 8e-13, 0.0, 0.9, 0.01],
+                  [0.5, 0.9, 0.0, 0.9],
+                  [0.5, 0.01, 0.9, 0.0]])
+    seen, rows0 = {}, []
+    check = _cache_checker(seen)
+
+    def hook(S, sizes, active, cd, clo, chi, cj):
+        rows0.append((float(cd[0]), int(clo[0]), int(chi[0])))
+        check(S, sizes, active, cd, clo, chi, cj)
+    hist = _agglomerate_np(ids, D, _after_merge=hook)
+    assert seen["merges"] == 2                       # the last merge ends the loop
+    assert rows0[0] == (0.5, 0, 1), "the fixture must exercise the tie update"
+    ref = agglomerate(ids, {(a, b): D[i, j] for i, a in enumerate(ids)
+                            for j, b in enumerate(ids)})
+    assert _hist_as_sets(hist) == _hist_as_sets(ref)
+
+
+def test_agglomerate_np_cache_invariant_on_heavy_ties():
+    """The same per-merge invariant on fixtures dominated by exact ties: blocks
+    of all-zero rows (distance exactly sqrt(0.5) to everything, like the live
+    registry's 79), identical rows, and distances quantised near the 1e-12
+    rounding boundary."""
+    rng = np.random.default_rng(20261003)
+    merges = 0
+    for case in range(60):
+        n = int(rng.integers(6, 28))
+        L = int(rng.integers(20, 60))
+        X = rng.standard_normal((n, L)) * 0.01
+        X[rng.random(n) < 0.35] = 0.0
+        dup = rng.random(n) < 0.25
+        X[dup] = X[int(rng.integers(0, n))]
+        ids = [f"{i:04d}" + "t" * 12 for i in range(n)]
+        D = _distance_matrix_np(X)
+        if case % 3 == 1:
+            D = np.round(D, 1) + (rng.integers(0, 3, D.shape) * 4e-13)
+            D = np.triu(D, 1)
+            D = D + D.T
+        seen = {}
+        _agglomerate_np(ids, D, _after_merge=_cache_checker(seen))
+        merges += seen.get("merges", 0)
+    assert merges > 500
+
+
+def test_effective_trials_np_fuzz_heavy_exact_ties():
+    """Fuzz, end to end against the pure-Python reference: many identical
+    and all-zero rows (exact ties at every level of the merge), through the
+    merge history and the public dispatcher."""
+    rng = np.random.default_rng(31337)
+    for case in range(40):
+        n = int(rng.integers(5, 26))
+        L = int(rng.integers(30, 70))
+        base = rng.standard_normal((3, L)) * 0.01
+        rows = []
+        for i in range(n):
+            r = rng.random()
+            if r < 0.35:
+                rows.append([0.0] * L)
+            elif r < 0.7:
+                rows.append([float(v) for v in base[int(rng.integers(0, 3))]])
+            else:
+                rows.append([float(v) for v in rng.standard_normal(L) * 0.01])
+        series = {f"{i:04d}" + "z" * 12: rows[i] for i in range(n)}
+        ids = sorted(series)
+        ref_hist = agglomerate(ids, distance_matrix(series))
+        new_hist = _agglomerate_np(ids, dmat_to_array(ids, distance_matrix(series)))
+        assert _hist_as_sets(new_hist) == _hist_as_sets(ref_hist), f"case {case}"
+        if _returns_matrix(series)[1] is not None:
+            assert effective_trials(series) == _effective_trials_ref(series), \
+                f"case {case}"
+
+
+def test_row_blocks_change_no_value(monkeypatch):
+    """_ROWS only bounds temporaries. With tiny blocks (many boundaries,
+    including a ragged last block) the distance matrix is byte-identical to
+    the ORIGINAL whole-matrix expression, and effective_trials is unchanged."""
+    rng = np.random.default_rng(7)
+    n, L = 53, 40
+    X = rng.standard_normal((n, L)) * 0.01
+    X[[3, 17, 40]] = 0.0
+    X[[5, 6, 7]] = X[9]
+    # the pre-step-7 expression, verbatim
+    M = X - X.mean(axis=1, keepdims=True)
+    ss = np.einsum("ij,ij->i", M, M)
+    good = ss > 0.0
+    with np.errstate(invalid="ignore", divide="ignore"):
+        R = (M @ M.T) / np.sqrt(np.outer(ss, ss))
+    R[~good, :] = 0.0
+    R[:, ~good] = 0.0
+    np.clip(R, -1.0, 1.0, out=R)
+    want = np.sqrt(0.5 * (1.0 - R))
+    want = np.triu(want, 1)
+    want = want + want.T
+    series = {f"{i:04d}" + "r" * 12: X[i].tolist() for i in range(n)}
+    before = effective_trials(series)
+    # the duplicate pin rewrites the duplicate block; compare everywhere else
+    mask = np.ones((n, n), dtype=bool)
+    mask[np.ix_([5, 6, 7, 9], [5, 6, 7, 9])] = False
+    for rows in (1, 4, 7, 52, 53, 1000):
+        monkeypatch.setattr(_cluster, "_ROWS", rows)
+        D = _distance_matrix_np(X)
+        assert D[mask].tobytes() == want[mask].tobytes(), f"_ROWS={rows}"
+        assert effective_trials(series) == before, f"_ROWS={rows}"
+
+
+def test_effective_trials_np_holds_one_matrix_at_a_time(monkeypatch):
+    """Memory: the merge sums consume D in place and the replay recomputes it,
+    so the traced peak is about 1.6 x n^2 x 8 bytes (measured, n = 600, small
+    row blocks), not the 4.3 x of three live n x n matrices plus full-size
+    temporaries before step 7."""
+    import tracemalloc
+    monkeypatch.setattr(_cluster, "_ROWS", 16)
+    rng = np.random.default_rng(0)
+    n, L = 600, 64
+    X = rng.standard_normal((n, L)) + rng.standard_normal((6, L))[rng.integers(0, 6, n)]
+    X[:5] = 0.0
+    series = {f"{i:05d}" + "m" * 11: X[i] for i in range(n)}
+    ids, Xm = _returns_matrix(series)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        _effective_trials_np(series, ids, Xm)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 2.2 * n * n * 8, f"peak {peak / (n * n * 8):.2f} x n^2 x 8"
+
+
+def test_agglomerate_np_overwrite_is_opt_in():
+    """Default callers keep their D (test helpers and the reference checks
+    pass one D twice); overwrite=True consumes it and gives the same history."""
+    series = seeded_series(30, 80)
+    ids = sorted(series)
+    D = _distance_matrix_np(_returns_matrix(series)[1])
+    keep = D.copy()
+    first = _agglomerate_np(ids, D)
+    assert D.tobytes() == keep.tobytes()
+    assert _agglomerate_np(ids, D, overwrite=True) == first
+    assert D.tobytes() != keep.tobytes()
+
+
+def test_mirror_upper_is_the_original_symmetrisation(monkeypatch):
+    """_mirror_upper(D) == triu(D, 1) + triu(D, 1).T byte for byte, on an
+    ASYMMETRIC non-negative matrix (BLAS usually hands back a symmetric Gram
+    matrix, which would hide a mirror that does nothing), across block
+    boundaries and a ragged last block."""
+    rng = np.random.default_rng(11)
+    for rows in (1, 3, 8, 512):
+        monkeypatch.setattr(_cluster, "_ROWS", rows)
+        A = rng.random((19, 19))
+        want = np.triu(A, 1)
+        want = want + want.T
+        got = A.copy()
+        _cluster._mirror_upper(got)
+        assert got.tobytes() == want.tobytes(), f"_ROWS={rows}"

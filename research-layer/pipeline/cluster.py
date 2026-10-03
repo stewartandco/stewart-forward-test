@@ -26,7 +26,10 @@ for byte-identical positive-variance rows. What remains is the rounding
 tail, and that absorption is probabilistic, not absolute: two summation
 orders can land within ulps of a half-1e-12 rounding boundary and still
 round apart, so the real ship bar is the recorded-data identity proof in
-tools_verify_cluster_identity.py (plan Tasks 4/5), not the rounding alone.
+tools/verify_cluster_identity.py, not the rounding alone. The same tool
+proves each later performance change (step 7, 2026-10-03: the array
+bookkeeping in _agglomerate_np and the in-place distance arithmetic)
+bit-identical, on real cached series, to the revision before it.
 """
 from __future__ import annotations
 
@@ -105,6 +108,27 @@ def _returns_matrix(returns_by_id: dict[str, list[float]]):
     return ids, X
 
 
+# Row block for the chunked n x n passes below. Chunking changes no value:
+# every element is the same IEEE operation on the same operands, only the
+# temporaries are (block x n) instead of (n x n).
+_ROWS = 512
+
+
+def _mirror_upper(D: "np.ndarray") -> None:
+    """In place: D becomes triu(D, 1) + triu(D, 1).T, the original
+    symmetrisation, without its two n x n temporaries. Off the diagonal the
+    original computes x + 0.0 (upper) and 0.0 + x (lower), which equal x
+    bit for bit for every x >= +0.0, and every entry here is the sqrt of a
+    non-negative value. Diagonal blocks use the original expression
+    verbatim; the diagonal itself is 0.0 + 0.0."""
+    n = D.shape[0]
+    for a in range(0, n, _ROWS):
+        b = min(n, a + _ROWS)
+        D[a:b, :a] = D[:a, a:b].T
+        up = np.triu(D[a:b, a:b], 1)
+        D[a:b, a:b] = up + up.T
+
+
 def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
     """Correlation-distance matrix over the rows of X, numpy form of
     distance_matrix(). Semantics matched to correlation()/distance():
@@ -112,6 +136,14 @@ def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
     rho clamped to [-1, 1], diagonal forced to 0.0, result exactly
     symmetric (the reference assigns (i, j) and (j, i) from one number;
     BLAS output is mirrored from the upper triangle to match).
+
+    Memory (step 7, 2026-10-03): ONE n x n buffer. The arithmetic runs in
+    place on the Gram matrix, the normalisation in row blocks, and the
+    mirror by _mirror_upper. Each element goes through exactly the IEEE
+    operations of the original expression
+    sqrt(0.5 * (1 - clip((M @ M.T) / sqrt(outer(ss, ss))))), in the same
+    order, so the result is bit-identical (tools/verify_cluster_identity.py
+    proves it on real data).
 
     Duplicate-row pin: byte-identical positive-variance rows hit rho =
     1 +/- 1ulp differently under BLAS than under the reference's
@@ -127,19 +159,24 @@ def _distance_matrix_np(X: "np.ndarray") -> "np.ndarray":
     reference's 0.0-correlation semantics (distance sqrt(0.5))."""
     n, L = X.shape
     if L < 2:
-        R = np.zeros((n, n))
+        D = np.zeros((n, n))
     else:
         M = X - X.mean(axis=1, keepdims=True)
         ss = np.einsum("ij,ij->i", M, M)
         good = ss > 0.0
+        D = M @ M.T
+        del M
         with np.errstate(invalid="ignore", divide="ignore"):
-            R = (M @ M.T) / np.sqrt(np.outer(ss, ss))
-        R[~good, :] = 0.0
-        R[:, ~good] = 0.0
-    np.clip(R, -1.0, 1.0, out=R)
-    D = np.sqrt(0.5 * (1.0 - R))
-    D = np.triu(D, 1)
-    D = D + D.T
+            for a in range(0, n, _ROWS):
+                b = min(n, a + _ROWS)
+                D[a:b] /= np.sqrt(np.outer(ss[a:b], ss))
+        D[~good, :] = 0.0
+        D[:, ~good] = 0.0
+    np.clip(D, -1.0, 1.0, out=D)
+    np.subtract(1.0, D, out=D)
+    np.multiply(0.5, D, out=D)
+    np.sqrt(D, out=D)
+    _mirror_upper(D)
     if L >= 2 and n >= 2:
         _, inverse = np.unique(X, axis=0, return_inverse=True)
         inverse = np.asarray(inverse).ravel()
@@ -187,94 +224,158 @@ def agglomerate(ids: list[str], dmat: dict) -> list[tuple]:
     return history
 
 
-def _agglomerate_np(ids: list[str], D: "np.ndarray") -> list[tuple]:
+def _agglomerate_np(ids: list[str], D: "np.ndarray", *, overwrite: bool = False,
+                    _after_merge=None) -> list[tuple]:
     """Average-linkage merge history on a numpy distance matrix; numpy form
     of agglomerate() with the identical (round(d, 12), lo, hi) tie-break.
 
     Slot invariant: a cluster lives at the slot of its smallest member's
     sorted-id index, so `keep` below is always the smaller-min-id side.
-    _effective_trials_np replays history under the same invariant.
+    _effective_trials_np replays history under the same invariant. It also
+    means the reference key (round(d, 12), lo_id, hi_id) orders exactly as
+    (round(d, 12), min(i, j), max(i, j)) on SLOT numbers, which is what the
+    cache below holds.
 
     Pair order inside a history step is not part of the reference contract
     (labels_for_k unions the pair either way); steps here list the cluster
     containing the smaller min id first.
+
+    Bookkeeping (step 7, 2026-10-03; cluster-profile-report.md s3A "V2"):
+    the method is unchanged, only how the per-row best key is kept.
+    - The per-row cache is held in arrays: cd (the rounded distance), clo /
+      chi (the slot pair) and cj (the partner); `valid` marks a row with a
+      partner.
+    - row_best resolves ties with arrays. Python's round(v, 12) is applied
+      to the DISTINCT values in the 2e-12 window only; among the candidates
+      whose rounded distance is smallest, the smallest slot j is the
+      smallest (lo, hi) pair (j < i gives lo = j < i; otherwise lo = i for
+      every candidate and hi = j decides), so it is the per-element loop's
+      answer.
+    - The global best is the minimum key over the arrays.
+    - Stale rows are the original's two tests as masks: the cached partner
+      was keep or drop (full re-scan), or the row's cached rounded distance
+      is within 2e-12 of its average distance to the merged cluster (a tie).
+    - A row stale ONLY through such a tie gets an O(1) update, new key =
+      min(cached key, key(i, keep)). That equals a full re-scan: its cached
+      partner is neither keep nor drop and only column `keep` changed, and
+      the cached key is the minimum key over ALL active j, because a value
+      more than 2e-12 above the raw minimum always rounds strictly higher
+      at 12 decimals. The invariant "every active row's cached key equals a
+      fresh re-scan" is asserted after every merge by test_cluster_np.py
+      (test_agglomerate_np_cache_matches_a_fresh_rescan_after_every_merge).
+    Before this the all-zero rows of the live registry (distance exactly
+    sqrt(0.5) to everything; 79 of them at 13,730 strategies) were re-keyed
+    through a Python loop over nearly every active cluster on every merge:
+    4.1 h of clustering at 13,730 strategies.
+
+    `overwrite=True` lets the merge sums consume D in place (S is D), saving
+    one n x n copy; the caller must not read D afterwards. `_after_merge`,
+    for tests only, is called after every merge's cache update with
+    (S, sizes, active, cd, clo, chi, cj).
     """
     ids = sorted(ids)
     n = len(ids)
     if n <= 1:
         return []
-    S = D.astype(np.float64, copy=True)
+    if overwrite:
+        S = np.asarray(D, dtype=np.float64)
+    else:
+        S = D.astype(np.float64, copy=True)
     sizes = np.ones(n, dtype=np.float64)
     active = np.ones(n, dtype=bool)
     members: list = [frozenset([i]) for i in ids]
-    min_id: list = list(ids)
     INF = float("inf")
+    cd = np.full(n, INF)                       # cached round(d, 12)
+    clo = np.full(n, n, dtype=np.int64)        # cached pair, low slot
+    chi = np.full(n, n, dtype=np.int64)        # cached pair, high slot
+    cj = np.full(n, -1, dtype=np.int64)        # cached partner slot
+    valid = np.zeros(n, dtype=bool)
 
-    def row_best(i: int):
-        """Best merge partner for slot i under the reference key, as
-        (key, j). None when no active partner exists."""
+    def row_best(i: int) -> None:
+        """Cache slot i's best merge partner under the reference key."""
         avg = S[i] / (sizes[i] * sizes)
         avg[~active] = INF
         avg[i] = INF
         raw = avg.min()
         if raw == INF:
-            return None
-        best = None
-        for j in np.flatnonzero(avg <= raw + 2e-12):
+            valid[i] = False
+            cd[i] = INF
+            cj[i] = -1
+            return
+        tie = np.flatnonzero(avg <= raw + 2e-12)
+        if len(tie) == 1:
+            j = int(tie[0])
             d = round(float(avg[j]), 12)
-            lo, hi = sorted((min_id[i], min_id[int(j)]))
-            key = (d, lo, hi)
-            if best is None or key < best[0]:
-                best = (key, int(j))
-        return best
+        else:
+            vals = avg[tie]
+            uniq = np.unique(vals)
+            rounded = [round(float(u), 12) for u in uniq]
+            d = min(rounded)
+            ok = np.zeros(len(tie), dtype=bool)
+            for u, r in zip(uniq, rounded):
+                if r == d:
+                    ok |= vals == u
+            j = int(tie[ok].min())
+        valid[i] = True
+        cd[i] = d
+        cj[i] = j
+        clo[i] = min(i, j)
+        chi[i] = max(i, j)
 
-    cache: list = [None] * n
     for i in range(n):
-        cache[i] = row_best(i)
+        row_best(i)
 
     history = []
     for _ in range(n - 1):
-        gx, gbest = None, None
-        for i in range(n):
-            if active[i] and cache[i] is not None:
-                if gbest is None or cache[i][0] < gbest[0]:
-                    gx, gbest = i, cache[i]
-        x, y = gx, gbest[1]
+        dd = np.where(valid & active, cd, INF)
+        cand = np.flatnonzero(dd == dd.min())
+        if len(cand) > 1:
+            lo = clo[cand]
+            cand = cand[lo == lo.min()]
+            if len(cand) > 1:
+                hi = chi[cand]
+                cand = cand[hi == hi.min()]
+        x = int(cand[0])
+        y = int(cj[x])
         # keep = the slot whose cluster holds the smaller min id
-        keep, drop = (x, y) if min_id[x] < min_id[y] else (y, x)
+        keep, drop = (x, y) if x < y else (y, x)
         history.append((members[keep], members[drop]))
-        new_size = sizes[keep] + sizes[drop]
         S[keep, :] += S[drop, :]
         S[:, keep] += S[:, drop]
-        sizes[keep] = new_size
+        sizes[keep] = sizes[keep] + sizes[drop]
         active[drop] = False
         members[keep] = members[keep] | members[drop]
         members[drop] = None
-        min_id[drop] = None
-        cache[drop] = None
-        if not active.any() or active.sum() == 1:
+        valid[drop] = False
+        if active.sum() <= 1:
             break
-        # invalidate: the merged row, and any row whose cached partner was
-        # one of the merged pair
-        stale = {keep}
-        for i in range(n):
-            if active[i] and i != keep and cache[i] is not None \
-                    and cache[i][1] in (keep, drop):
-                stale.add(i)
+        # stale: rows whose cached partner was one of the merged pair
+        others = active & valid
+        others[keep] = False
+        part = others & ((cj == keep) | (cj == drop))
         # ties: the merged cluster cannot BEAT any surviving cached key on
         # distance (average linkage is reducible), but it can tie on the
-        # rounded distance and win on (lo, hi); re-key those rows too
+        # rounded distance and win on (lo, hi)
         avg_new = S[keep] / (sizes[keep] * sizes)
         avg_new[~active] = INF
         avg_new[keep] = INF
-        for i in np.flatnonzero(np.isfinite(avg_new)):
+        tie = np.isfinite(avg_new) & valid & ~part
+        tie[keep] = False
+        tie &= np.abs(avg_new - cd) <= 2e-12
+        row_best(keep)
+        for i in np.flatnonzero(part):
+            row_best(int(i))
+        for i in np.flatnonzero(tie):
             i = int(i)
-            if i in stale or cache[i] is None:
-                continue
-            if abs(avg_new[i] - cache[i][0][0]) <= 2e-12:
-                stale.add(i)
-        for i in stale:
-            cache[i] = row_best(i)
+            d = round(float(avg_new[i]), 12)
+            lo, hi = (i, keep) if i < keep else (keep, i)
+            if (d, lo, hi) < (cd[i], clo[i], chi[i]):
+                cd[i] = d
+                clo[i] = lo
+                chi[i] = hi
+                cj[i] = keep
+        if _after_merge is not None:
+            _after_merge(S, sizes, active, cd, clo, chi, cj)
     return history
 
 
@@ -398,11 +499,14 @@ def _effective_trials_np(returns_by_id: dict[str, list[float]],
     is identical to _effective_trials_ref (see test_cluster_np.py); the
     recorded variance goes through the same _reps_variance code."""
     n = len(ids)
-    D = _distance_matrix_np(X)
-    history = _agglomerate_np(ids, D)
+    # Memory (step 7): the merge sums consume D in place and the replay
+    # recomputes it. The same X gives a bit-identical D (deterministic
+    # arithmetic; tools/verify_cluster_identity.py proves the end result),
+    # so one n x n matrix is held at a time instead of three.
+    history = _agglomerate_np(ids, _distance_matrix_np(X), overwrite=True)
     idx_of = {i: j for j, i in enumerate(ids)}
 
-    T = D.copy()                     # T[i, c] = sum dist from point i to slot c
+    T = _distance_matrix_np(X)       # T[i, c] = sum dist from point i to slot c
     sizes = np.ones(n)
     active = np.ones(n, dtype=bool)
     own = np.arange(n)               # point -> cluster slot
@@ -411,15 +515,18 @@ def _effective_trials_np(returns_by_id: dict[str, list[float]],
     bmin_idx = np.full(n, -1)
 
     def rescan(subset):
-        """Fresh masked b-min for the given point rows."""
+        """Fresh masked b-min for the given point rows, in row blocks (each
+        row's minimum is its own; blocks only bound the temporaries)."""
         if len(subset) == 0:
             return
         cols = np.flatnonzero(active)
-        Q = T[np.ix_(subset, cols)] / sizes[cols]
-        Q[cols[None, :] == own[subset][:, None]] = np.inf
-        pos = Q.argmin(axis=1)
-        bmin_val[subset] = Q[np.arange(len(subset)), pos]
-        bmin_idx[subset] = cols[pos]
+        for a in range(0, len(subset), _ROWS):
+            sub = subset[a:a + _ROWS]
+            Q = T[np.ix_(sub, cols)] / sizes[cols]
+            Q[cols[None, :] == own[sub][:, None]] = np.inf
+            pos = Q.argmin(axis=1)
+            bmin_val[sub] = Q[np.arange(len(sub)), pos]
+            bmin_idx[sub] = cols[pos]
 
     rescan(rows)
 
