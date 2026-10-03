@@ -1044,3 +1044,109 @@ def test_a_held_flush_holds_the_reserve_back_from_the_pbo_nulls(tmp_path, monkey
     assert st["pbo_null_mean_s"] is None and st["verdicts_without_stats"] > 0
     assert stats and all(p["pbo_null_draws"] == 0 for p in stats)
     assert st["retried_written"] == len(stats) and st["deferred_lock"] == 0
+
+
+# ------- step 7 part C: PBO null for EVERY family with a verdict needing stats -------
+
+PBO_FIELDS = ("pbo", "pbo_n_distinct", "pbo_percentile", "pbo_null_p05",
+              "pbo_null_p95", "pbo_null_draws", "pbo_status")
+
+
+def _only_verdicts(monkeypatch, keep, label=None):
+    """This run sees only the v6.1 verdicts of the strategies in `keep` (the
+    rest are left for a later night, as a staggered backlog would), and, if
+    `label` is given, sees each as that label: the label's only use in the
+    job was the pre-step-7 "passing verdict in this batch" rule."""
+    real = gs._View
+
+    class Partial(real):
+        def on_entry(self, e):
+            n = len(self.verdicts)
+            super().on_entry(e)
+            if len(self.verdicts) > n:
+                if self.verdicts[-1]["sid"] not in keep:
+                    self.verdicts.pop()
+                elif label is not None:
+                    self.verdicts[-1]["verdict"] = label
+    monkeypatch.setattr(gs, "_View", Partial)
+
+
+def test_siblings_statted_on_different_nights_record_the_same_pbo(tmp_path, monkeypatch, capsys):
+    """Night 1 stats two of the live family's verdicts, night 2 the other
+    three in a batch with NO passing verdict. Under the pre-step-7 rule night
+    2 recorded not_measured_dead_group with no null; now every family with a
+    verdict needing stats gets its null, so both nights record identical
+    PBO fields, and night 2 serves the null from the cache."""
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    group_of = {e["payload"]["strategy_id"]: e["payload"]["provenance"]["sibling_group_id"]
+                for e in reg.entries() if e["entry_type"] == "strategy_registered"}
+    judged = [e["payload"]["strategy_id"] for e in reg.entries()
+              if e["entry_type"] == "verdict" and e["payload"].get("stage") == "gauntlet"]
+    live_g = "p3-live-test-group"
+    fam = [s for s in judged if group_of[s] == live_g]
+    assert len(fam) == 5
+    built = []
+    real_null = gs.permutation_null
+    monkeypatch.setattr(gs, "permutation_null",
+                        lambda *a, **k: built.append(1) or real_null(*a, **k))
+    with monkeypatch.context() as m:
+        _only_verdicts(m, set(fam[:2]))
+        assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    night1 = {p["strategy_id"]: p for p in _stats_payloads(reg)}
+    assert set(night1) == set(fam[:2])
+    st1 = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st1["pbo_nulls_computed"] == len(built) == 1
+    with monkeypatch.context() as m:
+        _only_verdicts(m, set(fam[2:]), label="fail")
+        assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    st2 = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    night2 = [p for p in _stats_payloads(reg) if p["strategy_id"] not in night1]
+    assert {p["strategy_id"] for p in night2} == set(fam[2:])
+    ref = next(iter(night1.values()))
+    assert ref["pbo_status"] == "measured" and ref["pbo_null_draws"] > 0
+    for p in night2:
+        assert {k: p[k] for k in PBO_FIELDS} == {k: ref[k] for k in PBO_FIELDS}
+    assert st2["pbo_nulls_cached"] == 1 and st2["pbo_nulls_computed"] == 0
+    assert len(built) == 1                         # night 2 built no null
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_family_with_no_passing_verdict_gets_its_null(tmp_path, monkeypatch, capsys):
+    """The whole live family seen as failing (and no cache): its null is
+    built and recorded, where the pre-step-7 rule recorded no null."""
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    _only_verdicts(monkeypatch, {e["payload"]["strategy_id"] for e in reg.entries()
+                                 if e["entry_type"] == "verdict"}, label="fail")
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["pbo_nulls_computed"] == 1 and st["pbo_nulls_cached"] == 0
+    statuses = {p["pbo_status"] for p in _stats_payloads(reg)}
+    assert "measured" in statuses and "not_measured_dead_group" not in statuses
+
+
+def test_the_pbo_cache_key_and_file(tmp_path):
+    """The cache serves a result only for the same family, vintage, digest
+    and inputs (members, train series, draws); member order does not matter;
+    an unreadable or other-vintage file is an empty cache."""
+    fam = [{"sid": "a"}, {"sid": "b"}]
+    train = {"a": [0.1, 0.2], "b": [0.3, -0.1]}
+    sha = gs.pbo_inputs_sha("g", fam, train, 50)
+    assert sha == gs.pbo_inputs_sha("g", fam[::-1], train, 50)
+    assert sha != gs.pbo_inputs_sha("h", fam, train, 50)
+    assert sha != gs.pbo_inputs_sha("g", fam, train, 49)
+    assert sha != gs.pbo_inputs_sha("g", fam, {"a": [0.1, 0.2], "b": [0.3, -0.10001]}, 50)
+    assert sha != gs.pbo_inputs_sha("g", fam + [{"sid": "c"}],
+                                    {**train, "c": [0.0, 0.0]}, 50)
+    c = gs.PboCache(tmp_path, "2026-09-27", "d1")
+    assert c.get("g", sha) is None
+    c.put("g", sha, {"pbo": 0.4, "pbo_null_draws": 50})
+    assert gs.PboCache(tmp_path, "2026-09-27", "d1").get("g", sha) == {
+        "pbo": 0.4, "pbo_null_draws": 50}
+    assert gs.PboCache(tmp_path, "2026-09-27", "d1").get("g", "other") is None
+    assert gs.PboCache(tmp_path, "2026-10-04", "d1").get("g", sha) is None
+    assert gs.PboCache(tmp_path, "2026-09-27", "d2").get("g", sha) is None
+    (tmp_path / gs.PBO_CACHE_NAME).write_text("{not json", encoding="utf-8")
+    assert gs.PboCache(tmp_path, "2026-09-27", "d1").get("g", sha) is None

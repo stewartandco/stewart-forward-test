@@ -22,11 +22,19 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   alignment used is recorded beside it (trials_alignment,
   trials_common_days), as v6 recorded it in metrics.
 - PBO: the helpers and arguments of gauntlet.run's PBO section (train
-  window, CSCV_SPLITS, the group-id-seeded permutation null, which -- as
-  there -- is built only for a family with a passing verdict in this batch
-  and at least PBO_MIN_DISTINCT distinct configurations). RECORDED ONLY:
-  no pass/fail/kill label is computed, and no pbo_family_kill key is written
-  (verify_registry.py invariant 12 rejects one after the v6.1 note).
+  window, CSCV_SPLITS, the group-id-seeded permutation null). SCOPE (step 7,
+  gauntlet-protocol-v6.1-amendment-1): the null is built for EVERY family
+  that has a v6.1 verdict needing stats, whenever the family is measurable
+  (an observed PBO and at least PBO_MIN_DISTINCT distinct configurations),
+  whether or not any of its verdicts passed. Until step 7 it was built only
+  for a family with a passing verdict in the batch, so siblings statted on
+  different nights could record different pbo_status. The fields depend only
+  on the family's members and train series, so the rule is deterministic;
+  each null is cached per (family, vintage, data_digest, inputs) in
+  logs/gauntlet_stats_pbo_cache.json and computed once per vintage.
+  RECORDED ONLY: no pass/fail/kill label is computed, and no
+  pbo_family_kill key is written (verify_registry.py invariant 12 rejects
+  one after the v6.1 note).
 - plateau_ok: plateau.qualifies over the family, as the gauntlet recorded it.
 - haircut: harvey_liu_haircut(train Sharpe, train years, trials_n), window
   "train", as _evaluate_candidate recorded it.
@@ -70,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from array import array
 import json
 import sys
 import time
@@ -111,11 +120,17 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 INSTANCE_LOCK = "gauntlet_stats.lock"
 INSTANCE_STALE_AFTER_S = 7 * 3600
 STATUS_NAME = "gauntlet_stats_status.json"
+# Part C (step 7): one family's PBO result per (family, vintage, data_digest,
+# inputs), so a family whose verdicts arrive over several nights of one
+# vintage builds its permutation null once. Only the current vintage and
+# digest are kept; an unreadable file is an empty cache, never an error.
+PBO_CACHE_NAME = "gauntlet_stats_pbo_cache.json"
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "retried_written", "deferred_lock",
                  "oldest_unstatted_verdict_age_hours", "trials_n_raw",
                  "trials_n_effective", "registered_n", "trials_common_days",
-                 "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s")
+                 "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s",
+                 "pbo_nulls_computed", "pbo_nulls_cached")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -257,6 +272,53 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
+def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
+    """Everything group_pbo's result depends on: the family id (it seeds the
+    null), the draw count, CSCV_SPLITS, and each member's train series, in
+    sorted member order."""
+    h = hashlib.sha256(json.dumps([g, draws, CSCV_SPLITS]).encode("utf-8"))
+    for sid in sorted(s["sid"] for s in fam):
+        r = array("d", train[sid])
+        h.update(f"\n{sid}:{len(r)}:".encode("utf-8"))
+        h.update(r.tobytes())
+    return h.hexdigest()
+
+
+class PboCache:
+    """logs/gauntlet_stats_pbo_cache.json: {vintage, data_digest, families:
+    {g: {inputs_sha, pbo}}}. A file for another vintage or digest, or one
+    that cannot be read, starts empty. Written atomically after each null."""
+
+    def __init__(self, logs_dir: Path, vintage: str, data_digest: str) -> None:
+        self.path = logs_dir / PBO_CACHE_NAME
+        self.vintage, self.data_digest = vintage, data_digest
+        self.families: dict = {}
+        try:
+            d = json.loads(self.path.read_text(encoding="utf-8"))
+            if (isinstance(d, dict) and d.get("vintage") == vintage
+                    and d.get("data_digest") == data_digest
+                    and isinstance(d.get("families"), dict)):
+                self.families = d["families"]
+        except (OSError, ValueError):
+            pass
+
+    def get(self, g: str, inputs_sha: str) -> dict | None:
+        hit = self.families.get(g)
+        if (isinstance(hit, dict) and hit.get("inputs_sha") == inputs_sha
+                and isinstance(hit.get("pbo"), dict)):
+            return dict(hit["pbo"])
+        return None
+
+    def put(self, g: str, inputs_sha: str, pbo: dict) -> None:
+        self.families[g] = {"inputs_sha": inputs_sha, "pbo": dict(pbo)}
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"vintage": self.vintage,
+                                   "data_digest": self.data_digest,
+                                   "families": self.families}, sort_keys=True),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+
 def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   train_sharpe: float | None, clustered: dict, pbo: dict,
                   plateau_ok: bool, vintage: str, data_digest: str,
@@ -363,6 +425,8 @@ def run(argv: list[str] | None = None) -> int:
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
               "retried_written": 0, "deferred_lock": 0,
+              # part C: PBO nulls built this run / served from the cache
+              "pbo_nulls_computed": 0, "pbo_nulls_cached": 0,
               "oldest_unstatted_verdict_age_hours": 0.0, "trials_n_raw": None,
               "trials_n_effective": None,
               "registered_n": None, "trials_common_days": None,
@@ -596,6 +660,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         def null_fits() -> bool:
             return t_end - time.time() >= null_rate() + reserve_s()
 
+        pbo_cache = PboCache(a.logs_dir, vintage, data_digest)
         for g, fam in family_by_group.items():
             todo = pending_by_group.get(g)
             if not todo:
@@ -603,9 +668,20 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             if time.time() >= t_end - reserve_s():
                 status["stopped_at_deadline"] = True
                 break
-            live = any(v["verdict"] == "pass" for v in todo)
-            pbo = group_pbo(g, fam, train, live, a.pbo_null_draws,
-                            null_fits=null_fits, null_times=null_times)
+            # Part C (amendment-1): every family with a verdict needing stats
+            # gets its null when measurable, passing verdict or not; the
+            # result depends on the family alone, so it is cached.
+            inputs_sha = pbo_inputs_sha(g, fam, train, a.pbo_null_draws)
+            pbo = pbo_cache.get(g, inputs_sha)
+            if pbo is not None:
+                status["pbo_nulls_cached"] += pbo["pbo_null_draws"] > 0
+            else:
+                n_nulls = len(null_times)
+                pbo = group_pbo(g, fam, train, True, a.pbo_null_draws,
+                                null_fits=null_fits, null_times=null_times)
+                if pbo is not None:
+                    status["pbo_nulls_computed"] += len(null_times) - n_nulls
+                    pbo_cache.put(g, inputs_sha, pbo)
             if null_times:
                 status["pbo_null_mean_s"] = round(null_rate(), 3)
             if pbo is None:
