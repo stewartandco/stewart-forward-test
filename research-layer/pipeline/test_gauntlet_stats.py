@@ -863,3 +863,184 @@ def test_the_status_reports_raw_and_effective_trials(tmp_path, monkeypatch, caps
     assert "trials_n" not in st
     assert st["trials_n_raw"] == seen["trials_n"] < 302
     assert st["trials_n_effective"] == 302
+
+
+# ------- step 7, T7 flush: chain.lock held at flush keeps the stats -------
+
+def _held_chain_lock(logs):
+    """chain.lock held by ANOTHER writer (a real lock file, as the scanner
+    or the loop would leave it). Returns the owner, already acquired."""
+    from .chainlock import ChainLock
+    owner = ChainLock(logs, "scanner", "card batch")
+    owner.acquire()
+    return owner
+
+
+def _sleeps(monkeypatch, clock, on_sleep=None):
+    """Replace the drain's sleep: advance the frozen clock instead, record
+    each call, and run `on_sleep(n)` (n = calls so far) if given."""
+    calls = []
+
+    def fake(s):
+        calls.append(s)
+        clock.now += s
+        if on_sleep is not None:
+            on_sleep(len(calls))
+    monkeypatch.setattr(gs, "_sleep", fake)
+    return calls
+
+
+def test_a_held_chain_lock_at_flush_keeps_the_stats_and_retries(tmp_path, monkeypatch, capsys):
+    """chain.lock is held when the computed entry is first flushed: the entry
+    is KEPT, and once the holder releases (between two drain attempts) the
+    same run chains it. retried_written counts it; exit 0, reason done."""
+    from .test_gauntlet import run_verifier
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    logs = tmp_path / "logs"
+    clock = _frozen(monkeypatch)
+    _seed_status(tmp_path, cluster_s=1.0)
+    owner = _held_chain_lock(logs)
+    sleeps = _sleeps(monkeypatch, clock, on_sleep=lambda n: n == 2 and owner.release())
+    assert _stats_run(reg, data, tmp_path, 1.0) == 0
+    out = capsys.readouterr().out
+    assert "kept for a retry this run" in out
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "done" and st["stats_written"] == 1
+    assert st["retried_written"] == 1 and st["deferred_lock"] == 0
+    assert st["verdicts_without_stats"] == 0
+    assert sleeps == [gs.DRAIN_INTERVAL_S] * 2           # attempts at 0 s, 5 s, 10 s
+    assert len(_stats_payloads(reg)) == 1
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_lock_held_through_the_reserve_writes_nothing_and_never_breaks_it(
+        tmp_path, monkeypatch, capsys):
+    """Held for the whole reserve: bounded non-blocking attempts, nothing
+    written, exit 0 deferred_lock, and the holder's lock file untouched (never
+    waited on past the reserve, never broken)."""
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+    logs = tmp_path / "logs"
+    clock = _frozen(monkeypatch)
+    _seed_status(tmp_path, cluster_s=1.0)
+    owner = _held_chain_lock(logs)
+    lock_bytes = (logs / "chain.lock").read_bytes()
+    t0 = clock.now
+    sleeps = _sleeps(monkeypatch, clock)
+    try:
+        assert _stats_run(reg, data, tmp_path, 1.0) == 0
+    finally:
+        assert (logs / "chain.lock").read_bytes() == lock_bytes
+        owner.release()
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deferred_lock" and st["deferred_lock"] == 1
+    assert st["stats_written"] == 0 and st["retried_written"] == 0
+    assert st["verdicts_without_stats"] == 1
+    assert sum(1 for _ in reg.entries()) == n
+    assert clock.now - t0 <= gs.DRAIN_RESERVE_S
+    assert len(sleeps) == int(gs.DRAIN_RESERVE_S // gs.DRAIN_INTERVAL_S) - 1
+    assert "not written; the next run recomputes them" in capsys.readouterr().out
+
+
+def test_the_drain_never_runs_past_the_deadline(tmp_path, monkeypatch):
+    """18 s left at the first flush: the drain stops before the deadline,
+    far inside its 75 s reserve."""
+    from .test_gauntlet_worker import _setup, _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    logs = tmp_path / "logs"
+    clock = _frozen(monkeypatch)
+    _seed_status(tmp_path, cluster_s=1.0)
+    owner = _held_chain_lock(logs)
+    t_end = clock.now + 0.005 * 3600
+    sleeps = _sleeps(monkeypatch, clock)
+    try:
+        assert _stats_run(reg, data, tmp_path, 0.005) == 0
+    finally:
+        owner.release()
+    assert clock.now <= t_end
+    assert sleeps == [gs.DRAIN_INTERVAL_S] * 3           # attempts at 0, 5, 10, 15 s
+    assert _status(tmp_path)["exit_reason"] == "deferred_lock"
+
+
+def test_a_mid_run_hold_is_retried_after_the_next_family(tmp_path, monkeypatch, capsys):
+    """Two families, one entry per flush batch. chain.lock is held at the
+    first family's flush and released while the second family is computed:
+    the retry after that family chains both, with no drain sleep at all."""
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    monkeypatch.setattr(gs, "STATS_BATCH_MAX", 1)
+    owner = _held_chain_lock(logs)
+    calls = []
+    real = gs.group_pbo
+
+    def spy(*a, **k):
+        calls.append(a[0])
+        if len(calls) == 2:
+            owner.release()
+        return real(*a, **k)
+    monkeypatch.setattr(gs, "group_pbo", spy)
+    sleeps = []
+    monkeypatch.setattr(gs, "_sleep", lambda s: sleeps.append(s))
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    assert len(calls) == 2, "fixture: two families with verdicts"
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["exit_reason"] == "done" and st["verdicts_without_stats"] == 0
+    assert st["retried_written"] >= 1 and st["deferred_lock"] == 0
+    assert st["stats_written"] == len(_stats_payloads(reg)) > 1
+    assert sleeps == []
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def _dead_family_first(monkeypatch):
+    """Order the families so the dead ETHUSD family (no null needed) is
+    statted before the live BTCUSD one."""
+    real = gs.sibling_families
+
+    def ordered(all_specs, *a, **k):
+        fb, gb = real(all_specs, *a, **k)
+        dead = {s["provenance"]["sibling_group_id"] for s in all_specs
+                if "ETHUSD" in s["universe"]["assets"]}
+        return dict(sorted(fb.items(), key=lambda kv: kv[0] not in dead)), gb
+    monkeypatch.setattr(gs, "sibling_families", ordered)
+
+
+def test_a_held_flush_holds_the_reserve_back_from_the_pbo_nulls(tmp_path, monkeypatch, capsys):
+    """After a held flush the family loop leaves DRAIN_RESERVE_S for the
+    drain. 120 s left: with no hold the live family's 60 s null fits and is
+    built; with the dead family's entry held first, 120 s minus the 75 s
+    reserve does not fit, the null is not started (deadline stop), and the
+    kept entry is still chained by the drain."""
+    results = {}
+    for case in ("free", "held"):
+        d = tmp_path / case
+        d.mkdir()
+        reg, data, logs, cutoff = _live_family_v61(d)
+        clock = _frozen(monkeypatch)
+        _count_clustering(monkeypatch)
+        _dead_family_first(monkeypatch)
+        monkeypatch.setattr(gs, "STATS_BATCH_MAX", 1)
+        (logs / gs.STATUS_NAME).write_text(json.dumps({"cluster_s": 1.0}),
+                                           encoding="utf-8")
+        owner = _held_chain_lock(logs) if case == "held" else None
+        _sleeps(monkeypatch, clock,
+                on_sleep=lambda n, o=owner: o is not None and n == 1 and o.release())
+        assert gs.run(_stat_args(reg, data, logs, cutoff)
+                      + ["--deadline-hours", str(120 / 3600)]) == 0
+        capsys.readouterr()
+        assert not (logs / "chain.lock").exists()
+        results[case] = (json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8")),
+                         _stats_payloads(reg))
+    st, stats = results["free"]
+    assert st["exit_reason"] == "done" and st["pbo_null_mean_s"] is not None
+    assert any(p["pbo_null_draws"] > 0 for p in stats)
+    st, stats = results["held"]
+    assert st["exit_reason"] == "deadline" and st["stopped_at_deadline"] is True
+    assert st["pbo_null_mean_s"] is None and st["verdicts_without_stats"] > 0
+    assert stats and all(p["pbo_null_draws"] == 0 for p in stats)
+    assert st["retried_written"] == len(stats) and st["deferred_lock"] == 0

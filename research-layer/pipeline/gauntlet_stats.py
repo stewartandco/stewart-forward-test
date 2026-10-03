@@ -47,6 +47,15 @@ statistic already written. Chaining follows Ruling 10: one full chain read
 outside chain.lock; under it, an O(tail) advance, a re-check that drops any
 verdict already statted, and at most STATS_BATCH_MAX entries per hold.
 
+chain.lock held at a flush (step 7, T7): the computed entries are KEPT in
+memory and the flush is retried later in the same run, never waited for:
+one non-blocking attempt after each further family while a full batch is
+waiting, then a final drain of attempts DRAIN_INTERVAL_S apart for at most
+DRAIN_RESERVE_S, never past the deadline. Once a flush has been held, the family loop holds DRAIN_RESERVE_S
+back from the deadline for that drain. Entries still unwritten at the end
+are dropped (exit_reason deferred_lock, exit 0) and the next run recomputes
+them. chain.lock is never waited on, polled inside, or broken here.
+
 Deadline (I5): clustering starts only when the time left covers its
 estimate (the last measured duration, persisted in the status as cluster_s,
 else CLUSTER_PRIOR_S); each PBO null likewise (pbo_null_mean_s, else
@@ -103,9 +112,21 @@ INSTANCE_LOCK = "gauntlet_stats.lock"
 INSTANCE_STALE_AFTER_S = 7 * 3600
 STATUS_NAME = "gauntlet_stats_status.json"
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
+                 "retried_written", "deferred_lock",
                  "oldest_unstatted_verdict_age_hours", "trials_n_raw",
                  "trials_n_effective", "registered_n", "trials_common_days",
                  "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s")
+# T7 flush (step 7): computed entries a flush could not chain because
+# chain.lock was held are kept and retried in the same run. Once that has
+# happened the family loop starts nothing that would eat into this reserve,
+# and the final drain makes one non-blocking attempt every DRAIN_INTERVAL_S
+# inside it, never past the deadline. The worker's figures (2026-10-02): a
+# reserve that outlasts a scanner card batch several times over; the loop's
+# hours-long screen hold is outlasted by nothing affordable.
+DRAIN_RESERVE_S = 75.0
+DRAIN_INTERVAL_S = 5.0
+# Injectable so tests drive the drain on a fake clock instead of sleeping.
+_sleep = time.sleep
 
 
 def vintage_date(today: date) -> str:
@@ -339,6 +360,9 @@ def run(argv: list[str] | None = None) -> int:
     vintage = vintage_date(date.today())
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
+              # T7 flush: written on a retry after a held flush / still
+              # unwritten (dropped) at the end of the run
+              "retried_written": 0, "deferred_lock": 0,
               "oldest_unstatted_verdict_age_hours": 0.0, "trials_n_raw": None,
               "trials_n_effective": None,
               "registered_n": None, "trials_common_days": None,
@@ -498,10 +522,15 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             pending_by_group.setdefault(group_of[v["sid"]], []).append(v)
 
         items: list[tuple[str, str, dict]] = []
+        # T7 flush: verdict hashes whose computed entry was kept because a
+        # flush found chain.lock held. Non-empty = the run holds the reserve.
+        held_vh: set[str] = set()
 
         def flush() -> str | None:
-            """Chain what is computed, STATS_BATCH_MAX per chain.lock hold.
-            Returns an exit reason when chaining must stop, else None."""
+            """Chain what is computed, STATS_BATCH_MAX per chain.lock hold,
+            each hold one non-blocking attempt. Returns "held" when chain.lock
+            is held (everything not yet chained stays in `items`, kept for a
+            retry), "chain_refused" when chaining must stop, else None."""
             nonlocal snap, items
             if not a.chain:
                 items = []
@@ -515,15 +544,45 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                         fresh = [vh for _, vh, _ in chunk if vh not in snap.statted]
                         snap = registry.record_gauntlet_stats_batch(snap, chunk)
                 except ChainLockHeld:
-                    print("chain.lock held: stats deferred to the next run", flush=True)
-                    return "deferred_lock"
+                    if not held_vh:
+                        print(f"chain.lock held: {len(items)} computed stats entr"
+                              f"{'y' if len(items) == 1 else 'ies'} kept for a "
+                              f"retry this run", flush=True)
+                    held_vh.update(vh for _, vh, _ in items)
+                    return "held"
                 except (ChainMoved, UnstableEntry) as exc:
                     print(f"REFUSED: nothing written for this chunk: {exc}", flush=True)
                     return "chain_refused"
                 status["stats_written"] += len(fresh)
+                status["retried_written"] += sum(1 for vh in fresh if vh in held_vh)
                 done.update(vh for _, vh, _ in chunk)
                 items = rest
             return None
+
+        def reserve_s() -> float:
+            """Time the family loop leaves for the final drain: the reserve
+            once a flush has been held, else nothing."""
+            return DRAIN_RESERVE_S if held_vh and items else 0.0
+
+        def final_drain() -> str | None:
+            """Non-blocking flush attempts DRAIN_INTERVAL_S apart, for at most
+            DRAIN_RESERVE_S and never past the deadline. Never waits on,
+            polls inside, or breaks chain.lock: each attempt is one try.
+            Returns the last flush's outcome."""
+            stop_at = min(time.time() + DRAIN_RESERVE_S, t_end)
+            n0, attempts, out = len(items), 0, None
+            while items:
+                out = flush()
+                attempts += 1
+                if out != "held":
+                    break
+                if stop_at - time.time() <= DRAIN_INTERVAL_S:
+                    break
+                _sleep(DRAIN_INTERVAL_S)
+            print(f"gauntlet_stats: final drain, {attempts} attempt(s), "
+                  f"{n0 - len(items)} of {n0} kept entr"
+                  f"{'y' if n0 == 1 else 'ies'} chained", flush=True)
+            return out
 
         # I5: each family's null is started only when the time left covers
         # the measured mean null (this run's, else the last run's, else the
@@ -535,13 +594,13 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                     else prior_null_s or PBO_NULL_PRIOR_S)
 
         def null_fits() -> bool:
-            return t_end - time.time() >= null_rate()
+            return t_end - time.time() >= null_rate() + reserve_s()
 
         for g, fam in family_by_group.items():
             todo = pending_by_group.get(g)
             if not todo:
                 continue
-            if time.time() >= t_end:
+            if time.time() >= t_end - reserve_s():
                 status["stopped_at_deadline"] = True
                 break
             live = any(v["verdict"] == "pass" for v in todo)
@@ -565,13 +624,22 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                     train_sharpe[sid], clustered,
                     pbo, ok, vintage, data_digest, own_ends(sid),
                     floor, floor_hash)))
+            # a full batch (kept entries from a held flush included): one
+            # non-blocking attempt now, before the next family starts
             if len(items) >= STATS_BATCH_MAX:
-                stop = flush()
-                if stop is not None:
-                    return finish(1 if stop == "chain_refused" else 0, stop)
-        stop = flush()
-        if stop is not None:
-            return finish(1 if stop == "chain_refused" else 0, stop)
+                if flush() == "chain_refused":
+                    return finish(1, "chain_refused")
+        out = flush()
+        if out == "chain_refused":
+            return finish(1, "chain_refused")
+        if out == "held" and final_drain() == "chain_refused":
+            return finish(1, "chain_refused")
+        if items:
+            status["deferred_lock"] = len(items)
+            print(f"chain.lock held through the run: {len(items)} computed stats "
+                  f"entr{'y' if len(items) == 1 else 'ies'} not written; the next "
+                  f"run recomputes them", flush=True)
+            return finish(0, "deferred_lock")
         if not a.chain:
             print(f"report only: {len(pending)} verdict(s) computed, nothing chained "
                   f"(--chain is off)", flush=True)
