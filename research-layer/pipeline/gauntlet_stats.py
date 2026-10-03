@@ -6,8 +6,11 @@ week and each night resumes where the last stopped. Computes effective
 trials, the deflated Sharpe, PBO (recorded only), plateau_ok and the
 Harvey-Liu haircut for every v6.1 verdict without a gauntlet_stats entry,
 and with --chain appends one gauntlet_stats entry per verdict. Never changes
-a strategy's state. Without --chain it only reports (the 480 -> 44
-investigation must be accepted before --chain is scheduled).
+a strategy's state. Without --chain it only reports. With --chain it
+REFUSES (exit 1, exit_reason refused_no_amendment_note, nothing computed or
+written) until the gauntlet-protocol-v6.1-amendment-1 note is on the chain:
+entries whose SR* is floored must never be chained under the v6.1 text that
+says trials_sr_var "is not floored".
 
 Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - the registry-wide series and the clustering are gauntlet.registry_series
@@ -46,6 +49,17 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   this run and the entry that supplied it, or null), and trials_n =
   max(raw, floor), the figure the deflated Sharpe AND the haircut use.
   trials_sr_var stays this run's. See _View.on_entry for what counts.
+- the expected maximum Sharpe SR* is FLOORED too (step 7, Coen option a,
+  gauntlet-protocol-v6.1-amendment-1): SR* scales with sqrt(trials_sr_var),
+  and the variance moves by orders of magnitude between the silhouette
+  curve's two peaks, so a floored N with an unfloored variance could still
+  make the recorded deflated Sharpe more lenient as the registry grows. Each
+  entry records expected_max_sharpe_raw (expected_max_sharpe(trials_n,
+  trials_sr_var), exactly what v6.1 recorded), expected_max_sharpe_floor +
+  expected_max_sharpe_floor_entry_hash (the highest SR* already on the chain
+  and the entry that supplied it, or null), and expected_max_sharpe =
+  max(raw, floor), the figure the deflated Sharpe uses. The haircut does not
+  read SR* (it reads trials_n only), so it is unchanged.
 
 Resumable: the simulation is the expensive part and the simcache keeps every
 series simulated before a deadline stop, keyed by the bars THROUGH the
@@ -80,6 +94,7 @@ import argparse
 import hashlib
 from array import array
 import json
+import math
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -128,8 +143,10 @@ PBO_CACHE_NAME = "gauntlet_stats_pbo_cache.json"
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "retried_written", "deferred_lock",
                  "oldest_unstatted_verdict_age_hours", "trials_n_raw",
-                 "trials_n_effective", "registered_n", "trials_common_days",
-                 "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s",
+                 "trials_n_effective", "expected_max_sharpe_raw",
+                 "expected_max_sharpe_effective", "registered_n",
+                 "trials_common_days", "stopped_at_deadline", "chained",
+                 "cluster_s", "pbo_null_mean_s",
                  "pbo_nulls_computed", "pbo_nulls_cached")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
@@ -182,9 +199,27 @@ def data_digest_of(hashes: dict[str, str]) -> str:
 
 # Ruling 20: only these gauntlet protocols recorded a CLUSTER count in
 # metrics.trials_n. No protocol / v2 hold a registration count (excluded), and
-# v6.1 verdicts carry no trials_n.
+# v6.1 verdicts carry no trials_n. Ruling 35: the SAME whitelist decides which
+# verdicts' metrics.expected_max_sharpe count toward the SR* floor (v2's SR*
+# was computed over a registration count, so it is excluded with it).
 FLOOR_PROTOCOLS = ("gauntlet-protocol-v3", "gauntlet-protocol-v4",
                    "gauntlet-protocol-v5", "gauntlet-protocol-v6")
+# Ruling 35 (ii): --chain refuses until this note is on the chain, detected by
+# the first line's prefix, first occurrence (verify_registry's rule for the
+# notes it keys on). The hyphen after "v6.1" keeps it distinct from the v6.1
+# addendum's "gauntlet-protocol-v6.1:", which the worker, the old gauntlet and
+# verifier invariant 12 key on: this note must arm none of those.
+AMENDMENT_NOTE_PREFIX = "gauntlet-protocol-v6.1-amendment-1:"
+
+
+def is_amendment_note(text) -> bool:
+    return isinstance(text, str) and text.startswith(AMENDMENT_NOTE_PREFIX)
+
+
+def _positive_number(v) -> bool:
+    """A usable floor value: an int or float (never a bool), finite, > 0."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v > 0)
 
 
 class _View:
@@ -199,12 +234,22 @@ class _View:
         # of the entry that supplied it (the first, on a tie).
         self.trials_floor: int | None = None
         self.trials_floor_hash: str | None = None
+        # Ruling 35: the highest SR* recorded on the chain so far, likewise.
+        self.sr_floor: float | None = None
+        self.sr_floor_hash: str | None = None
+        # Ruling 35 (ii): the amendment note's entry hash (first occurrence).
+        self.amendment_hash: str | None = None
 
     def _floor_candidate(self, n, e: dict) -> None:
         # A cluster count is a positive int; anything else is no floor.
         if (isinstance(n, int) and not isinstance(n, bool) and n > 0
                 and (self.trials_floor is None or n > self.trials_floor)):
             self.trials_floor, self.trials_floor_hash = n, entry_hash(e)
+
+    def _sr_floor_candidate(self, v, e: dict) -> None:
+        # A non-numeric, bool, NaN, infinite or non-positive SR* is no floor.
+        if _positive_number(v) and (self.sr_floor is None or v > self.sr_floor):
+            self.sr_floor, self.sr_floor_hash = float(v), entry_hash(e)
 
     def on_entry(self, e: dict) -> None:
         et, p = e["entry_type"], e["payload"]
@@ -215,10 +260,15 @@ class _View:
             self.screen_tc_fail.add(p["strategy_id"])
         elif et == "gauntlet_stats":
             self._floor_candidate(p.get("trials_n_raw"), e)
+            self._sr_floor_candidate(p.get("expected_max_sharpe_raw"), e)
+        elif (et == "note" and self.amendment_hash is None
+              and is_amendment_note(p.get("text"))):
+            self.amendment_hash = entry_hash(e)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             m = p.get("metrics")
             if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
                 self._floor_candidate(m.get("trials_n"), e)
+                self._sr_floor_candidate(m.get("expected_max_sharpe"), e)
             if isinstance(m, dict) and m.get("protocol") == PROTOCOL_V61:
                 self.verdicts.append({"vh": entry_hash(e), "sid": p["strategy_id"],
                                       "verdict": p.get("verdict"),
@@ -324,17 +374,21 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   plateau_ok: bool, vintage: str, data_digest: str,
                   data_end_by_cell: dict[str, str],
                   trials_floor: int | None = None,
-                  trials_floor_hash: str | None = None) -> dict:
+                  trials_floor_hash: str | None = None,
+                  sr_floor: float | None = None,
+                  sr_floor_hash: str | None = None) -> dict:
     """The gauntlet_stats payload (less strategy_id / verdict_entry_hash).
     `trials_floor` / `trials_floor_hash` are the chain max before this run
-    and the entry that supplied it (Ruling 20), the same for every entry of
-    a run."""
+    and the entry that supplied it (Ruling 20); `sr_floor` / `sr_floor_hash`
+    the same for SR* (Ruling 35). Both are the same for every entry of a
+    run."""
     trials_raw, trials_var = clustered["trials_n"], clustered["trials_var"]
     trials_n = max(trials_raw, trials_floor or 0)
     r = _as_list(dsr_rets)      # clustered["returns_by_id"][sid] (Ruling 11)
     sr_hat = sharpe(r)
     _, _, skew, kurt = moments(r)
-    sr_star = expected_max_sharpe(trials_n, trials_var)
+    sr_raw = expected_max_sharpe(trials_n, trials_var)
+    sr_star = max(sr_raw, sr_floor) if _positive_number(sr_floor) else sr_raw
     # The gauntlet's t_years counted the train-window EQUITY points: the
     # first point plus one per train return (daily_returns_with_dates drops a
     # step only after equity <= 0). With no train return the haircut takes
@@ -347,6 +401,9 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
         "trials_n_floor_entry_hash": trials_floor_hash,
         "registered_n": clustered["registered_n"],
         "trials_sr_var": trials_var,
+        "expected_max_sharpe_raw": sr_raw,
+        "expected_max_sharpe_floor": sr_floor,
+        "expected_max_sharpe_floor_entry_hash": sr_floor_hash,
         "expected_max_sharpe": sr_star,
         "trials_alignment": clustered["trials_alignment"],
         "trials_common_days": clustered["trials_common_days"],
@@ -428,7 +485,8 @@ def run(argv: list[str] | None = None) -> int:
               # part C: PBO nulls built this run / served from the cache
               "pbo_nulls_computed": 0, "pbo_nulls_cached": 0,
               "oldest_unstatted_verdict_age_hours": 0.0, "trials_n_raw": None,
-              "trials_n_effective": None,
+              "trials_n_effective": None, "expected_max_sharpe_raw": None,
+              "expected_max_sharpe_effective": None,
               "registered_n": None, "trials_common_days": None,
               "stopped_at_deadline": False, "chained": bool(a.chain),
               # carried forward until this run measures its own (I5)
@@ -491,6 +549,14 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         view = _View()
         snap = registry.snapshot(on_entry=view.on_entry, track_stats=True)
         pending[:] = [v for v in view.verdicts if v["vh"] not in snap.statted]
+        if a.chain and view.amendment_hash is None:
+            # Ruling 35 (ii): SR* is floored from here on, and v6.1's text says
+            # it is not. Report-only runs are unaffected.
+            print(f"REFUSED: --chain needs the '{AMENDMENT_NOTE_PREFIX}' note on "
+                  f"the chain (it records the SR* floor); nothing computed or "
+                  f"written. {len(pending)} v6.1 verdict(s) without stats.",
+                  flush=True)
+            return finish(1, "refused_no_amendment_note")
         all_specs = view.specs
         by_class: dict[str, int] = {}
         for s in all_specs:
@@ -558,12 +624,21 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         status["cluster_s"] = round(time.time() - t_cluster0, 1)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
+        # Ruling 35: ONE SR* floor per run, from the same single read.
+        sr_floor, sr_floor_hash = view.sr_floor, view.sr_floor_hash
+        trials_eff = max(clustered["trials_n"], floor or 0)
+        sr_raw = expected_max_sharpe(trials_eff, clustered["trials_var"])
         status.update({"trials_n_raw": clustered["trials_n"],
-                       "trials_n_effective": max(clustered["trials_n"], floor or 0),
+                       "trials_n_effective": trials_eff,
+                       "expected_max_sharpe_raw": sr_raw,
+                       "expected_max_sharpe_effective": (
+                           max(sr_raw, sr_floor) if sr_floor is not None else sr_raw),
                        "registered_n": clustered["registered_n"],
                        "trials_common_days": clustered["trials_common_days"]})
         extra["trials_alignment"] = clustered["trials_alignment"]
         extra["trials_n_floor"] = floor
+        extra["expected_max_sharpe_floor"] = sr_floor
+        extra["expected_max_sharpe_floor_entry_hash"] = sr_floor_hash
 
         train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
                  for s in all_specs}
@@ -699,7 +774,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                     sid, clustered["returns_by_id"][sid], train[sid],
                     train_sharpe[sid], clustered,
                     pbo, ok, vintage, data_digest, own_ends(sid),
-                    floor, floor_hash)))
+                    floor, floor_hash, sr_floor, sr_floor_hash)))
             # a full batch (kept entries from a held flush included): one
             # non-blocking attempt now, before the next family starts
             if len(items) >= STATS_BATCH_MAX:

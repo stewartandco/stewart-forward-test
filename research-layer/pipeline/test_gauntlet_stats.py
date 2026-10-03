@@ -5,6 +5,20 @@ from datetime import date
 
 from . import gauntlet_stats as gs
 
+# Ruling 35 (ii): --chain refuses until the amendment note is on the chain,
+# so every fixture below that chains stats carries it (test anchors, not the
+# real text; the refusal itself is tested at the end of this file).
+V61_AMEND1 = gs.AMENDMENT_NOTE_PREFIX + " test anchor"
+
+
+def _setup(tmp_path, note=True):
+    """test_gauntlet_worker's fixture (v6.1 note on the chain) plus the
+    v6.1 amendment note."""
+    from .test_gauntlet_worker import _setup as worker_setup
+    reg, spec, data = worker_setup(tmp_path, note=note)
+    reg.append("note", {"text": V61_AMEND1})
+    return reg, spec, data
+
 
 def test_vintage_is_the_last_sunday():
     assert gs.vintage_date(date(2026, 9, 30)) == "2026-09-27"   # Wednesday
@@ -12,7 +26,7 @@ def test_vintage_is_the_last_sunday():
 
 
 def test_without_chain_flag_nothing_is_written(tmp_path):
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
@@ -23,7 +37,7 @@ def test_without_chain_flag_nothing_is_written(tmp_path):
 
 def test_with_chain_flag_every_v61_verdict_gets_one_linked_entry(tmp_path):
     from .test_gauntlet import run_verifier
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     args = ["--registry", str(reg.log_path), "--data-dir", str(data),
@@ -41,7 +55,7 @@ def test_the_stats_job_uses_the_gauntlets_own_clustering(tmp_path, monkeypatch):
     """The method is unchanged: the stats job calls gauntlet.cluster_registry
     (the function gauntlet.run itself uses) and reports its trials_n."""
     from . import gauntlet
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     seen = {}
@@ -63,7 +77,11 @@ def test_the_stats_job_uses_the_gauntlets_own_clustering(tmp_path, monkeypatch):
 STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                "oldest_unstatted_verdict_age_hours", "trials_n_raw",
                "trials_n_effective", "registered_n", "trials_common_days",
-               "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s"}
+               "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s",
+               # step 7: T7 flush (B), PBO scope (C), SR* floor (D)
+               "retried_written", "deferred_lock", "pbo_nulls_computed",
+               "pbo_nulls_cached", "expected_max_sharpe_raw",
+               "expected_max_sharpe_effective"}
 
 
 def _status(tmp_path):
@@ -72,7 +90,7 @@ def _status(tmp_path):
 
 
 def test_status_reports_progress_and_a_second_night_finds_nothing(tmp_path):
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     args = ["--registry", str(reg.log_path), "--data-dir", str(data),
@@ -94,7 +112,7 @@ def test_status_reports_progress_and_a_second_night_finds_nothing(tmp_path):
 
 
 def test_report_only_status_counts_the_backlog(tmp_path):
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
@@ -111,7 +129,7 @@ def test_stats_chained_by_someone_else_mid_run_are_not_duplicated(tmp_path, monk
     from . import gauntlet
     from .common import entry_hash
     from .test_gauntlet import run_verifier
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     v = next(e for e in reg.entries() if e["entry_type"] == "verdict"
@@ -133,7 +151,7 @@ def test_stats_chained_by_someone_else_mid_run_are_not_duplicated(tmp_path, monk
 
 
 def test_a_deadline_stop_writes_nothing_and_exits_0(tmp_path):
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
@@ -146,7 +164,6 @@ def test_a_deadline_stop_writes_nothing_and_exits_0(tmp_path):
 
 
 def test_no_verdicts_writes_a_status_and_exits_0(tmp_path):
-    from .test_gauntlet_worker import _setup
     reg, spec, data = _setup(tmp_path)
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--logs-dir", str(tmp_path / "logs"), "--chain"]) == 0
@@ -157,7 +174,7 @@ def test_no_verdicts_writes_a_status_and_exits_0(tmp_path):
 def test_the_weekly_vintage_truncates_the_bars(tmp_path, monkeypatch):
     """Bars after the vintage Sunday are not simulated: a week of data
     appended after it leaves every simcache key unchanged."""
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     monkeypatch.setattr(gs, "vintage_date", lambda today: "2023-01-20")
@@ -195,6 +212,7 @@ def test_recorded_stats_match_the_v6_gauntlets_own_numbers(tmp_path, capsys):
                          "--cutoff", V4_CUTOFF, "--no-perturb"]) == 0
     r61 = Registry(new / "reg.jsonl")
     r61.append("note", {"text": V61})
+    r61.append("note", {"text": V61_AMEND1})
     assert gw.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--artifacts-dir", str(new / "art"), "--logs-dir", str(new / "logs"),
                    "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
@@ -248,7 +266,7 @@ def test_group_pbo_records_values_and_never_a_gate_label():
 
 def test_a_crash_leaves_a_status_saying_so(tmp_path, monkeypatch):
     import pytest
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     def boom(*a, **k):
@@ -313,6 +331,7 @@ def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path,
                          "--cutoff", cutoff, "--no-perturb"]) == 0
     r61 = Registry(new / "reg.jsonl")
     r61.append("note", {"text": V61})
+    r61.append("note", {"text": V61_AMEND1})
     assert gw.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--artifacts-dir", str(new / "art"), "--logs-dir", str(new / "logs"),
                    "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
@@ -367,6 +386,7 @@ def _mixed_twin(tmp_path, name, drop_eur_row):
     shutil.copyfile(src / "reg.jsonl", d / "reg.jsonl")
     reg = Registry(d / "reg.jsonl")
     reg.append("note", {"text": V61})
+    reg.append("note", {"text": V61_AMEND1})
     eur = _weekday_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31))
     if drop_eur_row:
         eur = [b for b in eur if b["date"] != "2020-03-02"]
@@ -419,7 +439,7 @@ def test_no_clustering_starts_after_the_deadline(tmp_path, monkeypatch):
     wall would kill with no status written."""
     import time as real_time
     from . import gauntlet
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     expired = {"now": False}
@@ -467,6 +487,7 @@ def _v61_sweep(tmp_path):
     write_data_dir(d, {"BTCUSD": v4_bars()})
     reg = Registry(d / "reg.jsonl")
     reg.append("note", {"text": V61})
+    reg.append("note", {"text": V61_AMEND1})
     assert gw.run(["--registry", str(reg.log_path), "--data-dir", str(d / "data"),
                    "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
                    "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
@@ -495,9 +516,10 @@ def _stats_payloads(reg):
     return [e["payload"] for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
 
 
-def _spy_clustering(monkeypatch, trials_n=None):
+def _spy_clustering(monkeypatch, trials_n=None, trials_var=None):
     """Capture cluster_registry's output (the job's own call); optionally force
-    its raw k, leaving trials_var as that run's clustering computed it."""
+    its raw k and/or its trials_var (otherwise as that run's clustering
+    computed them)."""
     from . import gauntlet
     seen = {}
     real = gauntlet.cluster_registry
@@ -506,6 +528,8 @@ def _spy_clustering(monkeypatch, trials_n=None):
         out = real(*a, **k)
         if trials_n is not None:
             out = {**out, "trials_n": trials_n}
+        if trials_var is not None:
+            out = {**out, "trials_var": trials_var}
         seen.clear()
         seen.update(out)
         return out
@@ -675,7 +699,7 @@ def test_clustering_is_skipped_when_time_left_is_under_the_prior(tmp_path, monke
     """No measured duration yet: the 2 h prior applies. 1.9 h left is a
     deadline stop (exit 0, status written) with no clustering pass started;
     2.1 h left clusters."""
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
@@ -696,7 +720,7 @@ def test_clustering_is_skipped_when_time_left_is_under_the_prior(tmp_path, monke
 def test_the_last_measured_clustering_time_is_the_estimate(tmp_path, monkeypatch):
     """A persisted cluster_s replaces the prior in both directions, is carried
     forward by a run that does not cluster, and is re-measured by one that does."""
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     _frozen(monkeypatch)
@@ -725,6 +749,7 @@ def _live_family_v61(tmp_path):
     from . import gauntlet_worker as gw
     reg, live_sids, _, _, _ = dead_and_live_family_registry(tmp_path)
     reg.append("note", {"text": V61})
+    reg.append("note", {"text": V61_AMEND1})
     data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
                                      "ETHUSD": _flat_like(v4_bars())})
     logs = tmp_path / "logs"
@@ -792,7 +817,7 @@ def test_group_pbo_asks_before_the_null_and_times_it():
 
 def test_a_second_stats_instance_defers_and_leaves_the_status_alone(tmp_path, capsys):
     from .chainlock import ChainLock
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
@@ -822,7 +847,7 @@ def test_a_second_stats_instance_defers_and_leaves_the_status_alone(tmp_path, ca
 def test_a_stale_stats_lock_with_a_dead_holder_is_broken(tmp_path):
     import os
     import time as real_time
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     logs = tmp_path / "logs"
@@ -895,7 +920,7 @@ def test_a_held_chain_lock_at_flush_keeps_the_stats_and_retries(tmp_path, monkey
     is KEPT, and once the holder releases (between two drain attempts) the
     same run chains it. retried_written counts it; exit 0, reason done."""
     from .test_gauntlet import run_verifier
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     logs = tmp_path / "logs"
@@ -920,7 +945,7 @@ def test_a_lock_held_through_the_reserve_writes_nothing_and_never_breaks_it(
     """Held for the whole reserve: bounded non-blocking attempts, nothing
     written, exit 0 deferred_lock, and the holder's lock file untouched (never
     waited on past the reserve, never broken)."""
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
@@ -949,7 +974,7 @@ def test_a_lock_held_through_the_reserve_writes_nothing_and_never_breaks_it(
 def test_the_drain_never_runs_past_the_deadline(tmp_path, monkeypatch):
     """18 s left at the first flush: the drain stops before the deadline,
     far inside its 75 s reserve."""
-    from .test_gauntlet_worker import _setup, _run
+    from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     logs = tmp_path / "logs"
@@ -1150,3 +1175,167 @@ def test_the_pbo_cache_key_and_file(tmp_path):
     assert gs.PboCache(tmp_path, "2026-09-27", "d2").get("g", sha) is None
     (tmp_path / gs.PBO_CACHE_NAME).write_text("{not json", encoding="utf-8")
     assert gs.PboCache(tmp_path, "2026-09-27", "d1").get("g", sha) is None
+
+
+# ------- step 7, Ruling 35 (Coen option a): SR* floored at the chain max -------
+
+def _sr_parts(seen, p):
+    """(sr_hat, T, skew, kurt) of an entry's DSR series, from the clustering
+    the run itself produced."""
+    from .stats import moments, sharpe
+    r = list(seen["returns_by_id"][p["strategy_id"]])
+    _, _, skew, kurt = moments(r)
+    return sharpe(r), len(r), skew, kurt
+
+
+def test_sr_star_is_floored_at_a_v6_verdicts_expected_max_sharpe(tmp_path, monkeypatch, capsys):
+    """A v6 verdict on the chain recorded SR* = 0.9, far above this run's.
+    Every entry records the raw SR* (v6.1's own figure), the floor and the
+    entry that supplied it, and expected_max_sharpe = 0.9, which is what the
+    deflated Sharpe uses. trials_n, its floor and trials_sr_var are as before."""
+    from .stats import expected_max_sharpe, psr
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    floor_hash = _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v6",
+                                                   "trials_n": 3,
+                                                   "expected_max_sharpe": 0.9})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    stats = _stats_payloads(reg)
+    assert len(stats) > 1
+    differs = 0
+    for p in stats:
+        n_eff = max(seen["trials_n"], 3)
+        raw = expected_max_sharpe(n_eff, seen["trials_var"])
+        assert 0 < raw < 0.9
+        assert p["trials_n"] == n_eff and p["trials_sr_var"] == seen["trials_var"]
+        assert p["expected_max_sharpe_raw"] == raw
+        assert p["expected_max_sharpe_floor"] == 0.9
+        assert p["expected_max_sharpe_floor_entry_hash"] == floor_hash
+        assert p["expected_max_sharpe"] == 0.9
+        sr_hat, T, skew, kurt = _sr_parts(seen, p)
+        assert p["deflated_sharpe"] == psr(sr_hat, 0.9, T, skew, kurt)
+        differs += p["deflated_sharpe"] != psr(sr_hat, raw, T, skew, kurt)
+    assert differs, "the fixture must separate the floored DSR from the raw one"
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["expected_max_sharpe_raw"] == stats[0]["expected_max_sharpe_raw"]
+    assert st["expected_max_sharpe_effective"] == 0.9
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_raw_sr_star_above_the_floor_stands(tmp_path, monkeypatch, capsys):
+    from .stats import psr
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    floor_hash = _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v5",
+                                                   "trials_n": 1,
+                                                   "expected_max_sharpe": 1e-9})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    for p in _stats_payloads(reg):
+        assert p["expected_max_sharpe_raw"] > 1e-9
+        assert p["expected_max_sharpe"] == p["expected_max_sharpe_raw"]
+        assert p["expected_max_sharpe_floor"] == 1e-9
+        assert p["expected_max_sharpe_floor_entry_hash"] == floor_hash
+        sr_hat, T, skew, kurt = _sr_parts(seen, p)
+        assert p["deflated_sharpe"] == psr(sr_hat, p["expected_max_sharpe_raw"],
+                                           T, skew, kurt)
+
+
+def test_what_is_never_an_sr_star_floor():
+    """Same whitelist as trials_n (v3-v6 gauntlet verdicts, earlier stats
+    entries' raw SR*); a bool, string, None, NaN, infinity, zero or negative
+    value is no floor. The first of equal values supplies it."""
+    from .common import entry_hash
+
+    def verdict(m, stage="gauntlet"):
+        return {"entry_type": "verdict", "ts_utc": "t",
+                "payload": {"strategy_id": "s", "stage": stage, "metrics": m}}
+    v = gs._View()
+    junk = [verdict({"expected_max_sharpe": 5.0}),                          # no protocol
+            verdict({"protocol": "gauntlet-protocol-v2", "expected_max_sharpe": 5.0}),
+            verdict({"protocol": "gauntlet-protocol-v6.1", "expected_max_sharpe": 5.0}),
+            verdict({"protocol": "gauntlet-protocol-v6", "expected_max_sharpe": 5.0},
+                    stage="screened")]
+    for bad in (True, "0.5", None, float("nan"), float("inf"), 0.0, -0.3, [0.4]):
+        junk.append(verdict({"protocol": "gauntlet-protocol-v6",
+                             "expected_max_sharpe": bad}))
+        junk.append({"entry_type": "gauntlet_stats", "ts_utc": "t",
+                     "payload": {"expected_max_sharpe_raw": bad,
+                                 "expected_max_sharpe": 5.0}})
+    for e in junk:
+        v.on_entry(e)
+    assert v.sr_floor is None and v.sr_floor_hash is None
+    first = verdict({"protocol": "gauntlet-protocol-v4", "expected_max_sharpe": 0.25})
+    v.on_entry(first)
+    v.on_entry({"entry_type": "gauntlet_stats", "ts_utc": "u",
+                "payload": {"expected_max_sharpe_raw": 0.25}})
+    v.on_entry({"entry_type": "gauntlet_stats", "ts_utc": "v",
+                "payload": {"expected_max_sharpe_raw": 0.2}})
+    assert v.sr_floor == 0.25 and v.sr_floor_hash == entry_hash(first)
+    higher = {"entry_type": "gauntlet_stats", "ts_utc": "w",
+              "payload": {"expected_max_sharpe_raw": 0.3, "expected_max_sharpe": 0.31}}
+    v.on_entry(higher)
+    assert v.sr_floor == 0.3 and v.sr_floor_hash == entry_hash(higher)
+
+
+def test_the_sr_star_floor_is_monotone_across_runs(tmp_path, monkeypatch, capsys):
+    """Run 1's raw SR* is chained as expected_max_sharpe_raw; run 2's smaller
+    variance would give a smaller SR*, so the floor (run 1's entry) applies."""
+    from .common import entry_hash
+    from .stats import expected_max_sharpe
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    seen1 = _spy_clustering(monkeypatch, trials_var=4e-4)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    first = [e for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
+    raw1 = expected_max_sharpe(seen1["trials_n"], 4e-4)
+    assert first and all(e["payload"]["expected_max_sharpe_raw"] == raw1 for e in first)
+    assert all(e["payload"]["expected_max_sharpe_floor"] is None for e in first)
+    _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v6.1"})
+    seen2 = _spy_clustering(monkeypatch, trials_var=4e-7)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    new = _stats_payloads(reg)[len(first):]
+    assert len(new) == 1
+    p = new[0]
+    assert p["expected_max_sharpe_raw"] == expected_max_sharpe(p["trials_n"], 4e-7) < raw1
+    assert p["expected_max_sharpe_floor"] == raw1 == p["expected_max_sharpe"]
+    assert p["expected_max_sharpe_floor_entry_hash"] == entry_hash(first[0])
+    assert p["trials_sr_var"] == 4e-7                     # still not floored itself
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_chain_refuses_until_the_amendment_note_is_chained(tmp_path, capsys):
+    """Ruling 35 (ii): --chain exits 1 with refused_no_amendment_note and
+    writes nothing; neither the v6.1 note nor a note that merely mentions the
+    amendment counts. A report-only run is unaffected. Once the note is on
+    the chain the same --chain run statts every verdict."""
+    from .test_gauntlet_worker import _setup as worker_setup, _run
+    reg, spec, data = worker_setup(tmp_path)           # the v6.1 note only
+    assert _run(reg, data, tmp_path) == 0
+    reg.append("note", {"text": "incident: see " + gs.AMENDMENT_NOTE_PREFIX + " later"})
+    reg.append("note", {"text": gs.AMENDMENT_NOTE_PREFIX.upper() + " shouting"})
+    n = sum(1 for _ in reg.entries())
+    args = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--logs-dir", str(tmp_path / "logs")]
+    assert gs.run(args + ["--chain"]) == 1
+    assert "REFUSED" in capsys.readouterr().out
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "refused_no_amendment_note"
+    assert st["verdicts_without_stats"] == 1 and st["stats_written"] == 0
+    assert sum(1 for _ in reg.entries()) == n
+    assert gs.run(args) == 0                             # report only: unaffected
+    assert _status(tmp_path)["exit_reason"] == "done"
+    reg.append("note", {"text": V61_AMEND1})
+    assert gs.run(args + ["--chain"]) == 0
+    assert _status(tmp_path)["stats_written"] == 1
+
+
+def test_the_v61_note_is_not_the_amendment_and_vice_versa():
+    from .gauntlet_core import PROTOCOL_V61
+    assert not gs.is_amendment_note("gauntlet-protocol-v6.1: anything")
+    assert gs.is_amendment_note(V61_AMEND1)
+    assert not V61_AMEND1.startswith(PROTOCOL_V61 + ":")
+    assert not gs.is_amendment_note(None) and not gs.is_amendment_note(42)
