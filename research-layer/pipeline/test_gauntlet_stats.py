@@ -1339,3 +1339,63 @@ def test_the_v61_note_is_not_the_amendment_and_vice_versa():
     assert gs.is_amendment_note(V61_AMEND1)
     assert not V61_AMEND1.startswith(PROTOCOL_V61 + ":")
     assert not gs.is_amendment_note(None) and not gs.is_amendment_note(42)
+
+
+# ------- step 7 fix round 1 (review M2, M3, M4) -------
+
+def test_the_pbo_cache_is_keyed_on_the_pbo_code_and_constants(tmp_path, monkeypatch):
+    """M2: a result cached under one code/constant revision is never served
+    under another, so a mid-vintage change to the PBO code or constants
+    cannot reuse a stale null. pbo_code_sha() is stable for unchanged code
+    and moves with PBO_CACHE_REV and with each PBO constant."""
+    fam = [{"sid": "a"}, {"sid": "b"}]
+    sha = gs.pbo_inputs_sha("g", fam, {"a": [0.1, 0.2], "b": [0.3, -0.1]}, 50)
+    gs.PboCache(tmp_path, "2026-09-27", "d1", code_sha="rev-a").put(
+        "g", sha, {"pbo": 0.4, "pbo_null_draws": 50})
+    assert gs.PboCache(tmp_path, "2026-09-27", "d1", code_sha="rev-a").get("g", sha)
+    assert gs.PboCache(tmp_path, "2026-09-27", "d1", code_sha="rev-b").get("g", sha) is None
+    base = gs.pbo_code_sha()
+    assert base == gs.pbo_code_sha() and len(base) == 64
+    assert gs.PboCache(tmp_path, "v", "d").code_sha == base      # the default
+    for name, value in (("PBO_CACHE_REV", gs.PBO_CACHE_REV + 1),
+                        ("PBO_MIN_DISTINCT", gs.PBO_MIN_DISTINCT + 1),
+                        ("PBO_PASS_PCTILE", 0.06), ("PBO_KILL_PCTILE", 0.94),
+                        ("CSCV_SPLITS", gs.CSCV_SPLITS + 2)):
+        with monkeypatch.context() as m:
+            m.setattr(gs, name, value)
+            assert gs.pbo_code_sha() != base, name
+
+
+def test_a_failed_pbo_cache_write_does_not_crash_the_run(tmp_path, monkeypatch, capsys):
+    """M3: the cache file cannot be written (its temp path is a directory):
+    the run logs it, records the null it paid for, chains every entry and
+    ends done, exit 0."""
+    from .test_gauntlet import run_verifier
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    (logs / gs.PBO_CACHE_NAME).with_suffix(".json.tmp").mkdir(parents=True)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    out = capsys.readouterr().out
+    assert "PBO cache not written" in out
+    st = json.loads((logs / gs.STATUS_NAME).read_text(encoding="utf-8"))
+    assert st["exit_reason"] == "done" and st["verdicts_without_stats"] == 0
+    assert st["pbo_nulls_computed"] == 1
+    assert any(p["pbo_null_draws"] > 0 for p in _stats_payloads(reg))
+    assert not (logs / gs.PBO_CACHE_NAME).exists()
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_huge_integer_is_no_sr_star_floor_and_does_not_raise():
+    """M4: math.isfinite raises OverflowError on an int beyond float range;
+    the guard treats it as an invalid candidate instead of crashing the
+    single snapshot read."""
+    assert gs._positive_number(10 ** 400) is False
+    assert gs._positive_number(-(10 ** 400)) is False
+    assert gs._positive_number(7) is True
+    v = gs._View()
+    v.on_entry({"entry_type": "verdict", "ts_utc": "t",
+                "payload": {"strategy_id": "s", "stage": "gauntlet",
+                            "metrics": {"protocol": "gauntlet-protocol-v6",
+                                        "expected_max_sharpe": 10 ** 400}}})
+    v.on_entry({"entry_type": "gauntlet_stats", "ts_utc": "u",
+                "payload": {"expected_max_sharpe_raw": 10 ** 400}})
+    assert v.sr_floor is None and v.sr_floor_hash is None

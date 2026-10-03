@@ -140,6 +140,11 @@ STATUS_NAME = "gauntlet_stats_status.json"
 # vintage builds its permutation null once. Only the current vintage and
 # digest are kept; an unreadable file is an empty cache, never an error.
 PBO_CACHE_NAME = "gauntlet_stats_pbo_cache.json"
+# Fix round 1 (M2): bump on any change to how a family's PBO result is made
+# that pbo_code_sha() cannot see. pbo_code_sha() already covers the source of
+# pipeline/pbo.py, of group_pbo and of stats.percentile, and the PBO
+# constants, so a code or constant change mid-vintage re-keys the cache.
+PBO_CACHE_REV = 1
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "retried_written", "deferred_lock",
                  "oldest_unstatted_verdict_age_hours", "trials_n_raw",
@@ -217,9 +222,15 @@ def is_amendment_note(text) -> bool:
 
 
 def _positive_number(v) -> bool:
-    """A usable floor value: an int or float (never a bool), finite, > 0."""
-    return (isinstance(v, (int, float)) and not isinstance(v, bool)
-            and math.isfinite(v) and v > 0)
+    """A usable floor value: an int or float (never a bool), finite, > 0.
+    Total: an int too large for a float (math.isfinite raises OverflowError
+    on it; a hand-written JSON entry could hold one) is not a floor."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v) and v > 0
+    except OverflowError:
+        return False
 
 
 class _View:
@@ -322,6 +333,24 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
+def pbo_code_sha() -> str:
+    """The code-and-constants part of the PBO cache key: PBO_CACHE_REV, the
+    PBO constants, and the source of pipeline/pbo.py, group_pbo and
+    stats.percentile (line endings normalised, so a CRLF checkout of the
+    same code keys the same). Any change re-keys every cached result."""
+    import inspect
+    from . import pbo as _pbo_mod
+    from . import stats as _stats_mod
+    h = hashlib.sha256(json.dumps(
+        [PBO_CACHE_REV, PBO_MIN_DISTINCT, PBO_PASS_PCTILE, PBO_KILL_PCTILE,
+         CSCV_SPLITS]).encode("utf-8"))
+    for src in (inspect.getsource(_pbo_mod), inspect.getsource(group_pbo),
+                inspect.getsource(_stats_mod.percentile)):
+        h.update(src.replace("\r\n", "\n").encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
     """Everything group_pbo's result depends on: the family id (it seeds the
     null), the draw count, CSCV_SPLITS, and each member's train series, in
@@ -335,18 +364,24 @@ def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
 
 
 class PboCache:
-    """logs/gauntlet_stats_pbo_cache.json: {vintage, data_digest, families:
-    {g: {inputs_sha, pbo}}}. A file for another vintage or digest, or one
-    that cannot be read, starts empty. Written atomically after each null."""
+    """logs/gauntlet_stats_pbo_cache.json: {vintage, data_digest, code_sha,
+    families: {g: {inputs_sha, pbo}}}. A file for another vintage, digest or
+    code_sha (pbo_code_sha()), or one that cannot be read, starts empty.
+    Written atomically after each null; a failed write is logged and the run
+    goes on uncached (the cache is an optimisation, never a reason to crash
+    after a null has been paid for)."""
 
-    def __init__(self, logs_dir: Path, vintage: str, data_digest: str) -> None:
+    def __init__(self, logs_dir: Path, vintage: str, data_digest: str,
+                 code_sha: str | None = None) -> None:
         self.path = logs_dir / PBO_CACHE_NAME
         self.vintage, self.data_digest = vintage, data_digest
+        self.code_sha = code_sha if code_sha is not None else pbo_code_sha()
         self.families: dict = {}
         try:
             d = json.loads(self.path.read_text(encoding="utf-8"))
             if (isinstance(d, dict) and d.get("vintage") == vintage
                     and d.get("data_digest") == data_digest
+                    and d.get("code_sha") == self.code_sha
                     and isinstance(d.get("families"), dict)):
                 self.families = d["families"]
         except (OSError, ValueError):
@@ -359,14 +394,23 @@ class PboCache:
             return dict(hit["pbo"])
         return None
 
-    def put(self, g: str, inputs_sha: str, pbo: dict) -> None:
+    def put(self, g: str, inputs_sha: str, pbo: dict) -> bool:
+        """Record and persist one family's result. False (logged) when the
+        file could not be written; the in-memory entry is kept either way."""
         self.families[g] = {"inputs_sha": inputs_sha, "pbo": dict(pbo)}
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"vintage": self.vintage,
-                                   "data_digest": self.data_digest,
-                                   "families": self.families}, sort_keys=True),
-                       encoding="utf-8")
-        tmp.replace(self.path)
+        try:
+            tmp.write_text(json.dumps({"vintage": self.vintage,
+                                       "data_digest": self.data_digest,
+                                       "code_sha": self.code_sha,
+                                       "families": self.families}, sort_keys=True),
+                           encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as exc:
+            print(f"WARNING: PBO cache not written ({exc}); continuing uncached",
+                  flush=True)
+            return False
+        return True
 
 
 def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
