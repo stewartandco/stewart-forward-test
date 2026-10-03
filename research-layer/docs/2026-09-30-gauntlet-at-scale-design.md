@@ -124,7 +124,9 @@ gate's name as the reason; pass -> `quarantine`, reason `gauntlet pass`.
 pbo, pbo_percentile, plateau_ok, haircut, cluster_method, data_vintage}`
 (`plateau_ok` and `haircut` added at planning: both depend on the sibling
 family or on trials_n, both were recorded in v6 verdicts, and dropping them
-would lose that evidence). Exactly one per v6.1
+would lose that evidence; the v6.1 addendum and its amendment-1 list the
+fields as built, including `expected_max_sharpe_raw` / `_floor` /
+`_floor_entry_hash` added in step 7). Exactly one per v6.1
 gauntlet verdict, linked by the verdict entry's hash. It records; it never
 changes a strategy's state.
 
@@ -186,7 +188,18 @@ D9 re-trials, and Morpheus's display (its historical `dsr` gate label).
   `deferred_lock` previously counted first attempts that met the lock. No
   new `exit_reason` value.)
 - `logs/gauntlet_stats_status.json`: `stats_written`, `verdicts_without_stats`,
-  `oldest_unstatted_verdict_age_hours`, `stopped_at_deadline`.
+  `oldest_unstatted_verdict_age_hours`, `stopped_at_deadline`. (Amended
+  2026-10-03, step 7: `retried_written` = entries chained on a retry after
+  chain.lock was held at their first flush; `deferred_lock` = computed
+  entries still unwritten at the end (exit_reason `deferred_lock`);
+  `pbo_nulls_computed` / `pbo_nulls_cached` = PBO nulls built this run /
+  served from `logs/gauntlet_stats_pbo_cache.json`;
+  `expected_max_sharpe_raw` / `expected_max_sharpe_effective` = the run's
+  SR* before and after the SR* floor. New stats `exit_reason`
+  `refused_no_amendment_note` (exit 1): `--chain` before the
+  gauntlet-protocol-v6.1-amendment-1 note is chained. The Sentinel's
+  `gauntlet_queue` check reads only `oldest_unstatted_verdict_age_hours`
+  from this file.)
 - Ops Sentinel (`sc-ops-sentinel`): `27_GauntletWorker` in `hourly`;
   `28_GauntletStats` in `daily` (01:00 precedes the 09:15 run); a new
   queue-age check reading the worker status file: **FAIL when

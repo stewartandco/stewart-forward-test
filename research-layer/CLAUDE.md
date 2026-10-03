@@ -228,6 +228,53 @@ of it.
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's argmax) and
   `trials_n_effective` (the floored N the entries use).
+- **Step 7 (2026-10-03): the clustering takes ~2 min, not 4 h.** 95% of the
+  old 4.1 h was a Python tie loop in `cluster._agglomerate_np`, driven by the
+  all-zero return rows (79 at 13,730; distance exactly sqrt(0.5) to
+  everything). The bookkeeping is now array-based and the distance
+  arithmetic in place (one n x n matrix at a time; +2.4 GB commit at
+  13,730), with the METHOD UNCHANGED: `tools/verify_cluster_identity.py`
+  (read-only, never scheduled; run it on a registry COPY) proved merge
+  history, k, labels, `trials_sr_var` and SR* bit-identical to the old code
+  at n = 1k/2k/4k/8k on real data. Measured on a copy: 117.7 s, k = 560 at
+  13,730. Any future change to `cluster.py` re-runs that proof first.
+  `test_cluster_np.py` asserts the per-row cache against a fresh re-scan
+  after EVERY merge (the O(1) tie-only update is invisible to history
+  comparisons).
+- **SR* is floored (step 7, Coen option a, Ruling 35).** `expected_max_sharpe`
+  on an entry = max(`expected_max_sharpe_raw`, `expected_max_sharpe_floor`);
+  raw is v6.1's own `expected_max_sharpe(trials_n, trials_sr_var)`, the floor
+  the highest SR* on the chain (v3-v6 verdicts' `metrics.expected_max_sharpe`
+  via the SAME `FLOOR_PROTOCOLS`, plus `expected_max_sharpe_raw` on earlier
+  stats entries), named by `expected_max_sharpe_floor_entry_hash`. The DSR
+  uses the floored SR*; the haircut reads `trials_n` only. Why: SR* scales
+  with sqrt(`trials_sr_var`), which moves ~400x between the silhouette
+  curve's two peaks. On a copy (10-03) the chain floor was 0.06883 (entry
+  9829) and the night's raw SR* 0.0665, so the floor binds.
+- **`--chain` REFUSES until `docs/notes/gauntlet-protocol-v6.1-amendment-1.md`
+  is chained** (exit 1, `exit_reason` `refused_no_amendment_note`; first-line
+  prefix `gauntlet-protocol-v6.1-amendment-1:`, first occurrence). The note
+  is a DRAFT until Coen approves its exact text; chain it verbatim (the git
+  blob is LF: check the bytes are LF before chaining, `core.autocrlf` is on).
+  Report-only runs are unaffected. The Sentinel does not read the stats
+  `exit_reason`; an exit 1 on task 28 would reach the digest as a task result.
+- **PBO scope (step 7, amendment-1).** The null is built for EVERY family with
+  a v6.1 verdict needing stats whenever it is measurable (observed PBO, >= 4
+  distinct configs), passing verdict or not; before, only for a family with a
+  pass in the batch, so siblings statted on different nights could differ.
+  Each result is cached in `logs/gauntlet_stats_pbo_cache.json` per (family,
+  vintage, data_digest, inputs sha, `pbo_code_sha()` = PBO code + constants
+  + `PBO_CACHE_REV`); only the current vintage is kept, a failed write is
+  logged and the run continues uncached, and an
+  unreadable file is an empty cache. Measured on a copy: the 10-03 backlog
+  (2,193 verdicts, 286 families) needs ~32,300 s of nulls, about two nights.
+- **chain.lock held at a flush (step 7, T7):** the computed entries are KEPT
+  and retried in the same run (next full-batch flush, then a final drain of
+  non-blocking attempts every `DRAIN_INTERVAL_S` 5 s inside
+  `DRAIN_RESERVE_S` 75 s, never past the deadline; after a hold the family
+  loop holds that reserve back). Still held at the end: exit 0
+  `deferred_lock`, nothing written for them, the next run recomputes. Never
+  waits on, polls inside, or breaks the lock.
 - **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on the
   plan's cutover step 7 (the `--chain` gate; the public spec's section 10
   numbers its steps differently) (the wrapper has no `--chain` today). Coen's
@@ -258,7 +305,10 @@ of it.
   happened). No new `exit_reason` value was added.
   `logs/gauntlet_stats_status.json`: `stats_written`,
   `verdicts_without_stats`, `oldest_unstatted_verdict_age_hours`,
-  `stopped_at_deadline`. Sentinel `gauntlet_queue` check (on the UNMERGED
+  `stopped_at_deadline`; since step 7 also `retried_written` /
+  `deferred_lock` (T7 flush), `pbo_nulls_computed` / `pbo_nulls_cached` (PBO
+  scope) and `expected_max_sharpe_raw` / `expected_max_sharpe_effective` (SR*
+  floor). Sentinel `gauntlet_queue` check (on the UNMERGED
   `sc-ops-sentinel` branch `feat/gauntlet-queue-check` until cutover): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
@@ -269,7 +319,8 @@ of it.
 - **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
   (routine); 1 = a candidate raised, the run crashed, or setup was refused.
   Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
-  instance running; 1 = the data or the chain refused the run.
+  instance running; 1 = the data or the chain refused the run, or `--chain`
+  without the amendment-1 note (`refused_no_amendment_note`).
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
   Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry

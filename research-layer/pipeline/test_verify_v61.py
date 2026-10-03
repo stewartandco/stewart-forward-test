@@ -74,3 +74,34 @@ def test_invariant_12_state_change_leg_fires_on_the_reason_alone(tmp_path):
     assert r.returncode != 0
     assert "state_change cites pbo_family_kill" in r.stdout
     assert "gauntlet verdict applies pbo_family_kill" not in r.stdout
+
+
+# ---- step 7: the v6.1 amendment note must arm nothing keyed on the v6.1 note ----
+
+def _amendment_text():
+    """The draft amendment note, verbatim from docs/notes/ (what will be
+    chained after Coen's approval)."""
+    from pathlib import Path
+    p = (Path(__file__).resolve().parent.parent / "docs" / "notes"
+         / "gauntlet-protocol-v6.1-amendment-1.md")
+    return p.read_text(encoding="utf-8")
+
+
+def test_the_amendment_note_does_not_arm_invariant_12(tmp_path):
+    """Only the amendment is on the chain (no v6.1 note): a family kill after
+    it is still pre-v6.1 history to the verifier, so the chain stays VALID.
+    The same chain with the v6.1 note instead is INVALID (the control)."""
+    text = _amendment_text()
+    assert text.startswith("gauntlet-protocol-v6.1-amendment-1: ")
+    assert not text.startswith("gauntlet-protocol-v6.1:")
+    for note, valid in ((text, True), (V61, False)):
+        d = tmp_path / ("amend" if valid else "v61")
+        d.mkdir()
+        reg, spec = gauntlet_registry(d)
+        reg.append("note", {"text": note})
+        reg.record_verdict(spec["strategy_id"], "gauntlet", "fail",
+                           {"protocol": "gauntlet-protocol-v6", "pbo_family_kill": True},
+                           "0" * 64)
+        reg.record_state_change(spec["strategy_id"], "graveyard", "pbo_family_kill")
+        r = run_verifier(reg.log_path)
+        assert (r.returncode == 0) is valid, r.stdout

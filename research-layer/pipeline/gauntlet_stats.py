@@ -6,8 +6,11 @@ week and each night resumes where the last stopped. Computes effective
 trials, the deflated Sharpe, PBO (recorded only), plateau_ok and the
 Harvey-Liu haircut for every v6.1 verdict without a gauntlet_stats entry,
 and with --chain appends one gauntlet_stats entry per verdict. Never changes
-a strategy's state. Without --chain it only reports (the 480 -> 44
-investigation must be accepted before --chain is scheduled).
+a strategy's state. Without --chain it only reports. With --chain it
+REFUSES (exit 1, exit_reason refused_no_amendment_note, nothing computed or
+written) until the gauntlet-protocol-v6.1-amendment-1 note is on the chain:
+entries whose SR* is floored must never be chained under the v6.1 text that
+says trials_sr_var "is not floored".
 
 Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - the registry-wide series and the clustering are gauntlet.registry_series
@@ -22,11 +25,19 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   alignment used is recorded beside it (trials_alignment,
   trials_common_days), as v6 recorded it in metrics.
 - PBO: the helpers and arguments of gauntlet.run's PBO section (train
-  window, CSCV_SPLITS, the group-id-seeded permutation null, which -- as
-  there -- is built only for a family with a passing verdict in this batch
-  and at least PBO_MIN_DISTINCT distinct configurations). RECORDED ONLY:
-  no pass/fail/kill label is computed, and no pbo_family_kill key is written
-  (verify_registry.py invariant 12 rejects one after the v6.1 note).
+  window, CSCV_SPLITS, the group-id-seeded permutation null). SCOPE (step 7,
+  gauntlet-protocol-v6.1-amendment-1): the null is built for EVERY family
+  that has a v6.1 verdict needing stats, whenever the family is measurable
+  (an observed PBO and at least PBO_MIN_DISTINCT distinct configurations),
+  whether or not any of its verdicts passed. Until step 7 it was built only
+  for a family with a passing verdict in the batch, so siblings statted on
+  different nights could record different pbo_status. The fields depend only
+  on the family's members and train series, so the rule is deterministic;
+  each null is cached per (family, vintage, data_digest, inputs) in
+  logs/gauntlet_stats_pbo_cache.json and computed once per vintage.
+  RECORDED ONLY: no pass/fail/kill label is computed, and no
+  pbo_family_kill key is written (verify_registry.py invariant 12 rejects
+  one after the v6.1 note).
 - plateau_ok: plateau.qualifies over the family, as the gauntlet recorded it.
 - haircut: harvey_liu_haircut(train Sharpe, train years, trials_n), window
   "train", as _evaluate_candidate recorded it.
@@ -38,6 +49,17 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   this run and the entry that supplied it, or null), and trials_n =
   max(raw, floor), the figure the deflated Sharpe AND the haircut use.
   trials_sr_var stays this run's. See _View.on_entry for what counts.
+- the expected maximum Sharpe SR* is FLOORED too (step 7, Coen option a,
+  gauntlet-protocol-v6.1-amendment-1): SR* scales with sqrt(trials_sr_var),
+  and the variance moves by orders of magnitude between the silhouette
+  curve's two peaks, so a floored N with an unfloored variance could still
+  make the recorded deflated Sharpe more lenient as the registry grows. Each
+  entry records expected_max_sharpe_raw (expected_max_sharpe(trials_n,
+  trials_sr_var), exactly what v6.1 recorded), expected_max_sharpe_floor +
+  expected_max_sharpe_floor_entry_hash (the highest SR* already on the chain
+  and the entry that supplied it, or null), and expected_max_sharpe =
+  max(raw, floor), the figure the deflated Sharpe uses. The haircut does not
+  read SR* (it reads trials_n only), so it is unchanged.
 
 Resumable: the simulation is the expensive part and the simcache keeps every
 series simulated before a deadline stop, keyed by the bars THROUGH the
@@ -46,6 +68,15 @@ vintage (not the whole file), so the next night's keys are the same. With
 statistic already written. Chaining follows Ruling 10: one full chain read
 outside chain.lock; under it, an O(tail) advance, a re-check that drops any
 verdict already statted, and at most STATS_BATCH_MAX entries per hold.
+
+chain.lock held at a flush (step 7, T7): the computed entries are KEPT in
+memory and the flush is retried later in the same run, never waited for:
+one non-blocking attempt after each further family while a full batch is
+waiting, then a final drain of attempts DRAIN_INTERVAL_S apart for at most
+DRAIN_RESERVE_S, never past the deadline. Once a flush has been held, the family loop holds DRAIN_RESERVE_S
+back from the deadline for that drain. Entries still unwritten at the end
+are dropped (exit_reason deferred_lock, exit 0) and the next run recomputes
+them. chain.lock is never waited on, polled inside, or broken here.
 
 Deadline (I5): clustering starts only when the time left covers its
 estimate (the last measured duration, persisted in the status as cluster_s,
@@ -61,7 +92,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from array import array
 import json
+import math
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -102,10 +135,35 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 INSTANCE_LOCK = "gauntlet_stats.lock"
 INSTANCE_STALE_AFTER_S = 7 * 3600
 STATUS_NAME = "gauntlet_stats_status.json"
+# Part C (step 7): one family's PBO result per (family, vintage, data_digest,
+# inputs), so a family whose verdicts arrive over several nights of one
+# vintage builds its permutation null once. Only the current vintage and
+# digest are kept; an unreadable file is an empty cache, never an error.
+PBO_CACHE_NAME = "gauntlet_stats_pbo_cache.json"
+# Fix round 1 (M2): bump on any change to how a family's PBO result is made
+# that pbo_code_sha() cannot see. pbo_code_sha() already covers the source of
+# pipeline/pbo.py, of group_pbo and of stats.percentile, and the PBO
+# constants, so a code or constant change mid-vintage re-keys the cache.
+PBO_CACHE_REV = 1
 STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
+                 "retried_written", "deferred_lock",
                  "oldest_unstatted_verdict_age_hours", "trials_n_raw",
-                 "trials_n_effective", "registered_n", "trials_common_days",
-                 "stopped_at_deadline", "chained", "cluster_s", "pbo_null_mean_s")
+                 "trials_n_effective", "expected_max_sharpe_raw",
+                 "expected_max_sharpe_effective", "registered_n",
+                 "trials_common_days", "stopped_at_deadline", "chained",
+                 "cluster_s", "pbo_null_mean_s",
+                 "pbo_nulls_computed", "pbo_nulls_cached")
+# T7 flush (step 7): computed entries a flush could not chain because
+# chain.lock was held are kept and retried in the same run. Once that has
+# happened the family loop starts nothing that would eat into this reserve,
+# and the final drain makes one non-blocking attempt every DRAIN_INTERVAL_S
+# inside it, never past the deadline. The worker's figures (2026-10-02): a
+# reserve that outlasts a scanner card batch several times over; the loop's
+# hours-long screen hold is outlasted by nothing affordable.
+DRAIN_RESERVE_S = 75.0
+DRAIN_INTERVAL_S = 5.0
+# Injectable so tests drive the drain on a fake clock instead of sleeping.
+_sleep = time.sleep
 
 
 def vintage_date(today: date) -> str:
@@ -146,9 +204,33 @@ def data_digest_of(hashes: dict[str, str]) -> str:
 
 # Ruling 20: only these gauntlet protocols recorded a CLUSTER count in
 # metrics.trials_n. No protocol / v2 hold a registration count (excluded), and
-# v6.1 verdicts carry no trials_n.
+# v6.1 verdicts carry no trials_n. Ruling 35: the SAME whitelist decides which
+# verdicts' metrics.expected_max_sharpe count toward the SR* floor (v2's SR*
+# was computed over a registration count, so it is excluded with it).
 FLOOR_PROTOCOLS = ("gauntlet-protocol-v3", "gauntlet-protocol-v4",
                    "gauntlet-protocol-v5", "gauntlet-protocol-v6")
+# Ruling 35 (ii): --chain refuses until this note is on the chain, detected by
+# the first line's prefix, first occurrence (verify_registry's rule for the
+# notes it keys on). The hyphen after "v6.1" keeps it distinct from the v6.1
+# addendum's "gauntlet-protocol-v6.1:", which the worker, the old gauntlet and
+# verifier invariant 12 key on: this note must arm none of those.
+AMENDMENT_NOTE_PREFIX = "gauntlet-protocol-v6.1-amendment-1:"
+
+
+def is_amendment_note(text) -> bool:
+    return isinstance(text, str) and text.startswith(AMENDMENT_NOTE_PREFIX)
+
+
+def _positive_number(v) -> bool:
+    """A usable floor value: an int or float (never a bool), finite, > 0.
+    Total: an int too large for a float (math.isfinite raises OverflowError
+    on it; a hand-written JSON entry could hold one) is not a floor."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v) and v > 0
+    except OverflowError:
+        return False
 
 
 class _View:
@@ -163,12 +245,22 @@ class _View:
         # of the entry that supplied it (the first, on a tie).
         self.trials_floor: int | None = None
         self.trials_floor_hash: str | None = None
+        # Ruling 35: the highest SR* recorded on the chain so far, likewise.
+        self.sr_floor: float | None = None
+        self.sr_floor_hash: str | None = None
+        # Ruling 35 (ii): the amendment note's entry hash (first occurrence).
+        self.amendment_hash: str | None = None
 
     def _floor_candidate(self, n, e: dict) -> None:
         # A cluster count is a positive int; anything else is no floor.
         if (isinstance(n, int) and not isinstance(n, bool) and n > 0
                 and (self.trials_floor is None or n > self.trials_floor)):
             self.trials_floor, self.trials_floor_hash = n, entry_hash(e)
+
+    def _sr_floor_candidate(self, v, e: dict) -> None:
+        # A non-numeric, bool, NaN, infinite or non-positive SR* is no floor.
+        if _positive_number(v) and (self.sr_floor is None or v > self.sr_floor):
+            self.sr_floor, self.sr_floor_hash = float(v), entry_hash(e)
 
     def on_entry(self, e: dict) -> None:
         et, p = e["entry_type"], e["payload"]
@@ -179,10 +271,15 @@ class _View:
             self.screen_tc_fail.add(p["strategy_id"])
         elif et == "gauntlet_stats":
             self._floor_candidate(p.get("trials_n_raw"), e)
+            self._sr_floor_candidate(p.get("expected_max_sharpe_raw"), e)
+        elif (et == "note" and self.amendment_hash is None
+              and is_amendment_note(p.get("text"))):
+            self.amendment_hash = entry_hash(e)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             m = p.get("metrics")
             if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
                 self._floor_candidate(m.get("trials_n"), e)
+                self._sr_floor_candidate(m.get("expected_max_sharpe"), e)
             if isinstance(m, dict) and m.get("protocol") == PROTOCOL_V61:
                 self.verdicts.append({"vh": entry_hash(e), "sid": p["strategy_id"],
                                       "verdict": p.get("verdict"),
@@ -236,22 +333,106 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
+def pbo_code_sha() -> str:
+    """The code-and-constants part of the PBO cache key: PBO_CACHE_REV, the
+    PBO constants, and the source of pipeline/pbo.py, group_pbo and
+    stats.percentile (line endings normalised, so a CRLF checkout of the
+    same code keys the same). Any change re-keys every cached result."""
+    import inspect
+    from . import pbo as _pbo_mod
+    from . import stats as _stats_mod
+    h = hashlib.sha256(json.dumps(
+        [PBO_CACHE_REV, PBO_MIN_DISTINCT, PBO_PASS_PCTILE, PBO_KILL_PCTILE,
+         CSCV_SPLITS]).encode("utf-8"))
+    for src in (inspect.getsource(_pbo_mod), inspect.getsource(group_pbo),
+                inspect.getsource(_stats_mod.percentile)):
+        h.update(src.replace("\r\n", "\n").encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
+    """Everything group_pbo's result depends on: the family id (it seeds the
+    null), the draw count, CSCV_SPLITS, and each member's train series, in
+    sorted member order."""
+    h = hashlib.sha256(json.dumps([g, draws, CSCV_SPLITS]).encode("utf-8"))
+    for sid in sorted(s["sid"] for s in fam):
+        r = array("d", train[sid])
+        h.update(f"\n{sid}:{len(r)}:".encode("utf-8"))
+        h.update(r.tobytes())
+    return h.hexdigest()
+
+
+class PboCache:
+    """logs/gauntlet_stats_pbo_cache.json: {vintage, data_digest, code_sha,
+    families: {g: {inputs_sha, pbo}}}. A file for another vintage, digest or
+    code_sha (pbo_code_sha()), or one that cannot be read, starts empty.
+    Written atomically after each null; a failed write is logged and the run
+    goes on uncached (the cache is an optimisation, never a reason to crash
+    after a null has been paid for)."""
+
+    def __init__(self, logs_dir: Path, vintage: str, data_digest: str,
+                 code_sha: str | None = None) -> None:
+        self.path = logs_dir / PBO_CACHE_NAME
+        self.vintage, self.data_digest = vintage, data_digest
+        self.code_sha = code_sha if code_sha is not None else pbo_code_sha()
+        self.families: dict = {}
+        try:
+            d = json.loads(self.path.read_text(encoding="utf-8"))
+            if (isinstance(d, dict) and d.get("vintage") == vintage
+                    and d.get("data_digest") == data_digest
+                    and d.get("code_sha") == self.code_sha
+                    and isinstance(d.get("families"), dict)):
+                self.families = d["families"]
+        except (OSError, ValueError):
+            pass
+
+    def get(self, g: str, inputs_sha: str) -> dict | None:
+        hit = self.families.get(g)
+        if (isinstance(hit, dict) and hit.get("inputs_sha") == inputs_sha
+                and isinstance(hit.get("pbo"), dict)):
+            return dict(hit["pbo"])
+        return None
+
+    def put(self, g: str, inputs_sha: str, pbo: dict) -> bool:
+        """Record and persist one family's result. False (logged) when the
+        file could not be written; the in-memory entry is kept either way."""
+        self.families[g] = {"inputs_sha": inputs_sha, "pbo": dict(pbo)}
+        tmp = self.path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps({"vintage": self.vintage,
+                                       "data_digest": self.data_digest,
+                                       "code_sha": self.code_sha,
+                                       "families": self.families}, sort_keys=True),
+                           encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as exc:
+            print(f"WARNING: PBO cache not written ({exc}); continuing uncached",
+                  flush=True)
+            return False
+        return True
+
+
 def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                   train_sharpe: float | None, clustered: dict, pbo: dict,
                   plateau_ok: bool, vintage: str, data_digest: str,
                   data_end_by_cell: dict[str, str],
                   trials_floor: int | None = None,
-                  trials_floor_hash: str | None = None) -> dict:
+                  trials_floor_hash: str | None = None,
+                  sr_floor: float | None = None,
+                  sr_floor_hash: str | None = None) -> dict:
     """The gauntlet_stats payload (less strategy_id / verdict_entry_hash).
     `trials_floor` / `trials_floor_hash` are the chain max before this run
-    and the entry that supplied it (Ruling 20), the same for every entry of
-    a run."""
+    and the entry that supplied it (Ruling 20); `sr_floor` / `sr_floor_hash`
+    the same for SR* (Ruling 35). Both are the same for every entry of a
+    run."""
     trials_raw, trials_var = clustered["trials_n"], clustered["trials_var"]
     trials_n = max(trials_raw, trials_floor or 0)
     r = _as_list(dsr_rets)      # clustered["returns_by_id"][sid] (Ruling 11)
     sr_hat = sharpe(r)
     _, _, skew, kurt = moments(r)
-    sr_star = expected_max_sharpe(trials_n, trials_var)
+    sr_raw = expected_max_sharpe(trials_n, trials_var)
+    sr_star = max(sr_raw, sr_floor) if _positive_number(sr_floor) else sr_raw
     # The gauntlet's t_years counted the train-window EQUITY points: the
     # first point plus one per train return (daily_returns_with_dates drops a
     # step only after equity <= 0). With no train return the haircut takes
@@ -264,6 +445,9 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
         "trials_n_floor_entry_hash": trials_floor_hash,
         "registered_n": clustered["registered_n"],
         "trials_sr_var": trials_var,
+        "expected_max_sharpe_raw": sr_raw,
+        "expected_max_sharpe_floor": sr_floor,
+        "expected_max_sharpe_floor_entry_hash": sr_floor_hash,
         "expected_max_sharpe": sr_star,
         "trials_alignment": clustered["trials_alignment"],
         "trials_common_days": clustered["trials_common_days"],
@@ -339,8 +523,14 @@ def run(argv: list[str] | None = None) -> int:
     vintage = vintage_date(date.today())
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
+              # T7 flush: written on a retry after a held flush / still
+              # unwritten (dropped) at the end of the run
+              "retried_written": 0, "deferred_lock": 0,
+              # part C: PBO nulls built this run / served from the cache
+              "pbo_nulls_computed": 0, "pbo_nulls_cached": 0,
               "oldest_unstatted_verdict_age_hours": 0.0, "trials_n_raw": None,
-              "trials_n_effective": None,
+              "trials_n_effective": None, "expected_max_sharpe_raw": None,
+              "expected_max_sharpe_effective": None,
               "registered_n": None, "trials_common_days": None,
               "stopped_at_deadline": False, "chained": bool(a.chain),
               # carried forward until this run measures its own (I5)
@@ -403,6 +593,14 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         view = _View()
         snap = registry.snapshot(on_entry=view.on_entry, track_stats=True)
         pending[:] = [v for v in view.verdicts if v["vh"] not in snap.statted]
+        if a.chain and view.amendment_hash is None:
+            # Ruling 35 (ii): SR* is floored from here on, and v6.1's text says
+            # it is not. Report-only runs are unaffected.
+            print(f"REFUSED: --chain needs the '{AMENDMENT_NOTE_PREFIX}' note on "
+                  f"the chain (it records the SR* floor); nothing computed or "
+                  f"written. {len(pending)} v6.1 verdict(s) without stats.",
+                  flush=True)
+            return finish(1, "refused_no_amendment_note")
         all_specs = view.specs
         by_class: dict[str, int] = {}
         for s in all_specs:
@@ -470,12 +668,21 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         status["cluster_s"] = round(time.time() - t_cluster0, 1)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
+        # Ruling 35: ONE SR* floor per run, from the same single read.
+        sr_floor, sr_floor_hash = view.sr_floor, view.sr_floor_hash
+        trials_eff = max(clustered["trials_n"], floor or 0)
+        sr_raw = expected_max_sharpe(trials_eff, clustered["trials_var"])
         status.update({"trials_n_raw": clustered["trials_n"],
-                       "trials_n_effective": max(clustered["trials_n"], floor or 0),
+                       "trials_n_effective": trials_eff,
+                       "expected_max_sharpe_raw": sr_raw,
+                       "expected_max_sharpe_effective": (
+                           max(sr_raw, sr_floor) if sr_floor is not None else sr_raw),
                        "registered_n": clustered["registered_n"],
                        "trials_common_days": clustered["trials_common_days"]})
         extra["trials_alignment"] = clustered["trials_alignment"]
         extra["trials_n_floor"] = floor
+        extra["expected_max_sharpe_floor"] = sr_floor
+        extra["expected_max_sharpe_floor_entry_hash"] = sr_floor_hash
 
         train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
                  for s in all_specs}
@@ -498,10 +705,15 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             pending_by_group.setdefault(group_of[v["sid"]], []).append(v)
 
         items: list[tuple[str, str, dict]] = []
+        # T7 flush: verdict hashes whose computed entry was kept because a
+        # flush found chain.lock held. Non-empty = the run holds the reserve.
+        held_vh: set[str] = set()
 
         def flush() -> str | None:
-            """Chain what is computed, STATS_BATCH_MAX per chain.lock hold.
-            Returns an exit reason when chaining must stop, else None."""
+            """Chain what is computed, STATS_BATCH_MAX per chain.lock hold,
+            each hold one non-blocking attempt. Returns "held" when chain.lock
+            is held (everything not yet chained stays in `items`, kept for a
+            retry), "chain_refused" when chaining must stop, else None."""
             nonlocal snap, items
             if not a.chain:
                 items = []
@@ -515,15 +727,45 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                         fresh = [vh for _, vh, _ in chunk if vh not in snap.statted]
                         snap = registry.record_gauntlet_stats_batch(snap, chunk)
                 except ChainLockHeld:
-                    print("chain.lock held: stats deferred to the next run", flush=True)
-                    return "deferred_lock"
+                    if not held_vh:
+                        print(f"chain.lock held: {len(items)} computed stats entr"
+                              f"{'y' if len(items) == 1 else 'ies'} kept for a "
+                              f"retry this run", flush=True)
+                    held_vh.update(vh for _, vh, _ in items)
+                    return "held"
                 except (ChainMoved, UnstableEntry) as exc:
                     print(f"REFUSED: nothing written for this chunk: {exc}", flush=True)
                     return "chain_refused"
                 status["stats_written"] += len(fresh)
+                status["retried_written"] += sum(1 for vh in fresh if vh in held_vh)
                 done.update(vh for _, vh, _ in chunk)
                 items = rest
             return None
+
+        def reserve_s() -> float:
+            """Time the family loop leaves for the final drain: the reserve
+            once a flush has been held, else nothing."""
+            return DRAIN_RESERVE_S if held_vh and items else 0.0
+
+        def final_drain() -> str | None:
+            """Non-blocking flush attempts DRAIN_INTERVAL_S apart, for at most
+            DRAIN_RESERVE_S and never past the deadline. Never waits on,
+            polls inside, or breaks chain.lock: each attempt is one try.
+            Returns the last flush's outcome."""
+            stop_at = min(time.time() + DRAIN_RESERVE_S, t_end)
+            n0, attempts, out = len(items), 0, None
+            while items:
+                out = flush()
+                attempts += 1
+                if out != "held":
+                    break
+                if stop_at - time.time() <= DRAIN_INTERVAL_S:
+                    break
+                _sleep(DRAIN_INTERVAL_S)
+            print(f"gauntlet_stats: final drain, {attempts} attempt(s), "
+                  f"{n0 - len(items)} of {n0} kept entr"
+                  f"{'y' if n0 == 1 else 'ies'} chained", flush=True)
+            return out
 
         # I5: each family's null is started only when the time left covers
         # the measured mean null (this run's, else the last run's, else the
@@ -535,18 +777,30 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                     else prior_null_s or PBO_NULL_PRIOR_S)
 
         def null_fits() -> bool:
-            return t_end - time.time() >= null_rate()
+            return t_end - time.time() >= null_rate() + reserve_s()
 
+        pbo_cache = PboCache(a.logs_dir, vintage, data_digest)
         for g, fam in family_by_group.items():
             todo = pending_by_group.get(g)
             if not todo:
                 continue
-            if time.time() >= t_end:
+            if time.time() >= t_end - reserve_s():
                 status["stopped_at_deadline"] = True
                 break
-            live = any(v["verdict"] == "pass" for v in todo)
-            pbo = group_pbo(g, fam, train, live, a.pbo_null_draws,
-                            null_fits=null_fits, null_times=null_times)
+            # Part C (amendment-1): every family with a verdict needing stats
+            # gets its null when measurable, passing verdict or not; the
+            # result depends on the family alone, so it is cached.
+            inputs_sha = pbo_inputs_sha(g, fam, train, a.pbo_null_draws)
+            pbo = pbo_cache.get(g, inputs_sha)
+            if pbo is not None:
+                status["pbo_nulls_cached"] += pbo["pbo_null_draws"] > 0
+            else:
+                n_nulls = len(null_times)
+                pbo = group_pbo(g, fam, train, True, a.pbo_null_draws,
+                                null_fits=null_fits, null_times=null_times)
+                if pbo is not None:
+                    status["pbo_nulls_computed"] += len(null_times) - n_nulls
+                    pbo_cache.put(g, inputs_sha, pbo)
             if null_times:
                 status["pbo_null_mean_s"] = round(null_rate(), 3)
             if pbo is None:
@@ -564,14 +818,23 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                     sid, clustered["returns_by_id"][sid], train[sid],
                     train_sharpe[sid], clustered,
                     pbo, ok, vintage, data_digest, own_ends(sid),
-                    floor, floor_hash)))
+                    floor, floor_hash, sr_floor, sr_floor_hash)))
+            # a full batch (kept entries from a held flush included): one
+            # non-blocking attempt now, before the next family starts
             if len(items) >= STATS_BATCH_MAX:
-                stop = flush()
-                if stop is not None:
-                    return finish(1 if stop == "chain_refused" else 0, stop)
-        stop = flush()
-        if stop is not None:
-            return finish(1 if stop == "chain_refused" else 0, stop)
+                if flush() == "chain_refused":
+                    return finish(1, "chain_refused")
+        out = flush()
+        if out == "chain_refused":
+            return finish(1, "chain_refused")
+        if out == "held" and final_drain() == "chain_refused":
+            return finish(1, "chain_refused")
+        if items:
+            status["deferred_lock"] = len(items)
+            print(f"chain.lock held through the run: {len(items)} computed stats "
+                  f"entr{'y' if len(items) == 1 else 'ies'} not written; the next "
+                  f"run recomputes them", flush=True)
+            return finish(0, "deferred_lock")
         if not a.chain:
             print(f"report only: {len(pending)} verdict(s) computed, nothing chained "
                   f"(--chain is off)", flush=True)
