@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Reader v2 scanner runtime artifacts (dashboard reads them from disk; the
+# committed trust asset is registry_log.jsonl, not these)
+research-layer/logs/
+*.lock
+research-layer/inbox/

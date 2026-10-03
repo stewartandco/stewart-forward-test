@@ -1,0 +1,107 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "df5007a7235a70454912758caeb6805c2581c99604fe2bd57e8b8621ba47ab90",
+  "CAD_1d": "b1041b4ba11464c3ef1088e947f20e81fc45c835866e4823bf19954c03879b4c",
+  "CHF_1d": "ddc7405befda584fc1b4de20bf28402358d2c6ee34318324741dd1a7a1eb9b5c",
+  "EUR_1d": "8228f19f240522e5be7cc0900093084713009c0ee332a230469b94c306dc1bc9",
+  "GBP_1d": "0013b2dc2ed0645ee875d38326eb60c25549781fb1b8ea667537fa796140dba3",
+  "JPY_1d": "7121a60bfbbab0eea4358f58effae3590a2796dda444c935c073f61d0735f7cf",
+  "MXN_1d": "e5f30260f78f4fe4542d69be38c308978d2b950a04dd7c9c065246b3f7e3fc28",
+  "NOK_1d": "bff4cb0e1e0f2906798c0021d197601272f7de576bd9df177e332511979e4700",
+  "NZD_1d": "d85c05159e9b1c836ff11073429459b56d88f509225b821076352931121e9332",
+  "SEK_1d": "3082c891778fd3d7317cd193aa08f5690aaa81a6c769222529b878d30e509b24",
+  "SGD_1d": "bbbe2b2b037d3aa252763f4d807033fcd96f2a2f55c0c6f6030e50030d0481b0",
+  "ZAR_1d": "67a467d6dfe7771264c6d534da76fb1109d680727780277e46583e77b7bf9b33"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.7
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "pct": 0.1
+    },
+    "role": "stop",
+    "type": "pct_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-08-24T04:48:58Z",
+  "family": "fx_trend_vol_state_filter",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-24-fx-gen1"
+  },
+  "name": "EUR 1d fx_trend_vol_state_filter dboth f13 s130 l120 mp0.7 p0.1 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "303001052725c19f",
+    "5d46eb5e6f34392f",
+    "7909f68faed0075e",
+    "d0fc8344bd267d47",
+    "d124a7351a44f986",
+    "dad2ffd5702377ba",
+    "f4ecce1a057489c4"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_trend_vol_state_filter-2026-08-24-fx-gen1:EUR_1d"
+  },
+  "strategy_id": "4594b3937227d6b9",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "EUR"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}
