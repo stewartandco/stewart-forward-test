@@ -275,9 +275,12 @@ of it.
   loop holds that reserve back). Still held at the end: exit 0
   `deferred_lock`, nothing written for them, the next run recomputes. Never
   waits on, polls inside, or breaks the lock.
-- **NEVER add `--chain` to task 28 without Coen's say-so.** It is gated on the
-  plan's cutover step 7 (the `--chain` gate; the public spec's section 10
-  numbers its steps differently) (the wrapper has no `--chain` today). Coen's
+- **`--chain` on task 28 is ON since 2026-10-04 (Coen's say-so, the plan's
+  cutover step 7).** It was enabled only after a `--chain` run against a COPY
+  of the chain wrote 16 entries that `verify_registry.py` read VALID. Never
+  remove it, or re-add it after a rollback, without Coen's say-so; the job
+  itself refuses to chain until `gauntlet-protocol-v6.1-amendment-1` is on the
+  chain (it is, line 81246). Coen's
   effective-trials decision (2026-10-01, option 1) is in the v6.1 addendum and
   IS implemented and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is
   the larger of the clustering's argmax (`trials_n_raw`) and the highest cluster

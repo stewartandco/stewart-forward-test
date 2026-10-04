@@ -1,7 +1,8 @@
 @echo off
 setlocal
 rem 28_GauntletStats - gauntlet recorded statistics (Build 2a), daily 01:00.
-rem No --chain until the plan's cutover step 7 (the --chain gate): this job records nothing on the chain yet.
+rem --chain ON since 2026-10-04 (Coen's say-so, cutover step 7): appends one gauntlet_stats entry per v6.1 verdict.
+rem The job itself refuses to chain until gauntlet-protocol-v6.1-amendment-1 is on the chain (it is, line 81246).
 rem Exit code is load-bearing: the Ops Sentinel FAILs the digest on nonzero, so
 rem the exit code is ALWAYS the python step's code and never a git result.
 rem Registered by the owner (elevated) from morpheus-hub\tasks\xml\28_GauntletStats.xml.
@@ -25,7 +26,7 @@ set LOG=%LAYER%\logs\gauntlet-stats-run.log
 if not exist "%LAYER%\logs" mkdir "%LAYER%\logs"
 cd /d "%LAYER%"
 echo ==== %DATE% %TIME% gauntlet stats ==== >> "%LOG%"
-python -m pipeline.gauntlet_stats --report "%LAYER%\logs\gauntlet-stats-report.md" >> "%LOG%" 2>&1
+python -m pipeline.gauntlet_stats --chain --report "%LAYER%\logs\gauntlet-stats-report.md" >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
 cd /d "%REPO%"
 if exist "%LAYER%\logs\chain.lock" (
