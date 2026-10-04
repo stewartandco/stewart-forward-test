@@ -1,0 +1,275 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "IEF_1d": "2026-10-02 00:00:00"
+ },
+ "data_sha256": {
+  "IEF_1d": "271ff4e09088418995e97f7fbe58d88e24c6fcc643387d9b11175751622cbb90"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.0721673424714651,
+   "excess": 0.03168270704458946,
+   "strategy_net": -0.04048463542687564,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.0418351926449233,
+  "edge_decay_pct": -347.1433118818342,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 14,
+    "net_pnl": 0.08655663344865983
+   },
+   "post_2022": {
+    "n_trades": 11,
+    "net_pnl": -0.055895316298385955
+   },
+   "pre_gfc": {
+    "n_trades": 13,
+    "net_pnl": 0.029816906107825947
+   },
+   "zirp": {
+    "n_trades": 19,
+    "net_pnl": 0.02762607973127218
+   }
+  },
+  "exit_reasons_is": {
+   "signal:channel_exit": 32,
+   "stop": 18
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 3,
+   "stop": 4
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.032463343529149535,
+  "is_edge_raw": 0.0027177292501210978,
+  "is_vol": 0.08371686199484628,
+  "mc_p05_equity": 0.8434034932373491,
+  "oos_edge_per_trade": -0.08023098234551727,
+  "oos_edge_raw": -0.005814573575442029,
+  "oos_vol": 0.07247292012955024,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.21659523676600795,
+   "dense_only": true,
+   "mean_ratio": 0.9267200306708403,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 35,
+     "ratio": 1.0431448709176814,
+     "score": 0.22594021029766198,
+     "to": 20
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 35,
+     "ratio": 0.21907790181788206,
+     "score": 0.04745123001444441,
+     "to": 55
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.0,
+     "score": 0.21659523676600795,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.8641833151748971,
+     "score": 0.1871779897595405,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 1.0,
+     "ratio": 1.5245322358880513,
+     "score": 0.33020642058958394,
+     "to": 0.9
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.1021978872280744,
+     "score": 0.2387308123471585,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 0.7339040036692955,
+     "score": 0.15896011143827224,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.21907790181788206
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 7,
+     "net": -0.04070201502809421,
+     "win_rate": 0.2857142857142857,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.21659523676600795,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9885632788801403,
+     "n_trades": 15,
+     "net": -0.004945532133069476
+    },
+    {
+     "min_equity": 0.9817833495302883,
+     "n_trades": 19,
+     "net": 0.09061774696112311
+    },
+    {
+     "min_equity": 0.957281819995555,
+     "n_trades": 16,
+     "net": 0.0502142476780013
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 35
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 1.0
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-04T12:13:52Z",
+  "family": "credit_breakout_calmvol",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-04-120029-loop-bond_etf"
+  },
+  "name": "IEF 1d credit_breakout_calmvol dlong l35 l120 mp1.0 l20 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "3142c67d77f9011a",
+    "58fc981f679dad73",
+    "6dba955b6b43f40d",
+    "7660d2b7a0a4100b",
+    "80a41669681d747b",
+    "9a6abe19343ae46f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "58fc981f679dad73",
+    "7660d2b7a0a4100b"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_breakout_calmvol-2026-10-04-120029-loop-bond_etf:IEF_1d"
+  },
+  "strategy_id": "1467119546575ef2",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "IEF"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
