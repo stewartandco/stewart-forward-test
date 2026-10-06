@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+FXI,long,2008-01-17 00:00:00,51.7999482000518,2008-02-27 00:00:00,49.93328340004994,signal:zscore_revert,-0.036436036036036
+FXI,long,2016-12-19 00:00:00,35.38,2017-01-06 00:00:00,35.9,signal:zscore_revert,0.01429756924816279
