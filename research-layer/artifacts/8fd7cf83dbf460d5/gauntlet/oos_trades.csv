@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+IWM,long,2025-07-03 00:00:00,222.01,2025-08-01 00:00:00,215.0593572865266,stop,-0.03170779115117965,1.0
