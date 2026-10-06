@@ -1,0 +1,94 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "03966d21f465ee1cbbc63328b0276be85765bd661dd072c7697ad83477ebc073",
+  "ETHUSD_1d": "651598e3a138d0d29f9d55b5d56daa3186c2d985ed47aa2be3c960ca79db4995"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 50
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.6
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-09-01T03:23:29Z",
+  "family": "vol_conditioned_symmetric_ma_cross",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-01-023003-loop-crypto"
+  },
+  "name": "BTC+ETH 1d vol_conditioned_symmetric_ma_cross dboth f13 s50 l120 mp0.6 al14 m2.5 mb40 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0634177be8e6f12b",
+    "1be665e133422ed2",
+    "2243c5930df5c5be",
+    "4e907fc4974a48f9",
+    "9a6abe19343ae46f",
+    "be7a97c49de94b92",
+    "dcbe4d37af0f4eaa"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "vol_conditioned_symmetric_ma_cross-2026-09-01-023003-loop-crypto"
+  },
+  "strategy_id": "8ec6caa92979c63c",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

@@ -1,0 +1,301 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2026-08-18",
+  "ETHUSD_1d": "2026-08-18"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "90a8bd20a5727e6a12114143178749b0ea4317b57a4dca761af022343999c998",
+  "ETHUSD_1d": "bb4a6203a9ea7b2855da50b9b49031f7b72ddb848740eea8498986f9da63492d"
+ },
+ "group_context": {
+  "cluster_labels": {
+   "0022247749b387eb": 0,
+   "05be16ff262d1ab6": 0,
+   "0601f0fc256cf679": 0,
+   "0683c782c8a5536a": 1,
+   "08528204303c889d": 0,
+   "08b2b899076c2b7d": 0,
+   "0a179103b921c404": 0,
+   "0a6bd874b7a0fcea": 0,
+   "0a872bb0b01ac435": 0,
+   "0d43a89cbac5502d": 0,
+   "1137d1b2e3373b0e": 1,
+   "14590ceeff7a5e81": 1,
+   "150ac2892c6750e4": 0,
+   "17e0f2f54a0e617f": 0,
+   "1e46a478884a2db4": 0,
+   "2763cb1dc8d5731b": 0,
+   "2a6600f1efa0e989": 1,
+   "2a81986933c36b30": 0,
+   "2da71a5efe037e15": 1,
+   "2e4155263436844e": 1,
+   "35cfad2c16aedc1e": 0,
+   "3653f424cf9ccba8": 0,
+   "3b25220ab072523b": 0,
+   "3e3da0e8da77b8f3": 0,
+   "41213edf2e694c59": 0,
+   "43bf5e97b141ff78": 0,
+   "45d5410357ff9ea3": 0,
+   "48214fbc4de24f00": 0,
+   "48ebf9483d77674e": 0,
+   "497121ff001ce9d2": 0,
+   "49c5b2d04a4689b7": 1,
+   "51ca1fabf61053a7": 0,
+   "5ad944cf4c382d75": 0,
+   "6697c1f8ab44fd70": 0,
+   "67399610cc55a813": 0,
+   "6ab8dbdbebb8d263": 0,
+   "6ba950017e091633": 0,
+   "6ea757eeca03c24f": 1,
+   "72e1ea7611b9ee76": 0,
+   "7546f0eaf8ba8557": 0,
+   "75773b65e7ce1834": 0,
+   "76043263fde44531": 0,
+   "78b75c3e46808ec2": 0,
+   "78fd19cd9b83e4c4": 0,
+   "7a146aebe202bd0c": 0,
+   "7e790092c92641f2": 0,
+   "7ee9902942509087": 0,
+   "866257e540c96b29": 0,
+   "86e77b272fa5fb04": 0,
+   "872dcb9adf2cd9e8": 0,
+   "876dc462f1d6e442": 0,
+   "8c88270fcac3edad": 0,
+   "8c9115911421894f": 1,
+   "8d13d7866706ff8a": 0,
+   "92784fad199a27e4": 0,
+   "9440b0b664606cea": 0,
+   "9593dc8a09a625b3": 0,
+   "9784e194d55a32ae": 1,
+   "995293c4e2ffee18": 0,
+   "9b2a9b23a940b91e": 0,
+   "9b6753a48c4d0ccd": 0,
+   "9c5c58caffd9f7cf": 0,
+   "9cc49ddd9b6a569f": 0,
+   "9ef46e4dc7e968f1": 0,
+   "a11aade3fc777c27": 0,
+   "a1c3440ea84a784c": 0,
+   "a56f4224720cd7d8": 0,
+   "a61725295bffa35a": 0,
+   "a6467bd852beb833": 0,
+   "a64ffec1d436bfac": 0,
+   "a77fade4e6b6ba4f": 1,
+   "a9a45afb10dd2c1b": 0,
+   "aa428a53305cf1f6": 0,
+   "ad654fd8097717bd": 0,
+   "add23d6d8a70590c": 1,
+   "ae2dac1a862b5c28": 0,
+   "b0c0d512d28274dc": 0,
+   "b476048b2df2ab6e": 0,
+   "bd0b851cc7220d6a": 0,
+   "bd5527aa2a7b98dc": 0,
+   "bfeb7e5265b32ff8": 0,
+   "c354d0528fe420ea": 0,
+   "c6d4624a80543b72": 0,
+   "ca3ea8e4a14f730f": 0,
+   "ca5a101fb5269a0f": 0,
+   "cad2d7e7be04039b": 0,
+   "ce1fef877a375712": 0,
+   "d1fbe83eace953c6": 0,
+   "d33a2a6112ada137": 0,
+   "d38568a59f987177": 0,
+   "d3f6eb2ff09b574b": 1,
+   "d67b59551be353df": 0,
+   "d738cfeb4c119e19": 0,
+   "daae8ef1314419b8": 0,
+   "db892c8faa049566": 0,
+   "dd7ee7ea95b7b88e": 1,
+   "ddeddafaa931b864": 0,
+   "e21a3a2a2d238bed": 0,
+   "e998ead3a186c90b": 0,
+   "ecd8c854495dc869": 0,
+   "edf31b12365cdfcc": 0,
+   "eec131da5c5b26dc": 0,
+   "ef7712f41e2188e2": 0,
+   "ef9c9206e7d406a1": 1,
+   "f10620e1dd3c3e28": 1,
+   "f12ad61db881016e": 1,
+   "f9623a573ccb52d2": 0,
+   "fae172f81ba68878": 0,
+   "fe52f5d902f13993": 0,
+   "ff5adaac5be53211": 0
+  },
+  "dsrs": {
+   "41213edf2e694c59": 0.28526082411131765,
+   "497121ff001ce9d2": 0.1722530122703827,
+   "7ee9902942509087": 0.2387447806017154,
+   "86e77b272fa5fb04": 0.30256365763999177,
+   "c6d4624a80543b72": 0.22057168443332492
+  },
+  "effective_trials": 2,
+  "group": "below_ma_short_regime_trend-2026-08-19-gen4",
+  "registered_n": 110
+ },
+ "metrics": {
+  "cost_stress_net_pnl": 0.04130133357051613,
+  "deflated_sharpe": 0.1722530122703827,
+  "edge_decay_pct": 118.19415233823555,
+  "expected_max_sharpe": 0.02378803129323435,
+  "haircut": {
+   "haircut_pct": 100.0,
+   "method": "bonferroni",
+   "p_adjusted": 1.0,
+   "p_raw": 0.7636094091101218,
+   "sr_haircut": 0.0,
+   "sr_observed": 0.11908374748647624,
+   "window": "train"
+  },
+  "is_edge_per_trade": 0.0009331614925270299,
+  "is_edge_raw": 0.0007892654491852108,
+  "is_vol": 0.8457972767905969,
+  "mc_p05_equity": 0.6824405242259777,
+  "oos_edge_per_trade": 0.00203610380856618,
+  "oos_edge_raw": 0.0011657096148493557,
+  "oos_vol": 0.5725197359511084,
+  "p_ruin": 0.0055,
+  "pbo": 0.8732711732711733,
+  "pbo_family_kill": true,
+  "protocol": "gauntlet-protocol-v4",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 15,
+     "net": 0.07805686478584382,
+     "win_rate": 0.7333333333333333,
+     "wins": 11
+    },
+    "trend_down": {
+     "n": 24,
+     "net": 0.02112121698509056,
+     "win_rate": 0.4166666666666667,
+     "wins": 10
+    },
+    "trend_up": {
+     "n": 16,
+     "net": -0.035064052954219826,
+     "win_rate": 0.375,
+     "wins": 6
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "registered_n": 110,
+  "sibling_group_n": 5,
+  "train_sharpe": 0.11908374748647624,
+  "trials_n": 2,
+  "trials_sr_var": 0.002094686701273492,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9706831433334286,
+     "n_trades": 45,
+     "net": 0.1640891692944032
+    },
+    {
+     "min_equity": 0.8876360255523877,
+     "n_trades": 31,
+     "net": -0.11315618265081909
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 48,
+     "net": 0.04693592905538198
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v4",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "max_lookback": 75,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_bars": 20
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-19T11:24:23Z",
+  "family": "below_ma_short_regime_trend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-19-gen4"
+  },
+  "name": "BTC+ETH 1d below_ma_short_regime_trend dshort ml75 tm2.0 ml50 al14 m2.5 mb20 f0.02",
+  "provenance": {
+   "card_ids": [
+    "3042ee8aec83f2f2",
+    "3d4db3693d78d717",
+    "799502905879efbd",
+    "831e8c990e96e75e",
+    "d461a3aadbbaf81f",
+    "e0d728e421153bec",
+    "e774e6dd0f261cfc"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "below_ma_short_regime_trend-2026-08-19-gen4"
+  },
+  "strategy_id": "497121ff001ce9d2",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWU,long,2024-01-29 00:00:00,32.57,2024-05-06 00:00:00,35.56365485527532,target,0.0915144874201816,1.0
+EWU,long,2025-02-11 00:00:00,36.17,2025-04-04 00:00:00,35.038677337126224,stop,-0.03167792819667618,1.0
