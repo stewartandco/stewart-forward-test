@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+SPY,long,2025-05-15 00:00:00,585.56,2026-03-20 00:00:00,656.51,signal:regime_flip,0.12076606325568702,0.4487618150160577
