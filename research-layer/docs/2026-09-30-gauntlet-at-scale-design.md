@@ -105,6 +105,9 @@ The loop stops after the screen stage (triage, composer, screen unchanged).
 Screen already moves passers into state `gauntlet`; the worker takes them from
 there. The loop's gauntlet stage stays behind a flag, off by default, for one
 week after cutover as the rollback path (section 10), then is removed.
+(Amended 2026-10-07: cutover step 8 removed the stage and the
+`GAUNTLET_IN_LOOP` flag after a clean week. The loop has no gauntlet stage
+and no flag; the only way back to in-loop judging is a code revert.)
 
 ## 5. Chain entries
 
@@ -270,4 +273,8 @@ Rollback: re-enable the loop's gauntlet stage via its flag, which restores the
 pre-2a stage, and disable `27_GauntletWorker` and `28_GauntletStats`. Once the
 v6.1 note is chained, that stage applies no family kill (it reads the note), so
 its verdicts stay valid under invariant 12. v6.1 entries already chained remain
-valid under the addendum.
+valid under the addendum. (Amended 2026-10-07: the flag is gone. Step 8 removed
+`GAUNTLET_IN_LOOP` and the loop's gauntlet stage, so the only rollback is a
+code revert of that commit, plus disabling `27_GauntletWorker` and
+`28_GauntletStats`. A hand run of `python -m pipeline.gauntlet` stays possible
+and still applies no family kill once the v6.1 note is chained.)

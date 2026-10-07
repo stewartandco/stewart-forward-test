@@ -1,5 +1,7 @@
-"""Pipeline loop orchestrator: triage -> compose -> screen -> gauntlet when a
-class accumulates enough new cards.
+"""Pipeline loop orchestrator: triage -> compose -> screen when a class
+accumulates enough new cards. The gauntlet is NOT a loop stage (it is the
+standalone worker's, pipeline/gauntlet_worker.py; the in-loop stage and its
+GAUNTLET_IN_LOOP flag were removed 2026-10-07).
 
 TRIGGER BASIS (amended by Coen 2026-08-29): a class fires on its
 TRIGGERABLE count -- class-routable cards that are accepted OR pending,
@@ -79,9 +81,10 @@ TRIAGE_CEILING = 200
 TRIAGE_LIMIT = TRIAGE_CEILING
 
 # Build 2a (2026-09-30): the gauntlet left the loop for its own worker
-# (pipeline/gauntlet_worker.py, \Morpheus\27_GauntletWorker). True restores
-# the pre-2a stage exactly -- the rollback path, kept one week after cutover.
-GAUNTLET_IN_LOOP = False
+# (pipeline/gauntlet_worker.py, \Morpheus\27_GauntletWorker). Cutover step 8
+# (2026-10-07) removed the loop's gauntlet stage and its GAUNTLET_IN_LOOP
+# rollback flag: the loop stops at screen, and the only way back to in-loop
+# judging is a code revert.
 
 # Cycle-time model, kept in ONE place. MIN_TASK_WINDOW_S is DERIVED from
 # TRIAGE_LIMIT deliberately: the two drifting apart is its own bug. At limit
@@ -89,7 +92,9 @@ GAUNTLET_IN_LOOP = False
 # stayed SILENT on a task that could not finish -- the exact failure the
 # startup WARN exists to catch.
 _TRIAGE_S_PER_CARD = 3.85 * 3           # measured: 3.85 s/call x PANEL_SIZE 3
-_REST_OF_CYCLE_S = 90 * 60              # composer dry+real, screen, gauntlet
+# composer dry+real, screen. Sized (90 min) while the gauntlet still ran in-loop;
+# kept unchanged as slack so MIN_TASK_WINDOW_S does not move.
+_REST_OF_CYCLE_S = 90 * 60
 
 # D6 sweep rotation (docs/2026-08-28-market-data-universe-design.md s5): a
 # generation sweeps a ROTATING WINDOW of this many of its class's active
@@ -128,8 +133,8 @@ ROTATION_CLASSES = ("crypto",)
 
 # The scheduled task this module runs under, and the shortest execution
 # window a full cycle can survive. A cycle is 75-90 min (triage + composer
-# pair + screen + gauntlet); Windows hard-kills at ExecutionTimeLimit, and a
-# killed cycle never reaches the watermark advance, so the class re-fires on
+# pair + screen, plus the gauntlet until 2026-10-07); Windows hard-kills at
+# ExecutionTimeLimit, and a killed cycle never reaches the watermark advance, so the class re-fires on
 # the next tick and pays full freight again -- forever, silently, because a
 # killed task leaves no failure the Sentinel can see. On 2026-08-29 the live
 # task carried PT1H while its XML declared PT2H (apply_retry_settings.ps1 was
@@ -143,9 +148,9 @@ TASK_NAME = r"\Morpheus\25_PipelineLoop"
 MIN_TASK_WINDOW_S = int(TRIAGE_LIMIT * _TRIAGE_S_PER_CARD + _REST_OF_CYCLE_S)
 
 # Phase 3 step 3: the cycle's deadline is start + the live task's window minus
-# this margin, handed to screen and gauntlet as --deadline-utc so each stops
-# BEFORE starting work it cannot finish (pipeline/deadline.py). The margin
-# covers the post-gauntlet verify + commit and one gauntlet chunk of slack.
+# this margin, handed to screen as --deadline-utc so it stops BEFORE starting
+# work it cannot finish (pipeline/deadline.py). The margin covers the
+# post-screen verify + commit and one screen chunk of slack.
 # The task's ExecutionTimeLimit stays the backstop; with the deadline inside
 # it, hitting the wall becomes evidence of a bug rather than weather.
 SAFETY_MARGIN_S = 15 * 60
@@ -508,6 +513,12 @@ def _gauntlet_orphans(registry: Registry) -> list[str]:
     repairs the chain. The condition is mirrored from gauntlet.py rather than
     imported because gauntlet computes it inside run() after argument
     parsing; if that check ever moves to a shared helper, both should use it.
+
+    Since step 8 (2026-10-07) the loop no longer runs pipeline.gauntlet, so no
+    loop path can create a v6 orphan any more. The check is KEPT as the only
+    alarm for one that already exists or that a hand run of
+    `python -m pipeline.gauntlet` leaves behind: the worker repairs v6.1
+    orphans only, and a v6 verdict is "judged", so it is never re-queued.
     """
     states = registry.strategy_states()
     # v6.1 verdicts are the gauntlet worker's: it repairs its own orphans
@@ -528,17 +539,27 @@ def _clip(text: str, n: int = 800) -> str:
 
 
 def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None, dict[str, str]]:
-    """(problem, items). problem is None when every cell the gauntlet will
-    compare ends within the cross-class allowance; otherwise the text
+    """(problem, items). problem is None when every registered cell ends
+    within the cross-class allowance; otherwise the text
     assert_cells_comparable (or a missing price file) gives. Reads only each
     CSV's tail, so it is cheap enough for every fire.
 
-    Sits with the chain verify and the orphan preflight (4.0a/4.0b) for the
-    same reason: the gauntlet refuses on this condition at the END of the
-    cycle, after triage and both composer calls have been paid for. On
-    2026-09-11 that cost USD 1.90 and the month's last cycle. With stage 0
-    in front of this check, staleness now means the source lags beyond its
-    declared max_end_lag_days or a cell vanished -- a defect, never weather.
+    Sits with the chain verify and the orphan preflight (4.0a/4.0b). It was
+    written to protect the in-loop gauntlet stage, which refused on this
+    condition at the END of the cycle, after triage and both composer calls
+    had been paid for (2026-09-11: USD 1.90 and the month's last cycle). With
+    stage 0 in front of this check, staleness means the source lags beyond
+    its declared max_end_lag_days or a cell vanished -- a defect, never
+    weather.
+
+    Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages: screen
+    never calls assert_cells_comparable, and the gauntlet worker defers a
+    non-comparable candidate (`deferred_not_comparable`) rather than refusing.
+    It is now a data-health alarm. One stale cell in ANY class exits the whole
+    loop 1 (`stale_data`) and halts triage, composer and screen for every
+    class. Whether to keep it blocking, downgrade it to WARN, or narrow it to
+    the firing class's cells is Coen's open decision (2026-10-07); until he
+    rules, the behaviour is unchanged.
 
     Only FileNotFoundError is caught below, deliberately. A locked or
     half-written price file (AV, a concurrent snapshot writer, a torn handle)
@@ -704,7 +725,7 @@ def _deadline_items(registry_path: Path) -> dict[str, str]:
     contributes nothing -- absence is not a claim either way."""
     items: dict[str, str] = {}
     stopped: list[str] = []
-    for stage in ("screen", "gauntlet"):
+    for stage in ("screen",):
         r = _deadline.read_result(registry_path, stage)
         if r is None:
             continue
@@ -1223,10 +1244,11 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # 4.0b gauntlet-orphan pre-flight, same zero-spend position as the chain
-    # verify above. gauntlet.py refuses unconditionally on this condition at
-    # the END of the cycle, so without this check the loop pays for triage and
-    # both composer calls to reach a guaranteed exit 1 -- on every fire, until
-    # a human repairs the chain.
+    # verify above. Written when the loop ran gauntlet.py, which refuses
+    # unconditionally on this condition (a hand run still does). The loop no
+    # longer runs it, so this is now an alarm, not a guard against a
+    # guaranteed late exit 1: a non-v6.1 orphan needs a human to repair the
+    # chain, and nothing else in the system would surface it.
     orphans = _gauntlet_orphans(registry)
     if orphans:
         print(f"gauntlet_orphan: {len(orphans)} strategy(ies) in state "
@@ -1242,8 +1264,15 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
-    # refreshed the tradfi cells; if the tree is STILL not comparable, the
-    # gauntlet would refuse after every metered stage ran (2026-09-11).
+    # refreshed the tradfi cells; if the tree is STILL not comparable, a cell
+    # is stale or missing. Written to stop the in-loop gauntlet refusing after
+    # every metered stage ran (2026-09-11); since step 8 that stage is gone
+    # and this is a data-health alarm. Screen never calls
+    # assert_cells_comparable and the worker defers non-comparable candidates
+    # (`deferred_not_comparable`), yet one stale cell in any class still exits
+    # the whole loop 1 (`stale_data`). Keep blocking, downgrade to WARN, or
+    # narrow to the firing class's cells: Coen's open decision (2026-10-07).
+    # Behaviour deliberately unchanged here.
     problem, fresh_items = _freshness_preflight(registry, layer / "data")
     if problem is not None:
         print(f"stale_data: {problem}", flush=True)
@@ -1295,7 +1324,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # watermark never advances, and the class re-fires forever paying full
     # freight each time. At the measured 3.85 s/call x 3-reviewer panel, 200
     # cards is ~38.5 min of triage alone -- marginal even inside the XML's
-    # PT2H once the composer pair, screen and gauntlet are added, and fatal
+    # PT2H once the composer pair and screen are added, and fatal
     # against the PT1H the live task actually carries. 40 cards is ~7.7 min.
     # See TRIAGE_LIMIT.
     # Clear any previous cycle's result first: a stale file read as this
@@ -1338,7 +1367,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # Watermark truth, on the TRIGGERABLE basis -- it must match what
     # pick_class reads above or the comparison is apples-to-oranges (see
     # loop_state's BASIS WARNING). Measured right after triage, not after
-    # screen/gauntlet (and possibly a foreign writer) have also run.
+    # screen (and possibly a foreign writer) has also run.
     #
     # What this number means: triage has just moved every card it handled out
     # of pending -- accepted ones stay in the triggerable set, rejected ones
@@ -1401,7 +1430,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # accepted+pending trigger basis means a class can fire on pending cards
     # that triage then rejects or escalates wholesale -- leaving the composer
     # exactly the routable corpus it already swept last time, for two metered
-    # calls and a full screen+gauntlet pass. Stop here, at zero further cost.
+    # calls and a full screen pass. Stop here, at zero further cost.
     #
     # Gated on pending_routable_before: a class whose trigger came from
     # ALREADY-ACCEPTED growth (a human T3 session, or a prior cycle) has
@@ -1567,8 +1596,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     deadline_argv = (["--deadline-utc", args.deadline_utc]
                      if getattr(args, "deadline_utc", None) else [])
     # A leftover result from a previous cycle must never read as this one's.
-    for stage in ("screen", "gauntlet"):
-        _deadline.result_path(registry_path, stage).unlink(missing_ok=True)
+    _deadline.result_path(registry_path, "screen").unlink(missing_ok=True)
     screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv, *deadline_argv]
     rc, lock_lost = _lock_and_run("pipeline.screen", screen_argv)
     if lock_lost:
@@ -1577,20 +1605,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.screen", rc,
                                    _fresh_counts())
 
-    # 4e. gauntlet (chain-writing). Skipped by default since Build 2a: the
-    # gauntlet worker owns it. With the stage skipped no gauntlet_result.json
-    # is written, and _deadline_items omits deferred_gauntlet (absence is
-    # not a claim).
-    if GAUNTLET_IN_LOOP:
-        gauntlet_argv = [py, "-m", "pipeline.gauntlet", *reg_argv, *data_argv, *deadline_argv]
-        rc, lock_lost = _lock_and_run("pipeline.gauntlet", gauntlet_argv)
-        if lock_lost:
-            return _defer_midcycle_lock("pipeline.gauntlet")
-        if rc != 0:
-            return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.gauntlet", rc,
-                                       _fresh_counts())
-
-    # 4f. chain verify again, post-gauntlet (spec s6): the loop's OWN writes
+    # 4f. chain verify again, post-screen (spec s6): the loop's OWN writes
     # this cycle must satisfy the same invariants a human session's would.
     # Distinct from 4.0 above -- this one unambiguously attributes a break
     # to THIS cycle's stages, not to whatever was on disk before it started.
@@ -1598,7 +1613,7 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     rc = _stage(runner, verify_argv, layer)
     if rc != 0:
         print(f"chain_invalid: verify_registry.py rc={rc} after a clean "
-             f"gauntlet -- aborting, watermark NOT advanced", flush=True)
+             f"screen -- aborting, watermark NOT advanced", flush=True)
         _write_status(logs_dir, "chain_invalid", overall="FAIL",
                       extra={"asset_class": asset_class, "exit_code": str(rc)},
                       spent=_spent(logs_dir), escalations=["chain_invalid"], state=state,
