@@ -49,13 +49,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
 - **The loop STOPS AT SCREEN (Build 2a, 2026-09-30).** A cycle runs triage,
   composer and screen; screen moves passers into state `gauntlet` and the
   standalone gauntlet worker (section below) takes them from there. The
-  loop's own gauntlet stage is skipped by default: `loop.GAUNTLET_IN_LOOP =
-  False`. Setting it True restores the pre-2a stage exactly (registry-wide
-  clustering, v6-labelled verdicts) and is the ROLLBACK path, kept for one week
-  after cutover and then removed. With the stage skipped no
-  `gauntlet_result.json` is written and `deferred_gauntlet` is absent from the
-  status (absence is not a claim). The old `pipeline.gauntlet` labels its
-  verdicts v6 and reruns the registry-wide clustering. Since Ruling 23
+  loop's own gauntlet stage and its `GAUNTLET_IN_LOOP` rollback flag were
+  REMOVED at cutover step 8 (2026-10-07), after a clean week of the worker:
+  there is no flag any more, and the only way back to in-loop judging is a
+  code revert. The loop never reads or writes `gauntlet_result.json`, so
+  `deferred_gauntlet` is absent from the status (absence is not a claim); it
+  still runs the 4f post-screen chain verify. The old `pipeline.gauntlet`
+  module stays (the stats job imports from it, and a hand run is still
+  possible): it labels its verdicts v6 and reruns the registry-wide
+  clustering. Since Ruling 23
   (2026-10-01) it applies NO family kill once a `gauntlet-protocol-v6.1:` note
   is on the chain (`pbo_family_kill` false on every verdict, never a reason),
   because `verify_registry.py` invariant 12 rejects one after the note: the
@@ -197,8 +199,10 @@ of it.
   `gauntlet_queue` check. If chain.lock is held the repair is deferred to the
   next run with only a log line (`orphan repair deferred` in
   `logs/gauntlet-worker-run.log`, `repaired` 0); nothing alarms on a deferral
-  alone. (Under the GAUNTLET_IN_LOOP rollback, `pipeline.gauntlet` refuses on
-  any orphan, v6.1 included, and exits 1.)
+  alone. (A hand run of `pipeline.gauntlet` refuses on any orphan, v6.1
+  included, and exits 1; the loop no longer runs it, so no loop path creates a
+  v6 orphan, and the `gauntlet_orphan` pre-spend check stays only as the alarm
+  for one that already exists or that a hand run leaves.)
 - **Locks.** The worker's own instance lock is `logs/gauntlet_worker.lock`
   (stale after one hour, broken only when stale AND its holder is dead). A
   second instance defers (exit 0) and NEVER writes the status file, so a wedged
@@ -278,7 +282,8 @@ of it.
 - **`--chain` on task 28 is ON since 2026-10-04 (Coen's say-so, the plan's
   cutover step 7).** It was enabled only after a `--chain` run against a COPY
   of the chain wrote 16 entries that `verify_registry.py` read VALID. Never
-  remove it, or re-add it after a rollback, without Coen's say-so; the job
+  remove it, or re-add it after a code-revert rollback (the
+  `GAUNTLET_IN_LOOP` flag no longer exists), without Coen's say-so; the job
   itself refuses to chain until `gauntlet-protocol-v6.1-amendment-1` is on the
   chain (it is, line 81246). Coen's
   effective-trials decision (2026-10-01, option 1) is in the v6.1 addendum and
@@ -539,9 +544,10 @@ of it.
 - **Reporting.** Every completed non-dry stage run writes
   `logs/<stage>_result.json` (`evaluated`, `deferred`, `deadline_utc`,
   `stopped_at_deadline`) -- the triage_result.json convention; an absent file
-  means "did not report", never "deferred nothing". The loop UNLINKS both
-  before each stage and reads them on cycle_complete into status items
-  `deferred_screen`, `deferred_gauntlet`, and `stopped_at_deadline=<stage>`.
+  means "did not report", never "deferred nothing". The loop UNLINKS the
+  screen's before it runs and reads it on cycle_complete into status items
+  `deferred_screen` and `stopped_at_deadline=<stage>` (screen is the loop's only
+  deadline-aware stage since 2026-10-07; `deferred_gauntlet` is gone).
   **`stopped_at_deadline` is an OK outcome** (overall OK, cycle_complete): a
   cycle that chose to stop is routine; one killed at the wall is the defect.
   When the Sentinel is pointed at pipeline_status.json, treat it so.
@@ -750,10 +756,11 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   watermark (those cards were seen). Spec Decision 2, "no new information, no
   new trials".
 - `gauntlet_orphan` outcome (exit 1, FAIL): a strategy sits in state
-  'gauntlet' with a gauntlet verdict already chained -- gauntlet.py refuses on
-  this unconditionally, so the loop detects it next to the pre-spend chain
-  verify rather than paying ~$4.20/fire to reach a guaranteed failure. Repair
-  the chain manually.
+  'gauntlet' with a non-v6.1 gauntlet verdict already chained -- a hand run of
+  gauntlet.py refuses on this unconditionally. Since step 8 (2026-10-07) the
+  loop no longer runs gauntlet.py, so this is an alarm for an orphan that
+  already exists or that a hand run left, detected next to the pre-spend chain
+  verify. Repair the chain manually.
 - Fires ONCE at 20:00 local with a PT11H window, ending 07:00 (Coen 2026-09-28:
   PT4H killed every cycle 09-25..27 once the registry passed ~10k strategies --
   the gauntlet's registry-wide clustering is not deadline-aware -- and the 02:30
