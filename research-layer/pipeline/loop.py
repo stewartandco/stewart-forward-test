@@ -168,6 +168,10 @@ FIX_WINDOW_CMD = (
 # producer repo exists (tests, a fresh clone); never skipped in production.
 SNAPSHOT_CLASSES = ("fx", "equity_etf", "bond_etf", "metal_etf")
 
+# Status items meaning "stale cells exist but this cycle is not blocked".
+STALE_REPORT_KEYS = ("stale_other_cells", "stale_other_classes",
+                     "stale_other_missing", "stale_fired_cross_cells")
+
 # Items that belong to THIS run and must appear on every status path written
 # after they are known (snapshot_skipped, snapshot_utc). Reset at run() start.
 #
@@ -538,11 +542,47 @@ def _clip(text: str, n: int = 800) -> str:
     return text if len(text) <= n else f"{text[:n]} [+{len(text) - n} chars truncated]"
 
 
-def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None, dict[str, str]]:
-    """(problem, items). problem is None when every registered cell ends
-    within the cross-class allowance; otherwise the text
-    assert_cells_comparable (or a missing price file) gives. Reads only each
-    CSV's tail, so it is cheap enough for every fire.
+def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
+    """The cells that make `ends` non-comparable, by the gauntlet's own rule.
+
+    Within a class the rule is same-day, so a cell ending before its class's
+    latest day is a laggard. Across classes the allowance depends on both
+    classes' declared lag, so each pair of distinct (class, day) groups is put
+    through assert_cells_comparable itself (a two-cell dict) rather than
+    re-deriving the allowance here; the EARLIER side of a failing pair is the
+    laggard. Only called once the full set has already failed, so the cost is
+    paid on a real breach, not on every fire."""
+    from .screen import assert_cells_comparable
+    groups: dict[tuple[str, str], list[str]] = {}
+    for cid, e in ends.items():
+        groups.setdefault((class_of[cid], e[:10]), []).append(cid)
+    latest: dict[str, str] = {}
+    for (cls, day) in groups:
+        latest[cls] = max(latest.get(cls, day), day)
+    lag: set[str] = set()
+    for (cls, day), cids in groups.items():
+        if day < latest[cls]:
+            lag.update(cids)
+    keys = sorted(groups)
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if a[0] == b[0]:
+                continue
+            try:
+                assert_cells_comparable({"a": a[1], "b": b[1]},
+                                        class_of={"a": a[0], "b": b[0]})
+            except ValueError:
+                lag.update(groups[a if a[1] < b[1] else b])
+    return lag
+
+
+def _freshness_preflight(registry: Registry, data_dir: Path,
+                         asset_class: str) -> tuple[str | None, dict[str, str]]:
+    """(problem, items) for the class being fired. problem is None when the
+    registered cells OF `asset_class` are comparable among themselves
+    (assert_cells_comparable); otherwise the text it gives, or a missing price
+    file in that class. Reads only each CSV's tail, so it is cheap enough for
+    every fire.
 
     Sits with the chain verify and the orphan preflight (4.0a/4.0b). It was
     written to protect the in-loop gauntlet stage, which refused on this
@@ -555,11 +595,17 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
     Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages: screen
     never calls assert_cells_comparable, and the gauntlet worker defers a
     non-comparable candidate (`deferred_not_comparable`) rather than refusing.
-    It is now a data-health alarm. One stale cell in ANY class exits the whole
-    loop 1 (`stale_data`) and halts triage, composer and screen for every
-    class. Whether to keep it blocking, downgrade it to WARN, or narrow it to
-    the firing class's cells is Coen's open decision (2026-10-07); until he
-    rules, the behaviour is unchanged.
+    It is a data-health alarm. Coen decided 2026-10-08: narrowed to the fired
+    class. A breach inside that class's own cells is `stale_data` (FAIL, exit
+    1, zero spend) exactly as before. Staleness in OTHER classes is reported,
+    not blocking: `stale_other_cells` / `stale_other_classes` (plus
+    `stale_other_missing` for cells with no price file), and cross-class
+    staleness on the fired class's own side as `stale_fired_cross_cells`. The
+    caller carries them on the cycle's statuses and raises the overall to WARN.
+    The class of a cell is the one each spec declares in its own universe
+    (screen.comparable_cells), the same rule the composer and screen use. A
+    fired class with no registered spec has no cells here, so nothing in it can
+    block; the worker checks a first generation per candidate.
 
     Only FileNotFoundError is caught below, deliberately. A locked or
     half-written price file (AV, a concurrent snapshot writer, a torn handle)
@@ -573,7 +619,8 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
     majority of fires never reach this line, so they never pay for pulling
     in screen.py's dependency chain.
     """
-    from .screen import assert_cells_comparable, cell_end_dates, comparable_cells
+    from .screen import (assert_cells_comparable, cell_end_dates, cell_id,
+                         comparable_cells)
     all_specs = [e["payload"] for e in registry.entries()
                  if e["entry_type"] == "strategy_registered"]
     try:
@@ -585,18 +632,24 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
         # layer up); name it and let this escape to run()'s catch-all as
         # loop_crashed, never soften it into stale_data.
         bad = next((s for s in all_specs
-                   if not isinstance(s.get("universe"), dict)
-                   or "assets" not in s["universe"]), None)
+                    if not isinstance(s.get("universe"), dict)
+                    or "assets" not in s["universe"]), None)
         sid = bad.get("strategy_id") if bad else None
         raise ValueError(
             f"registered spec {sid!r} has no universe.assets; the chain "
             f"holds a spec the composer's schema forbids") from None
     if not cells_needed:
         return None, {}
-    try:
-        ends = cell_end_dates(data_dir, cells_needed)
-    except FileNotFoundError as exc:
-        return str(exc), {}
+    # One cell at a time: a missing file in the fired class blocks, in another
+    # class it is reported, so the first FileNotFoundError cannot end the read.
+    ends: dict[str, str] = {}
+    missing: dict[str, str] = {}
+    for cell in cells_needed:
+        try:
+            ends.update(cell_end_dates(data_dir, [cell]))
+        except FileNotFoundError as exc:
+            missing[cell_id(*cell)] = str(exc)
+    fired_ids = {cid for cid, c in class_of.items() if c == asset_class}
     days = sorted(e[:10] for e in ends.values() if e)
     items = {"data_end_min": days[0], "data_end_max": days[-1]} if days else {}
     # Per-class end dates: data_end_min/max span EVERY class, so a within-
@@ -610,11 +663,38 @@ def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None
     items["data_end_by_class"] = "; ".join(
         f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
         for c, v in sorted(by_cls.items()))
+
+    problem: str | None = None
+    fired_missing = sorted(c for c in missing if c in fired_ids)
+    if fired_missing:
+        problem = missing[fired_missing[0]]
+    else:
+        try:
+            assert_cells_comparable({c: e for c, e in ends.items() if c in fired_ids},
+                                    class_of=class_of)
+        except ValueError as exc:
+            problem = str(exc)
+
+    # Everything the full set would have refused, minus what blocks above.
+    stale_other = {c for c in missing if c not in fired_ids}
+    stale_other |= {c for c, e in ends.items() if not e and c not in fired_ids}
+    stale_fired: set[str] = set()
+    readable = {c: e for c, e in ends.items() if e}
     try:
-        assert_cells_comparable(ends, class_of=class_of)
-    except ValueError as exc:
-        return str(exc), items
-    return None, items
+        assert_cells_comparable(readable, class_of=class_of)
+    except ValueError:
+        for c in _lagging_cells(readable, class_of):
+            (stale_fired if c in fired_ids else stale_other).add(c)
+    if stale_other:
+        items["stale_other_cells"] = _clip(", ".join(sorted(stale_other)))
+        items["stale_other_classes"] = ", ".join(
+            sorted({class_of[c] for c in stale_other}))
+        absent = sorted(c for c in stale_other if c in missing)
+        if absent:
+            items["stale_other_missing"] = ", ".join(absent)
+    if stale_fired and problem is None:
+        items["stale_fired_cross_cells"] = _clip(", ".join(sorted(stale_fired)))
+    return problem, items
 
 
 def _budget_state(spent: float) -> str:
@@ -762,6 +842,12 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
         items.update(_count_items(*counts))
     items.update(_cycle_items)
     items.update(extra or {})
+    # Stale cells outside the blocking set (see _freshness_preflight) are
+    # non-blocking but must show wherever the status is rendered: an
+    # otherwise-OK cycle reads WARN. The exit code is untouched, so the
+    # Sentinel stays green.
+    if overall == "OK" and any(k in items for k in STALE_REPORT_KEYS):
+        overall = "WARN"
     payload = pipeline_status.build({"loop": overall}, spent, escalations)
     payload["items"] = {**payload.get("items", {}), **items}
     payload["overall"] = overall
@@ -1264,16 +1350,20 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
-    # refreshed the tradfi cells; if the tree is STILL not comparable, a cell
-    # is stale or missing. Written to stop the in-loop gauntlet refusing after
-    # every metered stage ran (2026-09-11); since step 8 that stage is gone
-    # and this is a data-health alarm. Screen never calls
-    # assert_cells_comparable and the worker defers non-comparable candidates
-    # (`deferred_not_comparable`), yet one stale cell in any class still exits
-    # the whole loop 1 (`stale_data`). Keep blocking, downgrade to WARN, or
-    # narrow to the firing class's cells: Coen's open decision (2026-10-07).
-    # Behaviour deliberately unchanged here.
-    problem, fresh_items = _freshness_preflight(registry, layer / "data")
+    # refreshed the tradfi cells; if the FIRED class's cells are still not
+    # comparable among themselves, one is stale or missing. Written to stop the
+    # in-loop gauntlet refusing after every metered stage ran (2026-09-11);
+    # since step 8 that stage is gone and this is a data-health alarm. Coen
+    # decided 2026-10-08: narrowed to the fired class. Its breach is
+    # `stale_data` (exit 1, zero spend); staleness in other classes is
+    # reported (status items, one WARN line, overall WARN) and never blocks.
+    problem, fresh_items = _freshness_preflight(registry, layer / "data", asset_class)
+    stale_report = {k: v for k, v in fresh_items.items() if k in STALE_REPORT_KEYS}
+    if stale_report:
+        print(f"WARN stale_data_report: stale cells outside the blocking set "
+              f"(fired class {asset_class!r}); this does not block the cycle: "
+              + "; ".join(f"{k}={v}" for k, v in stale_report.items()), flush=True)
+        _cycle_items.update(stale_report)
     if problem is not None:
         print(f"stale_data: {problem}", flush=True)
         _write_status(logs_dir, "stale_data", overall="FAIL",
