@@ -64,8 +64,7 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   loop's verify would return `chain_invalid` and, the chain being append-only,
   every later fire would fail too. Before the note it still applies the kill,
   which is why the cutover merges the code BEFORE chaining the note. Do not
-  flip the flag, and do not hand-run `python -m pipeline.gauntlet`, without
-  Coen's say-so.
+  hand-run `python -m pipeline.gauntlet` without Coen's say-so.
 - python -m pipeline.loop --once from the layer root; --dry-run reports the
   trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
   data/) still runs, so a dry run in the live tree refreshes the cells;
@@ -101,10 +100,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   only when the trading-systems producer root does not exist (tests, a fresh clone). A non-zero
   exit is `snapshot_failed` (FAIL, exit 1, escalation `run_aborted`, task retry, zero spend). Then,
   after the orphan check and before triage, `_freshness_preflight` reads each registered cell's
-  LAST bar and runs the gauntlet's own `assert_cells_comparable`; a breach is `stale_data` (FAIL,
+  LAST bar and runs the gauntlet's own `assert_cells_comparable`. It now guards a data-health
+  condition only (see the decision note below); a breach is `stale_data` (FAIL,
   exit 1, `run_aborted`, zero spend; `stale_detail` names the cells, `data_end_by_class` names the
   class). The preflight derives its cells from `screen.comparable_cells`, the same implementation
-  the gauntlet uses (stage 0's classes are `SNAPSHOT_CLASSES`). Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
+  the gauntlet worker uses (stage 0's classes are `SNAPSHOT_CLASSES`). Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
   but returns at the trigger report, before the chain verify, the orphan check and this preflight.
   **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
   failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
@@ -112,7 +112,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   SYMMETRIC: crypto's BTCUSD/ETHUSD come from the 08:20 QuarantineDaily, so if THAT stalls, crypto
   goes stale against fresh tradfi and every fire parks at `stale_data` (zero spend, Sentinel FAIL)
   until the crypto fetch is fixed -- read `data_end_by_class` in the status to see which class. The preflight covers only cells that already carry a registered spec: a class with no
-  registrations yet (metal_etf today) gets its FIRST generation checked by the gauntlet, not the preflight.
+  registrations yet (metal_etf today) gets its FIRST generation checked by the gauntlet worker, not the preflight.
+  **Since step 8 (2026-10-07) the preflight's original purpose is gone.** It was written to stop the in-loop
+  gauntlet stage refusing after every metered stage had run; that stage no longer exists. Screen never
+  calls `assert_cells_comparable`, and the worker defers non-comparable candidates
+  (`deferred_not_comparable`) rather than refusing. Yet one stale cell in any class still exits the whole
+  loop 1 (`stale_data`) for every class. It is now a data-health alarm. Whether to keep it blocking,
+  downgrade it to WARN, or narrow it to the firing class's cells is Coen's open decision (2026-10-07);
+  behaviour is unchanged until he rules.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the

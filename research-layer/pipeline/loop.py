@@ -539,17 +539,27 @@ def _clip(text: str, n: int = 800) -> str:
 
 
 def _freshness_preflight(registry: Registry, data_dir: Path) -> tuple[str | None, dict[str, str]]:
-    """(problem, items). problem is None when every cell the gauntlet will
-    compare ends within the cross-class allowance; otherwise the text
+    """(problem, items). problem is None when every registered cell ends
+    within the cross-class allowance; otherwise the text
     assert_cells_comparable (or a missing price file) gives. Reads only each
     CSV's tail, so it is cheap enough for every fire.
 
-    Sits with the chain verify and the orphan preflight (4.0a/4.0b) for the
-    same reason: the gauntlet refuses on this condition at the END of the
-    cycle, after triage and both composer calls have been paid for. On
-    2026-09-11 that cost USD 1.90 and the month's last cycle. With stage 0
-    in front of this check, staleness now means the source lags beyond its
-    declared max_end_lag_days or a cell vanished -- a defect, never weather.
+    Sits with the chain verify and the orphan preflight (4.0a/4.0b). It was
+    written to protect the in-loop gauntlet stage, which refused on this
+    condition at the END of the cycle, after triage and both composer calls
+    had been paid for (2026-09-11: USD 1.90 and the month's last cycle). With
+    stage 0 in front of this check, staleness means the source lags beyond
+    its declared max_end_lag_days or a cell vanished -- a defect, never
+    weather.
+
+    Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages: screen
+    never calls assert_cells_comparable, and the gauntlet worker defers a
+    non-comparable candidate (`deferred_not_comparable`) rather than refusing.
+    It is now a data-health alarm. One stale cell in ANY class exits the whole
+    loop 1 (`stale_data`) and halts triage, composer and screen for every
+    class. Whether to keep it blocking, downgrade it to WARN, or narrow it to
+    the firing class's cells is Coen's open decision (2026-10-07); until he
+    rules, the behaviour is unchanged.
 
     Only FileNotFoundError is caught below, deliberately. A locked or
     half-written price file (AV, a concurrent snapshot writer, a torn handle)
@@ -1254,8 +1264,15 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
-    # refreshed the tradfi cells; if the tree is STILL not comparable, the
-    # gauntlet would refuse after every metered stage ran (2026-09-11).
+    # refreshed the tradfi cells; if the tree is STILL not comparable, a cell
+    # is stale or missing. Written to stop the in-loop gauntlet refusing after
+    # every metered stage ran (2026-09-11); since step 8 that stage is gone
+    # and this is a data-health alarm. Screen never calls
+    # assert_cells_comparable and the worker defers non-comparable candidates
+    # (`deferred_not_comparable`), yet one stale cell in any class still exits
+    # the whole loop 1 (`stale_data`). Keep blocking, downgrade to WARN, or
+    # narrow to the firing class's cells: Coen's open decision (2026-10-07).
+    # Behaviour deliberately unchanged here.
     problem, fresh_items = _freshness_preflight(registry, layer / "data")
     if problem is not None:
         print(f"stale_data: {problem}", flush=True)
