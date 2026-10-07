@@ -846,9 +846,10 @@ def run(argv: list[str] | None = None) -> int:
     # Ruling 23 (C1): once a "gauntlet-protocol-v6.1:" note is chained, this
     # stage applies NO family kill. v6 retired it and verify_registry's
     # invariant 12 rejects any later verdict that carries pbo_family_kill
-    # true, or state change that cites it, so the rollback path
-    # (GAUNTLET_IN_LOOP=True after the note) must never write one: an
-    # INVALID entry on the append-only chain would wedge the loop for good.
+    # true, or state change that cites it, so a hand run of
+    # `python -m pipeline.gauntlet` after the note (the loop no longer runs
+    # this stage) must never write one: an INVALID entry on the append-only
+    # chain would wedge the loop for good.
     # Detected exactly as pipeline.gauntlet_worker detects the same note.
     v61_noted = any(
         e["entry_type"] == "note"

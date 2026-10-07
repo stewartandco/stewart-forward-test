@@ -123,9 +123,9 @@ class FakeRunner:
         self.triage_skipped = triage_skipped
         self.triage_reports = triage_reports
         self.pathspecs = {}            # call index -> list[str] from --pathspec-from-file
-        # Phase 3: screen/gauntlet write logs/<stage>_result.json. Default is
+        # Phase 3: screen writes logs/screen_result.json. Default is
         # "ran everything, deferred nothing"; a test wanting a deadline stop
-        # passes stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
+        # passes stage_results={"screen": {"evaluated": 2, "deferred": 3,
         # "stopped_at_deadline": True}}. stage_reports=False simulates a stage
         # that did not report at all.
         self.stage_results = dict(stage_results or {})
@@ -156,7 +156,7 @@ class FakeRunner:
                 self.pathspecs[len(self.calls) - 1] = Path(
                     tok.split("=", 1)[1]).read_text(encoding="utf-8").splitlines()
         if (self.stage_reports and argv[0] == sys.executable and "-m" in argv
-                and argv[argv.index("-m") + 1] in ("pipeline.screen", "pipeline.gauntlet")
+                and argv[argv.index("-m") + 1] == "pipeline.screen"
                 and "--registry" in argv):
             stage = argv[argv.index("-m") + 1].split(".")[-1]
             reg = Path(argv[argv.index("--registry") + 1])
@@ -338,15 +338,14 @@ def test_watermark_advances_by_cards_reviewed_not_by_whole_backlog(tmp_path, mon
         f"and keep counting toward the next trigger")
 
 
-def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path, monkeypatch):
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path):
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     assert _modules(fr) == ["pipeline.triage_batch", "pipeline.composer",
-                            "pipeline.composer", "pipeline.screen", "pipeline.gauntlet"]
+                            "pipeline.composer", "pipeline.screen"]
     triage_call = next(c for c in fr.calls
                        if "-m" in c and c[c.index("-m") + 1] == "pipeline.triage_batch")
     # Pinned to the constant, not a literal: the limit is sized against the
@@ -373,10 +372,7 @@ def test_trigger_runs_stages_in_order_and_advances_watermark(tmp_path, monkeypat
     assert "--asset-class" in real and real[real.index("--asset-class") + 1] == "fx"
     screen_call = next(c for c in fr.calls
                        if "-m" in c and c[c.index("-m") + 1] == "pipeline.screen")
-    gauntlet_call = next(c for c in fr.calls
-                         if "-m" in c and c[c.index("-m") + 1] == "pipeline.gauntlet")
     assert "--registry" in screen_call and "--data-dir" in screen_call
-    assert "--registry" in gauntlet_call and "--data-dir" in gauntlet_call
     git_calls = [c for c in fr.calls if c and c[0] == "git"]
     assert all("-A" not in c for c in git_calls)     # scoped adds only, ever
     st = json.loads((layer / "logs" / "loop_state.json").read_text(encoding="utf-8"))
@@ -642,7 +638,7 @@ def test_chain_invalid_before_triage_aborts_with_zero_spend(tmp_path):
 
 class _FailSecondVerifyRunner(FakeRunner):
     """The loop calls verify_registry.py TWICE (pre-triage and
-    post-gauntlet), both without "-m" -- FakeRunner's simple keying can't
+    post-screen), both without "-m" -- FakeRunner's simple keying can't
     tell them apart by argv alone, so this counts occurrences and fails
     only the second, letting the whole cycle run first."""
     def __init__(self, codes=None):
@@ -1109,18 +1105,14 @@ def _stage_call(fr, module):
                 and c[c.index("-m") + 1] == module)
 
 
-@pytest.mark.parametrize("in_loop, stages", [
-    (False, ("pipeline.screen",)),                      # default path
-    (True, ("pipeline.screen", "pipeline.gauntlet")),   # rollback path
-])
-def test_loop_passes_a_deadline_to_screen_and_gauntlet_when_the_window_is_known(
-        tmp_path, monkeypatch, in_loop, stages):
+def test_loop_passes_a_deadline_to_screen_when_the_window_is_known(
+        tmp_path, monkeypatch):
     """Phase 3 step 3. With a live task window the loop derives
     start + window - SAFETY_MARGIN_S and hands it to every chain-writing
     stage it runs as --deadline-utc, so none can run into the PT4H kill.
-    By default the stage is the screen alone; GAUNTLET_IN_LOOP adds the
-    gauntlet (rollback)."""
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", in_loop)
+    The stage is the screen alone (the gauntlet left the loop in Build 2a and
+    its stage was removed in step 8)."""
+    stages = ("pipeline.screen",)
     from . import deadline as dl
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: 4 * 3600)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
@@ -1153,18 +1145,17 @@ def test_a_stage_that_stopped_at_its_deadline_is_a_clean_cycle_and_says_so(tmp_p
     """A cycle that CHOSE to stop is routine, not a failure: outcome stays
     cycle_complete, overall OK, and the status names the stage and count so
     the digest can tell it from a cycle that ran everything."""
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    fr = FakeRunner(stage_results={"gauntlet": {"evaluated": 2, "deferred": 3,
-                                                "stopped_at_deadline": True}})
+    fr = FakeRunner(stage_results={"screen": {"evaluated": 2, "deferred": 3,
+                                              "stopped_at_deadline": True}})
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["overall"] == "OK"
     assert status["items"]["outcome"] == "cycle_complete"
-    assert status["items"]["stopped_at_deadline"] == "gauntlet"
-    assert status["items"]["deferred_gauntlet"] == "3"
-    assert status["items"]["deferred_screen"] == "0"
+    assert status["items"]["stopped_at_deadline"] == "screen"
+    assert status["items"]["deferred_screen"] == "3"
+    assert "deferred_gauntlet" not in status["items"]
 
 
 def test_a_stale_stage_result_is_cleared_before_the_stage_runs(tmp_path):
@@ -1172,14 +1163,19 @@ def test_a_stale_stage_result_is_cleared_before_the_stage_runs(tmp_path):
     this cycle's report -- the same rule the triage result already follows."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
-    (layer / "logs" / "gauntlet_result.json").write_text(json.dumps(
-        {"stage": "gauntlet", "evaluated": 0, "deferred": 99,
-         "deadline_utc": None, "stopped_at_deadline": True}), encoding="utf-8")
+    # A stale gauntlet_result.json (a hand run of pipeline.gauntlet leaves
+    # one) is not the loop's to read either: it must never surface.
+    for stage in ("screen", "gauntlet"):
+        (layer / "logs" / f"{stage}_result.json").write_text(json.dumps(
+            {"stage": stage, "evaluated": 0, "deferred": 99,
+             "deadline_utc": None, "stopped_at_deadline": True}), encoding="utf-8")
     fr = FakeRunner(stage_reports=False)          # this cycle's stages report nothing
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert "stopped_at_deadline" not in status["items"]
-    assert not (layer / "logs" / "gauntlet_result.json").exists()
+    assert "deferred_screen" not in status["items"]
+    assert "deferred_gauntlet" not in status["items"]
+    assert not (layer / "logs" / "screen_result.json").exists()
 
 
 def test_zero_delta_cycle_makes_no_commit_and_no_warning(tmp_path, capsys):
@@ -1471,7 +1467,7 @@ def test_triage_limit_fits_the_scheduled_execution_window():
     and the class re-fires forever paying full freight every time.
 
     Measured: 3.85 s per reviewer call, PANEL_SIZE 3 reviewers per card. The
-    rest of the cycle (composer --dry-run + real run, screen, gauntlet) is
+    rest of the cycle (composer --dry-run + real run, screen) is
     budgeted at 90 min worst case. The task XML is PT4H (verified live
     2026-08-31).
 
@@ -2452,7 +2448,7 @@ def test_window_reader_returns_none_on_undecodable_output(monkeypatch):
 
 # -- Build 2a task 6: the loop stops at the screen -----------------------------
 
-def test_the_loop_stops_at_the_screen_by_default(tmp_path):
+def test_the_loop_stops_at_the_screen(tmp_path):
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
@@ -2461,13 +2457,22 @@ def test_the_loop_stops_at_the_screen_by_default(tmp_path):
                             "pipeline.composer", "pipeline.screen"]
 
 
-def test_the_rollback_flag_restores_the_gauntlet_stage(tmp_path, monkeypatch):
-    monkeypatch.setattr(loop, "GAUNTLET_IN_LOOP", True)
+def test_the_loop_has_no_gauntlet_stage_and_no_rollback_flag(tmp_path):
+    """Cutover step 8 (2026-10-07): the in-loop gauntlet stage and its
+    GAUNTLET_IN_LOOP rollback flag are gone. No attribute, and a full cycle
+    never puts pipeline.gauntlet in any argv; the
+    only way back to in-loop judging is a code revert."""
+    assert not hasattr(loop, "GAUNTLET_IN_LOOP")
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
-    assert _modules(fr)[-1] == "pipeline.gauntlet"
+    py_stages = [c[c.index("-m") + 1] for c in fr.calls
+                 if c[0] == sys.executable and "-m" in c]
+    assert py_stages == ["pipeline.triage_batch", "pipeline.composer",
+                         "pipeline.composer", "pipeline.screen"]
+    assert not any("pipeline.gauntlet" in str(tok) for c in fr.calls for tok in c), \
+        [c for c in fr.calls if any("pipeline.gauntlet" in str(t) for t in c)]
 
 
 def test_a_v61_orphan_is_the_workers_not_the_loops(tmp_path):
@@ -2487,7 +2492,7 @@ def test_a_v6_orphan_still_counts_for_the_loop(tmp_path):
 
 
 def test_a_completed_cycle_without_the_gauntlet_stage_reports_no_deferred_gauntlet(tmp_path):
-    """The stage did not run, so there is no gauntlet_result.json: the cycle
+    """The loop has no gauntlet stage, so there is no gauntlet_result.json: the cycle
     still completes OK and the status carries no deferred_gauntlet item at
     all (never a fabricated 0). The screen's own report is untouched."""
     layer, _ = _mk_layer(tmp_path, accepted_fx=30)
