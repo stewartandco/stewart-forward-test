@@ -27,8 +27,11 @@ REM has not published the date's bar (FRED-fed FX lags ~a week) is DEFERRED
 REM for the day while on-time classes still record -- that is exit 0, by
 REM design, with "deferred:" lines in the log. Deferred dates are recorded by
 REM the `--catch-up` step below once their bars publish; `--review` lists what
-REM is owed. A missing price FILE, every-spec-deferred, or a bar restatement is
-REM still exit 1.
+REM is owed. Since the 2026-10-08 quarantine-isolation addendum a missing price
+REM FILE or a bar restatement defers only the affected strategies the same way
+REM (exit 0, recorded in logs\degraded_quarantine.json for the Sentinel). Exit 1
+REM remains for a total stall (every owing strategy missing a bar or price file,
+REM with no row already chained) and for real failures.
 REM
 REM EXIT CODE IS LOAD-BEARING: Ops Sentinel alarms on a nonzero last result, so
 REM this script exits 0 only when both Python steps succeeded. Every path uses

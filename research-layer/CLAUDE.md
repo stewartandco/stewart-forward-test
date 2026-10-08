@@ -141,6 +141,16 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   if it is stale against the rest; all other staleness is a WARN (status items, one WARN log line,
   overall WARN). The cell-exact block on proposed specs' missing/empty/late-starting/short files is
   the controller's Rulings 38-41, not Coen's.
+  **Since 2026-10-08 (per-asset isolation, `docs/2026-10-08-per-asset-isolation-design.md`):**
+  stage 0 SKIPS a bad series (verdict fail, sha mismatch, shrunk history, not
+  pinned, no parquet) and writes the rest; the manifest's `skipped` map names
+  them, the status carries `snapshot_skipped_series`, and a skipped series'
+  CSV and record are left exactly as they were. Zero series written is still
+  `snapshot_failed`. Every non-dry fire then writes `logs/degraded_loop.json`
+  (stage 0 skips + a report-only freshness pass over every registered cell,
+  run BEFORE the trigger decision so no_trigger nights count). The Ops
+  Sentinel's `research_degraded` reads it: WARN, FAIL after 3 days. The
+  preflight's blocking rules above are unchanged.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
@@ -826,13 +836,26 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - A failed date never strands later ones (exceptions included) but makes the
   run exit 1; the wrapper STILL commits what was recorded, then exits 1.
 - Cost: ~4-7 min per date on the 2026-09 chain (each date re-reads the chain
-  and re-simulates every ready strategy). Steady state is one or two dates a day.
+  and re-simulates only the strategies that still owe it, rule 1). Steady state is one or two dates a day.
 - Backfilled rows stay visible as backfills in `--review` (write time vs bar
   date); catch-up records every owed strategy alike, so it is a schedule,
   never a selection.
 - The Ops Sentinel health-asserts `23_QuarantineDaily` (`daily`) since
   2026-09-28 (Coen), so an exit 1 reaches the 09:15 digest; 267009 ("still
   running" -- a long catch-up) is tolerated for it alone.
+- **Per-strategy isolation (2026-10-08 addendum, `docs/2026-10-08-quarantine-isolation-addendum.md`).**
+  Only strategies that still OWE a row are simulated and guarded (rule 1), so a
+  restated asset whose strategies are fully recorded blocks nobody. A restated
+  asset or a missing price file defers only the owing strategies that trade it
+  (rules 2-3); every owing strategy missing a bar or a file, with no row
+  already chained for the date, is still a total stall (exit 1). A date where every owing strategy is deferred for a restated
+  asset uses no catch-up slot.
+- **Degraded ledger `logs/degraded_quarantine.json`** (read by the Ops
+  Sentinel's `research_degraded`: WARN, FAIL after 3 days). `--date` only adds
+  or refreshes items; `--catch-up` also removes recovered ones, and only when
+  it reached every owed date, no attempted date failed, and none was skipped
+  on chain.lock (a date that returned before its provenance check reports
+  nothing, which is not recovery). Deferrals exit 0.
 
 ## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
 - `python -m pipeline.livegate` judges BOTH arms of the chained
