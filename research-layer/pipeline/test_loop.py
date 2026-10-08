@@ -2258,26 +2258,40 @@ def _spec_on(card_ids, asset, asset_class):
     return spec
 
 
-def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end):
+def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
+                                     crypto_screened=False):
+    """AUD (fx) and BTCUSD (crypto), one daily cell each; the loop fires fx
+    (accepted_fx=30). `fx2_end` adds a second fx cell (CAD), so the FIRED
+    class can be stale against itself. Every spec is `proposed` (what screen
+    loads) unless `crypto_screened` moves the crypto one on."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     register_example_blocks(reg)
     reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
-    reg.register_strategy(_spec_on(["card0001"], "BTCUSD", "crypto"))
+    crypto_spec = _spec_on(["card0001"], "BTCUSD", "crypto")
+    reg.register_strategy(crypto_spec)
+    if crypto_screened:
+        reg.record_state_change(crypto_spec["strategy_id"], "screened", "test")
+    if fx2_end:
+        reg.register_strategy(_spec_on(["card0002"], "CAD", "fx"))
     data = layer / "data"
     data.mkdir()
     if fx_end:
         _write_cell_csv(data, "AUD", "1d", ["2026-01-02 00:00:00", fx_end])
     if crypto_end:
         _write_cell_csv(data, "BTCUSD", "1d", ["2026-01-02 00:00:00", crypto_end])
+    if fx2_end:
+        _write_cell_csv(data, "CAD", "1d", ["2026-01-02 00:00:00", fx2_end])
     return layer
 
 
 def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys):
-    """The 2026-09-11 failure, caught one stage in instead of four: AUD ends
-    2026-08-21, BTCUSD 2026-09-10 -- 20 days, allowance 13 (3 + fx's 10)."""
+    """The 2026-09-11 failure shape, narrowed to the fired class (2026-10-08):
+    fx is fired and AUD ends 2026-08-21 while its sibling fx cell CAD ends
+    2026-09-10. Crypto (BTCUSD, 09-10) is fine and is not what blocks."""
     layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
-                                             "2026-09-10 00:00:00")
+                                             "2026-09-10 00:00:00",
+                                             fx2_end="2026-09-10 00:00:00")
     fr = FakeRunner()
 
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
@@ -2285,14 +2299,17 @@ def test_stale_data_parks_the_cycle_before_triage_at_zero_spend(tmp_path, capsys
     assert rc == 1
     assert _modules(fr) == []                     # NOTHING metered ran
     out = capsys.readouterr().out
-    assert "stale_data:" in out and "AUD_1d" in out and "BTCUSD_1d" in out
+    assert "stale_data:" in out and "AUD_1d" in out
+    assert "BTCUSD_1d" not in out                 # crypto is not the fired class
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["overall"] == "FAIL"
     assert status["items"]["outcome"] == "stale_data"
     assert "AUD_1d" in status["items"]["stale_detail"]
     assert status["items"]["data_end_min"] == "2026-08-21"
     assert status["items"]["data_end_max"] == "2026-09-10"
-    assert status["items"]["data_end_by_class"] == "crypto:2026-09-10; fx:2026-08-21"
+    assert "BTCUSD_1d" not in status["items"]["stale_detail"]
+    assert status["items"]["data_end_by_class"] == "crypto:2026-09-10; fx:2026-08-21..2026-09-10"
+    assert "stale_other_cells" not in status["items"]   # crypto is fine
     assert "run_aborted" in status["escalations"]
     assert status["push"] is True
     assert "triggerable_fx" in status["items"]     # after the chain read, so counts present
@@ -2313,6 +2330,8 @@ def test_fresh_data_passes_the_preflight_and_the_stage_sequence_is_unchanged(tmp
                             "pipeline.composer", "pipeline.screen"]
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
+    assert status["overall"] == "OK"
+    assert not any(k.startswith("stale_") for k in status["items"])
 
 
 def test_a_registered_cell_with_no_price_file_is_stale_data_naming_the_cell(tmp_path, capsys):
@@ -2374,13 +2393,229 @@ def test_a_registered_spec_without_a_universe_names_itself_in_the_crash(tmp_path
     assert "bad-sid" in status["items"]["error"]
 
 
+_FULL_SEQUENCE = ["pipeline.triage_batch", "pipeline.composer",
+                  "pipeline.composer", "pipeline.screen"]
+
+
+def _read_status(layer):
+    return json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+
+
+def test_stale_cells_only_in_another_class_do_not_block_the_cycle(tmp_path, capsys):
+    """2026-10-08 (Coen): the preflight blocks on the FIRED class only. fx is
+    fired and fresh; BTCUSD (crypto) ends 20 days earlier. The cycle runs, exits
+    0, and the staleness is reported: items, one WARN line, overall WARN."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-08-21 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert status["overall"] == "WARN"
+    assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
+    assert status["items"]["stale_other_classes"] == "crypto"
+    assert "stale_fired_cells" not in status["items"]
+    assert status["escalations"] == [] and status["push"] is False
+    warn = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("WARN stale_data_report")]
+    assert len(warn) == 1 and "BTCUSD_1d" in warn[0]
+
+
+def test_a_fired_class_stale_against_other_classes_blocks(tmp_path, capsys):
+    """Coen 2026-10-08: the 2026-09-11 shape. fx (fired) is internally
+    consistent but 20 days behind crypto. That is stale_data: FAIL, exit 1,
+    run_aborted, zero spend, naming the fx cell (not the fresh crypto one)."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
+                                             "2026-09-10 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "AUD_1d" in status["items"]["stale_detail"]
+    assert "BTCUSD_1d" not in status["items"]["stale_detail"]
+    assert status["items"]["stale_fired_cells"] == "AUD_1d"
+    assert "stale_other_cells" not in status["items"]
+    assert status["items"]["data_end_by_class"] == "crypto:2026-09-10; fx:2026-08-21"
+    assert "run_aborted" in status["escalations"] and status["push"] is True
+    assert "stale_data:" in capsys.readouterr().out
+
+
+def test_stale_in_both_the_fired_class_and_another_blocks_on_the_fired_cells_only(
+        tmp_path, capsys):
+    """fx is fired and split against itself (AUD 08-21, CAD 09-10); crypto
+    BTCUSD ends 08-01. stale_data names ONLY the fired class cells in
+    stale_detail; the other class still shows in the WARN items. FAIL, exit 1,
+    zero spend."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
+                                             "2026-08-01 00:00:00",
+                                             fx2_end="2026-09-10 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "AUD_1d" in status["items"]["stale_detail"]
+    assert "BTCUSD_1d" not in status["items"]["stale_detail"]
+    assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
+    assert status["items"]["stale_other_classes"] == "crypto"
+    assert "run_aborted" in status["escalations"]
+    assert "stale_data:" in capsys.readouterr().out
+
+
+def test_a_missing_price_file_in_another_class_with_a_proposed_spec_blocks(tmp_path, capsys):
+    """screen loads every PROPOSED spec's cells in every class, so a vanished
+    BTCUSD file would fail it after triage and the composer were paid for.
+    It must stop here: stale_data, zero spend, naming the missing cell."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None)
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "BTCUSD_1d" in status["items"]["stale_detail"]
+    assert "no price file" in status["items"]["stale_detail"]
+    assert status["items"]["stale_other_missing"] == "BTCUSD_1d"
+    assert "run_aborted" in status["escalations"]
+    assert "BTCUSD_1d" in capsys.readouterr().out
+
+
+def test_a_missing_price_file_in_another_class_without_a_proposed_spec_is_reported_only(
+        tmp_path):
+    """The same missing file, but the crypto spec has moved on to 'screened':
+    screen will not open it, so it stays a WARN and the cycle runs."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None,
+                                             crypto_screened=True)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["overall"] == "WARN"
+    assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
+    assert status["items"]["stale_other_missing"] == "BTCUSD_1d"
+
+
+def _header_only(layer, asset):
+    f = layer / "data" / f"{asset}_1d.csv"
+    f.write_text(f.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+
+
+def test_a_header_only_price_file_for_a_proposed_spec_cell_blocks(tmp_path, capsys):
+    """Screen would load zero bars, run_spec returns 0 trades, and screen
+    chains an irreversible trade_count fail. Same block as a missing file."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _header_only(layer, "BTCUSD")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "BTCUSD_1d" in status["items"]["stale_detail"]
+    assert "no bars" in status["items"]["stale_detail"]
+    assert "run_aborted" in status["escalations"]
+    assert "stale_data:" in capsys.readouterr().out
+
+
+def test_a_price_file_ending_before_the_screen_cutoff_for_a_proposed_spec_blocks(tmp_path):
+    from pipeline.screen import DEFAULT_CUTOFF
+    assert "2023-06-01" < DEFAULT_CUTOFF
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2023-06-01 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "stale_data"
+    detail = status["items"]["stale_detail"]
+    assert "BTCUSD_1d" in detail and "2023-06-01" in detail and DEFAULT_CUTOFF in detail
+    assert "run_aborted" in status["escalations"]
+
+
+def test_an_empty_or_short_price_file_for_a_cell_no_proposed_spec_names_is_reported_only(
+        tmp_path):
+    """The crypto spec has moved on to 'screened', so screen never opens its
+    cell: header-only and pre-cutoff files are a WARN, not a block."""
+    for kind in ("empty", "short"):
+        (tmp_path / kind).mkdir()
+        layer = _layer_with_two_registered_cells(
+            tmp_path / kind, "2026-09-10 00:00:00",
+            "2023-06-01 00:00:00" if kind == "short" else "2026-09-10 00:00:00",
+            crypto_screened=True)
+        if kind == "empty":
+            _header_only(layer, "BTCUSD")
+        fr = FakeRunner()
+        assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0, kind
+        assert _modules(fr) == _FULL_SEQUENCE, kind
+        status = _read_status(layer)
+        assert status["overall"] == "WARN", kind
+        assert status["items"]["stale_other_cells"] == "BTCUSD_1d", kind
+
+
+def test_a_proposed_cell_ending_just_after_the_cutoff_but_stale_is_reported_only(tmp_path):
+    """Past the cutoff screen has train bars; the staleness against fx is a WARN."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2024-01-05 00:00:00")
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["overall"] == "WARN"
+    assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
+
+
+def test_a_fired_class_with_no_registered_spec_is_never_blocked_by_its_own_cells(tmp_path):
+    """fx fires but has no registered spec (a class first generation); two
+    crypto cells disagree with each other. Nothing in fx can block; the crypto
+    split is reported."""
+    layer, reg = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    register_example_blocks(reg)
+    reg.register_strategy(_spec_on(["card0001"], "BTCUSD", "crypto"))
+    reg.register_strategy(_spec_on(["card0002"], "ETHUSD", "crypto"))
+    data = layer / "data"
+    data.mkdir()
+    _write_cell_csv(data, "BTCUSD", "1d", ["2026-01-02 00:00:00", "2026-09-10 00:00:00"])
+    _write_cell_csv(data, "ETHUSD", "1d", ["2026-01-02 00:00:00", "2026-08-21 00:00:00"])
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["overall"] == "WARN"
+    assert status["items"]["stale_other_cells"] == "ETHUSD_1d"
+
+
 def test_stage0_runs_before_the_freshness_preflight_on_a_stale_tree(tmp_path, monkeypatch):
     """Stage 0 is the ONLY thing that can fix staleness (it refreshes the
     tradfi cells), so it must run even on a fire the freshness preflight is
     about to reject -- a preflight ordered first would refuse forever on
     data stage 0 never got the chance to refresh."""
     layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
-                                             "2026-09-10 00:00:00")
+                                             "2026-09-10 00:00:00",
+                                             fx2_end="2026-09-10 00:00:00")
     _with_producer(monkeypatch, tmp_path)
     fr = FakeRunner()
 
