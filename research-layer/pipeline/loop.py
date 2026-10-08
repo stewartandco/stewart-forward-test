@@ -168,9 +168,13 @@ FIX_WINDOW_CMD = (
 # producer repo exists (tests, a fresh clone); never skipped in production.
 SNAPSHOT_CLASSES = ("fx", "equity_etf", "bond_etf", "metal_etf")
 
-# Status items meaning "stale cells exist but this cycle is not blocked".
+# Status items meaning "stale cells exist but this cycle is not blocked":
+# other-class staleness that neither involves the fired class nor is a missing
+# file of a proposed spec (see _freshness_preflight). They ride _cycle_items
+# and raise an OK status to WARN. `stale_fired_cells` is deliberately NOT here:
+# a stale fired class blocks, so it only ever appears on the stale_data status.
 STALE_REPORT_KEYS = ("stale_other_cells", "stale_other_classes",
-                     "stale_other_missing", "stale_fired_cross_cells")
+                     "stale_other_missing")
 
 # Items that belong to THIS run and must appear on every status path written
 # after they are known (snapshot_skipped, snapshot_utc). Reset at run() start.
@@ -180,7 +184,8 @@ STALE_REPORT_KEYS = ("stale_other_cells", "stale_other_classes",
 # next run(); (2) values are str, like every other status item; (3) merged
 # BEFORE extra in _write_status, so a per-path extra key wins over one of
 # these (Task 4's stale_detail, once it exists, goes through extra for
-# exactly this reason).
+# exactly this reason). The non-blocking STALE_REPORT_KEYS items also live
+# here, so a later park or stage failure in the same cycle still shows them.
 _cycle_items: dict[str, str] = {}
 
 
@@ -578,11 +583,26 @@ def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
 
 def _freshness_preflight(registry: Registry, data_dir: Path,
                          asset_class: str) -> tuple[str | None, dict[str, str]]:
-    """(problem, items) for the class being fired. problem is None when the
-    registered cells OF `asset_class` are comparable among themselves
-    (assert_cells_comparable); otherwise the text it gives, or a missing price
-    file in that class. Reads only each CSV's tail, so it is cheap enough for
-    every fire.
+    """(problem, items) for the class being fired. problem is None unless one
+    of these blocks the cycle (all are `stale_data`: FAIL, exit 1, zero spend):
+
+    1. the registered cells OF `asset_class` are not mutually comparable
+       (assert_cells_comparable on that class's cells alone);
+    2. the fired class is stale AGAINST the rest: its cells are the lagging
+       side of a cross-class breach (the 2026-09-11 shape, e.g. all fx 20 days
+       behind crypto);
+    3. a price file is MISSING for a fired-class cell, or for any cell a
+       `proposed` spec of any class names. `pipeline.screen` loads every
+       proposed spec's cells in every class, so a vanished file there would
+       fail the screen AFTER triage and both composer calls were paid for.
+
+    Everything else is reported, not blocking: stale (present) or empty cells
+    in other classes, and a missing file for a cell no proposed spec names.
+    Those come back as `stale_other_cells` / `stale_other_classes` /
+    `stale_other_missing`; the caller carries them on the cycle's statuses and
+    raises the overall to WARN. A blocking breach also carries
+    `stale_fired_cells` (the fired class's lagging cells). Reads only each
+    CSV's tail, so it is cheap enough for every fire.
 
     Sits with the chain verify and the orphan preflight (4.0a/4.0b). It was
     written to protect the in-loop gauntlet stage, which refused on this
@@ -592,20 +612,19 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     its declared max_end_lag_days or a cell vanished -- a defect, never
     weather.
 
-    Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages: screen
-    never calls assert_cells_comparable, and the gauntlet worker defers a
-    non-comparable candidate (`deferred_not_comparable`) rather than refusing.
-    It is a data-health alarm. Coen decided 2026-10-08: narrowed to the fired
-    class. A breach inside that class's own cells is `stale_data` (FAIL, exit
-    1, zero spend) exactly as before. Staleness in OTHER classes is reported,
-    not blocking: `stale_other_cells` / `stale_other_classes` (plus
-    `stale_other_missing` for cells with no price file), and cross-class
-    staleness on the fired class's own side as `stale_fired_cross_cells`. The
-    caller carries them on the cycle's statuses and raises the overall to WARN.
-    The class of a cell is the one each spec declares in its own universe
-    (screen.comparable_cells), the same rule the composer and screen use. A
-    fired class with no registered spec has no cells here, so nothing in it can
-    block; the worker checks a first generation per candidate.
+    Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages
+    except the missing-file case above: screen never calls
+    assert_cells_comparable (it fences bars at its cutoff, so a stale feed is
+    invisible to it), and the gauntlet worker defers a non-comparable
+    candidate (`deferred_not_comparable`) rather than refusing. It is a
+    data-health alarm. Coen decided 2026-10-08: the fired class blocks when
+    its own cells are not mutually comparable OR it is stale against the
+    rest; any class with a proposed spec blocks on a missing file; all other
+    staleness is a WARN. The class of a cell is the one each spec declares in
+    its own universe (screen.comparable_cells), the same rule the composer and
+    screen use. A fired class with no registered spec has no cells here, so
+    nothing in it can block; the worker checks a first generation per
+    candidate.
 
     Only FileNotFoundError is caught below, deliberately. A locked or
     half-written price file (AV, a concurrent snapshot writer, a torn handle)
@@ -640,8 +659,8 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
             f"holds a spec the composer's schema forbids") from None
     if not cells_needed:
         return None, {}
-    # One cell at a time: a missing file in the fired class blocks, in another
-    # class it is reported, so the first FileNotFoundError cannot end the read.
+    # One cell at a time, so the first FileNotFoundError cannot end the read:
+    # which missing files block is decided below.
     ends: dict[str, str] = {}
     missing: dict[str, str] = {}
     for cell in cells_needed:
@@ -664,18 +683,19 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
         f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
         for c, v in sorted(by_cls.items()))
 
-    problem: str | None = None
-    fired_missing = sorted(c for c in missing if c in fired_ids)
-    if fired_missing:
-        problem = missing[fired_missing[0]]
-    else:
-        try:
-            assert_cells_comparable({c: e for c, e in ends.items() if c in fired_ids},
-                                    class_of=class_of)
-        except ValueError as exc:
-            problem = str(exc)
+    # A missing file blocks for the fired class and for every cell a proposed
+    # spec names (screen opens exactly those); anywhere else it is reported.
+    blocking_missing: list[str] = []
+    if missing:
+        states = registry.strategy_states()
+        proposed = [sp for sp in all_specs if states.get(sp.get("strategy_id")) == "proposed"]
+        proposed_ids = ({cell_id(*c) for c in comparable_cells(proposed)[0]}
+                        if proposed else set())
+        blocking_missing = sorted(c for c in missing
+                                  if c in fired_ids or c in proposed_ids)
 
-    # Everything the full set would have refused, minus what blocks above.
+    # Who is stale: cells the full set would refuse (the laggard side of each
+    # breach) plus missing / empty cells.
     stale_other = {c for c in missing if c not in fired_ids}
     stale_other |= {c for c, e in ends.items() if not e and c not in fired_ids}
     stale_fired: set[str] = set()
@@ -685,15 +705,30 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     except ValueError:
         for c in _lagging_cells(readable, class_of):
             (stale_fired if c in fired_ids else stale_other).add(c)
+
+    problem: str | None = None
+    if blocking_missing:
+        problem = "; ".join(missing[c] for c in blocking_missing)
+    else:
+        try:
+            assert_cells_comparable({c: e for c, e in ends.items() if c in fired_ids},
+                                    class_of=class_of)
+        except ValueError as exc:
+            problem = str(exc)
+    if problem is None and stale_fired:
+        problem = (f"cells of the fired class {asset_class!r} are stale against "
+                   f"other classes: "
+                   + ", ".join(f"{c} (ends {ends[c][:10]})" for c in sorted(stale_fired))
+                   + ". Re-fetch to a common end date; see data_end_by_class.")
+    if stale_fired:
+        items["stale_fired_cells"] = _clip(", ".join(sorted(stale_fired)))
     if stale_other:
         items["stale_other_cells"] = _clip(", ".join(sorted(stale_other)))
         items["stale_other_classes"] = ", ".join(
             sorted({class_of[c] for c in stale_other}))
         absent = sorted(c for c in stale_other if c in missing)
         if absent:
-            items["stale_other_missing"] = ", ".join(absent)
-    if stale_fired and problem is None:
-        items["stale_fired_cross_cells"] = _clip(", ".join(sorted(stale_fired)))
+            items["stale_other_missing"] = _clip(", ".join(absent))
     return problem, items
 
 
@@ -1350,18 +1385,20 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         return 1
 
     # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
-    # refreshed the tradfi cells; if the FIRED class's cells are still not
-    # comparable among themselves, one is stale or missing. Written to stop the
-    # in-loop gauntlet refusing after every metered stage ran (2026-09-11);
-    # since step 8 that stage is gone and this is a data-health alarm. Coen
-    # decided 2026-10-08: narrowed to the fired class. Its breach is
-    # `stale_data` (exit 1, zero spend); staleness in other classes is
-    # reported (status items, one WARN line, overall WARN) and never blocks.
+    # refreshed the tradfi cells. Written to stop the in-loop gauntlet refusing
+    # after every metered stage ran (2026-09-11); since step 8 that stage is
+    # gone and this is a data-health alarm (plus the one case screen still
+    # trips on, a missing price file). Coen decided 2026-10-08: the fired class
+    # blocks when its own cells are not mutually comparable OR it is stale
+    # against the rest; any class with a proposed spec blocks on a missing
+    # file; all other staleness is reported (status items, one WARN line,
+    # overall WARN) and never blocks. A block is `stale_data` (exit 1, zero
+    # spend).
     problem, fresh_items = _freshness_preflight(registry, layer / "data", asset_class)
     stale_report = {k: v for k, v in fresh_items.items() if k in STALE_REPORT_KEYS}
-    if stale_report:
-        print(f"WARN stale_data_report: stale cells outside the blocking set "
-              f"(fired class {asset_class!r}); this does not block the cycle: "
+    if problem is None and stale_report:
+        print(f"WARN stale_data_report: stale cells in other classes, reported "
+              f"only (fired class {asset_class!r}): "
               + "; ".join(f"{k}={v}" for k, v in stale_report.items()), flush=True)
         _cycle_items.update(stale_report)
     if problem is not None:

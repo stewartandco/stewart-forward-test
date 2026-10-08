@@ -2258,15 +2258,20 @@ def _spec_on(card_ids, asset, asset_class):
     return spec
 
 
-def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None):
+def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
+                                     crypto_screened=False):
     """AUD (fx) and BTCUSD (crypto), one daily cell each; the loop fires fx
     (accepted_fx=30). `fx2_end` adds a second fx cell (CAD), so the FIRED
-    class can be stale against itself."""
+    class can be stale against itself. Every spec is `proposed` (what screen
+    loads) unless `crypto_screened` moves the crypto one on."""
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     register_example_blocks(reg)
     reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
-    reg.register_strategy(_spec_on(["card0001"], "BTCUSD", "crypto"))
+    crypto_spec = _spec_on(["card0001"], "BTCUSD", "crypto")
+    reg.register_strategy(crypto_spec)
+    if crypto_screened:
+        reg.record_state_change(crypto_spec["strategy_id"], "screened", "test")
     if fx2_end:
         reg.register_strategy(_spec_on(["card0002"], "CAD", "fx"))
     data = layer / "data"
@@ -2413,26 +2418,35 @@ def test_stale_cells_only_in_another_class_do_not_block_the_cycle(tmp_path, caps
     assert status["overall"] == "WARN"
     assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
     assert status["items"]["stale_other_classes"] == "crypto"
-    assert "stale_fired_cross_cells" not in status["items"]
+    assert "stale_fired_cells" not in status["items"]
     assert status["escalations"] == [] and status["push"] is False
     warn = [ln for ln in capsys.readouterr().out.splitlines()
             if ln.startswith("WARN stale_data_report")]
     assert len(warn) == 1 and "BTCUSD_1d" in warn[0]
 
 
-def test_a_fired_class_lagging_other_classes_is_reported_not_blocking(tmp_path):
-    """The mirror case: fx (fired) is internally consistent but 20 days behind
-    crypto. The narrowed rule does not block (the worker defers per candidate),
-    but the lagging side is NOT silent: it is named as the fired class's."""
+def test_a_fired_class_stale_against_other_classes_blocks(tmp_path, capsys):
+    """Coen 2026-10-08: the 2026-09-11 shape. fx (fired) is internally
+    consistent but 20 days behind crypto. That is stale_data: FAIL, exit 1,
+    run_aborted, zero spend, naming the fx cell (not the fresh crypto one)."""
     layer = _layer_with_two_registered_cells(tmp_path, "2026-08-21 00:00:00",
                                              "2026-09-10 00:00:00")
     fr = FakeRunner()
-    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
-    assert _modules(fr) == _FULL_SEQUENCE
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
     status = _read_status(layer)
-    assert status["overall"] == "WARN"
-    assert status["items"]["stale_fired_cross_cells"] == "AUD_1d"
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "AUD_1d" in status["items"]["stale_detail"]
+    assert "BTCUSD_1d" not in status["items"]["stale_detail"]
+    assert status["items"]["stale_fired_cells"] == "AUD_1d"
     assert "stale_other_cells" not in status["items"]
+    assert status["items"]["data_end_by_class"] == "crypto:2026-09-10; fx:2026-08-21"
+    assert "run_aborted" in status["escalations"] and status["push"] is True
+    assert "stale_data:" in capsys.readouterr().out
 
 
 def test_stale_in_both_the_fired_class_and_another_blocks_on_the_fired_cells_only(
@@ -2458,11 +2472,36 @@ def test_stale_in_both_the_fired_class_and_another_blocks_on_the_fired_cells_onl
     assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
     assert status["items"]["stale_other_classes"] == "crypto"
     assert "run_aborted" in status["escalations"]
-    assert "WARN stale_data_report" in capsys.readouterr().out
+    assert "stale_data:" in capsys.readouterr().out
 
 
-def test_a_missing_price_file_in_another_class_is_reported_not_blocking(tmp_path):
+def test_a_missing_price_file_in_another_class_with_a_proposed_spec_blocks(tmp_path, capsys):
+    """screen loads every PROPOSED spec's cells in every class, so a vanished
+    BTCUSD file would fail it after triage and the composer were paid for.
+    It must stop here: stale_data, zero spend, naming the missing cell."""
     layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None)
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "BTCUSD_1d" in status["items"]["stale_detail"]
+    assert "no price file" in status["items"]["stale_detail"]
+    assert status["items"]["stale_other_missing"] == "BTCUSD_1d"
+    assert "run_aborted" in status["escalations"]
+    assert "BTCUSD_1d" in capsys.readouterr().out
+
+
+def test_a_missing_price_file_in_another_class_without_a_proposed_spec_is_reported_only(
+        tmp_path):
+    """The same missing file, but the crypto spec has moved on to 'screened':
+    screen will not open it, so it stays a WARN and the cycle runs."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None,
+                                             crypto_screened=True)
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     assert _modules(fr) == _FULL_SEQUENCE
