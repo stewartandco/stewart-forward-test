@@ -353,3 +353,71 @@ def test_advance_tracks_stats_over_the_tail(tmp_path):
     _same(adv, fresh)
     assert adv.statted == fresh.statted == {vs[3][1]}
     assert dict(adv.v61_verdicts) == dict(fresh.v61_verdicts)
+
+
+# Screen batch tests
+
+from .registry import SCREEN_BATCH_MAX
+
+
+def _proposed_registry(tmp_path, n=2):
+    """A registry with n proposed strategies, built through the screen test fixture."""
+    from .test_screen import screening_registry
+    reg, spec = screening_registry(tmp_path)
+    sids = [spec["strategy_id"]]
+    for i in range(1, n):
+        s = dict(spec, name=f"test breakout {i}", strategy_id=None)
+        s["blocks"] = [dict(b) for b in spec["blocks"]]
+        s["blocks"][0] = {"role": "entry", "type": "channel_breakout",
+                          "params": {"lookback": 20 + i, "direction": "long"}}
+        from .common import content_id
+        s["strategy_id"] = content_id(s, "strategy_id")
+        reg.register_strategy(s)
+        sids.append(s["strategy_id"])
+    return reg, sids
+
+
+def test_screen_batch_writes_the_same_entries_as_the_three_record_calls(tmp_path):
+    a, sids_a = _proposed_registry(tmp_path / "a")
+    b, sids_b = _proposed_registry(tmp_path / "b")
+    assert sids_a == sids_b
+    metrics = {"trades": 1, "net_pnl": 0.5}
+    # old path
+    for sid, (v, to, why) in zip(sids_a, [("fail", "graveyard", "trade_count"),
+                                          ("pass", "gauntlet", None)]):
+        a.record_state_change(sid, "screened", "screen run, cutoff 2023-12-31")
+        a.record_verdict(sid, "screened", v, metrics, "h" * 64)
+        a.record_state_change(sid, to, why)
+    # new path
+    snap = b.snapshot()
+    b.record_screen_outcomes_batch(snap, [
+        (sids_b[0], "fail", metrics, "h" * 64, "graveyard", "trade_count",
+         "screen run, cutoff 2023-12-31"),
+        (sids_b[1], "pass", metrics, "h" * 64, "gauntlet", None,
+         "screen run, cutoff 2023-12-31")])
+    strip = lambda es: [(e["entry_type"], e["payload"]) for e in es]
+    assert strip(a.entries()) == strip(b.entries())
+    assert b.strategy_states()[sids_b[0]] == "graveyard"
+    assert b.strategy_states()[sids_b[1]] == "gauntlet"
+
+
+def test_screen_batch_refuses_a_spec_not_in_proposed_and_writes_nothing(tmp_path):
+    reg, sids = _proposed_registry(tmp_path)
+    reg.record_state_change(sids[1], "graveyard", "hand")
+    before = reg.log_path.read_bytes()
+    snap = reg.snapshot()
+    with pytest.raises(ValueError, match="not 'proposed'"):
+        reg.record_screen_outcomes_batch(snap, [
+            (sids[0], "fail", {}, "h" * 64, "graveyard", "trade_count", "r"),
+            (sids[1], "fail", {}, "h" * 64, "graveyard", "trade_count", "r")])
+    assert reg.log_path.read_bytes() == before
+
+
+def test_screen_batch_refuses_a_duplicate_and_an_oversized_batch(tmp_path):
+    reg, sids = _proposed_registry(tmp_path)
+    snap = reg.snapshot()
+    item = (sids[0], "fail", {}, "h" * 64, "graveyard", "trade_count", "r")
+    with pytest.raises(ValueError, match="twice"):
+        reg.record_screen_outcomes_batch(snap, [item, item])
+    with pytest.raises(ValueError, match="at most"):
+        reg.record_screen_outcomes_batch(snap, [item] * (SCREEN_BATCH_MAX + 1))
