@@ -34,6 +34,9 @@ ones with nothing left to write. One asset stopped every strategy's day.
    and read by the Ops Sentinel (WARN, FAIL after 3 days). The run exits 0.
 5. **Total stall stays loud:** when every eligible owing strategy is deferred
    for a missing bar or a missing price file, the run refuses with exit 1.
+   *Clarification (approved by Coen 2026-10-09, before deployment): a total
+   stall also requires that no row is already chained for the date; a date
+   whose other strategies are already recorded is not a dead pipeline.*
 6. **Catch-up slots:** a date on which nothing is recordable because its owing strategies were deferred, at least one of them for a restated asset (rule 2), does not consume one of the 10 per-run slots. A date on which every owing strategy lacks a bar or a price file is a total stall (rule 5), not a slot-free date.
 
 ## What does NOT change
