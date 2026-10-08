@@ -15,7 +15,7 @@ catch-up was trying to write belonged to OTHER strategies, refused only
 because the recorder hashes the assets of every ready strategy, including
 ones with nothing left to write. One asset stopped every strategy's day.
 
-## Rules (replace rule 5 of the 2026-08-27 addendum; rules 1-4 and 6 stand)
+## Rules (replace rules 2 and 5 and amend rule 3 of the 2026-08-27 addendum; rules 1, 4 and 6 stand)
 
 1. **Only owing strategies are simulated and guarded.** A ready strategy all
    of whose `(strategy_id, date, asset)` keys are already chained is counted
@@ -34,9 +34,7 @@ ones with nothing left to write. One asset stopped every strategy's day.
    and read by the Ops Sentinel (WARN, FAIL after 3 days). The run exits 0.
 5. **Total stall stays loud:** when every eligible owing strategy is deferred
    for a missing bar or a missing price file, the run refuses with exit 1.
-6. **Catch-up slots:** a date on which nothing is recordable because every
-   owing strategy was deferred under rule 2 does not consume one of the 10
-   per-run slots.
+6. **Catch-up slots:** a date on which nothing is recordable because its owing strategies were deferred, at least one of them for a restated asset (rule 2), does not consume one of the 10 per-run slots. A date on which every owing strategy lacks a bar or a price file is a total stall (rule 5), not a slot-free date.
 
 ## What does NOT change
 
