@@ -222,3 +222,21 @@ def test_catch_up_removes_recovered_items_only_when_it_reached_every_date(tmp_pa
     monkeypatch.setattr(quarantine, "_owed_dates_for_catch_up", lambda *a, **k: many[:3])
     quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
     assert json.loads(p.read_text(encoding="utf-8"))["items"] == []
+
+
+def test_catch_up_keeps_ledger_items_when_any_date_failed(tmp_path, monkeypatch):
+    """A failed date may not have reached its provenance check, so an item it
+    did not report is unseen, not recovered: the ledger must keep it."""
+    from . import degraded as dg
+    reg_path = tmp_path / "r.jsonl"
+    reg_path.write_text("", encoding="utf-8")
+    p = tmp_path / "logs" / dg.QUARANTINE_LEDGER
+    dg.record(p, "quarantine", [{"source": "restated", "key": "EFA", "reason": "x"}],
+              remove_unseen=True)
+    dates = ["2026-09-01", "2026-09-02", "2026-09-03"]
+    monkeypatch.setattr(quarantine, "_owed_dates_for_catch_up", lambda *a, **k: dates)
+    monkeypatch.setattr(quarantine, "run_one_date_for_catch_up",
+                        lambda base, d, rep: (1, False) if d == "2026-09-02" else (0, False))
+    rc = quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
+    assert rc == 1
+    assert [i["key"] for i in json.loads(p.read_text(encoding="utf-8"))["items"]] == ["EFA"]

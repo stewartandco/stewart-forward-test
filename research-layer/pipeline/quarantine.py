@@ -993,12 +993,15 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
             dates, lambda d: run_one_date_for_catch_up(base, d, report))
         if write_ledger:
             # The authoritative pass: it removes recovered items, but only
-            # when it reached every owed date (design s3.1, Review Focus 1).
+            # when it reached every owed date (design s3.1, Review Focus 1)
+            # AND no attempted date failed: a failed date may not have
+            # reached its provenance check, so an item it did not report is
+            # unseen, not recovered.
             # Same guard as --date: the ledger is observability, a failed
             # write is reported and never the run's exit code.
             try:
                 _write_quarantine_ledger(args.registry, report,
-                                         remove_unseen=reached_all)
+                                         remove_unseen=reached_all and rc == 0)
             except OSError as exc:
                 print(f"degraded_ledger_error: {exc}", file=sys.stderr)
         return rc
