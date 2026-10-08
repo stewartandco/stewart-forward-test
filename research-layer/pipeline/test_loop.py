@@ -2259,7 +2259,10 @@ def _spec_on(card_ids, asset, asset_class):
 
 
 def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
-                                     crypto_screened=False):
+                                     crypto_screened=False,
+                                     crypto_first="2020-01-02 00:00:00",
+                                     fx_screened=False,
+                                     fx_first="2020-01-02 00:00:00"):
     """AUD (fx) and BTCUSD (crypto), one daily cell each; the loop fires fx
     (accepted_fx=30). `fx2_end` adds a second fx cell (CAD), so the FIRED
     class can be stale against itself. Every spec is `proposed` (what screen
@@ -2267,7 +2270,10 @@ def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     register_example_blocks(reg)
-    reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
+    fx_spec = _spec_on(["card0000"], "AUD", "fx")
+    reg.register_strategy(fx_spec)
+    if fx_screened:
+        reg.record_state_change(fx_spec["strategy_id"], "screened", "test")
     crypto_spec = _spec_on(["card0001"], "BTCUSD", "crypto")
     reg.register_strategy(crypto_spec)
     if crypto_screened:
@@ -2277,11 +2283,11 @@ def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
     data = layer / "data"
     data.mkdir()
     if fx_end:
-        _write_cell_csv(data, "AUD", "1d", ["2026-01-02 00:00:00", fx_end])
+        _write_cell_csv(data, "AUD", "1d", [fx_first, fx_end])
     if crypto_end:
-        _write_cell_csv(data, "BTCUSD", "1d", ["2026-01-02 00:00:00", crypto_end])
+        _write_cell_csv(data, "BTCUSD", "1d", [crypto_first, crypto_end])
     if fx2_end:
-        _write_cell_csv(data, "CAD", "1d", ["2026-01-02 00:00:00", fx2_end])
+        _write_cell_csv(data, "CAD", "1d", ["2020-01-02 00:00:00", fx2_end])
     return layer
 
 
@@ -2587,6 +2593,102 @@ def test_a_proposed_cell_ending_just_after_the_cutoff_but_stale_is_reported_only
     assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
 
 
+def test_a_first_bar_after_the_screen_cutoff_for_a_proposed_spec_blocks(tmp_path, capsys):
+    """Screen fences at the cutoff, loads zero bars, run_spec returns 0 trades
+    and screen chains an irreversible trade_count fail (Ruling 40). The END is
+    fresh, so only the first-bar read can see it (and it must also open the
+    registry shortcut, or this would never block)."""
+    from pipeline.screen import DEFAULT_CUTOFF
+    assert "2024-03-01" > DEFAULT_CUTOFF
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             crypto_first="2024-03-01 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    detail = status["items"]["stale_detail"]
+    assert "BTCUSD_1d" in detail and "starts 2024-03-01" in detail and DEFAULT_CUTOFF in detail
+    assert "run_aborted" in status["escalations"]
+    assert "stale_data:" in capsys.readouterr().out
+
+
+def test_the_first_bar_fence_matches_screens_date_inclusive_comparison(tmp_path):
+    """Screen keeps a bar iff date[:10] <= cutoff[:10]. So a first bar ON the
+    cutoff day (even 23:00) loads and runs; the next day loads nothing and
+    blocks. Checked against screen.load_bars itself."""
+    from pathlib import Path
+    from pipeline.screen import DEFAULT_CUTOFF, load_bars
+    on_day = DEFAULT_CUTOFF + " 23:00:00"
+    next_day = "2024-01-01 00:00:00"
+    assert DEFAULT_CUTOFF == "2023-12-31" and next_day[:10] > DEFAULT_CUTOFF
+    for first, runs in ((on_day, True), (next_day, False)):
+        d = tmp_path / first[:10]
+        d.mkdir()
+        layer = _layer_with_two_registered_cells(d, "2026-09-10 00:00:00",
+                                                 "2026-09-10 00:00:00",
+                                                 crypto_first=first)
+        loaded = load_bars(Path(layer) / "data", "BTCUSD", DEFAULT_CUTOFF)
+        assert bool(loaded) is runs                      # screen's own verdict on the file
+        fr = FakeRunner()
+        rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+        assert (rc == 0) is runs, first
+        assert (_modules(fr) == _FULL_SEQUENCE) is runs, first
+        status = _read_status(layer)
+        if not runs:
+            assert status["items"]["outcome"] == "stale_data"
+        else:
+            assert status["overall"] == "OK"
+
+
+def test_a_late_first_bar_for_a_cell_no_proposed_spec_names_does_not_block(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             crypto_screened=True,
+                                             crypto_first="2024-03-01 00:00:00")
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert not any(k.startswith("stale_") for k in status["items"])
+
+
+def test_a_late_first_bar_on_a_fired_class_cell_with_no_proposed_spec_does_not_block(tmp_path):
+    """Ruling 41. A cell that starts after the cutoff can never be fixed by a
+    re-fetch, so with no proposed spec on it the fired-class arm must stay
+    silent (else every fire of that class parks forever once such a cell, like
+    the 10 live 2024-start USDT cells, is registered). Silent: no stale_* item."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             fx_screened=True,
+                                             fx_first="2024-03-01 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert status["overall"] == "OK"
+    assert not any(k.startswith("stale_") for k in status["items"])
+
+
+def test_the_late_first_bar_message_says_a_refetch_cannot_fix_it(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             crypto_first="2024-03-01 00:00:00")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 1
+    detail = _read_status(layer)["items"]["stale_detail"]
+    assert "re-fetch cannot fix" in detail and "ACTIVE_CELLS" in detail
+
+
 def test_a_fired_class_with_no_registered_spec_is_never_blocked_by_its_own_cells(tmp_path):
     """fx fires but has no registered spec (a class first generation); two
     crypto cells disagree with each other. Nothing in fx can block; the crypto
@@ -2598,8 +2700,8 @@ def test_a_fired_class_with_no_registered_spec_is_never_blocked_by_its_own_cells
     reg.register_strategy(_spec_on(["card0002"], "ETHUSD", "crypto"))
     data = layer / "data"
     data.mkdir()
-    _write_cell_csv(data, "BTCUSD", "1d", ["2026-01-02 00:00:00", "2026-09-10 00:00:00"])
-    _write_cell_csv(data, "ETHUSD", "1d", ["2026-01-02 00:00:00", "2026-08-21 00:00:00"])
+    _write_cell_csv(data, "BTCUSD", "1d", ["2020-01-02 00:00:00", "2026-09-10 00:00:00"])
+    _write_cell_csv(data, "ETHUSD", "1d", ["2020-01-02 00:00:00", "2026-08-21 00:00:00"])
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     assert _modules(fr) == _FULL_SEQUENCE
