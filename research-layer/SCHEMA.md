@@ -416,9 +416,13 @@ Since the 2026-08-27 per-class-calendars addendum
 (`docs/2026-08-27-quarantine-per-class-calendars-addendum.md`), the daily
 runner records per spec: a spec whose universe is missing that date's bar is
 deferred (loudly, exit 0) rather than refusing every other spec's day, and its
-dates are backfilled by explicit `--date` runs once the bars publish. A
-missing price file, a day where every eligible spec defers, or a restatement
-of covered bars stays a hard refusal.
+dates are backfilled by explicit `--date` runs once the bars publish. Since the 2026-10-08 quarantine-isolation addendum
+(`docs/2026-10-08-quarantine-isolation-addendum.md`) only strategies that
+still owe a row are guarded; a restatement of covered bars, or a missing
+price file, defers the owing strategies that trade that asset (recorded in
+`logs/degraded_quarantine.json`) and the rest record. A day where every
+eligible owing strategy is deferred for a missing bar or a missing price file
+stays a hard refusal.
 
 The snapshot hashes each asset's price file two ways, and the difference
 matters:
