@@ -1298,7 +1298,7 @@ def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
     assert len(decisions(reg)) == 1
 
 
-def test_a_conflicting_concurrent_snapshot_refuses(tmp_path, capsys,
+def test_a_conflicting_concurrent_snapshot_defers_its_strategy(tmp_path, capsys,
                                                    monkeypatch):
     """The other half: what landed disagrees with the bars this run holds, so
     no row is recorded against unknown data. Since the 2026-10-08 addendum
@@ -1310,7 +1310,9 @@ def test_a_conflicting_concurrent_snapshot_refuses(tmp_path, capsys,
     monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
-    assert "RESTATED" in capsys.readouterr().err
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err
+    assert f"{spec['strategy_id']}  deferred:" in cap.out
     assert decisions(reg) == []
     assert len(snapshots(reg)) == 1
 

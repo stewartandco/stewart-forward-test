@@ -51,8 +51,9 @@ Conventions:
     bars up to and including that date. Because each day is recomputed from
     bar 0, the identity of those bars is load-bearing: without it a re-fetch
     would silently change what a reproduction yields for every historical
-    day. Re-running a date whose `bars_sha256` no longer matches is REFUSED,
-    not recomputed -- while a refresh that merely appends later bars is
+    day. Re-running a date whose `bars_sha256` no longer matches DEFERS the
+    owing strategies that trade the asset (2026-10-08 addendum rule 2), never
+    recomputes them -- while a refresh that merely appends later bars is
     correctly a non-event, which is what keeps backfill working.
   * A `--date` run whose write phase finds `logs/chain.lock` held by another
     writer DEFERS politely: exit 0, nothing recorded, no different from a day
@@ -256,7 +257,9 @@ def snapshot_conflicts(recorded: dict[str, str],
     chain does not cover YET is not a conflict either -- that is the
     supplement path, a class backfilled after the base snapshot was chained.
     Only 'covered but with a DIFFERENT hash' -- a restatement of bars that
-    rows were computed from -- is irreconcilable.
+    rows were computed from -- cannot be reconciled; since the 2026-10-08
+    addendum (rule 2) the caller defers the owing strategies that trade the
+    asset instead of refusing the day.
     """
     reasons = []
     for asset in sorted(current):
@@ -469,8 +472,9 @@ def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
         last_bar = _last_bar_date(data_dir, spec)
         owed = _owed_by_date(data_dir, spec, since, last_bar) if last_bar else None
         if owed is None:
-            # --date would REFUSE a date on a missing file; say so here rather
-            # than let the gap look like "nothing owed"
+            # since rule 3 (2026-10-08 addendum) --date DEFERS the strategy on
+            # a missing file; say so here rather than let the gap look like
+            # "nothing owed"
             print(f"catch-up: {sid} skipped (price file missing or empty); "
                   f"--review names it")
             continue
@@ -819,7 +823,10 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                         # a concurrent writer covered (some of) these assets
                         # between the read above and this write; absorb only
                         # an IDENTICAL cover -- anything else is
-                        # irreconcilable
+                        # irreconcilable. Deliberately kept a loud whole-day
+                        # refusal (not a rule-2 deferral): a rare race that
+                        # writes nothing; on the next run the landed
+                        # supplement is ordinary coverage and rule 2 applies.
                         landed = clash.chained.get("bars_sha256", {})
                         if any(landed.get(a) != bars_digests[a]
                                for a in new_assets):

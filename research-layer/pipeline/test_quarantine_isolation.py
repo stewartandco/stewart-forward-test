@@ -7,8 +7,8 @@ from .common import content_id
 from .test_gauntlet import gauntlet_registry
 from .test_gen3b import (ENTERED, argv_for, decisions, dated_target_hit_bars,
                          extend_ethusd, flat_dated_bars, read_csv_lines,
-                         quarantined_split_calendar, snap_payload, write_csv_lines,
-                         write_data_dir)
+                         quarantined_split_calendar, snap_payload, snapshots,
+                         supplements, write_csv_lines, write_data_dir)
 
 
 def _quarantine(reg, spec):
@@ -197,3 +197,27 @@ def test_a_failing_ledger_write_never_changes_the_exit_code(tmp_path, capsys, mo
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     assert "degraded_ledger_error" in capsys.readouterr().err
     assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"], b["strategy_id"]}
+
+
+def test_a_deferred_strategy_s_new_asset_is_never_supplemented(tmp_path):
+    """Rule 2 narrows the provenance map to the strategies that still record.
+    X (ETHUSD + SOLUSD) is deferred for the restated ETHUSD, so SOLUSD -- not
+    yet covered by the chained base -- must NOT be supplemented: that would
+    chain provenance for bars no row was computed from."""
+    reg, a = gauntlet_registry(tmp_path)
+    reg.record_verdict(a["strategy_id"], "gauntlet", "pass",
+                       {"deflated_sharpe": 0.5}, "0" * 64)
+    reg.record_state_change(a["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    x = _clone(a, ["ETHUSD", "SOLUSD"])
+    reg.register_strategy(x)
+    _quarantine(reg, x)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "ETHUSD": flat_dated_bars(),
+                                     "SOLUSD": flat_dated_bars()})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
+    assert supplements(reg) == []
+    assert len(snapshots(reg)) == 1
