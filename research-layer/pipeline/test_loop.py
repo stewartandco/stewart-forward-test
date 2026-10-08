@@ -2739,3 +2739,81 @@ def test_a_completed_cycle_without_the_gauntlet_stage_reports_no_deferred_gauntl
     assert status["items"]["outcome"] == "cycle_complete"
     assert "deferred_gauntlet" not in status["items"]
     assert status["items"]["deferred_screen"] == "0"
+
+
+# ─── degraded ledger (2026-10-08 per-asset isolation) ───────────────────────
+
+def _ledger(layer):
+    p = layer / "logs" / "degraded_loop.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+class _SkippingSnapshotRunner(FakeRunner):
+    """Stage 0 writes a manifest that skipped EFA, as the real adapter does."""
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if argv[0] == sys.executable and "-m" in argv and \
+                argv[argv.index("-m") + 1] == "pipeline.tradfi_data":
+            out = Path(argv[argv.index("--out") + 1]) / "data"
+            out.mkdir(exist_ok=True)
+            from datetime import datetime, timezone
+            (out / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+                {"snapshot_utc": datetime.now(timezone.utc).isoformat(), "series": {},
+                 "skipped": {"EFA": "EFA: last integrity verdict is fail"}}), encoding="utf-8")
+        return r
+
+
+def test_a_stage0_skip_becomes_a_ledger_item_and_a_status_item(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--layer", str(layer)], runner=_SkippingSnapshotRunner()) == 0
+    led = _ledger(layer)
+    assert [(i["source"], i["key"]) for i in led["items"]] == [("stage0", "EFA")]
+    assert _read_status(layer)["items"]["snapshot_skipped_series"] == "EFA"
+
+
+def test_an_old_manifest_is_never_read_as_this_run_s_skips(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    (layer / "data").mkdir()
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-01T00:00:00+00:00", "series": {},
+         "skipped": {"EFA": "old"}}), encoding="utf-8")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == []
+
+
+def test_a_no_trigger_fire_still_writes_the_freshness_report(tmp_path, capsys):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-08-21 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _read_status(layer)["items"]["outcome"] == "no_trigger"
+    assert [(i["source"], i["key"]) for i in _ledger(layer)["items"]] == [
+        ("freshness", "BTCUSD_1d")]
+
+
+def test_a_missing_file_is_a_freshness_item_and_the_outcome_is_unchanged(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None)
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    items = _ledger(layer)["items"]
+    assert [(i["source"], i["key"], i["reason"]) for i in items] == [
+        ("freshness", "BTCUSD_1d", "price file missing")]
+
+
+def test_a_dry_run_writes_no_ledger(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--dry-run", "--layer", str(layer)],
+                    runner=_SkippingSnapshotRunner()) == 0
+    assert _ledger(layer) is None
+
+
+def test_a_fresh_tree_writes_an_empty_ledger(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == []

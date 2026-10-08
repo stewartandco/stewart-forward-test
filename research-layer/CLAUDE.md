@@ -135,6 +135,16 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   if it is stale against the rest; all other staleness is a WARN (status items, one WARN log line,
   overall WARN). The cell-exact block on proposed specs' missing/empty/short files is the
   controller's Rulings 38/39, not Coen's.
+  **Since 2026-10-08 (per-asset isolation, `docs/2026-10-08-per-asset-isolation-design.md`):**
+  stage 0 SKIPS a bad series (verdict fail, sha mismatch, shrunk history, not
+  pinned, no parquet) and writes the rest; the manifest's `skipped` map names
+  them, the status carries `snapshot_skipped_series`, and a skipped series'
+  CSV and record are left exactly as they were. Zero series written is still
+  `snapshot_failed`. Every non-dry fire then writes `logs/degraded_loop.json`
+  (stage 0 skips + a report-only freshness pass over every registered cell,
+  run BEFORE the trigger decision so no_trigger nights count). The Ops
+  Sentinel's `research_degraded` reads it: WARN, FAIL after 3 days. The
+  preflight's blocking rules above are unchanged.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the

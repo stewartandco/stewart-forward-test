@@ -188,6 +188,10 @@ STALE_REPORT_KEYS = ("stale_other_cells", "stale_other_classes",
 # here, so a later park or stage failure in the same cycle still shows them.
 _cycle_items: dict[str, str] = {}
 
+# Series stage 0 skipped THIS run ({id: reason}); reset at run() start like
+# _cycle_items. Feeds the degraded ledger (2026-10-08 isolation design s4).
+_stage0_skips: dict[str, str] = {}
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -581,6 +585,43 @@ def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
     return lag
 
 
+def _freshness_report(registry: Registry, data_dir: Path) -> dict[str, str]:
+    """{cell_id: reason} for every registered cell that is missing, header-only
+    or a laggard. REPORT ONLY, on every non-dry-run fire, so no_trigger nights
+    keep the degraded ledger current (2026-10-08 isolation design s5, amended
+    D5). Never blocks: what blocks is _freshness_preflight's decision alone.
+    Reads each cell's tail on its own, so one missing file never ends the read;
+    PermissionError/OSError escapes to loop_crashed, as in the preflight."""
+    from .screen import assert_cells_comparable, cell_end_dates, cell_id, comparable_cells
+    all_specs = [e["payload"] for e in registry.entries()
+                 if e["entry_type"] == "strategy_registered"]
+    try:
+        cells_needed, class_of = comparable_cells(all_specs)
+    except KeyError:
+        return {}      # a spec without universe.assets: the preflight raises on a firing night
+    reasons: dict[str, str] = {}
+    readable: dict[str, str] = {}
+    for cell in cells_needed:
+        cid = cell_id(*cell)
+        try:
+            end = cell_end_dates(data_dir, [cell]).get(cid, "")
+        except FileNotFoundError:
+            reasons[cid] = "price file missing"
+            continue
+        if not end:
+            reasons[cid] = "price file has no bars"
+        else:
+            readable[cid] = end
+    if readable:
+        try:
+            assert_cells_comparable(readable, class_of=class_of)
+        except ValueError:
+            for cid in _lagging_cells(readable, class_of):
+                reasons[cid] = (f"ends {readable[cid][:10]}, behind its class or "
+                                f"the other classes")
+    return reasons
+
+
 def _freshness_preflight(registry: Registry, data_dir: Path,
                          asset_class: str) -> tuple[str | None, dict[str, str]]:
     """(problem, items) for the class being fired. problem is None unless one
@@ -929,6 +970,8 @@ def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
         print(f"snapshot_skipped: no producer at {root}", flush=True)
         _cycle_items["snapshot_skipped"] = "1"
         return None
+    from datetime import datetime, timezone
+    started = datetime.now(timezone.utc).replace(microsecond=0)
     rc = _stage(runner, [sys.executable, "-m", "pipeline.tradfi_data", "snapshot",
                          "--classes", ",".join(SNAPSHOT_CLASSES),
                          "--out", str(layer), "--ts-root", str(root)], cwd=layer)
@@ -939,6 +982,10 @@ def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
                   "data/tradfi_snapshot_manifest.json carries no snapshot_utc",
                   flush=True)
         _cycle_items.update(items)
+        skips = _snapshot_skips(layer, started)
+        if skips:
+            _stage0_skips.update(skips)
+            _cycle_items["snapshot_skipped_series"] = ", ".join(sorted(skips))
     return rc
 
 
@@ -955,6 +1002,24 @@ def _snapshot_items(layer: Path) -> dict[str, str]:
     except (OSError, ValueError, AttributeError, TypeError):
         return {}
     return {"snapshot_utc": str(utc)} if utc else {}
+
+
+def _snapshot_skips(layer: Path, started) -> dict[str, str] | None:
+    """{id: reason} the adapter skipped THIS run, from the manifest it just
+    wrote. None when that manifest is absent, unreadable, or older than this
+    stage's start: an earlier run's skips are never read as this one's."""
+    from datetime import datetime
+    p = layer / "data" / "tradfi_snapshot_manifest.json"
+    try:
+        m = json.loads(p.read_text(encoding="utf-8"))
+        utc, skipped = m.get("snapshot_utc"), m.get("skipped", {})
+        if not utc or not isinstance(skipped, dict):
+            return None
+        if datetime.fromisoformat(str(utc)) < started:
+            return None
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    return {str(k): str(v) for k, v in skipped.items()}
 
 
 def _abort_stage_failed(logs_dir: str | Path, state: dict, asset_class: str,
@@ -1136,6 +1201,7 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
                          "the cheap way to refresh the cells.")
     args = ap.parse_args(argv)
     _cycle_items.clear()
+    _stage0_skips.clear()
 
     layer = Path(args.layer)
     logs_dir = layer / "logs"
@@ -1295,6 +1361,17 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
 
     # -- 2. trigger check ----------------------------------------------------
     registry = Registry(registry_path)
+    # Degraded ledger (2026-10-08 isolation design s3.1/s5): every non-dry
+    # fire that got past stage 0 records what is degraded, no_trigger and
+    # budget parks included, so the Sentinel's clock never goes stale.
+    if not args.dry_run:
+        from . import degraded
+        seen = [{"source": "stage0", "key": k, "reason": v}
+                for k, v in sorted(_stage0_skips.items())]
+        seen += [{"source": "freshness", "key": k, "reason": v}
+                 for k, v in sorted(_freshness_report(registry, layer / "data").items())]
+        degraded.record(logs_dir / degraded.LOOP_LEDGER, "loop", seen,
+                        remove_unseen=True)
     # Two counts, two jobs: triggerable (accepted+pending) DECIDES, routable
     # (accepted-only) REPORTS. Both go to status so the digest never has to
     # guess which number fired the cycle -- and so a large routable/
