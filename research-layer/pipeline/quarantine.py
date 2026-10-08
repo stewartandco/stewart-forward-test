@@ -591,66 +591,19 @@ def review(registry: Registry, quarantined: list[str],
     return 0
 
 
-def run(argv: list[str] | None = None) -> int:
-    layer = Path(__file__).resolve().parent.parent
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--registry", type=Path, default=layer / "registry_log.jsonl")
-    ap.add_argument("--data-dir", type=Path, default=layer / "data")
-    ap.add_argument("--artifacts-dir", type=Path, default=layer / "artifacts")
-    ap.add_argument("--date", help="YYYY-MM-DD; the trading day to record")
-    ap.add_argument("--review", action="store_true",
-                    help="report progress against the minimum; writes nothing")
-    ap.add_argument("--catch-up", action="store_true",
-                    help="record every owed date (deferred or missed) through "
-                         "the --date path, oldest first")
-    args = ap.parse_args(argv)
+class DateReport:
+    """What one --date pass found, for the catch-up's slot rule and the
+    degraded ledger (isolation design s6.1)."""
 
-    if sum([args.review, bool(args.date), args.catch_up]) != 1:
-        print("Give exactly one of --date YYYY-MM-DD, --review or --catch-up.",
-              file=sys.stderr)
-        return 1
-    if args.date is not None:
-        try:
-            parse_iso_date(args.date, "--date")
-        except ValueError as exc:
-            print(f"REFUSED: {exc}", file=sys.stderr)
-            return 1
+    def __init__(self) -> None:
+        self.deferred_only = False      # owing strategies existed; every one was deferred (rule 2)
+        self.degraded: list[dict] = []  # {"source", "key", "reason"}
 
-    # A missing path must never read as "nothing to do": Registry.entries()
-    # returns silently on a missing file, so a wrong path, a moved cwd or a
-    # scheduler quirk would otherwise report success and leave an invisible
-    # hole in the forward record.
-    if not args.registry.exists():
-        print(f"REFUSED: no registry at {args.registry}. The forward record "
-              f"cannot be appended to a chain that is not there.",
-              file=sys.stderr)
-        return 1
-    if not args.data_dir.is_dir():
-        print(f"REFUSED: no data directory at {args.data_dir}. Decisions are "
-              f"computed from bars, and their completeness is audited against "
-              f"the price files.", file=sys.stderr)
-        return 1
 
-    registry = Registry(args.registry)
-    states = registry.strategy_states()
-    entered = quarantine_entry_dates(registry)
-    quarantined = sorted(sid for sid, st in states.items()
-                         if st == "quarantine")
-    specs = {e["payload"]["strategy_id"]: e["payload"]
-             for e in registry.entries()
-             if e["entry_type"] == "strategy_registered"}
-
-    if args.review:
-        return review(registry, quarantined, entered, specs,
-                      args.artifacts_dir, args.data_dir)
-
-    if args.catch_up:
-        dates = _owed_dates_for_catch_up(registry, quarantined, entered,
-                                         specs, args.data_dir)
-        base = ["--registry", str(args.registry), "--data-dir",
-                str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
-        return catch_up(dates, lambda d: run(base + ["--date", d]))
-
+def _record_date(args, registry: Registry, quarantined: list[str],
+                 entered: dict[str, str], specs: dict[str, dict],
+                 report: DateReport) -> int:
+    """The --date path: record one trading day for every eligible strategy."""
     if not quarantined:
         print("No strategies in 'quarantine' state.")
         return 0
@@ -873,6 +826,71 @@ def run(argv: list[str] | None = None) -> int:
     finally:
         if lock is not None:
             lock.release()
+
+
+def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
+        write_ledger: bool = True) -> int:
+    layer = Path(__file__).resolve().parent.parent
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--registry", type=Path, default=layer / "registry_log.jsonl")
+    ap.add_argument("--data-dir", type=Path, default=layer / "data")
+    ap.add_argument("--artifacts-dir", type=Path, default=layer / "artifacts")
+    ap.add_argument("--date", help="YYYY-MM-DD; the trading day to record")
+    ap.add_argument("--review", action="store_true",
+                    help="report progress against the minimum; writes nothing")
+    ap.add_argument("--catch-up", action="store_true",
+                    help="record every owed date (deferred or missed) through "
+                         "the --date path, oldest first")
+    args = ap.parse_args(argv)
+
+    if sum([args.review, bool(args.date), args.catch_up]) != 1:
+        print("Give exactly one of --date YYYY-MM-DD, --review or --catch-up.",
+              file=sys.stderr)
+        return 1
+    if args.date is not None:
+        try:
+            parse_iso_date(args.date, "--date")
+        except ValueError as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 1
+
+    # A missing path must never read as "nothing to do": Registry.entries()
+    # returns silently on a missing file, so a wrong path, a moved cwd or a
+    # scheduler quirk would otherwise report success and leave an invisible
+    # hole in the forward record.
+    if not args.registry.exists():
+        print(f"REFUSED: no registry at {args.registry}. The forward record "
+              f"cannot be appended to a chain that is not there.",
+              file=sys.stderr)
+        return 1
+    if not args.data_dir.is_dir():
+        print(f"REFUSED: no data directory at {args.data_dir}. Decisions are "
+              f"computed from bars, and their completeness is audited against "
+              f"the price files.", file=sys.stderr)
+        return 1
+
+    registry = Registry(args.registry)
+    states = registry.strategy_states()
+    entered = quarantine_entry_dates(registry)
+    quarantined = sorted(sid for sid, st in states.items()
+                         if st == "quarantine")
+    specs = {e["payload"]["strategy_id"]: e["payload"]
+             for e in registry.entries()
+             if e["entry_type"] == "strategy_registered"}
+
+    if args.review:
+        return review(registry, quarantined, entered, specs,
+                      args.artifacts_dir, args.data_dir)
+
+    if args.catch_up:
+        dates = _owed_dates_for_catch_up(registry, quarantined, entered,
+                                         specs, args.data_dir)
+        base = ["--registry", str(args.registry), "--data-dir",
+                str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
+        return catch_up(dates, lambda d: run(base + ["--date", d]))
+
+    return _record_date(args, registry, quarantined, entered, specs,
+                        report if report is not None else DateReport())
 
 
 if __name__ == "__main__":
