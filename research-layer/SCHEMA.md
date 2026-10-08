@@ -423,8 +423,9 @@ Under the 2026-10-08 quarantine-isolation addendum
 still owe a row are guarded; a restatement of covered bars, or a missing
 price file, defers the owing strategies that trade that asset (recorded in
 `logs/degraded_quarantine.json`) and the rest record. A day where every
-eligible owing strategy is deferred for a missing bar or a missing price file
-stays a hard refusal.
+eligible owing strategy is deferred for a missing bar or a missing price file,
+with no row already chained for that date, stays a hard refusal
+(clarification approved by Coen 2026-10-09).
 
 The snapshot hashes each asset's price file two ways, and the difference
 matters:
