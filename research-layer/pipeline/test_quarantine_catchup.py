@@ -7,6 +7,8 @@ equity_etf + 19 fx strategies sat at zero forward days for weeks. `--catch-up`
 re-runs the existing per-date path for every date a quarantined strategy is
 owed, so the per-date refusals and provenance checks all still apply.
 """
+import json
+
 import pytest
 
 from . import quarantine
@@ -52,7 +54,7 @@ def test_nothing_owed_is_an_empty_list():
 
 def test_catch_up_runs_every_date_oldest_first():
     ran = []
-    assert catch_up(["2026-09-01", "2026-09-02"], lambda d: ran.append(d) or 0) == 0
+    assert catch_up(["2026-09-01", "2026-09-02"], lambda d: ran.append(d) or 0)[0] == 0
     assert ran == ["2026-09-01", "2026-09-02"]
 
 
@@ -65,7 +67,7 @@ def test_one_failing_date_does_not_stop_the_rest_but_fails_the_run(capsys):
         ran.append(d)
         return 1 if d == "2026-09-02" else 0
 
-    rc = catch_up(["2026-09-01", "2026-09-02", "2026-09-03"], run_date)
+    rc = catch_up(["2026-09-01", "2026-09-02", "2026-09-03"], run_date)[0]
     assert rc == 1
     assert ran == ["2026-09-01", "2026-09-02", "2026-09-03"]
     assert "2026-09-02" in capsys.readouterr().out
@@ -76,13 +78,13 @@ def test_catch_up_is_bounded_per_run_and_says_what_it_left(capsys):
             [f"2026-08-{d:02d}" for d in range(1, 32)]
     assert len(dates) > MAX_CATCHUP_DATES
     ran = []
-    assert catch_up(dates, lambda d: ran.append(d) or 0) == 0
+    assert catch_up(dates, lambda d: ran.append(d) or 0)[0] == 0
     assert ran == dates[:MAX_CATCHUP_DATES]
     assert f"{len(dates) - MAX_CATCHUP_DATES} owed date(s) left" in capsys.readouterr().out
 
 
 def test_nothing_owed_runs_nothing(capsys):
-    assert catch_up([], lambda d: pytest.fail("ran a date")) == 0
+    assert catch_up([], lambda d: pytest.fail("ran a date"))[0] == 0
     assert "nothing owed" in capsys.readouterr().out
 
 
@@ -109,7 +111,7 @@ def test_an_exception_on_one_date_does_not_strand_the_rest(capsys):
             raise ValueError("boom")
         return 0
 
-    assert catch_up(["2026-09-01", "2026-09-02"], run_date) == 1
+    assert catch_up(["2026-09-01", "2026-09-02"], run_date)[0] == 1
     assert ran == ["2026-09-01", "2026-09-02"]
     out = capsys.readouterr().out
     assert "boom" in out and "FAILED on 2026-09-01" in out
@@ -171,3 +173,52 @@ def test_a_strategy_with_a_missing_price_file_is_skipped_and_named(tmp_path, cap
         {A: _spec("QQQ"), B: _spec("NOPE")}, tmp_path)
     assert got == ["2026-09-02"]
     assert B in capsys.readouterr().out
+
+
+def test_a_deferred_only_date_uses_no_slot(capsys):
+    dates = [f"2026-09-{d:02d}" for d in range(1, 13)]          # 12 owed
+    blocked = {"2026-09-01", "2026-09-02"}
+    ran = []
+
+    def run_date(d):
+        ran.append(d)
+        return (0, d in blocked)
+
+    rc, reached_all = catch_up(dates, run_date)
+    assert rc == 0 and reached_all is True
+    assert ran == dates                      # 10 recordable + 2 free ones
+    assert "no slot used" in capsys.readouterr().out
+
+
+def test_a_slot_limited_run_says_it_did_not_reach_every_date():
+    dates = [f"2026-09-{d:02d}" for d in range(1, 13)]
+    rc, reached_all = catch_up(dates, lambda d: 0)
+    assert rc == 0 and reached_all is False
+
+
+def test_a_strategy_with_a_missing_file_is_reported_to_the_ledger(tmp_path):
+    from .quarantine import _owed_dates_for_catch_up, DateReport
+    _csv(tmp_path, "QQQ", ["2026-09-01", "2026-09-02"])
+    rep = DateReport()
+    _owed_dates_for_catch_up(_StubChain(), [A, B], {A: "2026-09-01", B: "2026-09-01"},
+                             {A: _spec("QQQ"), B: _spec("NOPE")}, tmp_path, report=rep)
+    assert [(i["source"], i["key"]) for i in rep.degraded] == [("price_file_missing", "NOPE")]
+
+
+def test_catch_up_removes_recovered_items_only_when_it_reached_every_date(tmp_path, monkeypatch):
+    """Review Focus 1: a slot-limited run could not re-check the dates it never
+    reached, so it must not drop their items (the clock would restart daily)."""
+    from . import degraded as dg
+    reg_path = tmp_path / "r.jsonl"
+    reg_path.write_text("", encoding="utf-8")
+    p = tmp_path / "logs" / dg.QUARANTINE_LEDGER
+    dg.record(p, "quarantine", [{"source": "restated", "key": "EFA", "reason": "x"}],
+              remove_unseen=True)
+    many = [f"2026-09-{d:02d}" for d in range(1, 13)]
+    monkeypatch.setattr(quarantine, "_owed_dates_for_catch_up", lambda *a, **k: many)
+    monkeypatch.setattr(quarantine, "run_one_date_for_catch_up", lambda *a, **k: (0, False))
+    quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
+    assert [i["key"] for i in json.loads(p.read_text(encoding="utf-8"))["items"]] == ["EFA"]
+    monkeypatch.setattr(quarantine, "_owed_dates_for_catch_up", lambda *a, **k: many[:3])
+    quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
+    assert json.loads(p.read_text(encoding="utf-8"))["items"] == []

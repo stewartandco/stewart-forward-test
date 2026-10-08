@@ -22,7 +22,8 @@ Usage:
         [--data-dir data] [--artifacts-dir artifacts]
     python -m pipeline.quarantine --catch-up
         records every OWED date through the --date path, oldest first, at
-        most MAX_CATCHUP_DATES per run. The daily ends with it (2026-09-28):
+        most MAX_CATCHUP_DATES per run (a date where every owing strategy was
+        deferred for a restated asset uses no slot). The daily ends with it (2026-09-28):
         a deferred class or a missed day is filled on the next run, for EVERY
         owed strategy alike, so backfill is a schedule, never a selection.
 
@@ -426,43 +427,59 @@ def recordable_owed_dates(owed_by_sid: dict[str, dict[str, set[str]]],
     return sorted(dates)
 
 
-def catch_up(dates: list[str], run_date) -> int:
-    """Record each owed date through `run_date(date) -> exit code`, oldest
-    first, at most MAX_CATCHUP_DATES per run. A failed date never strands the
-    dates after it, but any failure makes the whole run exit 1."""
+def catch_up(dates: list[str], run_date) -> tuple[int, bool]:
+    """Record each owed date through `run_date(date)`, oldest first.
+    `run_date` returns an exit code, or (exit code, deferred_only). At most
+    MAX_CATCHUP_DATES dates that can record are attempted per run; a date on
+    which every owing strategy was deferred for a restated asset uses no slot
+    (2026-10-08 addendum rule 6), so blocked dates never starve newer ones. A
+    failed date never strands the dates after it, but any failure makes the
+    run exit 1. Returns (rc, reached_all): reached_all is False when the slot
+    limit left owed dates unattempted, which is when the caller must not drop
+    ledger items it could not re-check."""
     if not dates:
         print("catch-up: nothing owed")
-        return 0
-    todo = dates[:MAX_CATCHUP_DATES]
-    print(f"catch-up: {len(dates)} owed date(s); recording {len(todo)} "
-          f"({todo[0]} .. {todo[-1]})", flush=True)
-    failed = []
-    for date in todo:
+        return 0, True
+    print(f"catch-up: {len(dates)} owed date(s); recording up to "
+          f"{MAX_CATCHUP_DATES} ({dates[0]} .. {dates[-1]})", flush=True)
+    failed, used, attempted = [], 0, 0
+    for date in dates:
+        if used >= MAX_CATCHUP_DATES:
+            break
+        attempted += 1
         print(f"catch-up: --date {date}", flush=True)
         try:
-            rc = run_date(date)
+            res = run_date(date)
         except Exception:
             # the --date path RAISES on some refusals (a non-identical
             # duplicate, a writer ValueError); one such date must not strand
             # every date after it
             traceback.print_exc(file=sys.stdout)
-            rc = 1
+            res = 1
+        rc, deferred_only = (res, False) if isinstance(res, int) else res
+        if deferred_only:
+            print(f"catch-up: {date} recorded nothing (every owing strategy "
+                  f"deferred, restated); no slot used")
+        else:
+            used += 1
         if rc != 0:
             failed.append(date)
-    left = len(dates) - len(todo)
+    left = len(dates) - attempted
     if left:
         print(f"catch-up: {left} owed date(s) left for the next run")
     if failed:
         print(f"catch-up: FAILED on {', '.join(failed)}")
-        return 1
-    return 0
+        return 1, left == 0
+    return 0, left == 0
 
 
 def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
                              entered: dict[str, str], specs: dict[str, dict],
-                             data_dir: Path) -> list[str]:
+                             data_dir: Path,
+                             report: "DateReport | None" = None) -> list[str]:
     """The live inputs to recordable_owed_dates. A strategy with no spec, no
-    entry date or a missing price file is skipped here; --review names it."""
+    entry date or a missing price file is skipped here, named on the console
+    and (given `report`) reported to the degraded ledger; --review names it."""
     owed_by_sid: dict[str, dict[str, set[str]]] = {}
     universe_by_sid: dict[str, set[str]] = {}
     for sid in quarantined:
@@ -475,6 +492,15 @@ def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
             # since rule 3 (2026-10-08 addendum) --date DEFERS the strategy on
             # a missing file; say so here rather than let the gap look like
             # "nothing owed"
+            if report is not None:
+                for asset in spec["universe"]["assets"]:
+                    path = data_dir / f"{asset}_1d.csv"
+                    if not path.exists():
+                        report.degraded.append({"source": "price_file_missing", "key": asset,
+                                                "reason": f"no price file for {asset} at {path}"})
+                    elif not _daily_bars(data_dir, asset, "9999-12-31"):
+                        report.degraded.append({"source": "price_file_missing", "key": asset,
+                                                "reason": f"price file for {asset} has no bars"})
             print(f"catch-up: {sid} skipped (price file missing or empty); "
                   f"--review names it")
             continue
@@ -888,6 +914,14 @@ def _record_date(args, registry: Registry, quarantined: list[str],
             lock.release()
 
 
+def run_one_date_for_catch_up(base: list[str], date: str,
+                              report: DateReport) -> tuple[int, bool]:
+    one = DateReport()
+    rc = run(base + ["--date", date], report=one, write_ledger=False)
+    report.degraded.extend(one.degraded)
+    return rc, one.deferred_only
+
+
 def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
                              remove_unseen: bool) -> None:
     from . import degraded
@@ -950,11 +984,24 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
                       args.artifacts_dir, args.data_dir)
 
     if args.catch_up:
+        report = DateReport()
         dates = _owed_dates_for_catch_up(registry, quarantined, entered,
-                                         specs, args.data_dir)
+                                         specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
                 str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
-        return catch_up(dates, lambda d: run(base + ["--date", d]))
+        rc, reached_all = catch_up(
+            dates, lambda d: run_one_date_for_catch_up(base, d, report))
+        if write_ledger:
+            # The authoritative pass: it removes recovered items, but only
+            # when it reached every owed date (design s3.1, Review Focus 1).
+            # Same guard as --date: the ledger is observability, a failed
+            # write is reported and never the run's exit code.
+            try:
+                _write_quarantine_ledger(args.registry, report,
+                                         remove_unseen=reached_all)
+            except OSError as exc:
+                print(f"degraded_ledger_error: {exc}", file=sys.stderr)
+        return rc
 
     report = report if report is not None else DateReport()
     try:

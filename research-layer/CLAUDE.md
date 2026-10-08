@@ -829,6 +829,17 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - The Ops Sentinel health-asserts `23_QuarantineDaily` (`daily`) since
   2026-09-28 (Coen), so an exit 1 reaches the 09:15 digest; 267009 ("still
   running" -- a long catch-up) is tolerated for it alone.
+- **Per-strategy isolation (2026-10-08 addendum, `docs/2026-10-08-quarantine-isolation-addendum.md`).**
+  Only strategies that still OWE a row are simulated and guarded (rule 1), so a
+  restated asset whose strategies are fully recorded blocks nobody. A restated
+  asset or a missing price file defers only the owing strategies that trade it
+  (rules 2-3); every owing strategy missing a bar or a file is still a total
+  stall (exit 1). A date where every owing strategy is deferred for a restated
+  asset uses no catch-up slot.
+- **Degraded ledger `logs/degraded_quarantine.json`** (read by the Ops
+  Sentinel's `research_degraded`: WARN, FAIL after 3 days). `--date` only adds
+  or refreshes items; `--catch-up` also removes recovered ones, and only when
+  it reached every owed date. Deferrals exit 0.
 
 ## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
 - `python -m pipeline.livegate` judges BOTH arms of the chained
