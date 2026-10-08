@@ -110,3 +110,90 @@ def test_a_rerun_where_only_a_lagging_strategy_owes_is_not_a_stall(tmp_path, cap
     cap = capsys.readouterr()
     assert "already present" in cap.out
     assert "REFUSED" not in cap.err
+
+
+def quarantined_split_calendar_full(tmp_path):
+    """quarantined_split_calendar with ETHUSD published through 2023-01-23,
+    so the two-asset strategy is ready on 2023-01-22."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    extend_ethusd(data)
+    return reg, spec, two, data
+
+
+def test_a_restated_asset_defers_only_its_owing_strategy(tmp_path, capsys):
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
+    cap = capsys.readouterr()
+    assert f"{b['strategy_id']}  deferred:" in cap.out and "RESTATED" in cap.err
+    led = ledger(reg)
+    assert [(i["source"], i["key"]) for i in led["items"]] == [("restated", "ETHUSD")]
+
+
+def test_a_two_asset_strategy_with_one_restated_asset_writes_no_row_at_all(tmp_path, capsys):
+    """Review Focus 2: deferral is per STRATEGY."""
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert all(r["strategy_id"] != two["strategy_id"] for r in decisions(reg))
+
+
+def test_only_restated_strategies_owing_is_deferred_only_and_exits_zero(tmp_path, monkeypatch):
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))     # both record
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    # B owes again only if its row is absent: hide it from the pre-filter view
+    real = quarantine_mod.existing_decisions
+    monkeypatch.setattr(quarantine_mod, "existing_decisions",
+                        lambda r: {k for k in real(r) if k[0] != b["strategy_id"]})
+    rep = quarantine_mod.DateReport()
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"), report=rep)
+    assert rc == 0 and rep.deferred_only is True
+
+
+def test_a_missing_price_file_defers_only_its_strategy(tmp_path, capsys):
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    (data / "ETHUSD_1d.csv").unlink()
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
+    assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [("price_file_missing", "ETHUSD")]
+
+
+def test_every_owing_strategy_missing_its_file_is_still_a_total_stall(tmp_path, capsys):
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    (data / "ETHUSD_1d.csv").unlink()
+    (data / "BTCUSD_1d.csv").unlink()
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    assert "REFUSED: nothing recorded" in capsys.readouterr().err
+
+
+def test_a_date_run_never_removes_a_ledger_item(tmp_path):
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    from . import degraded as dg
+    p = reg.log_path.parent / "logs" / dg.QUARANTINE_LEDGER
+    dg.record(p, "quarantine", [{"source": "restated", "key": "EFA", "reason": "x"}],
+              remove_unseen=True)
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert [i["key"] for i in ledger(reg)["items"]] == ["EFA"]
+
+
+def test_a_failing_ledger_write_never_changes_the_exit_code(tmp_path, capsys, monkeypatch):
+    """Controller ruling: the ledger is observability; a PermissionError on it
+    must not turn a recorded day into a non-zero exit (the loop would retry)."""
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    from . import degraded as dg
+
+    def boom(*args, **kwargs):
+        raise PermissionError("ledger is locked")
+    monkeypatch.setattr(dg, "record", boom)
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert "degraded_ledger_error" in capsys.readouterr().err
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"], b["strategy_id"]}

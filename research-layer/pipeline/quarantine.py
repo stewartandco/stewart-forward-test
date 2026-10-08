@@ -354,21 +354,21 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
     return bars
 
 
-def _load_eligible_bars_or_refuse(data_dir: Path, assets: list[str],
-                                  date: str) -> dict[str, list[dict]] | None:
-    """Bars <= date for every asset an eligible spec trades, or None after
-    printing the refusal. A missing price FILE is a hard refusal -- a wrong
-    path or a broken data dir must never read as publication lag -- while a
-    missing BAR is judged per spec by the caller (2026-08-27 addendum)."""
+def _load_eligible_bars(data_dir: Path, assets: list[str],
+                        date: str) -> tuple[dict[str, list[dict]], dict[str, Path]]:
+    """(bars <= date per asset, {asset: path} of MISSING price files). A
+    missing file defers the strategies that trade it (2026-10-08 addendum
+    rule 3); the caller turns 'every owing strategy deferred for a missing
+    bar or file' into the total-stall refusal."""
     bars_by_asset: dict[str, list[dict]] = {}
+    missing: dict[str, Path] = {}
     for asset in assets:
         path = data_dir / f"{asset}_1d.csv"
         if not path.exists():
-            print(f"REFUSED: no price file for {asset} at {path}.",
-                  file=sys.stderr)
-            return None
+            missing[asset] = path
+            continue
         bars_by_asset[asset] = _daily_bars(data_dir, asset, date)
-    return bars_by_asset
+    return bars_by_asset, missing
 
 
 def _owed_by_date(data_dir: Path, spec: dict, after: str,
@@ -643,20 +643,26 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     # the file present is publication lag (FRED-fed FX runs ~a week behind
     # the crypto calendar): that spec DEFERS, loudly, and an explicit --date
     # backfill records it once the bar publishes. A missing FILE stays a hard
-    # refusal inside the loader.
+    # deferral (rule 3), judged per strategy.
     bars_by_asset: dict[str, list[dict]] = {}
     ready: list[str] = []
     if eligible:
-        loaded = _load_eligible_bars_or_refuse(
+        bars_by_asset, missing_files = _load_eligible_bars(
             args.data_dir,
             sorted({a for sid in eligible
                     for a in specs[sid]["universe"]["assets"]}),
             args.date)
-        if loaded is None:
-            return 1
-        bars_by_asset = loaded
+        for asset, path in sorted(missing_files.items()):
+            report.degraded.append({"source": "price_file_missing", "key": asset,
+                                    "reason": f"no price file for {asset} at {path}"})
         for sid in eligible:
-            missing = [a for a in specs[sid]["universe"]["assets"]
+            assets = specs[sid]["universe"]["assets"]
+            gone = [a for a in assets if a in missing_files]
+            if gone:
+                print(f"{sid}  deferred: no price file for {gone[0]} at "
+                      f"{missing_files[gone[0]]}")
+                continue
+            missing = [a for a in assets
                        if not bars_by_asset[a]
                        or bars_by_asset[a][-1]["date"] != args.date]
             if missing:
@@ -673,12 +679,15 @@ def _record_date(args, registry: Registry, quarantined: list[str],
             # day where NOTHING can record means the data pipeline is dead,
             # and going quiet would hide exactly the outage most likely to
             # persist unattended. Revisit if the pool ever goes tradfi-only.
+            # It covers a missing bar OR a missing price file (2026-10-08
+            # addendum rule 5).
             # A total stall also needs nothing already chained for the date
             # (n_present == 0): a date whose other strategies are already
             # chained is not a dead pipeline, only a lagging class (rule 1
             # follow-up); that case falls through to the normal summary, rc 0.
             print(f"REFUSED: nothing recorded for {args.date} -- every "
-                  f"eligible strategy was deferred for a missing bar. Either "
+                  f"eligible strategy was deferred for a missing bar or "
+                  f"price file. Either "
                   f"the data refresh is broken, or every class is late at "
                   f"once; backfill with an explicit --date once bars exist.",
                   file=sys.stderr)
@@ -762,15 +771,39 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                           file=sys.stderr)
                     return 1
                 covered = merged_bars_coverage(recorded, sups)
-                conflicts = snapshot_conflicts(covered, bars_digests)
-                if conflicts:
-                    print(f"REFUSED: the provenance chained for {args.date} "
-                          f"does not match the bars this run would use, so "
-                          f"re-running the date would not reproduce the rows "
-                          f"already on the chain:", file=sys.stderr)
-                    for reason in conflicts:
-                        print(f"  {reason}", file=sys.stderr)
-                    return 1
+                conflicted = sorted(a for a in bars_digests
+                                    if a in covered and covered[a] != bars_digests[a])
+                if conflicted:
+                    # Rule 2 (2026-10-08 addendum): covered-but-different
+                    # defers the owing strategies that trade the asset; the
+                    # rest record. No row is ever chained over a restated bar.
+                    reasons = dict(zip(conflicted, snapshot_conflicts(
+                        covered, {a: bars_digests[a] for a in conflicted})))
+                    for a in conflicted:
+                        report.degraded.append({"source": "restated", "key": a,
+                                                "reason": reasons[a]})
+                    print(f"RESTATED: the provenance chained for {args.date} "
+                          f"does not match the bars this run would use for "
+                          f"{', '.join(conflicted)}; the strategies trading "
+                          f"them are deferred, the rest record.", file=sys.stderr)
+                    kept = []
+                    for sid in ready:
+                        hit = sorted(set(specs[sid]["universe"]["assets"])
+                                     & set(conflicted))
+                        if hit:
+                            print(f"{sid}  deferred: {reasons[hit[0]]}")
+                        else:
+                            kept.append(sid)
+                    ready = kept
+                    keep_assets = {a for sid in ready
+                                   for a in specs[sid]["universe"]["assets"]}
+                    bars_digests = {a: d for a, d in bars_digests.items()
+                                    if a in keep_assets}
+                    if not ready:
+                        report.deferred_only = True
+                        print(f"\n0 decision(s) chained, {n_present} already "
+                              f"present; every owing strategy deferred (restated).")
+                        return 0
                 new_assets = sorted(set(bars_digests) - set(covered))
                 if new_assets:
                     # the backfill of a class deferred when the base was
@@ -848,6 +881,13 @@ def _record_date(args, registry: Registry, quarantined: list[str],
             lock.release()
 
 
+def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
+                             remove_unseen: bool) -> None:
+    from . import degraded
+    degraded.record(Path(registry_path).parent / "logs" / degraded.QUARANTINE_LEDGER,
+                    "quarantine", report.degraded, remove_unseen=remove_unseen)
+
+
 def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         write_ledger: bool = True) -> int:
     layer = Path(__file__).resolve().parent.parent
@@ -909,8 +949,21 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
                 str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
         return catch_up(dates, lambda d: run(base + ["--date", d]))
 
-    return _record_date(args, registry, quarantined, entered, specs,
-                        report if report is not None else DateReport())
+    report = report if report is not None else DateReport()
+    try:
+        return _record_date(args, registry, quarantined, entered, specs, report)
+    finally:
+        if write_ledger:
+            # --date only ADDS or refreshes: it sees one date, so an item it
+            # does not see may still be live on another (design s3.1). The
+            # ledger is observability: a failed write is reported, never the
+            # run's exit code (a non-zero exit makes the loop retry a metered
+            # cycle).
+            try:
+                _write_quarantine_ledger(args.registry, report,
+                                         remove_unseen=False)
+            except OSError as exc:
+                print(f"degraded_ledger_error: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
