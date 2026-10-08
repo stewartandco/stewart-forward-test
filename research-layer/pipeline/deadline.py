@@ -20,6 +20,7 @@ clock adjustment mid-cycle cannot move the deadline.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,18 +100,23 @@ def result_path(registry_path: Path, stage: str) -> Path:
 
 
 def write_result(registry_path: Path, stage: str, *, evaluated: int, deferred: int,
-                 deadline_utc: str | None, stopped_at_deadline: bool) -> Path:
+                 deadline_utc: str | None, stopped_at_deadline: bool,
+                 extra: dict[str, int] | None = None) -> Path:
     """Atomic, written on every completed run including the no-deadline
     case, so an absent file means 'the stage did not report', never
-    'nothing was deferred'."""
+    'nothing was deferred'. `extra` adds stage-specific integer counters
+    beside the core keys; it may never redefine one."""
+    core = {"stage": stage, "evaluated": int(evaluated), "deferred": int(deferred),
+            "deadline_utc": deadline_utc,
+            "stopped_at_deadline": bool(stopped_at_deadline)}
+    for k, v in (extra or {}).items():
+        if k in core:
+            raise ValueError(f"extra counter {k!r} would shadow a core key")
+        core[k] = int(v)
     p = result_path(registry_path, stage)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"stage": stage, "evaluated": int(evaluated),
-                               "deferred": int(deferred),
-                               "deadline_utc": deadline_utc,
-                               "stopped_at_deadline": bool(stopped_at_deadline)},
-                              indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(json.dumps(core, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(p)
     return p
 
