@@ -7,7 +7,8 @@ from .common import content_id
 from .test_gauntlet import gauntlet_registry
 from .test_gen3b import (ENTERED, argv_for, decisions, dated_target_hit_bars,
                          extend_ethusd, flat_dated_bars, read_csv_lines,
-                         snap_payload, write_csv_lines, write_data_dir)
+                         quarantined_split_calendar, snap_payload, write_csv_lines,
+                         write_data_dir)
 
 
 def _quarantine(reg, spec):
@@ -94,3 +95,18 @@ def test_a_missing_file_behind_a_fully_recorded_strategy_changes_nothing(tmp_pat
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     assert sum(1 for _ in reg.entries()) == before
     assert "2 already present" in capsys.readouterr().out
+
+
+def test_a_rerun_where_only_a_lagging_strategy_owes_is_not_a_stall(tmp_path, capsys):
+    """Rule 1 filters out the fully recorded strategies, so a same-day re-run
+    sees only the lagging one, deferred for a missing bar. That is not a dead
+    pipeline (rows for the date are already chained): rc 0, not the stall
+    guard's REFUSED. The guard itself stays pinned by
+    test_gen3b.test_every_eligible_spec_deferred_is_refused."""
+    reg, spec, two, data = quarantined_split_calendar(tmp_path)
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    cap = capsys.readouterr()
+    assert "already present" in cap.out
+    assert "REFUSED" not in cap.err

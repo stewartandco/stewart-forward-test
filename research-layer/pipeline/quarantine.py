@@ -668,11 +668,15 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                       f"({ends})")
             else:
                 ready.append(sid)
-        if not ready:
+        if not ready and n_present == 0:
             # While a class that trades every calendar day is in the pool, a
             # day where NOTHING can record means the data pipeline is dead,
             # and going quiet would hide exactly the outage most likely to
             # persist unattended. Revisit if the pool ever goes tradfi-only.
+            # A total stall also needs nothing already chained for the date
+            # (n_present == 0): a date whose other strategies are already
+            # chained is not a dead pipeline, only a lagging class (rule 1
+            # follow-up); that case falls through to the normal summary, rc 0.
             print(f"REFUSED: nothing recorded for {args.date} -- every "
                   f"eligible strategy was deferred for a missing bar. Either "
                   f"the data refresh is broken, or every class is late at "
@@ -685,9 +689,10 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     # loading above are cheap local reads and must not hold the lock; the
     # lock is acquired as late as correctness allows, right before the first
     # possible chain write, and only when there is one to make (ready is
-    # empty here only when nobody was eligible, in which case nothing below
-    # writes anything and taking the lock would just waste other writers'
-    # window time).
+    # empty here when nobody was eligible, when every eligible strategy was
+    # already fully recorded (rule 1), or when every owing one was deferred
+    # behind rows already chained; in each case nothing below writes anything
+    # and taking the lock would just waste other writers' window time).
     lock = None
     if ready:
         logs_dir = args.registry.parent / "logs"
