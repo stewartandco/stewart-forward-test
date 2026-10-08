@@ -169,8 +169,8 @@ FIX_WINDOW_CMD = (
 SNAPSHOT_CLASSES = ("fx", "equity_etf", "bond_etf", "metal_etf")
 
 # Status items meaning "stale cells exist but this cycle is not blocked":
-# other-class staleness that neither involves the fired class nor is a missing
-# file of a proposed spec (see _freshness_preflight). They ride _cycle_items
+# other-class staleness where the fired class is not the stale side and no
+# proposed spec's cell is missing, empty or short (see _freshness_preflight). They ride _cycle_items
 # and raise an OK status to WARN. `stale_fired_cells` is deliberately NOT here:
 # a stale fired class blocks, so it only ever appears on the stale_data status.
 STALE_REPORT_KEYS = ("stale_other_cells", "stale_other_classes",
@@ -591,14 +591,18 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     2. the fired class is stale AGAINST the rest: its cells are the lagging
        side of a cross-class breach (the 2026-09-11 shape, e.g. all fx 20 days
        behind crypto);
-    3. a price file is MISSING for a fired-class cell, or for any cell a
-       `proposed` spec of any class names. `pipeline.screen` loads every
-       proposed spec's cells in every class, so a vanished file there would
-       fail the screen AFTER triage and both composer calls were paid for.
+    3. a price file is MISSING, EMPTY (header only) or ends before screen's
+       train cutoff (`screen.DEFAULT_CUTOFF`, which the loop never overrides)
+       for a fired-class cell or for any cell a `proposed` spec of any class
+       names. `pipeline.screen` loads exactly those cells in every class: a
+       missing file would fail it AFTER triage and both composer calls were
+       paid for, and an empty or too-short one gives it no train bars, so
+       `run_spec` returns 0 trades and screen chains an irreversible
+       `trade_count` fail and buries the spec.
 
-    Everything else is reported, not blocking: stale (present) or empty cells
-    in other classes, and a missing file for a cell no proposed spec names.
-    Those come back as `stale_other_cells` / `stale_other_classes` /
+    Everything else is reported, not blocking: stale (present, past the
+    cutoff) cells in other classes, and a missing, empty or short file for a
+    cell no proposed spec names. Those come back as `stale_other_cells` / `stale_other_classes` /
     `stale_other_missing`; the caller carries them on the cycle's statuses and
     raises the overall to WARN. A blocking breach also carries
     `stale_fired_cells` (the fired class's lagging cells). Reads only each
@@ -613,14 +617,14 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     weather.
 
     Since step 8 (2026-10-07) it guards NOTHING in the loop's own stages
-    except the missing-file case above: screen never calls
-    assert_cells_comparable (it fences bars at its cutoff, so a stale feed is
-    invisible to it), and the gauntlet worker defers a non-comparable
-    candidate (`deferred_not_comparable`) rather than refusing. It is a
-    data-health alarm. Coen decided 2026-10-08: the fired class blocks when
-    its own cells are not mutually comparable OR it is stale against the
-    rest; any class with a proposed spec blocks on a missing file; all other
-    staleness is a WARN. The class of a cell is the one each spec declares in
+    except rule 3: screen never calls assert_cells_comparable (it fences bars
+    at its cutoff, so a stale feed is invisible to it), and the gauntlet
+    worker, which loads full history, defers a non-comparable candidate
+    (`deferred_not_comparable`) rather than refusing. It is a data-health
+    alarm. Coen decided 2026-10-08: narrowed to the fired class, which also
+    blocks when it is stale against the rest (rules 1-2); all other staleness
+    is a WARN. Rule 3 is the controller's Rulings 38/39 (review I1, N1): it
+    is cell-exact, the cells proposed specs name, not class-wide. The class of a cell is the one each spec declares in
     its own universe (screen.comparable_cells), the same rule the composer and
     screen use. A fired class with no registered spec has no cells here, so
     nothing in it can block; the worker checks a first generation per
@@ -638,8 +642,8 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     majority of fires never reach this line, so they never pay for pulling
     in screen.py's dependency chain.
     """
-    from .screen import (assert_cells_comparable, cell_end_dates, cell_id,
-                         comparable_cells)
+    from .screen import (DEFAULT_CUTOFF, assert_cells_comparable, cell_end_dates,
+                         cell_id, comparable_cells)
     all_specs = [e["payload"] for e in registry.entries()
                  if e["entry_type"] == "strategy_registered"]
     try:
@@ -683,16 +687,29 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
         f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
         for c, v in sorted(by_cls.items()))
 
-    # A missing file blocks for the fired class and for every cell a proposed
-    # spec names (screen opens exactly those); anywhere else it is reported.
-    blocking_missing: list[str] = []
-    if missing:
+    # A missing, empty or pre-cutoff file blocks for the fired class and for
+    # every cell a proposed spec names (screen loads exactly those, at
+    # DEFAULT_CUTOFF, and an unreadable train window buries the spec);
+    # anywhere else it is reported. The registry is read only when some cell
+    # is suspect, which is never on a healthy tree.
+    bad: dict[str, str] = {}
+    if missing or any(not e or e[:10] < DEFAULT_CUTOFF for e in ends.values()):
         states = registry.strategy_states()
         proposed = [sp for sp in all_specs if states.get(sp.get("strategy_id")) == "proposed"]
         proposed_ids = ({cell_id(*c) for c in comparable_cells(proposed)[0]}
                         if proposed else set())
-        blocking_missing = sorted(c for c in missing
-                                  if c in fired_ids or c in proposed_ids)
+        blocking = fired_ids | proposed_ids
+        for c, msg in missing.items():
+            if c in blocking:
+                bad[c] = msg
+        for c, e in ends.items():
+            if c not in blocking:
+                continue
+            if not e:
+                bad[c] = f"{c}: price file has no bars (header only)"
+            elif e[:10] < DEFAULT_CUTOFF:
+                bad[c] = (f"{c}: price file ends {e[:10]}, before screen's train "
+                          f"cutoff {DEFAULT_CUTOFF}")
 
     # Who is stale: cells the full set would refuse (the laggard side of each
     # breach) plus missing / empty cells.
@@ -707,8 +724,8 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
             (stale_fired if c in fired_ids else stale_other).add(c)
 
     problem: str | None = None
-    if blocking_missing:
-        problem = "; ".join(missing[c] for c in blocking_missing)
+    if bad:
+        problem = "; ".join(bad[c] for c in sorted(bad))
     else:
         try:
             assert_cells_comparable({c: e for c, e in ends.items() if c in fired_ids},
@@ -1387,13 +1404,13 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # 4.0c freshness pre-flight, same zero-spend position. Stage 0 has just
     # refreshed the tradfi cells. Written to stop the in-loop gauntlet refusing
     # after every metered stage ran (2026-09-11); since step 8 that stage is
-    # gone and this is a data-health alarm (plus the one case screen still
-    # trips on, a missing price file). Coen decided 2026-10-08: the fired class
-    # blocks when its own cells are not mutually comparable OR it is stale
-    # against the rest; any class with a proposed spec blocks on a missing
-    # file; all other staleness is reported (status items, one WARN line,
-    # overall WARN) and never blocks. A block is `stale_data` (exit 1, zero
-    # spend).
+    # gone and this is a data-health alarm. Coen decided 2026-10-08: narrowed
+    # to the fired class, which also blocks when it is stale against the rest;
+    # all other staleness is reported (status items, one WARN line, overall
+    # WARN) and never blocks. One more block, cell-exact (the cells proposed
+    # specs name; controller Rulings 38/39): a missing, empty or pre-cutoff
+    # price file there would fail or bury a spec in screen. A block is
+    # `stale_data` (exit 1, zero spend).
     problem, fresh_items = _freshness_preflight(registry, layer / "data", asset_class)
     stale_report = {k: v for k, v in fresh_items.items() if k in STALE_REPORT_KEYS}
     if problem is None and stale_report:

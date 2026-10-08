@@ -2511,6 +2511,82 @@ def test_a_missing_price_file_in_another_class_without_a_proposed_spec_is_report
     assert status["items"]["stale_other_missing"] == "BTCUSD_1d"
 
 
+def _header_only(layer, asset):
+    f = layer / "data" / f"{asset}_1d.csv"
+    f.write_text(f.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+
+
+def test_a_header_only_price_file_for_a_proposed_spec_cell_blocks(tmp_path, capsys):
+    """Screen would load zero bars, run_spec returns 0 trades, and screen
+    chains an irreversible trade_count fail. Same block as a missing file."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _header_only(layer, "BTCUSD")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["overall"] == "FAIL"
+    assert status["items"]["outcome"] == "stale_data"
+    assert "BTCUSD_1d" in status["items"]["stale_detail"]
+    assert "no bars" in status["items"]["stale_detail"]
+    assert "run_aborted" in status["escalations"]
+    assert "stale_data:" in capsys.readouterr().out
+
+
+def test_a_price_file_ending_before_the_screen_cutoff_for_a_proposed_spec_blocks(tmp_path):
+    from pipeline.screen import DEFAULT_CUTOFF
+    assert "2023-06-01" < DEFAULT_CUTOFF
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2023-06-01 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 1
+    assert _modules(fr) == []
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "stale_data"
+    detail = status["items"]["stale_detail"]
+    assert "BTCUSD_1d" in detail and "2023-06-01" in detail and DEFAULT_CUTOFF in detail
+    assert "run_aborted" in status["escalations"]
+
+
+def test_an_empty_or_short_price_file_for_a_cell_no_proposed_spec_names_is_reported_only(
+        tmp_path):
+    """The crypto spec has moved on to 'screened', so screen never opens its
+    cell: header-only and pre-cutoff files are a WARN, not a block."""
+    for kind in ("empty", "short"):
+        (tmp_path / kind).mkdir()
+        layer = _layer_with_two_registered_cells(
+            tmp_path / kind, "2026-09-10 00:00:00",
+            "2023-06-01 00:00:00" if kind == "short" else "2026-09-10 00:00:00",
+            crypto_screened=True)
+        if kind == "empty":
+            _header_only(layer, "BTCUSD")
+        fr = FakeRunner()
+        assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0, kind
+        assert _modules(fr) == _FULL_SEQUENCE, kind
+        status = _read_status(layer)
+        assert status["overall"] == "WARN", kind
+        assert status["items"]["stale_other_cells"] == "BTCUSD_1d", kind
+
+
+def test_a_proposed_cell_ending_just_after_the_cutoff_but_stale_is_reported_only(tmp_path):
+    """Past the cutoff screen has train bars; the staleness against fx is a WARN."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2024-01-05 00:00:00")
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["overall"] == "WARN"
+    assert status["items"]["stale_other_cells"] == "BTCUSD_1d"
+
+
 def test_a_fired_class_with_no_registered_spec_is_never_blocked_by_its_own_cells(tmp_path):
     """fx fires but has no registered spec (a class first generation); two
     crypto cells disagree with each other. Nothing in fx can block; the crypto
