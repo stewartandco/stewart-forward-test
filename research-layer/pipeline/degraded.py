@@ -42,12 +42,17 @@ def read_items(path) -> tuple[list[dict], str | None]:
 
 
 def merge(previous: list[dict], seen: list[dict], now: str, *,
-          remove_unseen: bool) -> list[dict]:
+          remove_unseen: bool, keep_sources: tuple[str, ...] = ()) -> list[dict]:
     """New ledger items. An item seen again keeps its ORIGINAL since_utc and
     gets the new reason and last_seen_utc; a new one starts at `now`. An item
     not seen this run is dropped when `remove_unseen` (it recovered), kept
     untouched otherwise (the run could not re-check it). Sorted by (source,
-    key) so a diff of two ledgers reads cleanly."""
+    key) so a diff of two ledgers reads cleanly.
+
+    `keep_sources` names sources this run could NOT re-check (no producer, no
+    current manifest, a spec the freshness pass cannot read): their unseen
+    items are kept UNCHANGED (original since_utc and last_seen_utc) even when
+    `remove_unseen`, so "could not look" is never read as "recovered"."""
     prev = {(i["source"], i["key"]): i for i in previous}
     out: dict[tuple[str, str], dict] = {}
     for s in seen:
@@ -55,8 +60,8 @@ def merge(previous: list[dict], seen: list[dict], now: str, *,
         since = prev[k]["since_utc"] if k in prev else now
         out[k] = {"source": s["source"], "key": s["key"], "reason": s["reason"],
                   "since_utc": since, "last_seen_utc": now}
-    if not remove_unseen:
-        for k, i in prev.items():
+    for k, i in prev.items():
+        if not remove_unseen or i["source"] in keep_sources:
             out.setdefault(k, dict(i))
     return [out[k] for k in sorted(out)]
 
@@ -75,9 +80,10 @@ def write(path, writer: str, items: list[dict], now: str,
 
 
 def record(path, writer: str, seen: list[dict], *,
-           remove_unseen: bool) -> list[dict]:
+           remove_unseen: bool, keep_sources: tuple[str, ...] = ()) -> list[dict]:
     now = now_utc()
     previous, note = read_items(path)
-    items = merge(previous, seen, now, remove_unseen=remove_unseen)
+    items = merge(previous, seen, now, remove_unseen=remove_unseen,
+                  keep_sources=keep_sources)
     write(path, writer, items, now, note)
     return items

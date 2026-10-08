@@ -30,6 +30,14 @@ def test_an_unseen_item_is_removed_only_when_asked():
     assert next(i for i in kept if i["key"] == "SPY")["last_seen_utc"] == T0
 
 
+def test_keep_sources_keeps_an_unchecked_source_unchanged_and_drops_the_rest():
+    prev = (dg.merge([], _seen("EFA", source="stage0"), T0, remove_unseen=True)
+            + dg.merge([], _seen("AUD_1d", source="freshness"), T0, remove_unseen=True))
+    out = dg.merge(prev, [], T1, remove_unseen=True, keep_sources=("stage0",))
+    assert out == [{"source": "stage0", "key": "EFA", "reason": "EFA why",
+                    "since_utc": T0, "last_seen_utc": T0}]
+
+
 def test_same_key_in_two_sources_are_two_items():
     items = dg.merge([], _seen("EFA") + _seen("EFA", source="price_file_missing"),
                      T0, remove_unseen=True)

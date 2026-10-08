@@ -191,6 +191,11 @@ _cycle_items: dict[str, str] = {}
 # Series stage 0 skipped THIS run ({id: reason}); reset at run() start like
 # _cycle_items. Feeds the degraded ledger (2026-10-08 isolation design s4).
 _stage0_skips: dict[str, str] = {}
+# True once THIS run read a current skip map (even an empty one) from the
+# manifest stage 0 just wrote. False = stage 0 could not be checked (no
+# producer root, no/old manifest): its ledger items are then carried forward,
+# not cleared. Reset at run() start with _stage0_skips.
+_stage0_checked: bool = False
 
 
 def _now_utc() -> str:
@@ -585,9 +590,12 @@ def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
     return lag
 
 
-def _freshness_report(registry: Registry, data_dir: Path) -> dict[str, str]:
+def _freshness_report(registry: Registry, data_dir: Path) -> dict[str, str] | None:
     """{cell_id: reason} for every registered cell that is missing, header-only
-    or a laggard. REPORT ONLY, on every non-dry-run fire, so no_trigger nights
+    or a laggard; None when the report could NOT be evaluated (a spec without
+    universe.assets), which the caller must not read as "nothing degraded".
+    It imports screen on every fire, so the preflight docstring's "no_trigger
+    fires never pay for the screen import" no longer holds. REPORT ONLY, on every non-dry-run fire, so no_trigger nights
     keep the degraded ledger current (2026-10-08 isolation design s5, amended
     D5). Never blocks: what blocks is _freshness_preflight's decision alone.
     Reads each cell's tail on its own, so one missing file never ends the read;
@@ -598,7 +606,7 @@ def _freshness_report(registry: Registry, data_dir: Path) -> dict[str, str]:
     try:
         cells_needed, class_of = comparable_cells(all_specs)
     except KeyError:
-        return {}      # a spec without universe.assets: the preflight raises on a firing night
+        return None    # a spec without universe.assets: the preflight raises on a firing night
     reasons: dict[str, str] = {}
     readable: dict[str, str] = {}
     for cell in cells_needed:
@@ -983,9 +991,12 @@ def _snapshot_stage(runner: Runner, layer: Path) -> int | None:
                   flush=True)
         _cycle_items.update(items)
         skips = _snapshot_skips(layer, started)
+        if skips is not None:
+            global _stage0_checked
+            _stage0_checked = True
         if skips:
             _stage0_skips.update(skips)
-            _cycle_items["snapshot_skipped_series"] = ", ".join(sorted(skips))
+            _cycle_items["snapshot_skipped_series"] = _clip(", ".join(sorted(skips)))
     return rc
 
 
@@ -1202,6 +1213,8 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     args = ap.parse_args(argv)
     _cycle_items.clear()
     _stage0_skips.clear()
+    global _stage0_checked
+    _stage0_checked = False
 
     layer = Path(args.layer)
     logs_dir = layer / "logs"
@@ -1368,10 +1381,23 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
         from . import degraded
         seen = [{"source": "stage0", "key": k, "reason": v}
                 for k, v in sorted(_stage0_skips.items())]
-        seen += [{"source": "freshness", "key": k, "reason": v}
-                 for k, v in sorted(_freshness_report(registry, layer / "data").items())]
-        degraded.record(logs_dir / degraded.LOOP_LEDGER, "loop", seen,
-                        remove_unseen=True)
+        # A source this fire could not re-check keeps its previous items
+        # (carried forward unchanged): "could not look" is not "recovered".
+        keep = []
+        if not _stage0_checked:
+            keep.append("stage0")
+        fresh = _freshness_report(registry, layer / "data")
+        if fresh is None:
+            keep.append("freshness")
+        else:
+            seen += [{"source": "freshness", "key": k, "reason": v}
+                     for k, v in sorted(fresh.items())]
+        try:
+            degraded.record(logs_dir / degraded.LOOP_LEDGER, "loop", seen,
+                            remove_unseen=True, keep_sources=tuple(keep))
+        except OSError as exc:
+            print(f"degraded_ledger_error: {exc}", flush=True)
+            _cycle_items["degraded_ledger_error"] = _clip(str(exc))
     # Two counts, two jobs: triggerable (accepted+pending) DECIDES, routable
     # (accepted-only) REPORTS. Both go to status so the digest never has to
     # guess which number fired the cycle -- and so a large routable/
