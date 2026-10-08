@@ -256,3 +256,61 @@ def test_written_csv_loads_through_screen_load_bars(tmp_path):
     td.snapshot(root, out, classes=("fx",), assets=("EUR",))
     bars = load_bars(out / "data", "EUR", cutoff="9999-12-31", timeframe="1d")
     assert len(bars) == 3 and bars[0]["open"] == bars[0]["close"] == 1.1701 and bars[0]["volume"] == 0.0
+
+
+def _mk_two_source(tmp_path, gbp_verdict="fail"):
+    """EUR fine; GBP pinned but with a FAIL verdict -- one bad series."""
+    root = _mk_source(tmp_path, CLOSES)
+    idx = pd.to_datetime([d for d, _ in CLOSES])
+    df = pd.DataFrame({"open": float("nan"), "high": float("nan"), "low": float("nan"),
+                       "close": [c for _, c in CLOSES], "volume": float("nan")}, index=idx)
+    df.index.name = "date"
+    df.to_parquet(root / "data" / "tradfi" / "free_fx_GBP_1d.parquet")
+    man_path = root / "results" / "tradfi" / "free_universe_manifest.json"
+    man = json.loads(man_path.read_text())
+    clean = [(d, c) for d, c in CLOSES if c == c]
+    man["selected"].append({"id": "GBP", "lane": "fx", "sha256": _canon_sha(clean),
+                            "history_start": CLOSES[0][0], "rows": len(clean)})
+    man_path.write_text(json.dumps(man), encoding="utf-8")
+    (root / "data" / "tradfi" / "verdict_GBP.json").write_text(
+        json.dumps({"verdict": gbp_verdict}), encoding="utf-8")
+    return root
+
+
+def test_one_bad_series_is_skipped_and_the_rest_written(tmp_path, capsys):
+    root = _mk_two_source(tmp_path)
+    out = tmp_path / "layer"
+    written = td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    assert written == ["EUR"]
+    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert set(man["skipped"]) == {"GBP"} and "verdict" in man["skipped"]["GBP"]
+    assert "snapshot: skipped GBP" in capsys.readouterr().out
+
+
+def test_a_skipped_series_keeps_its_old_csv_and_record_byte_identical(tmp_path):
+    root = _mk_two_source(tmp_path, gbp_verdict="ok")
+    out = tmp_path / "layer"
+    td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    csv_before = (out / "data" / "GBP_1d.csv").read_bytes()
+    rec_before = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())["series"]["GBP"]
+    (root / "data" / "tradfi" / "verdict_GBP.json").write_text(json.dumps({"verdict": "fail"}))
+    td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert (out / "data" / "GBP_1d.csv").read_bytes() == csv_before
+    assert man["series"]["GBP"] == rec_before and "GBP" in man["skipped"]
+
+
+def test_a_skipped_series_never_snapshotted_leaves_nothing_behind(tmp_path):
+    """Review Focus 4."""
+    root = _mk_two_source(tmp_path)
+    out = tmp_path / "layer"
+    td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
+    assert not (out / "data" / "GBP_1d.csv").exists() and "GBP" not in man["series"]
+
+
+def test_a_clean_run_records_an_empty_skipped_map(tmp_path):
+    root = _mk_source(tmp_path, CLOSES)
+    out = tmp_path / "layer"
+    td.snapshot(root, out, classes=("fx",), assets=("EUR",))
+    assert json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())["skipped"] == {}
