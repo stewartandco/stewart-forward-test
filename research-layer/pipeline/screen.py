@@ -47,12 +47,6 @@ SCREEN_CHUNK_PER_WORKER = 8
 DRAIN_RESERVE_S = 75.0
 DRAIN_INTERVAL_S = 5.0
 _sleep = time.sleep
-_ACTIVE_BUDGET = None
-
-
-def _deadline_passed_for_test() -> bool:
-    b = _ACTIVE_BUDGET
-    return bool(b is not None and b.active and (b.remaining_s() or 0) <= 0)
 
 
 def load_bars(data_dir: Path, asset: str, cutoff: str,
@@ -420,7 +414,6 @@ def run(argv: list[str] | None = None) -> int:
               f"protocol note before running for real (dry-run is allowed).")
         return 1
 
-    global _ACTIVE_BUDGET
     logs_dir = args.logs_dir or (Path(args.registry).resolve().parent / "logs")
     registered: list[dict] = []
     snap = registry.snapshot(on_entry=lambda e: registered.append(e["payload"])
@@ -434,7 +427,6 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     budget = _deadline.DeadlineBudget(args.deadline_utc)
-    _ACTIVE_BUDGET = budget
     n_specs_total = len(specs)
     if budget.active and not budget.fits(1, SCREEN_PRIOR_S_PER_SPEC):
         print(f"DEADLINE: {budget.remaining_s():.0f}s remain before {args.deadline_utc}; "
@@ -475,16 +467,22 @@ def run(argv: list[str] | None = None) -> int:
     n_pass_written = 0
     n_started = 0
     stopped_at_deadline = False
+    last_flush: str | None = None
 
     def flush() -> str | None:
         """Write `pending` in holds of <= SCREEN_BATCH_MAX, one non-blocking
-        acquire per hold. Returns "held" when a hold met a held chain.lock
-        (the rest stays pending), else None. ChainMoved / UnstableEntry
-        propagate: nothing of that hold was written."""
-        nonlocal snap, n_pass_written
+        acquire per hold. Returns "held" when a hold met a held chain.lock,
+        "deadline" when the deadline had passed before a hold could start
+        (either way the rest stays pending), else None. The outcome is kept
+        in `last_flush`: it decides how leftover specs are reported.
+        ChainMoved / UnstableEntry propagate: nothing of that hold was
+        written."""
+        nonlocal snap, n_pass_written, last_flush
+        last_flush = None
         while pending:
             if budget.active and (budget.remaining_s() or 0) <= 0:
-                return "held"           # never START a write after the deadline
+                last_flush = "deadline"     # never START a write after the deadline
+                return last_flush
             batch = pending[:SCREEN_BATCH_MAX]
             lock = ChainLock(logs_dir, holder="screen",
                              purpose=f"screen {len(batch)} verdict(s)")
@@ -492,7 +490,8 @@ def run(argv: list[str] | None = None) -> int:
                 lock.acquire()
             except ChainLockHeld:
                 held.update(s["strategy_id"] for s, _, _, _ in pending)
-                return "held"
+                last_flush = "held"
+                return last_flush
             try:
                 snap = registry.advance(snap)
                 live = [x for x in batch
@@ -521,7 +520,7 @@ def run(argv: list[str] | None = None) -> int:
             return
         stop_at = time.monotonic() + DRAIN_RESERVE_S
         while pending:
-            if flush() is None:
+            if flush() in (None, "deadline"):
                 return
             if time.monotonic() + DRAIN_INTERVAL_S >= stop_at:
                 return
@@ -531,10 +530,12 @@ def run(argv: list[str] | None = None) -> int:
 
     try:
         for chunk in _deadline.chunks(jobs, chunk_size):
+            # the drain reserve is held back only while a batch is pending
+            # (the gauntlet worker's reserve_s): stop unless this chunk AND
+            # the reserve both fit in what is left
             reserve = DRAIN_RESERVE_S if pending else 0.0
-            if budget.active and not budget.fits(
-                    len(chunk), budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)) \
-                    or (budget.active and (budget.remaining_s() or 0) <= reserve):
+            if budget.active and (len(chunk) * budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)
+                                  + reserve > (budget.remaining_s() or 0)):
                 stopped_at_deadline = True
                 break
             t_c0 = time.time()
@@ -567,8 +568,6 @@ def run(argv: list[str] | None = None) -> int:
         print(f"REFUSED: chain moved or an entry did not round-trip; nothing "
               f"written for that batch: {exc}", flush=True)
         return 1
-    finally:
-        _ACTIVE_BUDGET = None
 
     if args.dry_run:
         print(f"\nDRY RUN — {n_started} screened, {n_pass_written} would pass, "
@@ -576,23 +575,36 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     not_started = n_specs_total - n_started
-    if stopped_at_deadline:
+    # Leftover pending specs are a LOCK deferral (Ruling 4: deferred +
+    # deferred_lock, no stopped_at_deadline) unless the last flush was
+    # stopped by the deadline itself (Ruling 6: deferred only, and the
+    # deadline stopped the run).
+    unwritten_deadline = len(pending) if last_flush == "deadline" else 0
+    unwritten_lock = len(pending) - unwritten_deadline
+    if unwritten_deadline:
+        stopped_at_deadline = True
+    if stopped_at_deadline and not_started:
         print(f"DEADLINE: stopped before starting {not_started} of {n_specs_total} "
               f"specs; they stay 'proposed' and the next run screens them.", flush=True)
-    if pending:
-        print(f"chain.lock held: {len(pending)} screened spec(s) not written; they "
+    if unwritten_deadline:
+        print(f"DEADLINE: {unwritten_deadline} screened spec(s) not written (the "
+              f"deadline passed before their write could start); they stay "
+              f"'proposed' and the next run screens them.", flush=True)
+    if unwritten_lock:
+        print(f"chain.lock held: {unwritten_lock} screened spec(s) not written; they "
               f"stay 'proposed' and the next run screens them.", flush=True)
     _deadline.write_result(
         args.registry, "screen", evaluated=counts["written"],
         deferred=not_started + len(pending), deadline_utc=args.deadline_utc,
         stopped_at_deadline=stopped_at_deadline,
-        extra={"deferred_lock": len(pending), "retried_written": counts["retried_written"],
+        extra={"deferred_lock": unwritten_lock, "retried_written": counts["retried_written"],
                "dropped_stale": counts["dropped_stale"]})
     print(f"\n{counts['written']} screened: {n_pass_written} -> gauntlet, "
           f"{counts['written'] - n_pass_written} -> graveyard"
           + (f", {not_started + len(pending)} deferred to the next run."
              if not_started + len(pending) else "."))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(run())

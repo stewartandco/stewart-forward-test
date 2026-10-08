@@ -1,8 +1,9 @@
 """Screen writes batch by batch under short chain.lock holds (2026-10-08 design)."""
 from __future__ import annotations
 
-import json
+import shutil
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,12 @@ from .test_screen import (screening_registry, write_data_dir, dated_target_hit_b
                           chain_protocol_note, run_verifier)
 
 LAYER = Path(__file__).resolve().parent.parent
+
+# The plan's base commit: the last screen.py BEFORE this change (Ruling 6, I3).
+# Pinned, never derived from a branch: once this lands on the live branch a
+# merge-base with it is HEAD itself, and the identity test would compare the
+# new screen with itself.
+PRE_CHANGE_BASE = "6dc03f501f28da7b8180b256ade18fff35174684"
 
 
 def _registry_with(tmp_path, n):
@@ -45,16 +52,47 @@ def _result(reg):
     return read_result(reg.log_path, "screen")
 
 
+def _fake_clock(monkeypatch, chunk_s):
+    """One fake clock for the whole run: the budget's clock, screen's
+    time.time / time.monotonic, and _sleep (which advances it). Each run_all
+    call (one chunk) advances it by `chunk_s`, so the budget measures exactly
+    chunk_s per spec with one spec per chunk. Returns (now, budgets, calls)."""
+    now = {"t": 1000.0}
+    budgets: list = []
+    calls = {"n": 0}
+    real_budget = screen._deadline.DeadlineBudget
+
+    def make_budget(d, **k):
+        b = real_budget(d, clock=lambda: now["t"], **k)
+        budgets.append(b)
+        return b
+    monkeypatch.setattr(screen._deadline, "DeadlineBudget", make_budget)
+    monkeypatch.setattr(screen, "time", types.SimpleNamespace(
+        time=lambda: now["t"], monotonic=lambda: now["t"]))
+    monkeypatch.setattr(screen, "_sleep", lambda s: now.__setitem__("t", now["t"] + s))
+    real_run_all = screen.run_all
+
+    def run_all_on_the_clock(*a, **k):
+        calls["n"] += 1
+        out = real_run_all(*a, **k)
+        now["t"] += chunk_s
+        return out
+    monkeypatch.setattr(screen, "run_all", run_all_on_the_clock)
+    return now, budgets, calls
+
+
+def _deadline_in(seconds):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
 def test_identical_entries_to_the_pre_change_screen(tmp_path):
     """The same chain as screen at the plan's base commit, apart from ts_utc."""
-    base = subprocess.run(["git", "-C", str(LAYER), "merge-base", "HEAD",
-                           "claude/ai-agent-business-automation-0lzfd9"],
-                          capture_output=True, text=True, check=True).stdout.strip()
     old_src = subprocess.run(["git", "-C", str(LAYER), "show",
-                              f"{base}:research-layer/pipeline/screen.py"],
+                              f"{PRE_CHANGE_BASE}:research-layer/pipeline/screen.py"],
                              capture_output=True, text=True, check=True).stdout
+    assert "record_screen_outcomes_batch" not in old_src   # really the old screen
     old_mod = tmp_path / "old_screen_pkg"
-    import shutil
     shutil.copytree(LAYER / "pipeline", old_mod / "pipeline")
     (old_mod / "pipeline" / "screen.py").write_text(old_src, encoding="utf-8")
     a_reg, a_sids, a_data = _registry_with(tmp_path / "a", 5)
@@ -74,6 +112,8 @@ def test_identical_entries_to_the_pre_change_screen(tmp_path):
     assert _run(b_reg, b_data, tmp_path / "b") == 0
     strip = lambda r: [(e["entry_type"], e["payload"]) for e in r.entries()]
     assert strip(a_reg) == strip(b_reg)
+    assert any(e["entry_type"] == "verdict" for e in b_reg.entries())
+    assert run_verifier(a_reg.log_path).returncode == 0
     assert run_verifier(b_reg.log_path).returncode == 0
 
 
@@ -199,6 +239,7 @@ def test_a_second_hold_that_finds_the_lock_held_keeps_the_remainder(
     monkeypatch.setattr(screen, "SCREEN_BATCH_MAX", 2)          # 3 pending -> 2 holds
     monkeypatch.setattr(screen, "_sleep", lambda s: None)
     monkeypatch.setattr(screen, "DRAIN_RESERVE_S", 0.0)
+    monkeypatch.setattr(screen, "_TEST_GRAB_AFTER_RELEASE", False, raising=False)
     real = screen.Registry.record_screen_outcomes_batch
 
     def write_then_grab(self, snap, items):
@@ -226,45 +267,70 @@ def test_a_second_hold_that_finds_the_lock_held_keeps_the_remainder(
 
 def test_no_flush_starts_after_the_deadline(tmp_path, monkeypatch):
     """A chunk whose evaluation overruns the deadline: its results are kept,
-    and NO chain.lock acquire is attempted once the deadline has passed (not
-    at the chunk boundary, not in the final drain). Fake clock (controller
-    Ruling 1): the budget reads `now`, and evaluating the chunk moves `now`
-    60 s past a deadline 30 s ahead, so the overrun is exact, not slept."""
+    NO chain.lock acquire is attempted once the deadline has passed (not at
+    the chunk boundary, not in the final drain), and the leftovers are
+    reported as a DEADLINE stop, not a lock deferral (Ruling 6, I1). No lock
+    is held anywhere: the deadline is the only reason nothing is written.
+    Fake clock (Ruling 1): the chunk moves it 60 s past a deadline 30 s
+    ahead; the test reads "past the deadline" from its own clock."""
     reg, sids, data = _registry_with(tmp_path, 2)
-    monkeypatch.setattr(screen, "_sleep", lambda s: None)
-    now = {"t": 1000.0}
-    real_budget = screen._deadline.DeadlineBudget
-    monkeypatch.setattr(screen._deadline, "DeadlineBudget",
-                        lambda d, **k: real_budget(d, clock=lambda: now["t"], **k))
-    real_run_all = screen.run_all
-
-    def run_all_overrunning(*a, **k):
-        out = real_run_all(*a, **k)
-        now["t"] += 60.0                      # the chunk ran past the deadline
-        return out
-    monkeypatch.setattr(screen, "run_all", run_all_overrunning)
-    holder = ChainLock(tmp_path / "logs", holder="session", purpose="test")
-    holder.acquire()
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=60.0)
     attempts = {"after": 0, "before": 0}
     real_acquire = screen.ChainLock.acquire
 
     def counting_acquire(self):
-        if screen._deadline_passed_for_test():
+        if budgets and budgets[0].remaining_s() <= 0:
             attempts["after"] += 1
         else:
             attempts["before"] += 1
         return real_acquire(self)
     monkeypatch.setattr(screen.ChainLock, "acquire", counting_acquire)
-    from datetime import datetime, timedelta, timezone
-    soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
-    try:
-        assert _run(reg, data, tmp_path, "--deadline-utc", soon) == 0
-    finally:
-        holder.release()
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(30)) == 0
+    assert calls["n"] == 1 and budgets[0].remaining_s() < 0
     assert attempts["after"] == 0
     assert all(reg.strategy_states()[s] == "proposed" for s in sids)
     r = _result(reg)
     assert r["evaluated"] == 0 and r["deferred"] == 2
+    assert r["deferred_lock"] == 0 and r["stopped_at_deadline"] is True
+
+
+def test_with_a_batch_pending_a_chunk_that_eats_the_drain_reserve_is_not_started(
+        tmp_path, monkeypatch):
+    """Design 3.4 / Ruling 6 (I2): while a batch waits, DRAIN_RESERVE_S is
+    SUBTRACTED from the budget. Deadline 200 s ahead, 90 s per spec, one
+    spec per chunk, chain.lock held: after chunk 1, 110 s are left; chunk 2
+    fits on its own (90 <= 110) and is above the reserve floor (110 > 75),
+    but chunk + reserve (165) does not fit, so it is not started."""
+    reg, sids, data = _registry_with(tmp_path, 2)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 1)
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=90.0)
+    holder = ChainLock(tmp_path / "logs", holder="session", purpose="test")
+    holder.acquire()
+    try:
+        assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(200)) == 0
+    finally:
+        holder.release()
+    assert calls["n"] == 1                       # chunk 2 never started
+    assert all(reg.strategy_states()[s] == "proposed" for s in sids)
+    r = _result(reg)
+    assert r["evaluated"] == 0 and r["deferred"] == 2
+    assert r["deferred_lock"] == 1 and r["stopped_at_deadline"] is True
+
+
+def test_with_nothing_pending_the_same_chunk_is_started(tmp_path, monkeypatch):
+    """The converse: the same clock, lock free, so chunk 1 is written and
+    nothing is pending; no reserve is held back and chunk 2 (90 s of the 110
+    left) is started and written."""
+    reg, sids, data = _registry_with(tmp_path, 2)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 1)
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=90.0)
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(200)) == 0
+    assert calls["n"] == 2
+    assert all(reg.strategy_states()[s] in ("gauntlet", "graveyard") for s in sids)
+    r = _result(reg)
+    assert r["evaluated"] == 2 and r["deferred"] == 0
+    assert r["deferred_lock"] == 0 and r["stopped_at_deadline"] is False
+    assert run_verifier(reg.log_path).returncode == 0
 
 
 def test_dry_run_takes_no_lock_and_writes_nothing(tmp_path):
