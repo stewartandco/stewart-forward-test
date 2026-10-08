@@ -1,6 +1,6 @@
 # Quarantine recorder addendum — per-strategy isolation (2026-10-08)
 
-**Status: DRAFT until approved by Coen; written BEFORE implementation.**
+**Status: approved by Coen 2026-10-08 (in session), written BEFORE implementation.**
 This changes the pre-registered daily recorder's refusal semantics, so the
 change is pre-declared here, with the rules fixed before any code runs.
 Design: `docs/2026-10-08-per-asset-isolation-design.md` §6.
