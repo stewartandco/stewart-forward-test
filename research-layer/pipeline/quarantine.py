@@ -628,6 +628,10 @@ class DateReport:
     def __init__(self) -> None:
         self.deferred_only = False      # owing strategies existed; every one was deferred (rule 2)
         self.degraded: list[dict] = []  # {"source", "key", "reason"}
+        # the run returned before checking provenance (a deferred_lock skip,
+        # or a raise), so its silence is not recovery: the catch-up must not
+        # drop ledger items on the strength of it
+        self.unchecked = False
 
 
 def _record_date(args, registry: Registry, quarantined: list[str],
@@ -746,6 +750,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                       "two-strike rule break it", file=sys.stderr)
             print(f"deferred_lock: chain.lock held, skipping {args.date}; "
                   f"re-run with --date {args.date} to backfill")
+            report.unchecked = True
             return 0
 
     try:
@@ -917,8 +922,15 @@ def _record_date(args, registry: Registry, quarantined: list[str],
 def run_one_date_for_catch_up(base: list[str], date: str,
                               report: DateReport) -> tuple[int, bool]:
     one = DateReport()
-    rc = run(base + ["--date", date], report=one, write_ledger=False)
-    report.degraded.extend(one.degraded)
+    try:
+        rc = run(base + ["--date", date], report=one, write_ledger=False)
+    except BaseException:
+        one.unchecked = True            # a raise: this date was not fully checked
+        raise
+    finally:
+        # partial items survive a raise; the flag rides along either way
+        report.degraded.extend(one.degraded)
+        report.unchecked |= one.unchecked
     return rc, one.deferred_only
 
 
@@ -994,14 +1006,16 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         if write_ledger:
             # The authoritative pass: it removes recovered items, but only
             # when it reached every owed date (design s3.1, Review Focus 1)
-            # AND no attempted date failed: a failed date may not have
-            # reached its provenance check, so an item it did not report is
-            # unseen, not recovered.
+            # AND no attempted date failed or was skipped on chain.lock: such
+            # a date may not have reached its provenance check, so an item it
+            # did not report is unseen, not recovered.
             # Same guard as --date: the ledger is observability, a failed
             # write is reported and never the run's exit code.
+            recovered_is_provable = (reached_all and rc == 0
+                                     and not report.unchecked)
             try:
                 _write_quarantine_ledger(args.registry, report,
-                                         remove_unseen=reached_all and rc == 0)
+                                         remove_unseen=recovered_is_provable)
             except OSError as exc:
                 print(f"degraded_ledger_error: {exc}", file=sys.stderr)
         return rc

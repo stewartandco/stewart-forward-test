@@ -240,3 +240,47 @@ def test_catch_up_keeps_ledger_items_when_any_date_failed(tmp_path, monkeypatch)
     rc = quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
     assert rc == 1
     assert [i["key"] for i in json.loads(p.read_text(encoding="utf-8"))["items"]] == ["EFA"]
+
+
+def test_a_date_that_returned_before_its_provenance_check_does_not_recover_items(tmp_path, monkeypatch):
+    """A deferred_lock skip reports nothing because it checked nothing: its
+    silence is not recovery, so the authoritative write must keep the item."""
+    from . import degraded as dg
+    reg_path = tmp_path / "r.jsonl"
+    reg_path.write_text("", encoding="utf-8")
+    p = tmp_path / "logs" / dg.QUARANTINE_LEDGER
+    dg.record(p, "quarantine", [{"source": "restated", "key": "EFA", "reason": "x"}],
+              remove_unseen=True)
+    dates = ["2026-09-01", "2026-09-02"]
+    monkeypatch.setattr(quarantine, "_owed_dates_for_catch_up", lambda *a, **k: dates)
+
+    def fake(base, d, report):
+        if d == "2026-09-02":
+            report.unchecked = True
+        return 0, False
+    monkeypatch.setattr(quarantine, "run_one_date_for_catch_up", fake)
+    rc = quarantine.run(["--catch-up", "--registry", str(reg_path), "--data-dir", str(tmp_path)])
+    assert rc == 0
+    assert [i["key"] for i in json.loads(p.read_text(encoding="utf-8"))["items"]] == ["EFA"]
+
+
+def test_a_raising_date_keeps_its_partial_items_and_marks_the_report_unchecked(monkeypatch):
+    def boom(argv, *, report, write_ledger):
+        report.degraded.append({"source": "restated", "key": "ETHUSD", "reason": "x"})
+        raise ValueError("boom")
+    monkeypatch.setattr(quarantine, "run", boom)
+    rep = quarantine.DateReport()
+    with pytest.raises(ValueError):
+        quarantine.run_one_date_for_catch_up([], "2026-09-01", rep)
+    assert [i["key"] for i in rep.degraded] == ["ETHUSD"]
+    assert rep.unchecked is True
+
+
+def test_a_header_only_price_file_is_reported_as_having_no_bars(tmp_path):
+    from .quarantine import _owed_dates_for_catch_up, DateReport
+    (tmp_path / "EMPTY_1d.csv").write_text("date,open,high,low,close,volume\n")
+    rep = DateReport()
+    _owed_dates_for_catch_up(_StubChain(), [A], {A: "2026-09-01"},
+                             {A: _spec("EMPTY")}, tmp_path, report=rep)
+    assert [(i["source"], i["key"]) for i in rep.degraded] == [("price_file_missing", "EMPTY")]
+    assert "has no bars" in rep.degraded[0]["reason"]

@@ -221,3 +221,66 @@ def test_a_deferred_strategy_s_new_asset_is_never_supplemented(tmp_path):
     assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
     assert supplements(reg) == []
     assert len(snapshots(reg)) == 1
+
+
+# ---- end to end through --catch-up, the REAL seams (no monkeypatching) ----
+
+def test_catch_up_reports_a_restated_asset_and_charges_no_slot_for_its_date(tmp_path, capsys):
+    """B owes 2023-01-22 and its ETHUSD bars were restated after that date's
+    provenance was chained, so the date records nothing and costs no slot.
+    Built honestly: A records 01-22 BEFORE B is quarantined, so B's row is
+    genuinely absent from the chain."""
+    reg, a = gauntlet_registry(tmp_path)
+    reg.record_verdict(a["strategy_id"], "gauntlet", "pass",
+                       {"deflated_sharpe": 0.5}, "0" * 64)
+    reg.record_state_change(a["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "ETHUSD": flat_dated_bars()})
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    b = _clone(a, ["ETHUSD"])
+    reg.register_strategy(b)
+    _quarantine(reg, b)
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    out = capsys.readouterr().out
+    assert "2023-01-22 recorded nothing" in out and "no slot used" in out
+    assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [("restated", "ETHUSD")]
+    # the date after it still records both strategies
+    assert {(r["strategy_id"], r["date"]) for r in decisions(reg)} >= {
+        (a["strategy_id"], "2023-01-23"), (b["strategy_id"], "2023-01-23")}
+
+
+def test_catch_up_reports_a_missing_price_file_even_when_no_date_is_owed(tmp_path, capsys):
+    """Nothing runs through --date here (A and B are fully recorded and then B's
+    file disappears), so only the catch-up's own pre-filter can report it."""
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    for d in ("2023-01-22", "2023-01-23"):
+        assert quarantine_run(argv_for(reg, data, "--date", d)) == 0
+    (data / "ETHUSD_1d.csv").unlink()
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    assert "nothing owed" in capsys.readouterr().out
+    assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [("price_file_missing", "ETHUSD")]
+
+
+def test_catch_up_skipped_on_chain_lock_keeps_existing_ledger_items(tmp_path, capsys):
+    """The nested --date returns 0 on a held chain.lock before checking
+    anything; the authoritative write must not read that silence as recovery."""
+    from .chainlock import ChainLock
+    from . import degraded as dg
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    p = reg.log_path.parent / "logs" / dg.QUARANTINE_LEDGER
+    dg.record(p, "quarantine", [{"source": "restated", "key": "EFA", "reason": "x"}],
+              remove_unseen=True)
+    other = ChainLock(reg.log_path.parent / "logs", holder="session", purpose="manual work")
+    other.acquire()
+    try:
+        capsys.readouterr()
+        assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    finally:
+        other.release()
+    assert "deferred_lock" in capsys.readouterr().out
+    assert [i["key"] for i in ledger(reg)["items"]] == ["EFA"]
