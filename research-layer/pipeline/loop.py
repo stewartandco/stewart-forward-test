@@ -615,18 +615,25 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
        a first bar ON the cutoff day is fine), gives it no bars, so
        `run_spec` returns 0 trades and screen chains an irreversible
        `trade_count` fail and buries the spec; a file ending before the
-       cutoff shortens its train window to a stub. Rule 3 is the controller's
-       Rulings 38-40, cell-exact; the first-bar leg (Ruling 40) reads each
-       readable file's first row, so the registry shortcut below also fires on
-       a late first bar.
+       cutoff shortens its train window. Rule 3 is the controller's Rulings
+       38-41, cell-exact; the first-bar leg (Ruling 40) reads each readable
+       file's first row, so the registry shortcut below also fires on a late
+       first bar. EXCEPTION (Ruling 41): a late first bar blocks ONLY for
+       cells a proposed spec names, never for a fired-class cell on its own.
+       Unlike a missing, empty or short file it can never be fixed by a
+       re-fetch (the asset has no history before the cutoff; 10 live USDT-grid
+       cells start in 2024), so a fired-class arm would park every fire of
+       that class forever once such a cell is registered. It is silent
+       otherwise: screen never loads it, and it is permanent, so a WARN would
+       fire on every run.
 
     Everything else is reported, not blocking: stale (present, past the
-    cutoff) cells in other classes, and a missing, empty, late-starting or
-    short file for a cell no proposed spec names. Those come back as `stale_other_cells` / `stale_other_classes` /
-    `stale_other_missing`; the caller carries them on the cycle's statuses and
-    raises the overall to WARN. A blocking breach also carries
-    `stale_fired_cells` (the fired class's lagging cells). Reads only each
-    CSV's tail, so it is cheap enough for every fire.
+    cutoff) cells in other classes, and a missing, empty or short file for a
+    cell no proposed spec names. Those come back as `stale_other_cells` /
+    `stale_other_classes` / `stale_other_missing`; the caller carries them on
+    the cycle's statuses and raises the overall to WARN. A blocking breach
+    also carries `stale_fired_cells` (the fired class's lagging cells). Reads
+    only each CSV's tail and first row, so it is cheap enough for every fire.
 
     Sits with the chain verify and the orphan preflight (4.0a/4.0b). It was
     written to protect the in-loop gauntlet stage, which refused on this
@@ -643,7 +650,7 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     (`deferred_not_comparable`) rather than refusing. It is a data-health
     alarm. Coen decided 2026-10-08: narrowed to the fired class, which also
     blocks when it is stale against the rest (rules 1-2); all other staleness
-    is a WARN. Rule 3 is the controller's Rulings 38-40 (review I1, N1, first bar): it
+    is a WARN. Rule 3 is the controller's Rulings 38-41 (review I1, N1, first bar): it
     is cell-exact, the cells proposed specs name, not class-wide. The class of a cell is the one each spec declares in
     its own universe (screen.comparable_cells), the same rule the composer and
     screen use. A fired class with no registered spec has no cells here, so
@@ -707,13 +714,15 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
         f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
         for c, v in sorted(by_cls.items()))
 
-    # A missing, empty, late-starting or pre-cutoff file blocks for the fired
-    # class and for every cell a proposed spec names (screen loads exactly
-    # those, at DEFAULT_CUTOFF, and an empty or stub train window buries the
-    # spec); anywhere else it is reported. First bars come from one cheap
-    # first-row read per readable file. The registry is read only when some
-    # cell is suspect, which is never on a healthy tree; the late-first-bar
-    # case MUST be part of that test or the block could be skipped.
+    # A missing, empty or pre-cutoff-ending file blocks for the fired class and
+    # for every cell a proposed spec names (screen loads exactly those, at
+    # DEFAULT_CUTOFF); anywhere else it is reported. A LATE FIRST BAR blocks
+    # only for cells a proposed spec names (Ruling 41): it is permanent, so a
+    # fired-class arm would park every fire of that class forever. First bars
+    # come from one cheap first-row read per readable file. The registry is
+    # read only when some cell is suspect, which is never on a healthy tree;
+    # the late-first-bar case MUST be part of that test or the block could be
+    # skipped.
     first_bar: dict[str, str] = {}
     for asset, tf in cells_needed:
         cid = cell_id(asset, tf)
@@ -735,9 +744,12 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
                 continue
             if not e:
                 bad[c] = f"{c}: price file has no bars (header only)"
-            elif c in late:
+            elif c in late and c in proposed_ids:
                 bad[c] = (f"{c}: price file starts {first_bar[c][:10]}, after screen's "
-                          f"train cutoff {DEFAULT_CUTOFF}, so screen loads no bars")
+                          f"train cutoff {DEFAULT_CUTOFF}, so screen loads no bars. A "
+                          f"re-fetch cannot fix this: the asset has no history before "
+                          f"the cutoff. Exclude the cell upstream (ACTIVE_CELLS "
+                          f"admission or the composer) or deal with the spec by hand")
             elif e[:10] < DEFAULT_CUTOFF:
                 bad[c] = (f"{c}: price file ends {e[:10]}, before screen's train "
                           f"cutoff {DEFAULT_CUTOFF}")
@@ -1439,8 +1451,9 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # to the fired class, which also blocks when it is stale against the rest;
     # all other staleness is reported (status items, one WARN line, overall
     # WARN) and never blocks. One more block, cell-exact (the cells proposed
-    # specs name; controller Rulings 38-40): a missing, empty, late-starting
-    # or pre-cutoff price file there would fail or bury a spec in screen. A block is
+    # specs name; controller Rulings 38-41): a missing, empty, late-starting
+    # or pre-cutoff price file there would fail or bury a spec in screen (a
+    # late start only for a proposed spec's cell). A block is
     # `stale_data` (exit 1, zero spend).
     problem, fresh_items = _freshness_preflight(registry, layer / "data", asset_class)
     stale_report = {k: v for k, v in fresh_items.items() if k in STALE_REPORT_KEYS}

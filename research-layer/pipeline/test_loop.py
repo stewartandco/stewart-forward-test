@@ -2260,7 +2260,9 @@ def _spec_on(card_ids, asset, asset_class):
 
 def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
                                      crypto_screened=False,
-                                     crypto_first="2020-01-02 00:00:00"):
+                                     crypto_first="2020-01-02 00:00:00",
+                                     fx_screened=False,
+                                     fx_first="2020-01-02 00:00:00"):
     """AUD (fx) and BTCUSD (crypto), one daily cell each; the loop fires fx
     (accepted_fx=30). `fx2_end` adds a second fx cell (CAD), so the FIRED
     class can be stale against itself. Every spec is `proposed` (what screen
@@ -2268,7 +2270,10 @@ def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
     layer, reg = _mk_layer(tmp_path, accepted_fx=30)
     _seed_crypto_caught_up(layer, 30)
     register_example_blocks(reg)
-    reg.register_strategy(_spec_on(["card0000"], "AUD", "fx"))
+    fx_spec = _spec_on(["card0000"], "AUD", "fx")
+    reg.register_strategy(fx_spec)
+    if fx_screened:
+        reg.record_state_change(fx_spec["strategy_id"], "screened", "test")
     crypto_spec = _spec_on(["card0001"], "BTCUSD", "crypto")
     reg.register_strategy(crypto_spec)
     if crypto_screened:
@@ -2278,7 +2283,7 @@ def _layer_with_two_registered_cells(tmp_path, fx_end, crypto_end, fx2_end=None,
     data = layer / "data"
     data.mkdir()
     if fx_end:
-        _write_cell_csv(data, "AUD", "1d", ["2020-01-02 00:00:00", fx_end])
+        _write_cell_csv(data, "AUD", "1d", [fx_first, fx_end])
     if crypto_end:
         _write_cell_csv(data, "BTCUSD", "1d", [crypto_first, crypto_end])
     if fx2_end:
@@ -2652,6 +2657,36 @@ def test_a_late_first_bar_for_a_cell_no_proposed_spec_names_does_not_block(tmp_p
     status = _read_status(layer)
     assert status["items"]["outcome"] == "cycle_complete"
     assert not any(k.startswith("stale_") for k in status["items"])
+
+
+def test_a_late_first_bar_on_a_fired_class_cell_with_no_proposed_spec_does_not_block(tmp_path):
+    """Ruling 41. A cell that starts after the cutoff can never be fixed by a
+    re-fetch, so with no proposed spec on it the fired-class arm must stay
+    silent (else every fire of that class parks forever once such a cell, like
+    the 10 live 2024-start USDT cells, is registered). Silent: no stale_* item."""
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             fx_screened=True,
+                                             fx_first="2024-03-01 00:00:00")
+    fr = FakeRunner()
+
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+
+    assert rc == 0
+    assert _modules(fr) == _FULL_SEQUENCE
+    status = _read_status(layer)
+    assert status["items"]["outcome"] == "cycle_complete"
+    assert status["overall"] == "OK"
+    assert not any(k.startswith("stale_") for k in status["items"])
+
+
+def test_the_late_first_bar_message_says_a_refetch_cannot_fix_it(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00",
+                                             crypto_first="2024-03-01 00:00:00")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 1
+    detail = _read_status(layer)["items"]["stale_detail"]
+    assert "re-fetch cannot fix" in detail and "ACTIVE_CELLS" in detail
 
 
 def test_a_fired_class_with_no_registered_spec_is_never_blocked_by_its_own_cells(tmp_path):

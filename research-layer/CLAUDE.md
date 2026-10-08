@@ -100,19 +100,23 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   only when the trading-systems producer root does not exist (tests, a fresh clone). A non-zero
   exit is `snapshot_failed` (FAIL, exit 1, escalation `run_aborted`, task retry, zero spend). Then,
   after the orphan check and before triage, `_freshness_preflight` reads each registered cell's
-  LAST bar and runs the gauntlet's own `assert_cells_comparable`. **Rule:** it BLOCKS
+  LAST bar (and first row) and runs the gauntlet's own `assert_cells_comparable`. **Rule:** it BLOCKS
   (`stale_data`: FAIL, exit 1, `run_aborted`, zero spend; `stale_detail` names the cells,
   `stale_fired_cells` the fired class's lagging cells, `data_end_by_class` the classes) when (1) the
   FIRED class's cells are not mutually comparable, or (2) the fired class is stale AGAINST the rest
   (the lagging side of a cross-class breach) -- both Coen, 2026-10-08 -- or (3) a price file is
-  MISSING, EMPTY (header only), STARTS after screen's train cutoff (`screen.DEFAULT_CUTOFF`; screen
-  keeps a bar iff its date[:10] <= the cutoff, so a first bar ON the cutoff day passes) or ENDS before
-  it, for a fired-class cell or any cell a `proposed` spec of any class names (cell-exact, the set
-  screen loads; controller Rulings 38-40): screen would fail after spend on a missing file; an empty
-  or late-starting file loads no bars, `run_spec` returns 0 trades and screen buries the spec with
-  an irreversible `trade_count` fail; a file ending before the cutoff leaves a stub train window.
+  MISSING, EMPTY (header only) or ENDS before screen's train cutoff (`screen.DEFAULT_CUTOFF`) for a
+  fired-class cell or any cell a `proposed` spec of any class names (cell-exact, the set screen
+  loads; controller Rulings 38-41), or STARTS after the cutoff for a cell a `proposed` spec names
+  (screen keeps a bar iff its date[:10] <= the cutoff, so a first bar ON the cutoff day passes; a
+  fired-class cell with a late start and no proposed spec does NOT block, because a re-fetch can
+  never fix it and the park would never end -- Ruling 41; it is silent, not a WARN): screen would
+  fail after spend on a missing file; an empty or late-starting file loads no bars, `run_spec`
+  returns 0 trades and screen buries the spec with an irreversible `trade_count` fail; a file ending
+  before the cutoff shortens the train window. The late-start message says a re-fetch cannot fix it:
+  exclude the cell upstream or deal with the spec by hand.
   ALL OTHER staleness is a WARN, never a block: a stale cell past the cutoff in another class, or a
-  missing/empty/late-starting/short file no proposed spec names. The cycle runs, the
+  missing/empty/short file no proposed spec names. The cycle runs, the
   status carries `stale_other_cells` / `stale_other_classes` / `stale_other_missing`, the run log
   prints one `WARN stale_data_report` line, and an otherwise-OK cycle's overall is WARN (exit stays
   0, so the Sentinel, which reads only the task's exit code, stays green). A fired class with no
@@ -131,12 +135,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   **Since step 8 (2026-10-07) the preflight's original purpose is gone.** It was written to stop the in-loop
   gauntlet stage refusing after every metered stage had run; that stage no longer exists. Screen never
   calls `assert_cells_comparable` and fences bars at its train cutoff, so a stale feed is invisible
-  to it (only a missing, empty, late-starting or pre-cutoff file trips it); the gauntlet worker, which loads full
+  to it (only a missing, empty or late-starting file trips it; a pre-cutoff-ending file just trains on a shorter window); the gauntlet worker, which loads full
   history, defers non-comparable candidates (`deferred_not_comparable`) rather than refusing. It is
   now a data-health alarm. Coen decided 2026-10-08: narrowed to the fired class, which also blocks
   if it is stale against the rest; all other staleness is a WARN (status items, one WARN log line,
   overall WARN). The cell-exact block on proposed specs' missing/empty/late-starting/short files is
-  the controller's Rulings 38-40, not Coen's.
+  the controller's Rulings 38-41, not Coen's.
 - State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
 - **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
 - Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
@@ -410,6 +414,14 @@ of it.
   every crypto fire, three times a day. `test_phase2_freeze.py` simulates
   both a half-landed and a fully-landed Phase 3, so a coupling error fails at
   test time rather than in production.
+- **Before SP5 Phase 3 activates the crypto USDT grid (Ruling 41): exclude late-starting cells
+  upstream.** Cells whose first bar is after `screen.DEFAULT_CUTOFF` (2023-12-31) must be excluded in
+  the ACTIVE_CELLS admission or the composer. Ten live cells start in 2024: ENA, ETHFI, JUP, PYTH,
+  RENDER, STRK, TAO, WIF, ZK, ZRO (the ">= 730 days of history" admission rule in cells.py admits
+  them all). Otherwise new specs on them are screened in-cycle with zero train bars and buried, or,
+  if left `proposed` (a screen deadline deferral does this), they park EVERY fire of every class at
+  `stale_data` (the freshness preflight blocks a late-starting cell a proposed spec names; a
+  re-fetch cannot fix it).
 - **`docs/2026-08-28-market-data-universe-design.md` s5 is STALE in this
   worktree** on the rotation rule (as is s4 on crypto's benchmark and s7b on
   the resurrection chaining). Trust the code, `docs/notes/family-openness-v1.md`
