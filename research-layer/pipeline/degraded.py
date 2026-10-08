@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LOOP_LEDGER = "degraded_loop.json"
 QUARANTINE_LEDGER = "degraded_quarantine.json"
 _REQUIRED = {"source", "key", "since_utc"}
+NOTE_TTL = timedelta(hours=36)
 
 
 def now_utc() -> str:
@@ -39,6 +41,24 @@ def read_items(path) -> tuple[list[dict], str | None]:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return [], (f"previous ledger unreadable ({type(exc).__name__}: {exc}); "
                     f"every since_utc restarts now")
+
+
+def read_note(path, now: str) -> tuple[str | None, str | None]:
+    """(note, note_utc) carried by a previous, readable ledger, or (None, None).
+    A note is a one-off statement ("every since_utc restarts now"); the 09:15
+    Sentinel must still see it after the quarantine task's later --catch-up
+    write, so `record` carries it forward until it is `NOTE_TTL` old. A ledger
+    that cannot be read carries nothing (its own fresh note replaces it)."""
+    try:
+        body = json.loads(Path(path).read_text(encoding="utf-8"))
+        note = body["note"]
+        if not isinstance(note, str) or not note:
+            return None, None
+        note_utc = body.get("note_utc") or body["ts_utc"]
+        age = datetime.fromisoformat(now) - datetime.fromisoformat(note_utc)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None, None
+    return (note, note_utc) if age < NOTE_TTL else (None, None)
 
 
 def merge(previous: list[dict], seen: list[dict], now: str, *,
@@ -67,23 +87,38 @@ def merge(previous: list[dict], seen: list[dict], now: str, *,
 
 
 def write(path, writer: str, items: list[dict], now: str,
-          note: str | None = None) -> None:
-    """Atomic replace: the Sentinel must never read a half-written file."""
+          note: str | None = None, note_utc: str | None = None) -> None:
+    """Atomic replace: the Sentinel must never read a half-written file. The
+    temp file is unique and in the target directory, so two writers can never
+    share one and os.replace stays on one volume."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = {"writer": writer, "ts_utc": now, "items": items}
     if note:
         body["note"] = note
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+        body["note_utc"] = note_utc or now
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(body, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def record(path, writer: str, seen: list[dict], *,
            remove_unseen: bool, keep_sources: tuple[str, ...] = ()) -> list[dict]:
     now = now_utc()
     previous, note = read_items(path)
+    note_utc = now if note else None
+    if not note:
+        note, note_utc = read_note(path, now)
     items = merge(previous, seen, now, remove_unseen=remove_unseen,
                   keep_sources=keep_sources)
-    write(path, writer, items, now, note)
+    write(path, writer, items, now, note, note_utc)
     return items

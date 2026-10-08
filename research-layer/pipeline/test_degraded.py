@@ -82,3 +82,50 @@ def test_a_missing_previous_ledger_is_a_first_run_not_a_note(tmp_path):
 
 def test_now_utc_carries_an_explicit_offset():
     assert dg.now_utc().endswith("+00:00")
+
+
+def _record_at(monkeypatch, p, when, seen, *, ledger_text=None):
+    monkeypatch.setattr(dg, "now_utc", lambda: when)
+    if ledger_text is not None:
+        p.write_text(ledger_text, encoding="utf-8")
+    dg.record(p, "quarantine", seen, remove_unseen=True)
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_a_clock_restart_note_survives_the_next_clean_write(tmp_path, monkeypatch):
+    p = tmp_path / dg.QUARANTINE_LEDGER
+    first = _record_at(monkeypatch, p, "2026-10-08T09:00:00+00:00",
+                       _seen("EFA"), ledger_text="{not json")
+    assert "restarts" in first["note"]
+    assert first["note_utc"] == "2026-10-08T09:00:00+00:00"
+    second = _record_at(monkeypatch, p, "2026-10-08T09:10:00+00:00", _seen("EFA"))
+    assert second["note"] == first["note"]
+    assert second["note_utc"] == "2026-10-08T09:00:00+00:00"
+    assert second["ts_utc"] == "2026-10-08T09:10:00+00:00"
+
+
+def test_a_note_older_than_36_hours_is_dropped(tmp_path, monkeypatch):
+    p = tmp_path / dg.QUARANTINE_LEDGER
+    _record_at(monkeypatch, p, "2026-10-08T09:00:00+00:00", _seen("EFA"),
+               ledger_text="{not json")
+    inside = _record_at(monkeypatch, p, "2026-10-09T20:59:00+00:00", _seen("EFA"))
+    assert "note" in inside
+    gone = _record_at(monkeypatch, p, "2026-10-09T21:01:00+00:00", _seen("EFA"))
+    assert "note" not in gone and "note_utc" not in gone
+
+
+def test_a_new_note_replaces_the_carried_one(tmp_path, monkeypatch):
+    p = tmp_path / dg.QUARANTINE_LEDGER
+    _record_at(monkeypatch, p, "2026-10-08T09:00:00+00:00", _seen("EFA"),
+               ledger_text="{not json")
+    again = _record_at(monkeypatch, p, "2026-10-08T10:00:00+00:00", _seen("EFA"),
+                       ledger_text="{still not json")
+    assert again["note_utc"] == "2026-10-08T10:00:00+00:00"
+
+
+def test_two_consecutive_writes_leave_no_temp_file(tmp_path):
+    p = tmp_path / "logs" / dg.LOOP_LEDGER
+    dg.write(p, "loop", [], T0)
+    dg.write(p, "loop", [], T1)
+    assert sorted(f.name for f in p.parent.iterdir()) == [dg.LOOP_LEDGER]
+    assert not list(p.parent.glob("*.tmp"))
