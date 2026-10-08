@@ -623,6 +623,21 @@ def _record_date(args, registry: Registry, quarantined: list[str],
         else:
             eligible.append(sid)
 
+    # Rule 1 (2026-10-08 addendum): only strategies that still OWE a row are
+    # simulated and guarded. A fully recorded strategy's rows are already on
+    # the chain; re-simulating it only fed its assets into the provenance
+    # check, so one restated asset refused every OTHER strategy's day.
+    seen_keys = existing_decisions(registry)
+    owing: list[str] = []
+    n_present = 0
+    for sid in eligible:
+        keys = [(sid, args.date, a) for a in specs[sid]["universe"]["assets"]]
+        if all(k in seen_keys for k in keys):
+            n_present += len(keys)
+        else:
+            owing.append(sid)
+    eligible = owing
+
     # Per-class calendars (2026-08-27 addendum): a spec records only when
     # EVERY asset in its universe has a bar for the date. A missing bar with
     # the file present is publication lag (FRED-fed FX runs ~a week behind
@@ -777,7 +792,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                             return 1
 
         seen = existing_decisions(registry)
-        n_written = n_skipped = 0
+        n_written, n_skipped = 0, n_present
         try:
             for sid in ready:
                 for row in observe_day(specs[sid], bars_by_asset, args.date,
