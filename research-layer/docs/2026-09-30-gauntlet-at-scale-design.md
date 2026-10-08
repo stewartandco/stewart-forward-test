@@ -108,6 +108,9 @@ week after cutover as the rollback path (section 10), then is removed.
 (Amended 2026-10-07: cutover step 8 removed the stage and the
 `GAUNTLET_IN_LOOP` flag after a clean week. The loop has no gauntlet stage
 and no flag; the only way back to in-loop judging is a code revert.)
+(Amended 2026-10-08: screen no longer runs under the loop's chain.lock; it takes
+the lock itself for each batch write of at most 200 specs and retries a batch
+that meets a held lock. See `docs/2026-10-08-screen-lock-release-design.md`.)
 
 ## 5. Chain entries
 
