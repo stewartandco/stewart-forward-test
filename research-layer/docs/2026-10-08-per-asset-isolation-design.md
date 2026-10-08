@@ -49,6 +49,16 @@ recovered once the producer verdict was ok. Row 3 is still failing.
   reserved for "something broke and the work did not happen".
 - D4. The EFA restatement is recorded on the chain by a ONE-OFF `note`
   (no new entry type, no general restatement-resolution machinery).
+- D5 (amendment, Coen 2026-10-08, same day). **D2 is superseded** by the
+  preflight another session merged at 12:45 (`6a3ef98a`, "Coen 2026-10-08
+  option a" + controller Rulings 38/39): it blocks on the FIRED class (not
+  mutually comparable, or stale against the rest) and on a missing / empty /
+  pre-cutoff file for any cell a `proposed` spec names (screen would bury that
+  spec with an irreversible `trade_count` fail); all other staleness is a WARN
+  status item at exit 0. That live preflight stays the sole authority for what
+  BLOCKS. §5 is reduced to feeding staleness into the ledger, from a report
+  that runs on every fire. §6.3 now counts a missing price file toward the
+  recorder's total stall.
 
 ## 3. The degraded contract (shared by the loop and the recorder)
 
@@ -89,8 +99,8 @@ file. Shape:
   so a missing or old ledger can never read as "all clear". Atomic replace
   (write a temp file in `logs/`, then `os.replace`).
 - **Loop:** every non-dry-run fire that completes stage 0 writes the ledger,
-  `no_trigger` and budget parks included (§5 moves the freshness check ahead
-  of the trigger decision for exactly this reason). A `--dry-run` fire writes
+  `no_trigger` and budget parks included (§5's report runs before the trigger
+  decision for exactly this reason). A `--dry-run` fire writes
   no ledger. A fire that defers before stage 0 (instance or lock) writes none;
   the Sentinel's max-age rule catches a writer that stops writing.
 - **Recorder:** only `--catch-up` REMOVES items. It is the authoritative pass:
@@ -169,43 +179,41 @@ Unchanged: a hand snapshot is still a REPAIR, never a routine; the
 pinned-prefix check keeps its exact strength; the producer's verdict is never
 overridden.
 
-## 5. Freshness preflight: name the stale cells, stop blocking
+## 5. Freshness: feed staleness into the ledger, on every fire (amended D5)
 
-Since step 8 (2026-10-07) the preflight protects no in-loop stage: screen never
-calls `assert_cells_comparable` and the worker defers non-comparable
-candidates (`deferred_not_comparable`).
+**What blocks is unchanged.** The live `_freshness_preflight` (merged
+`6a3ef98a`, Coen 2026-10-08 option a + controller Rulings 38/39) stays exactly
+as it is and stays the sole authority for blocking: the fired class not
+mutually comparable or stale against the rest, or a missing / empty /
+pre-cutoff file for any cell a `proposed` spec names, is `stale_data` (FAIL,
+exit 1, zero spend); all other staleness is a WARN status item at exit 0. This
+design does not edit that function.
 
-- New pure function `screen.stale_cells(data_end, class_of) -> dict[cell_id, reason]`
-  beside `assert_cells_comparable`, implementing the SAME rules but naming the
-  laggards:
-  - a cell with no bars (`""`) -> stale (`no bars`);
-  - WITHIN a class: every cell ending before that class's latest day -> stale;
-  - ACROSS classes (after the within-class laggards are set aside, so each
-    class is represented by its latest day): for each pair of classes whose
-    latest days are more than `3 + max(lag_a, lag_b)` calendar days apart,
-    every cell of the EARLIER class -> stale.
-- **Equivalence (tested):** `stale_cells(...)` is non-empty exactly when
-  `assert_cells_comparable(...)` raises, over generated cases and the real
-  shapes (EFA lagging its class; fx lagging crypto beyond its allowance). A
-  cell with no declared class in `class_of` is a caller bug: `stale_cells`
-  raises the same `ValueError` the assert does, never a stale item.
-  `assert_cells_comparable` itself is not modified; its callers (gauntlet
-  worker, hand gauntlet, gauntlet_stats) are untouched.
-- `_freshness_preflight` reads each cell's end individually; a MISSING price
-  file becomes a stale item (`price file missing`) instead of aborting.
-  PermissionError/OSError on a present file still escapes to `loop_crashed`,
-  exactly as today.
-- The preflight no longer returns `stale_data`: it writes one `freshness`
-  ledger item per stale cell, keeps `data_end_by_class` and adds
-  `stale_cells` (comma-joined) to the status items, and the cycle continues to
-  triage, composer and screen.
-- **It moves to every fire.** Today it sits at 4.0c, after the trigger
-  decision, so `no_trigger` and budget parks (most nights) never reach it.
-  Since it no longer aborts anything, it runs right after stage 0 on every
-  non-dry-run fire, before the trigger decision; its own docstring already
-  calls it cheap enough for every fire (tail reads plus one chain read of the
-  registered specs). The 4.0 chain verify and 4.0b orphan check keep their
-  position and their aborts.
+What it adds:
+
+- **A report-only function `_freshness_report(registry, data_dir) -> dict[cell_id, reason]`**
+  in `loop.py`, beside the preflight. Every registered cell (the set
+  `screen.comparable_cells` derives, the same set the preflight reads) is
+  stale when its price file is MISSING (`price file missing`), HEADER-ONLY
+  (`price file has no bars`), or a laggard by `_lagging_cells` over the
+  readable ends (`ends <day>, behind its class or the other classes`). It
+  reads each cell's tail individually, exactly as the preflight does, so one
+  missing file never ends the read; PermissionError/OSError still escapes to
+  `loop_crashed`. It never blocks and never changes a status outcome.
+- **It runs on every non-dry-run fire**, right after stage 0 and the
+  `Registry(registry_path)` construction, BEFORE the trigger decision, so
+  `no_trigger` and budget parks (most nights) keep the ledger current. Its
+  result becomes one `freshness` ledger item per stale cell (key = cell id),
+  written together with stage 0's items in the fire's single ledger write
+  (§3.1).
+- This closes the gap the live preflight's own docs name: its WARN cases exit
+  0, "so the Sentinel, which reads only the task's exit code, stays green".
+  Through the ledger they reach the digest as WARN and become FAIL after 3
+  days. Its blocking cases are unchanged: exit 1, FAIL at once, and the task's
+  three retries are free (the block precedes any spend).
+- Consequence for a skipped series (§4): it goes stale within its class. Under
+  the live rule only that class's fires park; every other class runs. The
+  ledger names the stage 0 skip (cause) and the stale cell (effect).
 
 **Deliberately unchanged: 28_GauntletStats.** It refuses (`cells_not_comparable`,
 exit 1) when cells are not comparable at its Sunday vintage. A registry-wide
@@ -254,9 +262,10 @@ All inside the existing `--date` path; `--catch-up` keeps routing through it.
 ### 6.3 Total stall stays loud
 
 When every ELIGIBLE strategy is deferred for a missing BAR (the existing
-`not ready` path), the run still refuses with exit 1 — a dead data pipeline
-while a 24x7 class is in the pool. Deferrals under rules 2 and 3 do not count
-toward this; they are tracked in the ledger.
+`not ready` path) **or a missing price file (rule 3; amended D5)**, the run
+still refuses with exit 1: a dead data pipeline, or a wiped data directory,
+while a 24x7 class is in the pool. Restated-asset deferrals (rule 2) do not
+count toward this; they are tracked in the ledger.
 
 ### 6.4 Protocol addendum (written and approved FIRST)
 
@@ -296,8 +305,8 @@ safe window (not 20:00-07:00, not during the worker's git step), as step 8 was.
 
 1. Addendum + SCHEMA.md text (§6.4) -> Coen approves.
 2. Recorder (§6) + its ledger writer. The urgent part.
-3. Loop: stage 0 skip (§4), `stale_cells` + narrowed preflight (§5), loop
-   ledger writer.
+3. Loop: stage 0 skip (§4), the every-fire `_freshness_report` (§5), loop
+   ledger writer. `_freshness_preflight` is not edited.
 4. Sentinel `research_degraded` (§3.3), enabled only after 2 and 3 are live
    (a missing ledger would otherwise FAIL the first digest).
 5. The chained note (§7).
@@ -306,8 +315,8 @@ safe window (not 20:00-07:00, not during the worker's git step), as step 8 was.
 
 TDD per unit; full research-layer and Sentinel suites run in the worktree,
 never the live tree. Mutation runs on the guards (rule 1's owing filter, rule
-2's per-asset deferral, the zero-write fatal, `stale_cells` equivalence, the
-Sentinel's day threshold). Builder/verifier split: a cold reviewer verifies
+2's per-asset deferral, the zero-write fatal, the freshness report's laggard
+rule, the Sentinel's day threshold). Builder/verifier split: a cold reviewer verifies
 each claim at source before the merge.
 
 Required tests (each must be seen failing first):
@@ -317,7 +326,8 @@ Required tests (each must be seen failing first):
   exit 0.
 - Recorder: an owing strategy on a restated asset is deferred alone, others
   record, a `restated` item is written, exit 0; a missing file defers alone;
-  every eligible strategy missing a bar -> still exit 1.
+  every eligible strategy missing a bar, or every one missing its file -> still
+  exit 1; a date where only restated strategies owe exits 0.
 - Recorder catch-up: deferral-only dates do not consume slots; newer owed dates
   still record within the run.
 - Stage 0: one bad series skipped, the rest written, `skipped` recorded, the
@@ -325,7 +335,10 @@ Required tests (each must be seen failing first):
   -> exit 1; explicit out-of-class `--assets` -> exit 1.
 - Loop: an old snapshot manifest (`snapshot_utc` before the stage) is not read
   as this run's skips.
-- `stale_cells` equivalence with `assert_cells_comparable`.
+- `_freshness_report`: a missing file, a header-only file and a laggard each
+  produce one item; a fresh tree produces none; it runs on a `no_trigger` fire
+  and never changes the outcome; the live preflight's existing tests pass
+  unchanged.
 - Ledger: `since_utc` kept across runs; recovered items removed; empty ledger
   written; unreadable previous ledger -> clock restart is noted; a recorder
   `--date` run never removes an item (only `--catch-up` does).
