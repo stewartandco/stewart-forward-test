@@ -291,13 +291,19 @@ def test_a_skipped_series_keeps_its_old_csv_and_record_byte_identical(tmp_path):
     root = _mk_two_source(tmp_path, gbp_verdict="ok")
     out = tmp_path / "layer"
     td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
-    csv_before = (out / "data" / "GBP_1d.csv").read_bytes()
-    rec_before = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())["series"]["GBP"]
+    # Tamper with GBP's on-disk CSV and record so a regenerated copy is distinguishable.
+    (out / "data" / "GBP_1d.csv").write_bytes(b"SENTINEL\n")
+    man_path = out / "data" / "tradfi_snapshot_manifest.json"
+    man = json.loads(man_path.read_text())
+    man["series"]["GBP"]["_marker"] = "untouched"
+    man_path.write_text(json.dumps(man), encoding="utf-8")
+    rec_before = man["series"]["GBP"]
     (root / "data" / "tradfi" / "verdict_GBP.json").write_text(json.dumps({"verdict": "fail"}))
     td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
-    man = json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())
-    assert (out / "data" / "GBP_1d.csv").read_bytes() == csv_before
-    assert man["series"]["GBP"] == rec_before and "GBP" in man["skipped"]
+    man = json.loads(man_path.read_text())
+    assert (out / "data" / "GBP_1d.csv").read_bytes() == b"SENTINEL\n"
+    assert man["series"]["GBP"] == rec_before and man["series"]["GBP"]["_marker"] == "untouched"
+    assert "GBP" in man["skipped"]
 
 
 def test_a_skipped_series_never_snapshotted_leaves_nothing_behind(tmp_path):
@@ -314,3 +320,14 @@ def test_a_clean_run_records_an_empty_skipped_map(tmp_path):
     out = tmp_path / "layer"
     td.snapshot(root, out, classes=("fx",), assets=("EUR",))
     assert json.loads((out / "data" / "tradfi_snapshot_manifest.json").read_text())["skipped"] == {}
+
+
+def test_a_clean_run_after_a_skip_resets_skipped(tmp_path):
+    root = _mk_two_source(tmp_path)
+    out = tmp_path / "layer"
+    td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    man_path = out / "data" / "tradfi_snapshot_manifest.json"
+    assert "GBP" in json.loads(man_path.read_text())["skipped"]
+    (root / "data" / "tradfi" / "verdict_GBP.json").write_text(json.dumps({"verdict": "ok"}))
+    td.snapshot(root, out, classes=("fx",), assets=("EUR", "GBP"))
+    assert json.loads(man_path.read_text())["skipped"] == {}
