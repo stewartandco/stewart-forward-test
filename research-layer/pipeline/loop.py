@@ -547,6 +547,20 @@ def _clip(text: str, n: int = 800) -> str:
     return text if len(text) <= n else f"{text[:n]} [+{len(text) - n} chars truncated]"
 
 
+def _first_bar_date(path: Path) -> str:
+    """The first data row's date string of a price CSV ("" for a header-only
+    file), reading only the first lines, never the whole file. The counterpart
+    of screen._last_csv_date; same first-field convention. Assumes ascending
+    bars, like cell_end_dates (every producer writes them so)."""
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip().lstrip("\ufeff")
+            if not line or line.lower().startswith("date,"):
+                continue
+            return line.split(",", 1)[0].strip()
+    return ""
+
+
 def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
     """The cells that make `ends` non-comparable, by the gauntlet's own rule.
 
@@ -591,18 +605,24 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     2. the fired class is stale AGAINST the rest: its cells are the lagging
        side of a cross-class breach (the 2026-09-11 shape, e.g. all fx 20 days
        behind crypto);
-    3. a price file is MISSING, EMPTY (header only) or ends before screen's
+    3. a price file is MISSING, EMPTY (header only), STARTS after screen's
        train cutoff (`screen.DEFAULT_CUTOFF`, which the loop never overrides)
-       for a fired-class cell or for any cell a `proposed` spec of any class
-       names. `pipeline.screen` loads exactly those cells in every class: a
-       missing file would fail it AFTER triage and both composer calls were
-       paid for, and an empty or too-short one gives it no train bars, so
+       or ENDS before it, for a fired-class cell or for any cell a `proposed`
+       spec of any class names. `pipeline.screen` loads exactly those cells in
+       every class: a missing file would fail it AFTER triage and both
+       composer calls were paid for; an empty file, or one whose first bar is
+       past the fence (screen keeps a bar iff its date[:10] <= the cutoff, so
+       a first bar ON the cutoff day is fine), gives it no bars, so
        `run_spec` returns 0 trades and screen chains an irreversible
-       `trade_count` fail and buries the spec.
+       `trade_count` fail and buries the spec; a file ending before the
+       cutoff shortens its train window to a stub. Rule 3 is the controller's
+       Rulings 38-40, cell-exact; the first-bar leg (Ruling 40) reads each
+       readable file's first row, so the registry shortcut below also fires on
+       a late first bar.
 
     Everything else is reported, not blocking: stale (present, past the
-    cutoff) cells in other classes, and a missing, empty or short file for a
-    cell no proposed spec names. Those come back as `stale_other_cells` / `stale_other_classes` /
+    cutoff) cells in other classes, and a missing, empty, late-starting or
+    short file for a cell no proposed spec names. Those come back as `stale_other_cells` / `stale_other_classes` /
     `stale_other_missing`; the caller carries them on the cycle's statuses and
     raises the overall to WARN. A blocking breach also carries
     `stale_fired_cells` (the fired class's lagging cells). Reads only each
@@ -623,7 +643,7 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
     (`deferred_not_comparable`) rather than refusing. It is a data-health
     alarm. Coen decided 2026-10-08: narrowed to the fired class, which also
     blocks when it is stale against the rest (rules 1-2); all other staleness
-    is a WARN. Rule 3 is the controller's Rulings 38/39 (review I1, N1): it
+    is a WARN. Rule 3 is the controller's Rulings 38-40 (review I1, N1, first bar): it
     is cell-exact, the cells proposed specs name, not class-wide. The class of a cell is the one each spec declares in
     its own universe (screen.comparable_cells), the same rule the composer and
     screen use. A fired class with no registered spec has no cells here, so
@@ -687,13 +707,21 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
         f"{c}:{min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
         for c, v in sorted(by_cls.items()))
 
-    # A missing, empty or pre-cutoff file blocks for the fired class and for
-    # every cell a proposed spec names (screen loads exactly those, at
-    # DEFAULT_CUTOFF, and an unreadable train window buries the spec);
-    # anywhere else it is reported. The registry is read only when some cell
-    # is suspect, which is never on a healthy tree.
+    # A missing, empty, late-starting or pre-cutoff file blocks for the fired
+    # class and for every cell a proposed spec names (screen loads exactly
+    # those, at DEFAULT_CUTOFF, and an empty or stub train window buries the
+    # spec); anywhere else it is reported. First bars come from one cheap
+    # first-row read per readable file. The registry is read only when some
+    # cell is suspect, which is never on a healthy tree; the late-first-bar
+    # case MUST be part of that test or the block could be skipped.
+    first_bar: dict[str, str] = {}
+    for asset, tf in cells_needed:
+        cid = cell_id(asset, tf)
+        if ends.get(cid):
+            first_bar[cid] = _first_bar_date(Path(data_dir) / f"{asset}_{tf}.csv")
+    late = {c for c, f in first_bar.items() if f[:10] > DEFAULT_CUTOFF[:10]}
     bad: dict[str, str] = {}
-    if missing or any(not e or e[:10] < DEFAULT_CUTOFF for e in ends.values()):
+    if missing or late or any(not e or e[:10] < DEFAULT_CUTOFF for e in ends.values()):
         states = registry.strategy_states()
         proposed = [sp for sp in all_specs if states.get(sp.get("strategy_id")) == "proposed"]
         proposed_ids = ({cell_id(*c) for c in comparable_cells(proposed)[0]}
@@ -707,6 +735,9 @@ def _freshness_preflight(registry: Registry, data_dir: Path,
                 continue
             if not e:
                 bad[c] = f"{c}: price file has no bars (header only)"
+            elif c in late:
+                bad[c] = (f"{c}: price file starts {first_bar[c][:10]}, after screen's "
+                          f"train cutoff {DEFAULT_CUTOFF}, so screen loads no bars")
             elif e[:10] < DEFAULT_CUTOFF:
                 bad[c] = (f"{c}: price file ends {e[:10]}, before screen's train "
                           f"cutoff {DEFAULT_CUTOFF}")
@@ -1408,8 +1439,8 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # to the fired class, which also blocks when it is stale against the rest;
     # all other staleness is reported (status items, one WARN line, overall
     # WARN) and never blocks. One more block, cell-exact (the cells proposed
-    # specs name; controller Rulings 38/39): a missing, empty or pre-cutoff
-    # price file there would fail or bury a spec in screen. A block is
+    # specs name; controller Rulings 38-40): a missing, empty, late-starting
+    # or pre-cutoff price file there would fail or bury a spec in screen. A block is
     # `stale_data` (exit 1, zero spend).
     problem, fresh_items = _freshness_preflight(registry, layer / "data", asset_class)
     stale_report = {k: v for k, v in fresh_items.items() if k in STALE_REPORT_KEYS}
