@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+DIA,long,2025-06-11 00:00:00,429.86,2025-06-12 00:00:00,428.2,signal:ma_crossunder,-0.004261722421253489,1.0

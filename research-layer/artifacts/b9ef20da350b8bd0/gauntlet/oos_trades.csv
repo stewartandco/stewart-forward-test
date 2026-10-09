@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+DIA,long,2025-06-10 00:00:00,428.265,2025-06-16 00:00:00,425.05,signal:regime_flip,-0.007907034196116868,1.0
+DIA,long,2025-06-24 00:00:00,428.53,2026-03-19 00:00:00,459.97,signal:regime_flip,0.07296709215224158,1.0

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWU,long,2024-01-29 00:00:00,32.57,2024-02-13 00:00:00,31.87,stop,-0.021892170709241588,1.0
+EWU,long,2025-02-11 00:00:00,36.17,2025-02-12 00:00:00,36.29,signal:ma_crossunder,0.002917666574509159,1.0

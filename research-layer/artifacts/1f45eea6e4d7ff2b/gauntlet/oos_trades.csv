@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWC,long,2024-07-11 00:00:00,38.21,2024-08-02 00:00:00,37.55,stop,-0.017672965192358104,1.0
+EWC,long,2025-05-01 00:00:00,42.32,2025-05-02 00:00:00,42.71,signal:ma_crossunder,0.008815500945179534,0.6448897714339386
