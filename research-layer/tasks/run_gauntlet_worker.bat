@@ -74,7 +74,10 @@ type nul > "%SCOPE%"
 if "%REG%"=="1" echo research-layer/registry_log.d>> "%SCOPE%"
 rem Only bundle paths ride the list (the worker writes nothing else), so a
 rem hand edit naming the registry or a parent directory never reaches git.
-if exist "%TAKING%" findstr /b /c:"research-layer/artifacts/" "%TAKING%" >> "%SCOPE%"
+rem A line with ".." or a backslash is dropped too: git resolves
+rem research-layer/artifacts/../registry_log.jsonl to the live file. findstr
+rem /l /c: is literal; "\\" is findstr's escape for one backslash.
+if exist "%TAKING%" findstr /b /c:"research-layer/artifacts/" "%TAKING%" | findstr /v /l /c:".." | findstr /v /l /c:"\\" >> "%SCOPE%"
 rem An empty scope must never reach git: `git commit --pathspec-from-file`
 rem with an empty file commits the WHOLE index, another session's staged work
 rem and an unsynced mirror included (review 2026-10-09). findstr exits 1 on

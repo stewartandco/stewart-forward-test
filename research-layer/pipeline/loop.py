@@ -589,9 +589,12 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
     for rel in listed:                    # screen's list; a vanished file is skipped
         if rel in seen:
             continue
-        if not rel.startswith("research-layer/artifacts/"):
+        if (not rel.startswith("research-layer/artifacts/")
+                or ".." in rel.split("/") or "\\" in rel):
             # Screen lists bundle files only; anything else is a hand edit,
-            # and the live registry must never ride in past the mirror.
+            # and the live registry must never ride in past the mirror. A
+            # `..` segment (`artifacts/../registry_log.jsonl` resolves to the
+            # live file in git) or a backslash is never a path screen writes.
             gone.add(rel)
             continue
         if _on_disk(layer, rel):

@@ -233,6 +233,27 @@ def test_worker_list_lines_outside_artifacts_never_enter_the_scope(tmp_path):
     assert _head_files(repo) == [BUNDLE]
 
 
+def test_worker_list_lines_with_dotdot_or_backslash_never_enter_the_scope(tmp_path):
+    """`research-layer/artifacts/../registry_log.jsonl` passes the artifacts
+    prefix filter, and git resolves it to the live file, which is still
+    tracked in this scratch repo and was appended to by the stub: without the
+    guard the commit carries it (final review 2026-10-09)."""
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    _refuse_next_sync(repo)
+    with (repo / "research-layer/pipeline/gauntlet_worker.py").open("a", encoding="utf-8") as f:
+        f.write("with open(L / 'logs' / 'gauntlet_worker_commit_paths.txt', 'a') as f:\n"
+                "    f.write('research-layer/artifacts/../registry_log.jsonl\\n'"
+                "            'research-layer/artifacts/cccc000000000001/../../registry_log.jsonl\\n'"
+                "            'research-layer/artifacts/cccc000000000001\\\\..\\\\..\\\\registry_log.jsonl\\n'"
+                "            'research-layer/artifacts/cccc000000000001\\\\config.json\\n')\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "hand-edited list stub")
+    assert _run(bat) == 0
+    assert _head_files(repo) == [BUNDLE]
+    scope = (repo / "research-layer/logs/gauntlet_worker_commit_pathspec.txt").read_text(encoding="utf-8")
+    assert scope.split() == [BUNDLE]
+
+
 def test_stats_commits_the_mirror_and_skips_an_unchanged_one(tmp_path):
     repo, bat = _scratch(tmp_path, "run_gauntlet_stats.bat")
     assert _run(bat) == 0

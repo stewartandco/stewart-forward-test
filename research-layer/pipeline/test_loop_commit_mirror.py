@@ -107,3 +107,22 @@ def test_listed_paths_outside_artifacts_never_enter_the_scope(tmp_path):
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_commit,) = _git(fr, "commit")
     assert fr.pathspecs[i_commit] == [MIRROR] + paths
+
+
+def test_listed_paths_with_dotdot_or_backslash_never_enter_the_scope(tmp_path, capsys):
+    """`research-layer/artifacts/../registry_log.jsonl` starts with the
+    artifacts prefix but git resolves it to the live file; a backslash path
+    names a real bundle on Windows but is never one screen writes. Both are
+    dropped as foreign, loudly (final review 2026-10-09)."""
+    layer = _layer(tmp_path)
+    paths = _bundle(layer, "dddd000000000006")
+    foreign = ["research-layer/artifacts/../registry_log.jsonl",
+               "research-layer/artifacts/dddd000000000006/../../registry_log.jsonl",
+               "research-layer/artifacts/dddd000000000006\\config.json"]
+    _list(layer, foreign + paths)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    (i_add,), (i_commit,) = _git(fr, "add"), _git(fr, "commit")
+    assert fr.pathspecs[i_add] == [MIRROR] + paths
+    assert fr.pathspecs[i_commit] == [MIRROR] + paths
+    assert "WARNING skipped 3 listed screen path(s)" in capsys.readouterr().out
