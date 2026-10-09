@@ -103,7 +103,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   prefix" means the live file was rewritten or truncated. Coen's call; never
   delete registry_log.d or hand-edit the manifest to make a sync pass.
 - **Verify:** `python verify_registry.py registry_log.d` (manifest + boundary
-  checks, then the normal walk); `python -m pipeline.chain_mirror check` says
+  checks, then the normal walk; with NO path argument it reads
+  `registry_log.jsonl`, or `registry_log.d` when only that exists, as in a
+  public clone); `python -m pipeline.chain_mirror check` says
   MATCH / BEHIND / MISMATCH against the live file, read-only.
 - **⚠ NEVER check out a commit from before the switch in the LIVE tree**
   (`checkout`/`switch`/`reset`/rebase): moving onto a commit that tracks
@@ -111,15 +113,45 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   back DELETES it. A hand commit of the chain = `python -m pipeline.chain_mirror
   sync` then stage `research-layer/registry_log.d`; never `git add -f
   registry_log.jsonl`.
-- **Merging a branch cut before the switch into the live tree** is safe only if
-  that branch never touched `registry_log.jsonl` (pipeline branches do not). A
-  branch that did touch it conflicts; resolve by keeping the deletion and
-  never taking the branch's copy.
+- **⚠ NEVER merge into the LIVE tree a branch that touched
+  `registry_log.jsonl`.** Git sees a modify/delete conflict, writes the
+  branch's copy over the (now untracked) live chain, and `git merge --abort`
+  then DELETES the live file (reproduced 2026-10-09). Before ANY merge into
+  live run `git diff --name-only $(git merge-base HEAD <branch>) <branch> --
+  research-layer/registry_log.jsonl`: it must print NOTHING. Pipeline
+  branches never touch it; one that does is never merged in the live tree.
+  If the live file is ever lost, the recovery sources are the pre-switch
+  backup `E:\Users\Coen\Claude\_backups\registry_log.jsonl.bak-<date>-pre-segments`
+  and the segments: joined in order they are the live content, as of the last
+  sync, with LF endings (LF -> CRLF gives the live bytes back).
+- **⚠ NEVER run `git clean -x` or `git clean -X` in the LIVE tree.** Since the
+  switch the live chain is an IGNORED file (as is all of `logs/`), and
+  `-x`/`-X` delete ignored files.
+- **⚠ NEVER revert or reset the switch commit** ("chain: git tracks
+  registry_log.d segments; registry_log.jsonl is local"): while the ignore
+  rule is active git overwrites the ignored live file with the switch-time
+  blob. The rollback order is in the design doc s6: revert the MERGE, never
+  the switch commit.
+- **Sync refuses with "sealed segment ... on disk is missing or differs from
+  the manifest":** restore that file, never delete the mirror. First `git
+  checkout -- research-layer/registry_log.d/<seg>`; if the next sync still
+  refuses, HEAD's copy was never the sealed one, so rebuild it from the live
+  file, from `research-layer/` (the one-liner asserts the manifest's sha256
+  before it writes), then sync again:
+  `python -c "from pipeline import chain_mirror as cm; import hashlib, pathlib; m = cm.load_manifest('registry_log.d'); r = next(x for x in m['sealed'] if x['file'] == '<seg>'); L = cm.split_lines(cm.read_live('registry_log.jsonl')); d = b''.join(L[r['first_line'] - 1:r['last_line']]); assert hashlib.sha256(d).hexdigest() == r['sha256']; pathlib.Path('registry_log.d', r['file']).write_bytes(d)"`.
+  Cause: a sync stalled more than 600 s (`LOCK_STALE_S`) lost a lock race and
+  overwrote a segment another sync had just sealed. Rare, and it does NOT
+  clear by itself: every later sync refuses until the file is restored.
+- **Segment size has a hard ceiling, `HARD_MAX_BYTES` = 50 MiB**, that no
+  manifest can raise: sync refuses a `segment_max_bytes` over it and
+  `check_layout` (so the verifier) flags it and any segment over it.
 - **Unpushed history still holds full-file `registry_log.jsonl` blobs up to
   81.5 MB.** They are under GitHub's 100 MiB limit, so the push works, and they
   stay in history forever. That is expected; never "fix" it with a history
   rewrite.
-- The commit lists carry `research-layer/artifacts/` paths only, and the
+- The commit lists carry `research-layer/artifacts/` paths only (a line with a
+  `..` segment or a backslash is dropped too: git resolves
+  `artifacts/../registry_log.jsonl` to the live file), and the
   worker never hands git an empty pathspec file (`git commit
   --pathspec-from-file=<empty>` commits the WHOLE index). Wrappers test exit
   codes for EXACTLY 0 (a crash's NTSTATUS code is negative).

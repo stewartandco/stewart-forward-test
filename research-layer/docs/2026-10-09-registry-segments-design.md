@@ -200,27 +200,53 @@ commits the live file, because the guard is gone and the committers stage
    no index.lock, gauntlet_worker.lock or chain.lock; nothing staged; the
    next :00/:30 fire more than a few minutes away). Daytime, clear of 20:00
    (loop) and 08:20 (quarantine).
-2. Back up the live file:
-   `logs/registry_log.jsonl.bak-<date>-pre-segments`.
+2. Back up the live file OUTSIDE the repo:
+   `E:\Users\Coen\Claude\_backups\registry_log.jsonl.bak-<date>-pre-segments`.
+   Never under `logs/`: after the switch the live file and `logs/` are both
+   ignored, so a `git clean -x` / `-X` would delete the chain and its backup
+   together.
 3. `python -m pipeline.chain_mirror sync`: the first sync writes about two
    sealed segments plus the active one, and the manifest.
 4. `python -m pipeline.chain_mirror check` must report MATCH. Then
    `python verify_registry.py registry_log.d` must report VALID with the same
    entry count as `python verify_registry.py registry_log.jsonl` run at the
    same moment.
-5. `git rm --cached research-layer/registry_log.jsonl`. Add
-   `research-layer/registry_log.jsonl` to `.gitignore`, and the `-text` rule
-   to `.gitattributes`.
-6. Commit only `research-layer/registry_log.jsonl` (the removal),
-   `research-layer/registry_log.d`, `.gitignore` and `.gitattributes`, by
-   pathspec. Nothing else.
-7. Confirm with `git show --stat HEAD` that the live file still exists on
-   disk and its size is unchanged. Then confirm the next worker run commits
+5. `git rm --cached -q research-layer/registry_log.jsonl`, then
+   `git add research-layer/registry_log.d`. The `.gitignore` rule for
+   `research-layer/registry_log.jsonl` and the `-text` rule in
+   `.gitattributes` come with the merge; `git add .gitignore .gitattributes`
+   only if either still shows as changed.
+6. `git diff --cached --name-status --no-renames` must show EXACTLY
+   `D research-layer/registry_log.jsonl` plus `A` lines for the segments and
+   `MANIFEST.json` (and an `M` line for `.gitignore` / `.gitattributes` only
+   if step 5 staged it), and nothing else. Stop if anything else is staged.
+   (`--no-renames`: without it git may pair the removal with the first
+   segment and print one `R` line instead of the `D`.)
+   Then commit WITHOUT a pathspec:
+   `git commit -m "chain: git tracks registry_log.d segments; registry_log.jsonl is local"`.
+   Never `git commit -- <paths>` here: a pathspec commit is the `--only` form,
+   which takes the named paths' WORKING-TREE content, so it re-adds the live
+   file that `git rm --cached` just removed (reproduced 2026-10-09).
+7. Confirm: `git ls-files research-layer/registry_log.jsonl` prints NOTHING;
+   `git show --stat --no-renames HEAD` lists `registry_log.jsonl` with
+   deletions only, plus the segments and the manifest; the live file still
+   exists on disk at its size. Then confirm the next worker run commits
    `registry_log.d` (its log line).
 
-**Rollback** (before any push): revert the merge, then `git add` the live file
-back, but only while it is under the guard size. Otherwise leave it
-untracked and re-apply the stopgap.
+**Rollback** (before any push), in this order, under the step 1 guard:
+
+- (a) **Never revert or reset the switch commit** (step 6). While the ignore
+  rule is active, either one writes the switch-time blob of
+  `registry_log.jsonl` over the ignored live file.
+- (b) Revert the MERGE commit: `git revert -m 1 <merge>`. That also reverts
+  the ignore rule, so the live file is no longer ignored; then
+  `git add research-layer/registry_log.jsonl`, but ONLY while it is under
+  95 MiB (the stopgap's guard size). Over that, leave it untracked.
+- (c) The stopgap commit `72c8973dc` (`fix/registry-commit-guard`) is NOT on
+  the live branch: it arrives only inside this merge, so (b) reverts it too,
+  and re-merging `fix/registry-commit-guard` afterwards is a no-op (the
+  commit is already an ancestor). If the guard is needed again:
+  `git cherry-pick 72c8973dc`, never a re-merge.
 
 ## 7. Hazards this creates (each goes into research-layer/CLAUDE.md)
 
@@ -230,10 +256,25 @@ untracked and re-apply the stopgap.
   file with the old committed copy, and moving back would DELETE it. Feature
   worktrees are unaffected (they do not hold the live chain). The backup in
   step 2 is the recovery copy.
-- **Merging a branch cut before the switch into live** is safe as long as
-  that branch never touched `registry_log.jsonl`, which pipeline branches do
-  not. A branch that did touch it conflicts. Resolve by keeping the deletion
-  and never taking the branch's copy.
+- **Never merge into the LIVE tree a branch that touched
+  `registry_log.jsonl`.** Git sees a modify/delete conflict and writes the
+  branch's copy over the untracked live file, and `git merge --abort` then
+  deletes it (reproduced 2026-10-09). Before any merge into live,
+  `git diff --name-only $(git merge-base HEAD <branch>) <branch> -- research-layer/registry_log.jsonl`
+  must print nothing. Pipeline branches never touch it. If the live file is
+  ever lost, the recovery sources are the step 2 backup and the segments:
+  joined in order they are the live content (as of the last sync) with LF
+  endings.
+- **Never run `git clean -x` or `-X` in the LIVE tree.** The live chain is an
+  ignored file after the switch, and so is everything under `logs/`.
+- **Never revert or reset the switch commit** (Rollback (a) above).
+- **A sync refusing with "sealed segment ... on disk is missing or differs
+  from the manifest"** is repaired by restoring that file
+  (`git checkout -- research-layer/registry_log.d/<seg>`, or rebuilding it
+  from the live file's manifest line range when HEAD's copy is not the
+  sealed one), never by deleting the mirror. Cause: a sync stalled more than
+  600 s lost a lock race and overwrote a just-sealed segment. Rare; it does
+  not clear by itself.
 - **A hand commit of the chain** now means `chain_mirror sync` plus staging
   `registry_log.d`, never `git add registry_log.jsonl` (gitignored, so git
   refuses it without `-f`; never use `-f` on it).
