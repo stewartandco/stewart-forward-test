@@ -378,9 +378,16 @@ def _proposed_registry(tmp_path, n=2):
 
 
 def test_screen_batch_writes_the_same_entries_as_the_three_record_calls(tmp_path):
+    # Build ONE chain and clone it: reader.build_card stamps created_utc with
+    # the wall clock (1 s resolution), so two separate builds that straddle a
+    # second boundary get different card ids, hence different strategy ids
+    # (flaked under full-suite load, 2026-10-09).
     a, sids_a = _proposed_registry(tmp_path / "a")
-    b, sids_b = _proposed_registry(tmp_path / "b")
-    assert sids_a == sids_b
+    (tmp_path / "b").mkdir()
+    b = Registry(tmp_path / "b" / "reg.jsonl")
+    b.log_path.write_bytes(a.log_path.read_bytes())
+    sids_b = list(sids_a)
+    assert b.strategy_states() == {sid: "proposed" for sid in sids_b}
     metrics = {"trades": 1, "net_pnl": 0.5}
     # old path
     for sid, (v, to, why) in zip(sids_a, [("fail", "graveyard", "trade_count"),
