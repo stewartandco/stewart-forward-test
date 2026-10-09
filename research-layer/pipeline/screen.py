@@ -22,6 +22,7 @@ import argparse
 from pathlib import Path
 from collections.abc import Iterable
 
+from . import commit_list as _commit_list
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id
 from .parallel import run_all, CellError
@@ -375,6 +376,21 @@ def bundle_hash(bundle: Path,
     return h.hexdigest()
 
 
+def _list_for_commit(logs_dir: Path, sids: list[str]) -> None:
+    """Best-effort, AFTER the chain write: the verdicts are already the record,
+    so a failure here is loud but never fails the run. Nothing else lists
+    the bundle, so it then stays uncommitted until someone commits it by
+    hand: the WARNING says so."""
+    try:
+        _commit_list.append(logs_dir, [f"research-layer/artifacts/{sid}/{n}"
+                                       for sid in sids
+                                       for n in _commit_list.BUNDLE_FILES])
+    except OSError as exc:
+        print(f"screen: WARNING could not list {len(sids)} bundle(s) for the "
+              f"loop commit ({exc}); they stay UNCOMMITTED until committed by "
+              f"hand: {', '.join(sids)}", flush=True)
+
+
 def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path,
@@ -415,6 +431,14 @@ def run(argv: list[str] | None = None) -> int:
         return 1
 
     logs_dir = args.logs_dir or (Path(args.registry).resolve().parent / "logs")
+    # Only bundles in the registry's own artifacts/ go on the commit list
+    # (commit_list.py); a scratch --artifacts-dir must never reach a live
+    # commit. "research-layer/" is the loop's hardcoded pathspec convention.
+    # The loop's commit reads <registry dir>/logs, so a list anywhere else
+    # would never be committed: both dirs must be the registry's own.
+    layer_dir = Path(args.registry).resolve().parent
+    list_bundles = (Path(args.artifacts_dir).resolve() == (layer_dir / "artifacts").resolve()
+                    and Path(logs_dir).resolve() == (layer_dir / "logs").resolve())
     registered: list[dict] = []
     snap = registry.snapshot(on_entry=lambda e: registered.append(e["payload"])
                              if e["entry_type"] == "strategy_registered" else None)
@@ -507,6 +531,8 @@ def run(argv: list[str] | None = None) -> int:
                                   screened_reason))
                 if items:
                     snap = registry.record_screen_outcomes_batch(snap, items)
+                    if list_bundles:
+                        _list_for_commit(logs_dir, [it[0] for it in items])
             finally:
                 lock.release()
             counts["written"] += len(items)

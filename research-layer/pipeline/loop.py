@@ -43,6 +43,7 @@ import sys
 import traceback
 
 from . import allowance as _allowance
+from . import commit_list as _commit_list
 from . import deadline as _deadline
 from datetime import datetime, timezone
 from pathlib import Path
@@ -426,9 +427,10 @@ def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
 
     Known best-effort gap: an artifact bundle that finishes landing on disk
     in the window between this scan and the `git add` below is simply
-    missed this cycle. It is NOT picked up on a later cycle either -- the
-    next cycle's start_line has already moved past its strategy_registered
-    entry."""
+    missed by THIS scan, and no later cycle's scan picks it up -- the next
+    cycle's start_line has already moved past its strategy_registered
+    entry. Screen bundles no longer depend on this scan: screen lists each
+    one it chains (commit_list.py) and commit_cycle carries that list."""
     layer = registry_path.parent
     rel_root = "research-layer"
     paths = [f"{rel_root}/registry_log.jsonl"]
@@ -447,9 +449,101 @@ def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
     return paths
 
 
+def _on_disk(layer: Path, rel: str) -> bool:
+    """A listed "research-layer/..." path exists under this layer (the same
+    hardcoded pathspec convention as collect_commit_paths)."""
+    head, _, rest = rel.partition("/")
+    return head == "research-layer" and bool(rest) and (layer / rest).is_file()
+
+
+def _read_list(path: Path) -> list[str]:
+    """A list file's paths. utf-8-sig drops a BOM (PowerShell's Out-File) and
+    errors="replace" keeps a mis-encoded hand edit (UTF-16 from a PowerShell
+    5.1 `>`) from raising; its garbled lines then match no file on disk."""
+    return path.read_text(encoding="utf-8-sig", errors="replace").split()
+
+
+def _fold_into(src: Path, dst: Path) -> None:
+    """Append src's paths onto dst, then delete src. Order is irrelevant: the
+    commit dedupes, and a path listed twice costs nothing."""
+    lines = _read_list(src)
+    if lines:
+        with dst.open("a", encoding="utf-8", newline="\n") as f:
+            f.write("".join(x + "\n" for x in lines))
+    src.unlink()
+
+
+def _take_screen_list(logs: Path) -> tuple[list[str], bool]:
+    """Take screen's commit list (commit_list.py) for this commit. Leftovers
+    first: a .merging segment (a take killed between its rename and its
+    append) and a .taking file (a commit killed mid-way), then the current
+    list. The current list moves by RENAME only, so a hand-run screen
+    appending at that moment either keeps its file (the rename fails on
+    Windows and the list waits for the next commit) or starts a fresh one.
+    Never raises: commit bookkeeping must not fail a completed cycle.
+
+    Returns (paths, took). took is False when the take raised part-way: a
+    .taking file may then exist whose paths are NOT in `paths`, so the
+    caller must never let a successful commit delete it (re-review
+    2026-10-09: that lost a list without committing it)."""
+    lst = logs / _commit_list.SCREEN_COMMIT_LIST
+    taking = logs / _commit_list.SCREEN_COMMIT_TAKING
+    merging = logs / (_commit_list.SCREEN_COMMIT_LIST + ".merging")
+    try:
+        if merging.exists():
+            _fold_into(merging, taking)
+        if lst.exists():
+            if taking.exists():
+                os.replace(lst, merging)
+                _fold_into(merging, taking)
+            else:
+                os.replace(lst, taking)
+        return (_read_list(taking) if taking.exists() else []), True
+    except Exception as exc:                # noqa: BLE001 -- bookkeeping, see docstring
+        print(f"loop: WARNING could not take the screen commit list ({exc}); "
+              f"it waits for the next commit", flush=True)
+        return [], False
+
+
+def _settle_screen_list(logs: Path, committed: bool) -> None:
+    """After the commit: delete the taken list if it succeeded, else append it
+    back onto the list (never replace it: screen may have listed more while
+    the commit ran), the gauntlet worker wrapper's own rule. Never raises."""
+    lst = logs / _commit_list.SCREEN_COMMIT_LIST
+    taking = logs / _commit_list.SCREEN_COMMIT_TAKING
+    try:
+        if not taking.exists():
+            return
+        if committed:
+            taking.unlink()
+        else:
+            _fold_into(taking, lst)
+    except Exception as exc:                # noqa: BLE001 -- bookkeeping
+        print(f"loop: WARNING screen commit list left as .taking ({exc}); the "
+              f"next commit folds it back in", flush=True)
+
+
 def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runner) -> None:
-    """Scoped commit of this cycle's chain delta (registry_log.jsonl plus the
-    artifact bundles registered this cycle). Best-effort: a git failure is
+    """Takes screen's commit list too (commit_list.py), so a bundle screened in
+    an earlier cycle that never reached its own commit rides this one; the
+    list is deleted only after this commit succeeds."""
+    logs = registry_path.parent / "logs"
+    listed, took = _take_screen_list(logs)
+    committed = False
+    try:
+        committed = _commit_cycle(registry_path, start_line, run_id, runner, listed)
+    finally:
+        # A failed take never counts as committed: whatever it left in
+        # .taking is folded back onto the list, not deleted.
+        _settle_screen_list(logs, committed and took)
+
+
+def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runner,
+                  listed: list[str]) -> bool:
+    """Scoped commit of this cycle's chain delta (registry_log.jsonl, the
+    artifact bundles registered this cycle, and every file on screen's
+    commit list). Returns True only when the commit succeeded or there was
+    nothing to commit. Best-effort: a git failure is
     LOUD (printed) but never fails the cycle -- the chain itself is the
     trust asset, this commit is bookkeeping. Takes registry_path (not layer)
     so the caller's already-computed Path is reused rather than
@@ -470,6 +564,20 @@ def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runn
     layer = registry_path.parent
     repo = layer.parent
     paths = collect_commit_paths(registry_path, start_line)
+    seen = set(paths)
+    gone = set()
+    for rel in listed:                    # screen's list; a vanished file is skipped
+        if rel in seen:
+            continue
+        if _on_disk(layer, rel):
+            paths.append(rel)
+            seen.add(rel)
+        else:
+            gone.add(rel)
+    if gone:
+        # Loud, never silent: a garbled hand edit lands here too.
+        print(f"loop: WARNING skipped {len(gone)} listed screen path(s) not on disk, "
+              f"e.g. {sorted(gone)[0]!r}", flush=True)
     has_new_artifacts = len(paths) > 1   # more than just the registry line
 
     # The scope NEVER travels on the command line (2026-09-01). The fx cycle
@@ -492,19 +600,25 @@ def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runn
             changed = True
             break
     if not changed and not has_new_artifacts:
-        return                            # nothing changed this cycle -- silent, no commit
+        # Nothing changed this cycle -- silent, no commit. Every listed file
+        # still on disk is in `paths` (forcing has_new_artifacts), so reaching
+        # here means the list held only vanished files: nothing to keep.
+        return True
 
     with _pathspec_file(paths) as ps:
         add = runner(["git", "add", f"--pathspec-from-file={ps}"], cwd=str(repo))
         if add.returncode != 0:
             print("loop: WARNING git add failed; chain delta left uncommitted", flush=True)
-            return
+            return False
         cm = runner(["git", "commit", "-q", "-m", f"loop: {run_id} chain delta",
                      f"--pathspec-from-file={ps}"], cwd=str(repo))
         if cm.returncode != 0:
             print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
-            return
-    print(f"loop: committed chain delta ({len(paths) - 1} artifact bundle(s))", flush=True)
+            return False
+    n_listed = sum(1 for x in paths if x.count("/") >= 3)
+    print(f"loop: committed chain delta ({len(paths) - 1 - n_listed} artifact bundle(s), "
+          f"{n_listed} listed screen file(s))", flush=True)
+    return True
 
 
 def _spent(logs_dir: str | Path) -> float:

@@ -86,6 +86,23 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `ChainLock.info()` probe before it logs a holder and never defers the
   cycle (a probe, not an acquire). Triage and the composer's real run keep
   `_lock_and_run`, so a held lock there still defers the cycle.
+- **Screen bundles reach git through a commit list (2026-10-09).** After
+  each batch write, screen appends that batch's chained bundles
+  (`research-layer/artifacts/<sid>/{config.json,equity.csv,trades.csv}`) to
+  `logs/screen_commit_paths.txt`, only when `--artifacts-dir` and
+  `--logs-dir` are the registry's own (a scratch run is never listed). The
+  loop's `commit_cycle` takes the list (rename to `.taking`; leftover
+  `.taking` / `.merging` segments are folded back in first), commits it with
+  the chain delta by `--pathspec-from-file`, and deletes it ONLY after the
+  commit succeeds; on any failure it is folded back onto the list for the
+  next commit. Listed files missing on disk are skipped with a WARNING. Take
+  and settle never raise. Why: commit_cycle used to commit only bundles of
+  strategies registered in the same cycle, and 14 cycles (08-31..09-28) died
+  between screen and commit, so 8,627 screen bundles (plus 2,195 v6 gauntlet
+  bundles judged cross-cycle) were never committed; all hash-matched their
+  chained `artifacts_hash` and were committed by hand in per-day scoped
+  commits on 2026-10-09. Never hand-write the list from PowerShell 5.1
+  (UTF-16): it is read as UTF-8, so garbled lines are skipped with a WARNING.
 - **The loop STOPS AT SCREEN (Build 2a, 2026-09-30).** A cycle runs triage,
   composer and screen; screen moves passers into state `gauntlet` and the
   standalone gauntlet worker (section below) takes them from there. The
