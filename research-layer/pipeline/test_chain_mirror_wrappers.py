@@ -286,3 +286,38 @@ def test_quarantine_never_sweeps_a_live_file_someone_else_staged(tmp_path):
     assert _run(bat) == 0
     assert "research-layer/registry_log.jsonl" not in _head_files(repo)
     assert "research-layer/registry_log.jsonl" in _git(repo, "diff", "--cached", "--name-only")
+
+
+REPO_ROOT = LAYER.parent
+
+
+def test_repo_attributes_store_segments_verbatim_under_autocrlf(tmp_path):
+    """Review Focus 1: core.autocrlf=true on this machine must not touch a
+    segment; the committed blob is the LF bytes exactly."""
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    shutil.copy(REPO_ROOT / ".gitattributes", repo / ".gitattributes")
+    _git(repo, "config", "core.autocrlf", "true")
+    _git(repo, "add", ".gitattributes")
+    _git(repo, "commit", "-q", "-m", "attributes")
+    assert _run(bat) == 0
+    blob = subprocess.run(["git", "-C", str(repo), "cat-file", "-p", f"HEAD:{MIRROR}/000001.jsonl"],
+                          capture_output=True, check=True).stdout
+    assert b"\r" not in blob and blob == _live_lf(repo)
+    assert _git(repo, "check-attr", "text", "--", f"{MIRROR}/000001.jsonl").strip().endswith("unset")
+
+
+def test_repo_ignores_the_live_file_and_mirror_tmp_files():
+    out = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "--no-index", "-v",
+                          "research-layer/registry_log.jsonl",
+                          "research-layer/registry_log.d/000001.jsonl.tmp"],
+                         capture_output=True, text=True)
+    lines = out.stdout.splitlines()
+    assert len(lines) == 2, out.stdout + out.stderr
+    assert subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "--no-index", "-q",
+                           "research-layer/registry_log.d/000001.jsonl"]).returncode == 1
+
+
+def test_the_stopgap_guard_is_gone():
+    assert not (LAYER / "pipeline" / "commit_guard.py").exists()
+    for bat in ("run_gauntlet_worker.bat", "run_gauntlet_stats.bat", "run_quarantine.bat"):
+        assert b"commit_guard" not in (LAYER / "tasks" / bat).read_bytes()

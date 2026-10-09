@@ -7,3 +7,8 @@ __pycache__/
 research-layer/logs/
 *.lock
 research-layer/inbox/
+# The live chain file is local since the segments switch: git tracks its LF
+# segments in research-layer/registry_log.d/ (chain_mirror.py). Never `git add -f` it.
+research-layer/registry_log.jsonl
+# a sync killed mid-write leaves one; the next sync removes it
+research-layer/registry_log.d/*.tmp

@@ -107,8 +107,16 @@ python -m pipeline.gauntlet --dry-run
 python -m pipeline.gauntlet
 
 # 6. Verify the chain any time
-python verify_registry.py registry_log.jsonl
+python verify_registry.py registry_log.d
 ```
+
+Git tracks the chain as LF segments in `registry_log.d/` (each at most
+40 MiB, so no file approaches GitHub's 100 MiB limit), with a `MANIFEST.json`
+recording every sealed segment's line range, size, sha256 and boundary hashes.
+Joined in order, the segments are the chain. The verifier checks the manifest
+and every cross-segment link, then walks the joined chain exactly as it walks
+a single file. Commits before 2026-10 carry the chain as one
+`registry_log.jsonl`; commits after carry `registry_log.d/`. A VALID result means the hash chain in the segments verifies; it does not say the mirror is current with the live file, which `python -m pipeline.chain_mirror check` compares (MATCH / BEHIND / MISMATCH).
 
 `verify_registry.py` re-walks the hash chain and then checks nine invariants:
 
