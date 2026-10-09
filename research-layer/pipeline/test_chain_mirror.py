@@ -314,3 +314,55 @@ def test_check_flags_a_sealed_segment_that_differs_or_is_missing(tmp_path):
     # without the manifest comparison that would read BEHIND
     (md / "000002.jsonl").unlink()
     assert cm.check(reg, md) == "MISMATCH"
+
+
+def _mirrored(tmp_path, n=12, lines_per_seg=4):
+    reg, md, logs = _setup(tmp_path, n)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    assert cm.sync(reg, md, logs_dir=logs, max_bytes=line * lines_per_seg).ok
+    return reg, md
+
+
+def test_layout_of_a_good_mirror_is_clean(tmp_path):
+    reg, md = _mirrored(tmp_path)
+    assert cm.check_layout(md) == []
+    assert "".join(cm.iter_lines(md)).encode("utf-8") == cm.read_live(reg)
+
+
+def test_layout_accepts_an_empty_active_segment(tmp_path):
+    reg, md, logs = _setup(tmp_path, 0)
+    reg.write_bytes(b"")
+    assert cm.sync(reg, md, logs_dir=logs).ok
+    assert (md / "000001.jsonl").read_bytes() == b""
+    assert cm.check_layout(md) == []
+
+
+def test_layout_flags_a_flipped_byte_a_missing_file_and_an_extra_file(tmp_path):
+    _, md = _mirrored(tmp_path)
+    data = bytearray((md / "000001.jsonl").read_bytes())
+    data[5] ^= 1
+    (md / "000001.jsonl").write_bytes(bytes(data))
+    assert any("000001.jsonl: bytes/sha256" in p for p in cm.check_layout(md))
+    (md / "000002.jsonl").unlink()
+    assert any("missing" in p for p in cm.check_layout(md))
+    (md / "000099.jsonl").write_bytes(b"")
+    assert any("segment files" in p for p in cm.check_layout(md))
+
+
+def test_layout_flags_cr_and_a_missing_manifest(tmp_path):
+    _, md = _mirrored(tmp_path)
+    act = md / cm.segment_name(len(cm.load_manifest(md)["sealed"]) + 1)
+    act.write_bytes(act.read_bytes().replace(b"\n", b"\r\n"))
+    assert any("CR" in p for p in cm.check_layout(md))
+    (md / cm.MANIFEST).unlink()
+    assert cm.check_layout(md) == [f"{cm.MANIFEST} missing"]
+
+
+def test_layout_flags_a_broken_cross_segment_link(tmp_path):
+    _, md = _mirrored(tmp_path)
+    man = json.loads((md / cm.MANIFEST).read_text(encoding="utf-8"))
+    man["sealed"][0]["last_entry_hash"] = "f" * 64
+    (md / cm.MANIFEST).write_text(json.dumps(man), encoding="utf-8")
+    probs = cm.check_layout(md)
+    assert any("last_entry_hash differs" in p for p in probs)
+    assert any("does not link" in p for p in probs)

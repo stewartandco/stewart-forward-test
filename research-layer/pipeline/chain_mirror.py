@@ -22,6 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from . import degraded
 from .common import GENESIS_HASH, entry_hash
@@ -281,6 +282,83 @@ def check(registry_path, mirror_dir) -> str:
     if j == live:
         return "MATCH"
     return "BEHIND" if live.startswith(j) else "MISMATCH"
+
+
+def check_layout(mirror_dir) -> list[str]:
+    """Problems with a registry_log.d directory, read-only; [] = good.
+    Checks the manifest, that the files are exactly the sealed ones plus ONE
+    active segment, each sealed file's bytes/sha256/line range, LF only, the
+    size cap, and every cross-segment hash link. The chain walk itself is the
+    verifier's."""
+    mdir = Path(mirror_dir)
+    if not (mdir / MANIFEST).is_file():
+        return [f"{MANIFEST} missing"]
+    try:
+        man = load_manifest(mdir)
+    except (MirrorRefused, ValueError) as exc:
+        return [f"{MANIFEST} unreadable: {exc}"]
+    probs: list[str] = []
+    sealed = man.get("sealed", [])
+    maxb = man.get("segment_max_bytes", SEGMENT_MAX_BYTES)
+    want = [segment_name(k) for k in range(1, len(sealed) + 2)]
+    have = sorted(p.name for p in mdir.glob("*.jsonl"))
+    if have != want:
+        probs.append(f"segment files {have} != expected {want}")
+    line, prev_last = 1, GENESIS_HASH
+    for rec in sealed:
+        f = mdir / rec["file"]
+        if not f.is_file():
+            probs.append(f"{rec['file']} missing")
+            line, prev_last = rec["last_line"] + 1, rec["last_entry_hash"]
+            continue
+        data = f.read_bytes()
+        ls = split_lines(data)
+        if len(data) != rec["bytes"] or _sha(data) != rec["sha256"]:
+            probs.append(f"{rec['file']}: bytes/sha256 differ from the manifest")
+        if b"\r" in data:
+            probs.append(f"{rec['file']}: contains CR (segments are LF)")
+        if data and not data.endswith(b"\n"):
+            probs.append(f"{rec['file']}: does not end with LF")
+        if len(data) > maxb:
+            probs.append(f"{rec['file']}: {len(data)} bytes over the {maxb}-byte cap")
+        if rec["first_line"] != line or rec["last_line"] != line + len(ls) - 1:
+            probs.append(f"{rec['file']}: line range {rec['first_line']}..{rec['last_line']} "
+                         f"!= {line}..{line + len(ls) - 1}")
+        try:
+            first_prev, last_hash = _first_prev(ls), _last_hash(ls)
+        except ValueError as exc:
+            probs.append(f"{rec['file']}: unparsable entry ({exc})")
+        else:
+            if first_prev != rec["first_prev_entry_hash"] or rec["first_prev_entry_hash"] != prev_last:
+                probs.append(f"{rec['file']}: first entry does not link to the previous segment")
+            if last_hash != rec["last_entry_hash"]:
+                probs.append(f"{rec['file']}: last_entry_hash differs from the manifest")
+        line, prev_last = line + len(ls), rec["last_entry_hash"]
+    act = mdir / segment_name(len(sealed) + 1)
+    if act.is_file():
+        data = act.read_bytes()
+        if b"\r" in data:
+            probs.append(f"{act.name}: contains CR (segments are LF)")
+        if len(data) > maxb:
+            probs.append(f"{act.name}: {len(data)} bytes over the {maxb}-byte cap")
+        try:
+            first_prev = _first_prev(split_lines(data))
+        except ValueError as exc:
+            probs.append(f"{act.name}: unparsable entry ({exc})")
+        else:
+            if first_prev is not None and first_prev != prev_last:
+                probs.append(f"{act.name}: first entry does not link to the last sealed segment")
+    return probs
+
+
+def iter_lines(mirror_dir) -> Iterator[str]:
+    """The joined segments as text lines (each ending in LF), in order."""
+    mdir = Path(mirror_dir)
+    for k in range(1, len(load_manifest(mdir)["sealed"]) + 2):
+        p = mdir / segment_name(k)
+        if p.is_file():
+            with p.open("r", encoding="utf-8", newline="") as f:
+                yield from f
 
 
 def build_parser() -> argparse.ArgumentParser:
