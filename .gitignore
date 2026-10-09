@@ -3,7 +3,8 @@ __pycache__/
 .pytest_cache/
 
 # Reader v2 scanner runtime artifacts (dashboard reads them from disk; the
-# committed trust asset is registry_log.jsonl, not these)
+# committed trust asset is the chain, tracked as LF segments in
+# research-layer/registry_log.d/, not these)
 research-layer/logs/
 *.lock
 research-layer/inbox/

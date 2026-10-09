@@ -111,6 +111,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   back DELETES it. A hand commit of the chain = `python -m pipeline.chain_mirror
   sync` then stage `research-layer/registry_log.d`; never `git add -f
   registry_log.jsonl`.
+- **Merging a branch cut before the switch into the live tree** is safe only if
+  that branch never touched `registry_log.jsonl` (pipeline branches do not). A
+  branch that did touch it conflicts; resolve by keeping the deletion and
+  never taking the branch's copy.
+- **Unpushed history still holds full-file `registry_log.jsonl` blobs up to
+  81.5 MB.** They are under GitHub's 100 MiB limit, so the push works, and they
+  stay in history forever. That is expected; never "fix" it with a history
+  rewrite.
 - The commit lists carry `research-layer/artifacts/` paths only, and the
   worker never hands git an empty pathspec file (`git commit
   --pathspec-from-file=<empty>` commits the WHOLE index). Wrappers test exit
