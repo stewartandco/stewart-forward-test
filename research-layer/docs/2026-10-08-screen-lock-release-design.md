@@ -32,7 +32,7 @@ Measured on a copy of the live chain (99,877 entries, 2026-10-08), most of the h
   - The probe no longer defers the cycle (`_defer_midcycle_lock` is not used for screen).
   - Triage (4a) and both composer calls keep today's `_lock_and_run` wrapper; they are minutes long.
   - The post-screen chain verify (4f) is unchanged.
-- `pipeline/screen.py` takes `chain.lock` itself, only for each batch write. The holder is `screen`, and the purpose names the run id.
+- `pipeline/screen.py` takes `chain.lock` itself, only for each batch write. The holder is `screen`, and the purpose is `screen N verdict(s)`. (Amended 2026-10-09: screen is never told the run id, so the purpose does not name it.)
 
 ### 3.2 Screen's run (Coen: write as it goes)
 1. Start: the existing orphan check (strategies resting in `screened`) and the screen-protocol note check, both unchanged. Then take one chain snapshot (`Registry.snapshot`: states, head hash, byte length) and select the `proposed` specs from it. Selection and order are unchanged.
@@ -45,7 +45,7 @@ Measured on a copy of the live chain (99,877 entries, 2026-10-08), most of the h
 ### 3.3 Flushing a batch (one non-blocking attempt)
 Under `chain.lock`, if acquired:
 1. **Advance the snapshot** over only the bytes appended since (`Registry.advance`), verifying `prev_entry_hash` continuity of the tail.
-2. **Re-check each spec** on the advanced snapshot: still `proposed`, and no `screened` verdict already chained for it. A spec that fails is dropped unwritten and counted in `dropped_stale`.
+2. **Re-check each spec** on the advanced snapshot: still `proposed`. A spec that fails is dropped unwritten and counted in `dropped_stale`. (Amended 2026-10-09: there is no separate "screened verdict already chained" check. The state check suffices: a chained `screened` verdict implies the spec has left `proposed`, and no transition returns to `proposed`.)
 3. **Write the evidence bundles** for the specs still to be written: the same `write_artifacts` call, arguments and `bundle_hash`. A kept-but-unwritten spec never leaves a bundle on disk.
 4. **Append, in ONE write,** all entries for every spec in the batch, using a new `Registry.record_screen_outcomes_batch(snap, items)` on the existing `_append_at` path (Rulings 8/9). For each spec, in order:
    - `state_change` proposed -> screened, with the same reason text as today;
@@ -59,6 +59,8 @@ Under `chain.lock`, if acquired:
 5. Release the lock.
 
 If the lock is held, the batch stays pending and is retried at the next chunk boundary and in the final drain. A batch is capped at 200 specs per hold, the stats job's STATS_BATCH_MAX pattern; a larger pending set is flushed in successive holds.
+
+(Amended 2026-10-09: measured hold, on a copy of the live chain with 200 specs at the default 7 workers. Per-hold lock duration, acquire to release: median 2.27 s, max 2.48 s at 56-spec chunks (4 holds: 56, 56, 56 and 32 specs = 2.48, 2.38, 2.16, 1.11 s). A full 200-spec batch is about 8 s. Write phase 0.041 s per spec, against 6.84 s per spec before. `verify_registry` VALID. A hold is a few seconds, not well under a second. After a held lock, pending specs flush back to back in successive holds of up to 200 specs, about 8 s each.)
 
 ### 3.4 Failure handling
 - **Lock held through the end:** the unwritten specs stay `proposed` and the next run screens them. The exit is 0, with counters `deferred_lock` (specs unwritten) and `retried_written` (specs written on a retry).
@@ -92,7 +94,7 @@ If the lock is held, the batch stays pending and is retried at the next chunk bo
 - A hand-run writer is caught by the per-spec re-check (3.3 step 2) or by the size-check (exit 1).
 
 ## 5. Testing (tmp registries; never the live tree)
-- **Identity:** on a fixture with passes and fails, the old screen (loaded via `git show <base>:research-layer/pipeline/screen.py`) and the new screen produce the same entries in per-spec order (types, payloads, bundles); only `ts_utc` differs. `verify_registry` is VALID for both.
+- **Identity:** on a fixture with passes and fails, the old screen (loaded via `git show <base>:research-layer/pipeline/screen.py`) and the new screen produce the same entries in per-spec order (types, payloads, bundles); only `ts_utc` differs. `verify_registry` is VALID for both. (Amended 2026-10-09: the unit identity fixture produces fails only (`trade_count`). Pass-path identity rests on the measured proof, 78 passes and 122 fails on a copy of the live chain with entries identical apart from `ts_utc` and the prev hash derived from it and all 200 bundles byte-equal, and on the payload helpers both screens share.)
 - **Lock behaviour:**
   - Lock held at the first attempt, then released before the next chunk: written in the same run, `retried_written` counted, each bundle written exactly once.
   - Lock held for the whole run: nothing written, no bundles, all specs `proposed`, `deferred_lock` = N, exit 0.

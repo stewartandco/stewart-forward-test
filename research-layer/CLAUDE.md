@@ -49,8 +49,10 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   (2026-10-08, Coen's decision; design `docs/2026-10-08-screen-lock-release-design.md`).**
   `pipeline.screen` evaluates every chunk with NO lock, then flushes the
   verdicts under ONE non-blocking acquire (holder `screen`) per batch of at
-  most `SCREEN_BATCH_MAX` (200) specs per hold. In practice a hold is one
-  chunk (workers x 8 = 56 specs at 7 workers). Measured 2026-10-09 on a copy
+  most `SCREEN_BATCH_MAX` (200) specs per hold. A hold is normally one
+  chunk (workers x 8 = 56 specs at 7 workers), but after a held lock the
+  pending specs flush back to back in successive holds of up to 200 specs
+  (about 8 s each), with no gap between them. Measured 2026-10-09 on a copy
   of the live 103,626-entry chain (200 specs, 78 pass / 122 fail): the write
   costs 0.04 s per spec, so a hold ran 1.1 to 2.5 s (median 2.3 s, max
   2.5 s); a full 200-spec batch would hold about 8 s. Under
