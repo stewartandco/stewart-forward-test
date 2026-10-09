@@ -738,8 +738,12 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - **It never writes to the chain, and proves it:** size + sha256 before and after,
   on every exit path. It HOLDS `chain.lock` (holder `reextract-shadow`) for its
   duration so the resident scanner and the quarantine daily defer politely instead
-  of appending mid-run; run it clear of 22:30 / 02:30 (the loop), 08:20 (quarantine
-  daily) and 09:00-09:15 (Reader, Sentinel). If the chain still moves, the report
+  of appending mid-run; run it clear of 20:00-07:00 (the loop: one 20:00 fire,
+  PT11H window, ending 07:00), 08:20 (quarantine daily) and 09:00-09:15 (Reader,
+  Sentinel). The cycle guard refuses (exit 2) while `logs/loop.lock` OR
+  `logs/chain.lock` exists: the loop holds loop.lock for the whole cycle, while
+  screen takes chain.lock only per batch write (2026-10-08), so chain.lock alone
+  no longer shows a running cycle. If the chain still moves, the report
   records it as a field and names the legitimate writers - read that before
   blaming the harness.
 - **Money.** Pilot ceiling USD 3, checked before each document (the last document

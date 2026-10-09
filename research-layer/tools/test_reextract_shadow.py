@@ -431,6 +431,20 @@ def test_ensure_no_cycle_running_shows_the_lock_holder(tmp_path):
         ensure_no_cycle_running(logs)
 
 
+def test_ensure_no_cycle_running_raises_when_only_the_loop_lock_is_held(tmp_path):
+    # 2026-10-08: screen takes chain.lock only per batch write, so for most of
+    # a screen stage chain.lock is absent while the loop still holds loop.lock
+    # for the whole cycle. loop.lock alone must refuse.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "loop.lock").write_text('{"holder": "loop-instance", "pid": 1}',
+                                    encoding="utf-8")
+    assert not (logs / "chain.lock").exists()
+    with pytest.raises(RuntimeError, match="loop.lock") as info:
+        ensure_no_cycle_running(logs)
+    assert '"holder": "loop-instance"' in str(info.value)
+
+
 from tools.reextract_shadow import shadow_one_document
 
 
@@ -758,6 +772,26 @@ def test_run_refuses_when_a_cycle_holds_the_chain_lock(tmp_path, capsys, monkeyp
     assert rc == 2
     out = capsys.readouterr().out
     assert "REFUSED" in out and "chain.lock" in out
+
+
+def test_run_refuses_while_the_loop_holds_loop_lock_without_chain_lock(tmp_path, capsys,
+                                                                       monkeypatch):
+    cards = _fake_chain(tmp_path)
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.reextract_shadow._load_cards", lambda path: cards)
+    (tmp_path / "logs" / "loop.lock").write_text(
+        '{"holder": "loop-instance", "pid": 1}', encoding="utf-8")
+
+    def must_not_be_called(model, panel_model, logs):
+        raise AssertionError("the live client must not be built when refused")
+
+    monkeypatch.setattr("tools.reextract_shadow._live_extract_and_panel", must_not_be_called)
+
+    rc = run(["--layer", str(tmp_path), "--seed", "42", "--sample", "4"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "loop.lock" in out
+    assert not (tmp_path / "logs" / "chain.lock").exists()   # never took the lock
 
 
 def _stub_live(monkeypatch, meter, extract=None, panel=None):

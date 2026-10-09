@@ -382,20 +382,29 @@ class ChainUnchanged:
 
 
 def ensure_no_cycle_running(logs_dir: Path) -> None:
-    """Refuse to start while a pipeline cycle holds the chain lock.
+    """Refuse to start while a pipeline cycle is running.
 
     Not for the chain's sake - we never write it - but because a cycle's own
     spend calibration reads ledger deltas around its stages, and this run's
     charges would land inside that window and distort the loop's allowance.
+
+    Two signs, either one refuses. logs/loop.lock is held by the loop for its
+    WHOLE cycle (holder "loop-instance"). logs/chain.lock is held by any chain
+    writer; since 2026-10-08 screen takes it only per batch write, so it is
+    absent for most of a screen stage and can no longer stand in for "a cycle
+    is running" on its own.
     """
-    lock = Path(logs_dir) / "chain.lock"
-    if lock.exists():
+    for name, what in (("loop.lock", "a loop cycle is running"),
+                       ("chain.lock", "a cycle or chain writer is running")):
+        lock = Path(logs_dir) / name
+        if not lock.exists():
+            continue
         try:
             held_by = lock.read_text(encoding="utf-8").strip()[:200]
         except OSError:
             held_by = "(unreadable)"
         raise RuntimeError(
-            f"a cycle is running ({lock} is held: {held_by}) - rerun when it is "
+            f"{what} ({lock} is held: {held_by}) - rerun when it is "
             "free; shadow spend inside a cycle would distort the loop's "
             "calibration. If the holder pid is dead this is a STALE lock - "
             "check it the way pipeline.chainlock does before clearing anything.")
