@@ -366,3 +366,48 @@ def test_layout_flags_a_broken_cross_segment_link(tmp_path):
     probs = cm.check_layout(md)
     assert any("last_entry_hash differs" in p for p in probs)
     assert any("does not link" in p for p in probs)
+
+
+def test_a_stray_tmp_that_no_write_would_replace_is_removed(tmp_path):
+    """The leftover in the test above shares its name with the file the sync
+    writes anyway, so os.replace consumes it; this one is only gone if the
+    cleanup loop really runs."""
+    reg, md, logs = _setup(tmp_path, 4)
+    md.mkdir()
+    (md / "000007.jsonl.tmp").write_bytes(b"half")
+    assert cm.sync(reg, md, logs_dir=logs).ok
+    assert sorted(p.name for p in md.iterdir()) == ["000001.jsonl", cm.MANIFEST]
+
+
+def test_a_crash_before_the_first_segment_write_leaves_no_manifest_claiming_it(tmp_path, monkeypatch):
+    """Segment files first, manifest last: a kill in between must leave a
+    manifest that names no file that does not exist, or the next sync would
+    refuse forever on a sealed segment missing from disk."""
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    real = cm._write
+
+    def crash_on_first_segment(path, data):
+        if path.name == "000001.jsonl":
+            raise OSError("killed")
+        real(path, data)
+    monkeypatch.setattr(cm, "_write", crash_on_first_segment)
+    assert not cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4).ok
+    assert not (md / cm.MANIFEST).exists()
+    monkeypatch.setattr(cm, "_write", real)
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert r.ok and cm.check(reg, md) == "MATCH"
+
+
+def test_check_flags_a_sealed_range_rewritten_identically_in_live_and_segment(tmp_path):
+    """Live file and mirror still join to equal bytes, so only the per-record
+    comparison against the manifest can see that a sealed range changed."""
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert cm.check(reg, md) == "MATCH"
+    reg.write_bytes(reg.read_bytes().replace(b"note 0001", b"note 9999"))
+    seg = md / "000001.jsonl"
+    seg.write_bytes(seg.read_bytes().replace(b"note 0001", b"note 9999"))
+    assert cm.read_live(reg) == cm.joined(md)
+    assert cm.check(reg, md) == "MISMATCH"
