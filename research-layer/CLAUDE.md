@@ -79,6 +79,42 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   crashing spec (`CellError`) keeps the earlier batches; it and every later
   spec stay `proposed`.
 
+## Registry commit guard (2026-10-09 stopgap, `pipeline/commit_guard.py`)
+- **Why:** GitHub blocks any file over 100 MiB anywhere in pushed history.
+  registry_log.jsonl was 81.6 MB on 2026-10-09, growing ~2.9 MB/day (crossing
+  ~10-16, as early as ~10-12 on gauntlet-heavy days). ONE commit of a version
+  over the limit makes that commit and every later one unpushable without a
+  history rewrite of the shared live branch. Options + measurements: vault
+  note `project_registry_log_size_2026-10-09`; the durable fix is option B
+  (segment the chain), Coen 2026-10-09.
+- **All four committers ask the guard first:** `loop.commit_cycle`,
+  `tasks/run_gauntlet_worker.bat`, `tasks/run_gauntlet_stats.bat`,
+  `tasks/run_quarantine.bat`. At or over `GUARD_BYTES` (95 MiB) the registry
+  stays OUT of the commit; bundles, screen lists and price CSVs still commit.
+  The chain itself keeps growing on disk, untouched. Exit codes are unchanged.
+- **Fail-safe:** only the guard's exit 0 commits the registry (3 = held back;
+  a crash, a missing python, any other code also holds it back). A guard that
+  raises inside the loop is a "no", never a failed cycle.
+  The wrappers test the exit code for EXACTLY 0, never `if errorlevel 1`
+  (that is >= 1, so a crash's negative NTSTATUS code read as "yes"; cold
+  review 2026-10-09).
+- **The commit lists only carry `research-layer/artifacts/` paths** (loop and
+  worker filter them), so a hand edit naming the registry cannot ride past the
+  guard. **An empty scope never reaches git:** `git commit
+  --pathspec-from-file=<empty file>` commits the WHOLE index, so the worker
+  stops before git when nothing is left in scope.
+- **The pause is a degraded item, not a failure:** `logs/degraded_commit.json`
+  (writer `commit`, source `registry_commit`), rewritten on every guard call,
+  so its `ts_utc` proves the guard ran. The Sentinel reads it once the
+  manifest's `research_degraded` block names `commit_ledger`.
+- **Quarantine's commit is the --only form since this change** (`-- paths`),
+  so a registry another session staged can never ride along.
+- **Never commit registry_log.jsonl by hand once it is over the guard.** It
+  stays uncommitted until segmentation ships.
+- Tests: `test_commit_guard.py` (module + CLI), `test_loop_commit_guard.py`,
+  `test_commit_guard_wrappers.py` (RUNS copies of the three .bat files under
+  cmd.exe against a scratch repo; Windows only).
+
 ## Pipeline loop (25_PipelineLoop)
 - **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs
   `pipeline.screen` with `--logs-dir <logs>` and WITHOUT `_lock_and_run`:

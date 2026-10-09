@@ -39,6 +39,17 @@ cd /d "%LAYER%"
 echo ==== %DATE% %TIME% gauntlet worker ==== >> "%LOG%"
 python -m pipeline.gauntlet_worker --max-workers 6 >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
+rem Commit guard (2026-10-09 stopgap, pipeline\commit_guard.py): GitHub blocks
+rem any file over 100 MiB in pushed history, so the registry is committed ONLY
+rem on the guard's exit 0. Exit 3 (at or over the guard), or any other code,
+rem keeps it out of this commit; the chain still grows on disk, and the pause
+rem is an item in logs\degraded_commit.json for the Sentinel.
+rem The listed bundles still commit without it.
+set REG=0
+python -m pipeline.commit_guard >> "%LOG%" 2>&1
+rem Exactly 0, never `if errorlevel 1`: that test is ERRORLEVEL >= 1, so a
+rem crash's NTSTATUS code (negative, e.g. -1073741819) would read as "yes".
+if "%ERRORLEVEL%"=="0" set REG=1
 cd /d "%REPO%"
 rem A .taking file left by a run killed mid-commit goes back on the list.
 if exist "%TAKING%" (
@@ -54,17 +65,32 @@ set WANT=0
 if exist "%TAKING%" set WANT=1
 rem vs HEAD, not the index: a registry change another session staged is
 rem still uncommitted and still ours to commit.
-git diff --quiet HEAD -- research-layer/registry_log.jsonl
-if errorlevel 1 set WANT=1
+if "%REG%"=="1" (
+  git diff --quiet HEAD -- research-layer/registry_log.jsonl
+  if errorlevel 1 set WANT=1
+)
 if "%WANT%"=="0" goto :done
-> "%SCOPE%" echo research-layer/registry_log.jsonl
-if exist "%TAKING%" type "%TAKING%" >> "%SCOPE%"
+type nul > "%SCOPE%"
+if "%REG%"=="1" echo research-layer/registry_log.jsonl>> "%SCOPE%"
+rem Only bundle paths ride the list (the worker writes nothing else), so a
+rem hand edit naming the registry or a parent directory never reaches git.
+if exist "%TAKING%" findstr /b /c:"research-layer/artifacts/" "%TAKING%" >> "%SCOPE%"
+rem An empty scope must never reach git: `git commit --pathspec-from-file`
+rem with an empty file commits the WHOLE index, another session's staged work
+rem and a held-back registry included (review 2026-10-09). findstr exits 1 on
+rem no match and 2 on an error; both skip the commit.
+findstr /r /c:"[a-z0-9]" "%SCOPE%" > nul
+if errorlevel 1 goto :empty
 git add --pathspec-from-file="%SCOPE%" >> "%LOG%" 2>&1
 if errorlevel 1 goto :keep
 git commit -q -m "gauntlet worker: verdicts %DATE% %TIME%" --pathspec-from-file="%SCOPE%" >> "%LOG%" 2>&1
 if errorlevel 1 goto :keep
 if exist "%TAKING%" del "%TAKING%"
 echo committed registry and listed bundles >> "%LOG%"
+goto :done
+:empty
+echo nothing in scope (registry held back, no listed bundle); no commit >> "%LOG%"
+if exist "%TAKING%" del "%TAKING%"
 goto :done
 :keep
 echo commit skipped (git failed or nothing new in scope); bundle list kept >> "%LOG%"
