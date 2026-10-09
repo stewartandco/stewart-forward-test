@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,6 +83,8 @@ EXIT_OK = 0
 EXIT_REFUSED = 3
 LOCK_TIMEOUT_S = 120.0     # a sync takes about a second; the loop and worker can overlap at 20:00
 LOCK_STALE_S = 600.0
+LEDGER_TRIES = 5
+LEDGER_RETRY_S = 0.1
 
 LAYER = Path(__file__).resolve().parent.parent
 
@@ -169,8 +172,19 @@ def _sync_locked(registry_path: Path, mdir: Path, max_bytes: int) -> SyncResult:
                 f"of the live file's tail ({len(remainder)} bytes): the live file was "
                 f"truncated or rewritten")
     pieces = plan_pieces(lines, start, max_bytes)
+    # A stale-lock break can let another sync run to completion while this
+    # one sat between its checks and its writes. Re-read the manifest from
+    # disk right before the first write and refuse if it moved; no file
+    # numbered <= the on-disk sealed count is ever written or deleted.
+    disk_sealed = load_manifest(mdir, max_bytes)["sealed"]
+    if disk_sealed != sealed:
+        raise MirrorRefused("manifest changed during sync (another sync broke a stale "
+                            "lock?); nothing written, the next sync starts clean")
+    frozen = len(disk_sealed)
     new_sealed = []
     for n, (i, j) in enumerate(pieces[:-1], start=len(sealed) + 1):
+        if n <= frozen:
+            raise MirrorRefused(f"refusing to write sealed segment {segment_name(n)}")
         data = b"".join(lines[i:j])
         _write(mdir / segment_name(n), data)
         new_sealed.append({"file": segment_name(n), "first_line": i + 1, "last_line": j,
@@ -180,9 +194,11 @@ def _sync_locked(registry_path: Path, mdir: Path, max_bytes: int) -> SyncResult:
     i, j = pieces[-1]
     active_no = len(sealed) + len(new_sealed) + 1
     active = b"".join(lines[i:j])
+    if active_no <= frozen:
+        raise MirrorRefused(f"refusing to write sealed segment {segment_name(active_no)}")
     _write(mdir / segment_name(active_no), active)
     for stale in mdir.glob("*.jsonl"):
-        if stale.stem.isdigit() and int(stale.stem) > active_no:
+        if stale.stem.isdigit() and int(stale.stem) > max(active_no, frozen):
             stale.unlink()
     if new_sealed or not (mdir / MANIFEST).exists():
         man["sealed"] = sealed + new_sealed
@@ -194,11 +210,20 @@ def _sync_locked(registry_path: Path, mdir: Path, max_bytes: int) -> SyncResult:
 
 def _record(logs_dir, res: SyncResult) -> None:
     seen = [] if res.ok else [{"source": SOURCE, "key": KEY, "reason": res.reason}]
-    try:
-        degraded.record(Path(logs_dir) / LEDGER, WRITER, seen, remove_unseen=True)
-    except Exception as exc:                     # noqa: BLE001 -- never changes the result
-        print(f"chain_mirror: WARNING ledger not written ({type(exc).__name__}: {exc})",
-              flush=True)
+    for attempt in range(LEDGER_TRIES):
+        try:
+            degraded.record(Path(logs_dir) / LEDGER, WRITER, seen, remove_unseen=True)
+            return
+        except PermissionError as exc:           # Windows: os.replace under a racing reader
+            if attempt + 1 < LEDGER_TRIES:
+                time.sleep(LEDGER_RETRY_S)
+                continue
+            err = exc
+        except Exception as exc:                 # noqa: BLE001 -- never changes the result
+            err = exc
+        break
+    print(f"chain_mirror: WARNING ledger not written ({type(err).__name__}: {err})",
+          flush=True)
 
 
 def sync(registry_path, mirror_dir, *, logs_dir=None,
@@ -210,14 +235,20 @@ def sync(registry_path, mirror_dir, *, logs_dir=None,
     try:
         mdir.mkdir(parents=True, exist_ok=True)
         with FileLock(mdir, timeout=LOCK_TIMEOUT_S, stale_after=LOCK_STALE_S):
-            res = _sync_locked(Path(registry_path), mdir, max_bytes)
-    except MirrorRefused as exc:
-        res = SyncResult(ok=False, reason=str(exc))
+            try:
+                res = _sync_locked(Path(registry_path), mdir, max_bytes)
+            except MirrorRefused as exc:
+                res = SyncResult(ok=False, reason=str(exc))
+            except Exception as exc:             # noqa: BLE001 -- bookkeeping, see docstring
+                res = SyncResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+            if logs_dir is not None:             # still holding the lock: ledger writes serialise
+                _record(logs_dir, res)
+            return res
     except FileLockTimeout as exc:
         res = SyncResult(ok=False, reason=f"mirror lock busy ({exc})")
-    except Exception as exc:                     # noqa: BLE001 -- bookkeeping, see docstring
+    except Exception as exc:                     # noqa: BLE001 -- mkdir / lock failure
         res = SyncResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
-    if logs_dir is not None:
+    if logs_dir is not None:                     # best-effort, outside the lock
         _record(logs_dir, res)
     return res
 
@@ -232,10 +263,19 @@ def joined(mirror_dir) -> bytes:
 
 def check(registry_path, mirror_dir) -> str:
     """MATCH: the mirror equals the live file now. BEHIND: it is a strict
-    prefix (a commit has not caught up). MISMATCH: anything else."""
+    prefix (a commit has not caught up). MISMATCH: anything else, including
+    any sealed segment missing from disk or differing from the manifest."""
+    mdir = Path(mirror_dir)
     try:
-        j = joined(mirror_dir)
-    except (OSError, ValueError, MirrorRefused):
+        for rec in load_manifest(mdir)["sealed"]:
+            f = mdir / rec["file"]
+            if not f.is_file():
+                return "MISMATCH"
+            data = f.read_bytes()
+            if len(data) != rec["bytes"] or _sha(data) != rec["sha256"]:
+                return "MISMATCH"
+        j = joined(mdir)
+    except (OSError, ValueError, KeyError, TypeError, MirrorRefused):
         return "MISMATCH"
     live = read_live(registry_path)
     if j == live:

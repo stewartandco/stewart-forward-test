@@ -205,7 +205,7 @@ def test_an_oversized_entry_is_refused(tmp_path):
     assert not r.ok and "larger than segment_max_bytes" in r.reason
 
 
-def test_two_concurrent_syncs_serialise_on_the_lock(tmp_path):
+def test_two_concurrent_syncs_serialise_on_the_lock(tmp_path, capsys):
     reg, md, logs = _setup(tmp_path, 40)
     line = len(cm.split_lines(cm.read_live(reg))[0])
     results = []
@@ -218,6 +218,9 @@ def test_two_concurrent_syncs_serialise_on_the_lock(tmp_path):
     assert all(r.ok for r in results)
     assert cm.check(reg, md) == "MATCH"
     assert not (tmp_path / "registry_log.d.lock").exists()
+    led = _ledger(logs)                                   # written under the lock, intact
+    assert led["writer"] == "commit" and led["items"] == []
+    assert "ledger not written" not in capsys.readouterr().out
 
 
 def test_a_held_lock_times_out_as_a_refusal_not_an_exception(tmp_path, monkeypatch):
@@ -260,3 +263,54 @@ def test_cli_defaults_point_at_the_layer():
     assert ns.registry == LAYER / "registry_log.jsonl"
     assert ns.mirror_dir == LAYER / "registry_log.d"
     assert ns.logs_dir == LAYER / "logs"
+
+
+def test_a_sync_that_lost_a_stale_lock_race_refuses_instead_of_overwriting(tmp_path, monkeypatch):
+    """Sync A passed its checks on a SHORT live file, then B (which broke A's
+    stale lock) ran a complete sync on the LONGER one and sealed 000001. A must
+    not write over it (finding 1, reproduction by the task reviewer)."""
+    reg, md, logs = _setup(tmp_path, 1)
+    short = tmp_path / "short.jsonl"
+    short.write_bytes(reg.read_bytes())                   # A's read: one line
+    for k in (1, 2):
+        Registry(reg).append("note", {"text": f"n {k:04d}"})
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    mx = line * 2
+    real_plan = cm.plan_pieces
+    inner = []
+
+    def hooked(lines, start, max_bytes):
+        monkeypatch.setattr(cm, "plan_pieces", real_plan)
+        inner.append(cm._sync_locked(reg, md, mx))        # B runs while A is paused
+        return real_plan(lines, start, max_bytes)
+    monkeypatch.setattr(cm, "plan_pieces", hooked)
+    r = cm.sync(short, md, logs_dir=logs, max_bytes=mx)
+    assert inner and inner[0].ok and inner[0].sealed_new == ["000001.jsonl"]
+    assert not r.ok and "manifest changed during sync" in r.reason
+    man = cm.load_manifest(md)
+    assert [s["file"] for s in man["sealed"]] == ["000001.jsonl"]
+    for rec in man["sealed"]:
+        assert cm._sha((md / rec["file"]).read_bytes()) == rec["sha256"]
+    assert (md / "000002.jsonl").is_file()                # B's active segment survived
+    assert cm.sync(reg, md, logs_dir=logs).ok
+    assert cm.check(reg, md) == "MATCH"
+
+
+def test_check_flags_a_sealed_segment_that_differs_or_is_missing(tmp_path):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert cm.check(reg, md) == "MATCH"
+    good = (md / "000001.jsonl").read_bytes()
+    altered = bytearray(good)
+    altered[10] = (altered[10] + 1) % 256                 # same length, other content
+    (md / "000001.jsonl").write_bytes(bytes(altered))
+    assert cm.check(reg, md) == "MISMATCH"
+    (md / "000001.jsonl").write_bytes(good)
+    assert cm.check(reg, md) == "MATCH"
+    (md / "000001.jsonl").unlink()
+    assert cm.check(reg, md) == "MISMATCH"
+    # with the active segment gone too, what is left is an empty (prefix) join:
+    # without the manifest comparison that would read BEHIND
+    (md / "000002.jsonl").unlink()
+    assert cm.check(reg, md) == "MISMATCH"
