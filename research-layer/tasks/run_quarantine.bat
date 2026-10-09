@@ -79,9 +79,10 @@ REM 4. Persist the witnessed record. Scoped pathspec ONLY -- a concurrent sessio
 REM    shares this branch and working tree, and an unscoped add would sweep its
 REM    work into this commit. Guarded so a no-change day makes no commit and
 REM    leaves a clean tree. Never pushed; pushing stays a human action.
-REM    `git diff --quiet` exits 1 when there ARE changes, which is the signal to
-REM    commit, NOT an error -- hence the explicit exit 0 below rather than
-REM    letting that errorlevel leak out as the task's result.
+REM    The change test is `git status --porcelain | findstr`: findstr exits 0 when
+REM    there ARE changes, which is the signal to commit, NOT an error -- hence the
+REM    explicit exit 0 below rather than letting a stray errorlevel leak out as
+REM    the task's result.
 REM Chain mirror (2026-10-09 segments design, pipeline\chain_mirror.py): git
 REM tracks research-layer\registry_log.d (LF segments of the chain, none over
 REM 40 MiB), never registry_log.jsonl. The mirror is staged ONLY on sync's exit

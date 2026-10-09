@@ -115,6 +115,11 @@ def _mirror_files(repo) -> list[str]:
     return sorted(_git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", MIRROR).split())
 
 
+def _git_bytes(repo, *args) -> bytes:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                          check=True).stdout
+
+
 def _ledger(repo):
     return json.loads((repo / "research-layer/logs/degraded_commit.json").read_text(encoding="utf-8"))
 
@@ -144,10 +149,24 @@ def test_worker_seals_segments_as_the_chain_grows(tmp_path):
     repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat", max_bytes=16)
     assert _run(bat) == 0
     assert _run(bat) == 0
-    assert len(_mirror_files(repo)) >= 3                  # sealed + active + manifest
-    joined = b"".join((repo / f).read_bytes() for f in _mirror_files(repo)
+    files = _mirror_files(repo)
+    assert files == sorted(f"{MIRROR}/{n}" for n in
+                           ("000001.jsonl", "000002.jsonl", "000003.jsonl", "MANIFEST.json"))
+    joined = b"".join(_git_bytes(repo, "show", f"HEAD:{f}") for f in files
                       if f.endswith(".jsonl"))
     assert joined == _live_lf(repo)
+
+
+def test_worker_with_no_bundles_still_commits_a_new_untracked_mirror(tmp_path):
+    """Detection must see UNTRACKED segments (`git diff` never reports them):
+    with no bundle list, the mirror alone is what makes the worker commit."""
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    (repo / "research-layer/pipeline/gauntlet_worker.py").write_text(
+        STUBS["gauntlet_stats"], encoding="utf-8")        # appends to the registry, lists nothing
+    _git(repo, "add", "research-layer/pipeline/gauntlet_worker.py")
+    _git(repo, "commit", "-q", "-m", "registry-only worker stub")
+    assert _run(bat) == 0
+    assert _head_files(repo) == sorted([f"{MIRROR}/000001.jsonl", f"{MIRROR}/MANIFEST.json"])
 
 
 def test_worker_with_a_refused_sync_commits_bundles_only(tmp_path):
@@ -188,8 +207,12 @@ CRASH = "import os\nos._exit(-1073741819)\n"
 def test_a_sync_that_crashes_with_a_negative_code_leaves_the_mirror_out(tmp_path, bat, want):
     repo, path = _scratch(tmp_path, bat)
     (repo / "research-layer/pipeline/chain_mirror.py").write_text(CRASH, encoding="utf-8")
-    _git(repo, "add", "-A")
+    _git(repo, "add", "research-layer/pipeline/chain_mirror.py")
     _git(repo, "commit", "-q", "-m", "crashing mirror")
+    # An UNTRACKED leftover in the mirror dir: a wrong "sync succeeded" reading
+    # of the crash code would commit it (the crashing module makes no mirror).
+    (repo / MIRROR).mkdir(parents=True, exist_ok=True)
+    (repo / MIRROR / "000001.jsonl").write_bytes(b'{"genesis": 1}' + bytes([10]))
     head = _git(repo, "rev-parse", "HEAD")
     assert _run(path) == 0
     if want is None:
@@ -235,6 +258,17 @@ def test_quarantine_commits_mirror_and_prices(tmp_path):
     assert _run(bat) == 0
     assert _head_files(repo) == sorted([f"{MIRROR}/000001.jsonl", f"{MIRROR}/MANIFEST.json",
                                         "research-layer/data/BTCUSD_1d.csv"])
+
+
+def test_quarantine_with_unchanged_prices_still_commits_a_new_untracked_mirror(tmp_path):
+    """Detection must see UNTRACKED segments: with the price CSVs unchanged,
+    the mirror alone is what makes quarantine commit."""
+    repo, bat = _scratch(tmp_path, "run_quarantine.bat")
+    (repo / "research-layer/pipeline/data_fetch.py").write_text("", encoding="utf-8")
+    _git(repo, "add", "research-layer/pipeline/data_fetch.py")
+    _git(repo, "commit", "-q", "-m", "no-op fetch stub")
+    assert _run(bat) == 0
+    assert _head_files(repo) == sorted([f"{MIRROR}/000001.jsonl", f"{MIRROR}/MANIFEST.json"])
 
 
 def test_quarantine_with_a_refused_sync_commits_prices_only(tmp_path):
