@@ -330,3 +330,20 @@ def test_the_stopgap_guard_is_gone():
     assert not (LAYER / "pipeline" / "commit_guard.py").exists()
     for bat in ("run_gauntlet_worker.bat", "run_gauntlet_stats.bat", "run_quarantine.bat"):
         assert b"commit_guard" not in (LAYER / "tasks" / bat).read_bytes()
+
+
+def test_worker_with_an_unchanged_mirror_and_no_list_makes_no_commit_attempt(tmp_path):
+    """The dirty check is what keeps a quiet run from running git add/commit
+    at all; without it the attempt fails and logs a spurious skip."""
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    assert _run(bat) == 0
+    (repo / "research-layer/pipeline/gauntlet_worker.py").write_text("", encoding="utf-8")
+    _git(repo, "add", "research-layer/pipeline/gauntlet_worker.py")
+    _git(repo, "commit", "-q", "-m", "no-op worker stub")
+    head = _git(repo, "rev-parse", "HEAD")
+    log = repo / "research-layer/logs/gauntlet-worker-run.log"
+    log.write_text("", encoding="utf-8")
+    assert _run(bat) == 0
+    assert _git(repo, "rev-parse", "HEAD") == head
+    text = log.read_text(encoding="utf-8", errors="replace")
+    assert "commit skipped" not in text and "committed" not in text
