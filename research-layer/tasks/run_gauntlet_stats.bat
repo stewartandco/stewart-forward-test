@@ -28,6 +28,19 @@ cd /d "%LAYER%"
 echo ==== %DATE% %TIME% gauntlet stats ==== >> "%LOG%"
 python -m pipeline.gauntlet_stats --chain --report "%LAYER%\logs\gauntlet-stats-report.md" >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
+rem Commit guard (2026-10-09 stopgap, pipeline\commit_guard.py): GitHub blocks
+rem any file over 100 MiB in pushed history, so the registry is committed ONLY
+rem on the guard's exit 0. Exit 3 (at or over the guard), or any other code,
+rem keeps it out of this commit; the chain still grows on disk, and the pause
+rem is an item in logs\degraded_commit.json for the Sentinel.
+rem The registry is this job's whole commit, so a "no" skips the commit.
+python -m pipeline.commit_guard >> "%LOG%" 2>&1
+rem Exactly 0, never `if errorlevel 1`: that test is ERRORLEVEL >= 1, so a
+rem crash's NTSTATUS code (negative, e.g. -1073741819) would read as "yes".
+if not "%ERRORLEVEL%"=="0" (
+  echo registry held back by the commit guard, commit skipped >> "%LOG%"
+  goto :done
+)
 cd /d "%REPO%"
 if exist "%LAYER%\logs\chain.lock" (
   echo chain.lock held, commit skipped >> "%LOG%"

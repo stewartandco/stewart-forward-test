@@ -82,11 +82,24 @@ REM    leaves a clean tree. Never pushed; pushing stays a human action.
 REM    `git diff --quiet` exits 1 when there ARE changes, which is the signal to
 REM    commit, NOT an error -- hence the explicit exit 0 below rather than
 REM    letting that errorlevel leak out as the task's result.
+REM Commit guard (2026-10-09 stopgap, pipeline\commit_guard.py): GitHub blocks
+REM any file over 100 MiB in pushed history, so the registry is committed ONLY
+REM on the guard's exit 0. Exit 3 (at or over the guard), or any other code,
+REM keeps it out of this commit; the chain still grows on disk, and the pause
+REM is an item in logs\degraded_commit.json for the Sentinel.
+REM The price CSVs still commit without it. The commit is the --only form
+REM (`-- paths`), so nothing another session staged, a registry included,
+REM can ride along in this commit.
+set QPATHS=research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
+python -m pipeline.commit_guard >> "%LOG%" 2>&1
+REM Exactly 0, never `if errorlevel 1`: that test is ERRORLEVEL >= 1, so a
+REM crash's NTSTATUS code (negative, e.g. -1073741819) would read as "yes".
+if "%ERRORLEVEL%"=="0" set QPATHS=research-layer/registry_log.jsonl %QPATHS%
 cd /d "%REPO%"
-git diff --quiet -- research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
+git diff --quiet -- %QPATHS%
 if errorlevel 1 (
-  git add research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
-  git commit -q -m "quarantine: forward record for %QDATE% (+ catch-up)" >> "%LOG%" 2>&1
+  git add %QPATHS%
+  git commit -q -m "quarantine: forward record for %QDATE% (+ catch-up)" -- %QPATHS% >> "%LOG%" 2>&1
 )
 
 if "%CATCHUP_RC%"=="1" goto :fail

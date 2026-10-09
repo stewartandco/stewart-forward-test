@@ -43,6 +43,7 @@ import sys
 import traceback
 
 from . import allowance as _allowance
+from . import commit_guard as _commit_guard
 from . import commit_list as _commit_list
 from . import deadline as _deadline
 from datetime import datetime, timezone
@@ -564,10 +565,29 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
     layer = registry_path.parent
     repo = layer.parent
     paths = collect_commit_paths(registry_path, start_line)
+    # Commit guard (2026-10-09 stopgap, commit_guard.py): at or over the
+    # guard the registry stays out of this commit and everything else in
+    # scope still commits. A guard that raises is a "no", never a commit of
+    # an unchecked registry and never a failed cycle.
+    try:
+        reg_ok = _commit_guard.registry_committable(
+            registry_path, layer / "logs", guard_bytes=_commit_guard.GUARD_BYTES)
+    except Exception as exc:              # noqa: BLE001 -- bookkeeping
+        print(f"loop: WARNING commit guard failed ({exc}); registry left out of "
+              f"this commit", flush=True)
+        reg_ok = False
+    if not reg_ok:
+        print("loop: registry left out of this commit (commit guard)", flush=True)
+        paths = paths[1:]                 # collect_commit_paths puts it first
     seen = set(paths)
     gone = set()
     for rel in listed:                    # screen's list; a vanished file is skipped
         if rel in seen:
+            continue
+        if not rel.startswith("research-layer/artifacts/"):
+            # Screen lists bundle files only; anything else is a hand edit,
+            # and the registry must never ride in past the commit guard.
+            gone.add(rel)
             continue
         if _on_disk(layer, rel):
             paths.append(rel)
@@ -578,7 +598,7 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
         # Loud, never silent: a garbled hand edit lands here too.
         print(f"loop: WARNING skipped {len(gone)} listed screen path(s) not on disk, "
               f"e.g. {sorted(gone)[0]!r}", flush=True)
-    has_new_artifacts = len(paths) > 1   # more than just the registry line
+    has_new_artifacts = len(paths) > int(reg_ok)   # more than just the registry line
 
     # The scope NEVER travels on the command line (2026-09-01). The fx cycle
     # registered 1,260 strategies, chained them, banked its watermark, and
@@ -616,7 +636,7 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
             print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
             return False
     n_listed = sum(1 for x in paths if x.count("/") >= 3)
-    print(f"loop: committed chain delta ({len(paths) - 1 - n_listed} artifact bundle(s), "
+    print(f"loop: committed chain delta ({len(paths) - int(reg_ok) - n_listed} artifact bundle(s), "
           f"{n_listed} listed screen file(s))", flush=True)
     return True
 
