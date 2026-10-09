@@ -52,3 +52,211 @@ def test_plan_pieces_does_not_seal_a_full_remainder_until_the_next_line():
 def test_plan_pieces_refuses_an_entry_larger_than_a_segment():
     with pytest.raises(cm.MirrorRefused, match="line 2"):
         cm.plan_pieces([b"a\n", b"x" * 20 + b"\n"], 0, 10)
+
+
+import json
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+from .common import entry_hash
+from .registry import Registry
+
+LAYER = Path(__file__).resolve().parent.parent
+
+
+def _chain(tmp_path, n, text="note"):
+    """A real chain written by Registry (text mode: CRLF on Windows)."""
+    reg = Registry(tmp_path / "registry_log.jsonl")
+    for i in range(n):
+        reg.append("note", {"text": f"{text} {i:04d}"})
+    return reg.log_path
+
+
+def _setup(tmp_path, n=10):
+    p = _chain(tmp_path, n)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    return p, tmp_path / "registry_log.d", tmp_path / "logs"
+
+
+def _ledger(logs):
+    return json.loads((logs / cm.LEDGER).read_text(encoding="utf-8"))
+
+
+def test_first_sync_writes_one_active_segment_and_a_manifest(tmp_path):
+    reg, md, logs = _setup(tmp_path)
+    r = cm.sync(reg, md, logs_dir=logs)
+    assert r.ok and r.sealed_new == [] and r.active == "000001.jsonl"
+    assert (md / "000001.jsonl").read_bytes() == cm.read_live(reg)
+    man = json.loads((md / cm.MANIFEST).read_text(encoding="utf-8"))
+    assert man["format"] == cm.FORMAT and man["sealed"] == []
+    assert man["segment_max_bytes"] == cm.SEGMENT_MAX_BYTES
+    assert _ledger(logs) | {"ts_utc": None} == {"writer": "commit", "ts_utc": None, "items": []}
+
+
+def test_sync_across_seal_boundaries_joins_back_to_the_live_file(tmp_path):
+    reg, md, logs = _setup(tmp_path, 30)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert r.ok and r.sealed_new == [cm.segment_name(k) for k in range(1, 8)]
+    assert cm.joined(md) == cm.read_live(reg)
+    man = cm.load_manifest(md)
+    assert [s["first_line"] for s in man["sealed"]] == [1, 5, 9, 13, 17, 21, 25]
+    assert man["sealed"][0]["first_prev_entry_hash"] == "0" * 64
+    lines = cm.split_lines(cm.read_live(reg))
+    assert man["sealed"][-1]["last_entry_hash"] == entry_hash(json.loads(lines[27]))
+    assert cm.check(reg, md) == "MATCH"
+
+
+def test_a_sealed_segment_is_never_rewritten(tmp_path):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    sealed = (md / "000001.jsonl").stat().st_mtime_ns
+    Registry(reg).append("note", {"text": "later"})
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert r.ok and (md / "000001.jsonl").stat().st_mtime_ns == sealed
+    assert cm.check(reg, md) == "MATCH"
+
+
+def test_the_manifests_max_bytes_wins_over_the_argument(tmp_path):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    r = cm.sync(reg, md, logs_dir=logs)                  # default max ignored
+    assert r.ok and cm.load_manifest(md)["segment_max_bytes"] == line * 4
+
+
+def test_exact_boundary_then_next_entry_seals_and_starts_an_active_segment(tmp_path):
+    reg, md, logs = _setup(tmp_path, 4)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 2)   # (0,2) sealed, (2,4) active and full
+    assert [s["file"] for s in cm.load_manifest(md)["sealed"]] == ["000001.jsonl"]
+    Registry(reg).append("note", {"text": "next 0000"})
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 2)
+    assert r.sealed_new == ["000002.jsonl"] and r.active == "000003.jsonl"
+    assert cm.check(reg, md) == "MATCH"
+
+
+def test_a_rewritten_sealed_range_is_refused_and_recorded(tmp_path):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    before = {p.name: p.read_bytes() for p in md.iterdir()}
+    data = reg.read_bytes()
+    reg.write_bytes(data.replace(b"note 0001", b"note 9999"))
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert not r.ok and "prefix mismatch at segment 000001.jsonl" in r.reason
+    assert {p.name: p.read_bytes() for p in md.iterdir()} == before   # nothing written
+    (item,) = _ledger(logs)["items"]
+    assert (item["source"], item["key"]) == ("chain_mirror", "registry_log.d")
+
+
+def test_a_truncated_live_file_is_refused(tmp_path):
+    reg, md, logs = _setup(tmp_path, 6)
+    cm.sync(reg, md, logs_dir=logs)
+    data = reg.read_bytes()
+    reg.write_bytes(data[: data.find(b"\n") + 1])         # keep one line
+    r = cm.sync(reg, md, logs_dir=logs)
+    assert not r.ok and "not a prefix" in r.reason
+
+
+def test_a_sealed_file_edited_or_deleted_on_disk_is_refused(tmp_path):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    (md / "000001.jsonl").write_bytes(b"tampered\n")
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert not r.ok and "000001.jsonl on disk" in r.reason
+    (md / "000001.jsonl").unlink()
+    assert not cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4).ok
+
+
+def test_a_crash_between_segment_and_manifest_writes_repairs_itself(tmp_path, monkeypatch):
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    real = cm._write
+
+    def crash_on_manifest(path, data):
+        if path.name == cm.MANIFEST:
+            raise OSError("killed")
+        real(path, data)
+    monkeypatch.setattr(cm, "_write", crash_on_manifest)
+    assert not cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4).ok
+    monkeypatch.setattr(cm, "_write", real)
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4)
+    assert r.ok and cm.check(reg, md) == "MATCH"
+    assert _ledger(logs)["items"] == []                   # recovered, item dropped
+
+
+def test_leftover_tmp_files_and_stale_segments_are_removed(tmp_path):
+    reg, md, logs = _setup(tmp_path, 4)
+    md.mkdir()
+    (md / "000001.jsonl.tmp").write_bytes(b"half")
+    (md / "000009.jsonl").write_bytes(b"stray\n")
+    assert cm.sync(reg, md, logs_dir=logs).ok
+    assert sorted(p.name for p in md.iterdir()) == ["000001.jsonl", cm.MANIFEST]
+
+
+def test_an_oversized_entry_is_refused(tmp_path):
+    reg, md, logs = _setup(tmp_path, 2)
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=10)
+    assert not r.ok and "larger than segment_max_bytes" in r.reason
+
+
+def test_two_concurrent_syncs_serialise_on_the_lock(tmp_path):
+    reg, md, logs = _setup(tmp_path, 40)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    results = []
+    ts = [threading.Thread(target=lambda: results.append(
+        cm.sync(reg, md, logs_dir=logs, max_bytes=line * 3))) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert all(r.ok for r in results)
+    assert cm.check(reg, md) == "MATCH"
+    assert not (tmp_path / "registry_log.d.lock").exists()
+
+
+def test_a_held_lock_times_out_as_a_refusal_not_an_exception(tmp_path, monkeypatch):
+    reg, md, logs = _setup(tmp_path, 2)
+    md.mkdir()
+    (tmp_path / "registry_log.d.lock").write_text("1 0", encoding="utf-8")
+    monkeypatch.setattr(cm, "LOCK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(cm, "LOCK_STALE_S", 3600.0)
+    r = cm.sync(reg, md, logs_dir=logs)
+    assert not r.ok and "lock busy" in r.reason
+
+
+def test_check_reports_behind_and_mismatch(tmp_path):
+    reg, md, logs = _setup(tmp_path, 3)
+    cm.sync(reg, md, logs_dir=logs)
+    Registry(reg).append("note", {"text": "after"})
+    assert cm.check(reg, md) == "BEHIND"
+    (md / "000001.jsonl").write_bytes(b"x\n")
+    assert cm.check(reg, md) == "MISMATCH"
+
+
+def _cli(*args):
+    return subprocess.run([sys.executable, "-m", "pipeline.chain_mirror", *args],
+                          cwd=str(LAYER), capture_output=True, text=True)
+
+
+def test_cli_sync_and_check_exit_codes(tmp_path):
+    reg, md, logs = _setup(tmp_path, 3)
+    base = ["--registry", str(reg), "--mirror-dir", str(md), "--logs-dir", str(logs)]
+    assert _cli("check", *base).returncode == 1           # nothing mirrored yet
+    assert _cli("sync", *base).returncode == 0
+    assert _cli("check", *base).returncode == 0
+    (md / cm.MANIFEST).write_text('{"format": "other"}', encoding="utf-8")
+    r = _cli("sync", *base)
+    assert r.returncode == cm.EXIT_REFUSED == 3 and "refused" in r.stdout
+
+
+def test_cli_defaults_point_at_the_layer():
+    ns = cm.build_parser().parse_args(["sync"])
+    assert ns.registry == LAYER / "registry_log.jsonl"
+    assert ns.mirror_dir == LAYER / "registry_log.d"
+    assert ns.logs_dir == LAYER / "logs"
