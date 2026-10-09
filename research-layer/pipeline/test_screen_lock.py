@@ -233,6 +233,29 @@ def test_a_cell_error_keeps_earlier_batches_and_leaves_the_rest_proposed(
     assert run_verifier(reg.log_path).returncode == 0
 
 
+def test_a_cell_error_is_logged_even_when_its_pre_raise_flush_meets_a_moved_chain(
+        tmp_path, monkeypatch, capsys):
+    # Review M2: the pre-raise flush can raise ChainMoved (REFUSED, exit 1);
+    # the crashing spec's id and message must already be in the log by then.
+    from .registry import ChainMoved
+    reg, sids, data = _registry_with(tmp_path, 2)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 2)   # both in one chunk
+    real_run_all = screen.run_all
+
+    def run_all_second_fails(job, chunk, workers=1):
+        return real_run_all(job, chunk[:1], workers=workers) + [screen.CellError("boom")]
+    monkeypatch.setattr(screen, "run_all", run_all_second_fails)
+
+    def moved(self, snap, items):
+        raise ChainMoved("moved under the hold")
+    monkeypatch.setattr(Registry, "record_screen_outcomes_batch", moved)
+    assert _run(reg, data, tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "CELL ERROR" in out and "boom" in out
+    assert out.index("CELL ERROR") < out.index("REFUSED")
+    assert not [st for st in reg.strategy_states().values() if st != "proposed"]
+
+
 def test_a_second_hold_that_finds_the_lock_held_keeps_the_remainder(
         tmp_path, monkeypatch):
     reg, sids, data = _registry_with(tmp_path, 3)

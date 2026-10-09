@@ -545,7 +545,10 @@ def run(argv: list[str] | None = None) -> int:
                 if isinstance(outcome, CellError):
                     # a verdict chain must not silently graveyard a spec that
                     # crashed: keep what was judged so far (one attempt), then
-                    # raise; this spec and every later one stay 'proposed'
+                    # raise; this spec and every later one stay 'proposed'.
+                    # The crash detail is printed BEFORE the flush, so a
+                    # ChainMoved in that flush cannot hide it from the log.
+                    print(f"CELL ERROR: {spec['strategy_id']}: {outcome}", flush=True)
                     if not args.dry_run:
                         flush()
                     raise RuntimeError(f"{spec['strategy_id']}: {outcome}")
