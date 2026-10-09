@@ -191,8 +191,12 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     Two-phase: every requested id is verified (pinned, verdict clear, pinned
     prefix sha match -- see the D4 refinement note above -- and, when
     --assets was given explicitly, a declared member of the requested class)
-    before anything is written. Any refusal aborts the whole call with every
-    refusal named; nothing partial is ever written.
+    before anything is written. A per-series problem SKIPS that series (its
+    CSV and manifest record are left untouched, the reason lands in the
+    manifest's top-level `skipped` map and is printed); the rest are written.
+    Still fatal, writing nothing: an explicit --assets id outside its class,
+    a run that would write zero series from a non-empty request, and an
+    unreadable producer manifest.
 
     A subset re-run (e.g. `--assets EUR` after a full-class snapshot) merges
     into any existing `tradfi_snapshot_manifest.json` in layer_root/data
@@ -211,7 +215,8 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     pinned = {row["id"]: row for row in manifest.get("selected", [])}
 
-    refusals: list[str] = []
+    fatal: list[str] = []              # a caller bug: refuses the whole call
+    skipped: dict[str, str] = {}       # a per-series problem: that series is left untouched
     requested: list[tuple[str, str]] = []
     for cls in classes:
         cls_assets = cells._class_spec(cls)["assets"]
@@ -224,7 +229,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
             # otherwise pass a real equities OHLC series through fx's
             # single_fix flattening and record a verified-looking lie.
             if assets is not None and asset_id not in cls_assets:
-                refusals.append(f"{asset_id}: not a declared {cls} asset")
+                fatal.append(f"{asset_id}: not a declared {cls} asset")
                 continue
             requested.append((cls, asset_id))
 
@@ -232,18 +237,18 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
     for cls, asset_id in requested:
         row = pinned.get(asset_id)
         if row is None:
-            refusals.append(f"{asset_id}: not pinned in {manifest_path}")
+            skipped[asset_id] = f"{asset_id}: not pinned in {manifest_path}"
             continue
         lane = row["lane"]
 
         verdict_refusal, verdict_value = _check_verdict(ts_root, asset_id)
         if verdict_refusal is not None:
-            refusals.append(verdict_refusal)
+            skipped[asset_id] = verdict_refusal
             continue
 
         parquet_path = _cache_path(ts_root, lane, asset_id)
         if not parquet_path.exists():
-            refusals.append(f"{asset_id}: no cached parquet at {parquet_path}")
+            skipped[asset_id] = f"{asset_id}: no cached parquet at {parquet_path}"
             continue
         df = pd.read_parquet(parquet_path)
 
@@ -253,13 +258,13 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
         pin_rows = row["rows"]
         total_rows = len(_canon_lines(df))
         if total_rows < pin_rows:
-            refusals.append(
+            skipped[asset_id] = (
                 f"{asset_id}: history shrank ({total_rows} rows on disk, {pin_rows} pinned) -- rewritten history")
             continue
 
         prefix_sha = _pinned_prefix_sha256(df, pin_rows)
         if prefix_sha != row["sha256"]:
-            refusals.append(
+            skipped[asset_id] = (
                 f"{asset_id}: pinned-prefix sha256 mismatch over the first {pin_rows} rows "
                 f"(manifest {row['sha256']}, computed {prefix_sha})")
             continue
@@ -267,8 +272,14 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
         rows_beyond_pin = total_rows - pin_rows
         verified[asset_id] = (df, row, cls, verdict_value, rows_beyond_pin)
 
-    if refusals:
-        raise SnapshotRefused("; ".join(refusals))
+    # Per-series problems skip that series (2026-10-08 isolation design s4);
+    # a caller bug or a run that would write NOTHING is still fatal.
+    if fatal:
+        raise SnapshotRefused("; ".join(fatal))
+    if requested and not verified:
+        raise SnapshotRefused("; ".join(skipped[a] for a in skipped))
+    for asset_id, reason in skipped.items():
+        print(f"snapshot: skipped {asset_id} ({reason})")
 
     out_data_dir = layer_root / "data"
     out_data_dir.mkdir(parents=True, exist_ok=True)
@@ -298,6 +309,7 @@ def snapshot(ts_root: Path, layer_root: Path, classes: tuple[str, ...],
         "snapshot_utc": datetime.now(timezone.utc).isoformat(),
         "source_snapshot_utc": manifest.get("snapshot_utc"),
         "series": merged_series,
+        "skipped": skipped,
     }
     if previous_manifest and "snapshot_utc" in previous_manifest:
         snapshot_manifest["previous_snapshot_utc"] = previous_manifest["snapshot_utc"]

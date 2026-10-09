@@ -1238,32 +1238,24 @@ def test_rerunning_a_date_chains_no_second_snapshot(tmp_path, capsys):
     assert "1 already present" in capsys.readouterr().out
 
 
-def test_a_restated_price_file_refuses_the_whole_day(tmp_path, capsys):
-    """The detector, not just the provenance. Re-running a date against bars
-    that have been revised would not reproduce the rows already chained, so
-    the day is refused rather than silently recomputed."""
+def test_a_restated_bar_behind_rows_already_chained_is_a_no_op(tmp_path, capsys):
+    """CHANGED by the 2026-10-08 quarantine-isolation addendum (rule 1). The
+    strategy already has its row for the date, so it owes nothing and its
+    bars are not re-hashed: a re-run is a no-op, not a refusal. The guard
+    itself still bites for an OWING strategy -- see
+    test_quarantine_isolation.py."""
     reg, spec, data = quarantined(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
     before = sum(1 for _ in reg.entries())
-    recorded = snapshots(reg)[0]["bars_sha256"]["BTCUSD"]
-
-    csv_path = data / "BTCUSD_1d.csv"
-    lines = csv_path.read_text(encoding="utf-8").splitlines()
-    # restate the 2023-01-22 bar ITSELF, not a later one: the failure this
-    # guards is a revision to bars the chained rows were computed from
+    lines = read_csv_lines(data)
     i = next(i for i, l in enumerate(lines) if l.startswith("2023-01-22,"))
     lines[i] = "2023-01-22,111,111,111,112,1.0"
-    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
+    write_csv_lines(data, lines)
     capsys.readouterr()
-    assert quarantine_run(argv) == 1
-    err = capsys.readouterr().err
-    assert "REFUSED" in err
-    assert "BTCUSD" in err
-    assert recorded in err                      # names the chained hash
-    assert bars_sha_of(data, "BTCUSD") in err   # and the recomputed one
-    assert sum(1 for _ in reg.entries()) == before      # nothing written
+    assert quarantine_run(argv) == 0
+    assert sum(1 for _ in reg.entries()) == before
+    assert "1 already present" in capsys.readouterr().out
 
 
 def test_a_snapshot_missing_a_needed_asset_gets_a_supplement(tmp_path, capsys):
@@ -1306,17 +1298,21 @@ def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
     assert len(decisions(reg)) == 1
 
 
-def test_a_conflicting_concurrent_snapshot_refuses(tmp_path, capsys,
+def test_a_conflicting_concurrent_snapshot_defers_its_strategy(tmp_path, capsys,
                                                    monkeypatch):
     """The other half: what landed disagrees with the bars this run holds, so
-    the day is refused rather than recorded against unknown data."""
+    no row is recorded against unknown data. Since the 2026-10-08 addendum
+    (rule 2) the owing strategy is deferred (RESTATED, exit 0) rather than the
+    day refused."""
     reg, spec, data = quarantined(tmp_path)
     reg.record_quarantine_snapshot(
         dict(snap_payload(data, ["BTCUSD"]), bars_sha256={"BTCUSD": "b" * 64}))
     monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
     capsys.readouterr()
-    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
-    assert "REFUSED" in capsys.readouterr().err
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err
+    assert f"{spec['strategy_id']}  deferred:" in cap.out
     assert decisions(reg) == []
     assert len(snapshots(reg)) == 1
 
@@ -1640,26 +1636,27 @@ def test_a_partial_day_still_backfills_after_a_refresh(tmp_path, capsys,
     assert {r["asset"] for r in decisions(reg)} == {"BTCUSD", "ETHUSD"}
 
 
-def test_restating_a_bar_at_or_before_the_date_still_refuses(tmp_path, capsys):
-    """The other half: the guard must stay a guard. A revision to a bar the
-    chained rows were computed from is exactly what it exists to catch."""
+def test_restating_a_bar_at_or_before_the_date_defers_the_owing_strategy(tmp_path, capsys):
+    """CHANGED by the 2026-10-08 addendum (rule 2): the guard stays a guard
+    for a strategy that still OWES the date -- no row is chained over a
+    restated bar -- but it defers that strategy instead of refusing the day."""
     reg, spec, data = quarantined(tmp_path)
-    argv = argv_for(reg, data, "--date", "2023-01-22")
-    quarantine_run(argv)
-    before = sum(1 for _ in reg.entries())
-
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
+    chained = bars_sha_of(data, "BTCUSD")
     lines = read_csv_lines(data)
     i = next(i for i, l in enumerate(lines) if l.startswith("2023-01-21,"))
     lines[i] = "2023-01-21,100,110,100,109,1.0"
     write_csv_lines(data, lines)
-
+    recomputed = bars_sha_of(data, "BTCUSD")
+    assert chained != recomputed
     capsys.readouterr()
-    assert quarantine_run(argv) == 1
-    err = capsys.readouterr().err
-    assert "REFUSED" in err
-    assert "BTCUSD" in err
-    assert "bars up to this date have changed" in err
-    assert sum(1 for _ in reg.entries()) == before
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err and "BTCUSD" in cap.err
+    # the chained-vs-recomputed pair is what diagnosed the real incident
+    assert chained in cap.out + cap.err and recomputed in cap.out + cap.err
+    assert "bars up to this date have changed" in cap.out
+    assert decisions(reg) == []
 
 
 def test_verifier_rejects_a_snapshot_whose_maps_disagree(tmp_path):
@@ -2048,15 +2045,19 @@ def test_every_eligible_spec_deferred_is_refused(tmp_path, capsys):
     assert snapshots(reg) == []
 
 
-def test_a_missing_price_file_is_still_a_hard_refusal(tmp_path, capsys):
-    """Deferral is for a bar that has not published, never for a file that is
-    not there: a wrong path or broken data dir must not read as lag."""
+def test_a_missing_price_file_defers_its_strategy_not_the_day(tmp_path, capsys):
+    """CHANGED by the 2026-10-08 addendum (rule 3): a missing file no longer
+    refuses every strategy's day; it defers the strategy that trades it
+    (loudly, and into the degraded ledger) while the rest record. A day where
+    EVERY owing strategy lacks a bar or file stays a refusal (rule 5; pinned
+    by test_quarantine_isolation)."""
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
     (data / "ETHUSD_1d.csv").unlink()
     rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
-    assert rc == 1
-    assert "REFUSED" in capsys.readouterr().err
-    assert decisions(reg) == []
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert f"{two['strategy_id']}  deferred: no price file for ETHUSD" in cap.out
+    assert {r["strategy_id"] for r in decisions(reg)} == {spec["strategy_id"]}
 
 
 def test_supplement_requires_an_earlier_base_snapshot(tmp_path):
@@ -2145,24 +2146,29 @@ def test_a_conflicting_concurrent_supplement_refuses(tmp_path, capsys,
     assert len(decisions(reg)) == 1            # only the first run's row
 
 
-def test_restated_bar_on_a_supplemented_asset_refuses(tmp_path, capsys):
-    """'Not covered yet' became the supplement path; 'covered but different'
-    must stay fatal for supplement-covered assets exactly as for base ones."""
+def test_restated_bar_on_a_supplemented_asset_defers_its_strategy(tmp_path, capsys):
+    """'Covered but different' is detected for supplement-covered assets
+    exactly as for base ones; since the 2026-10-08 addendum it defers the
+    owing strategy instead of refusing the day."""
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
-    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))   # spec records, two defers
     extend_ethusd(data)
-    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
-    # restate the ETHUSD 2023-01-22 bar itself, then re-run the date
+    reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
+    chained = bars_sha_of(data, "ETHUSD")
     csv_path = data / "ETHUSD_1d.csv"
     lines = csv_path.read_text(encoding="utf-8").splitlines()
     i = next(i for i, l in enumerate(lines) if l.startswith("2023-01-22,"))
     lines[i] = "2023-01-22,100.0,100.0,100.0,101.0,1.0"
     csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    recomputed = bars_sha_of(data, "ETHUSD")
+    assert chained != recomputed
     capsys.readouterr()
-    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
-    err = capsys.readouterr().err
-    assert "REFUSED" in err
-    assert "ETHUSD" in err
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err
+    # the chained-vs-recomputed pair is what diagnosed the real incident
+    assert chained in cap.out + cap.err and recomputed in cap.out + cap.err
+    assert {r["strategy_id"] for r in decisions(reg)} == {spec["strategy_id"]}
 
 
 def test_a_malformed_base_snapshot_refuses_rather_than_supplements(

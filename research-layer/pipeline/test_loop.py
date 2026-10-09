@@ -2893,3 +2893,193 @@ def test_a_held_chain_lock_at_screen_does_not_defer_the_cycle(tmp_path):
     assert status["items"]["outcome"] == "cycle_complete", status["items"]
     assert rc == 0
     assert fr.holder_at["pipeline.screen"] == ["session"]
+
+
+# ─── degraded ledger (2026-10-08 per-asset isolation) ───────────────────────
+
+def _ledger(layer):
+    p = layer / "logs" / "degraded_loop.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+class _SkippingSnapshotRunner(FakeRunner):
+    """Stage 0 writes a manifest that skipped EFA, as the real adapter does."""
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if argv[0] == sys.executable and "-m" in argv and \
+                argv[argv.index("-m") + 1] == "pipeline.tradfi_data":
+            out = Path(argv[argv.index("--out") + 1]) / "data"
+            out.mkdir(exist_ok=True)
+            from datetime import datetime, timezone
+            (out / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+                {"snapshot_utc": datetime.now(timezone.utc).isoformat(), "series": {},
+                 "skipped": {"EFA": "EFA: last integrity verdict is fail"}}), encoding="utf-8")
+        return r
+
+
+def test_a_stage0_skip_becomes_a_ledger_item_and_a_status_item(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--layer", str(layer)], runner=_SkippingSnapshotRunner()) == 0
+    led = _ledger(layer)
+    assert [(i["source"], i["key"]) for i in led["items"]] == [("stage0", "EFA")]
+    assert _read_status(layer)["items"]["snapshot_skipped_series"] == "EFA"
+
+
+def test_an_old_manifest_is_never_read_as_this_run_s_skips(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    (layer / "data").mkdir()
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-01T00:00:00+00:00", "series": {},
+         "skipped": {"EFA": "old"}}), encoding="utf-8")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == []
+
+
+def test_a_no_trigger_fire_still_writes_the_freshness_report(tmp_path, capsys):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-08-21 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _read_status(layer)["items"]["outcome"] == "no_trigger"
+    assert [(i["source"], i["key"]) for i in _ledger(layer)["items"]] == [
+        ("freshness", "BTCUSD_1d")]
+
+
+def test_a_missing_file_is_a_freshness_item_and_the_outcome_is_unchanged(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00", None)
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    items = _ledger(layer)["items"]
+    assert [(i["source"], i["key"], i["reason"]) for i in items] == [
+        ("freshness", "BTCUSD_1d", "price file missing")]
+
+
+def test_a_dry_run_writes_no_ledger(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--dry-run", "--layer", str(layer)],
+                    runner=_SkippingSnapshotRunner()) == 0
+    assert _ledger(layer) is None
+
+
+def test_a_fresh_tree_writes_an_empty_ledger(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == []
+
+
+class _ManifestRunner(FakeRunner):
+    """Stage 0 writes a manifest with a FRESH snapshot_utc and the given skips."""
+    def __init__(self, skipped, **kw):
+        super().__init__(**kw)
+        self.skipped = skipped
+
+    def __call__(self, argv, **kw):
+        r = super().__call__(argv, **kw)
+        if argv[0] == sys.executable and "-m" in argv and \
+                argv[argv.index("-m") + 1] == "pipeline.tradfi_data":
+            out = Path(argv[argv.index("--out") + 1]) / "data"
+            out.mkdir(exist_ok=True)
+            from datetime import datetime, timezone
+            (out / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+                {"snapshot_utc": datetime.now(timezone.utc).isoformat(), "series": {},
+                 "skipped": self.skipped}), encoding="utf-8")
+        return r
+
+
+def _hand_ledger(layer, items):
+    from . import degraded
+    degraded.write(layer / "logs" / degraded.LOOP_LEDGER, "loop", items,
+                   "2026-10-01T00:00:00+00:00")
+
+
+_OLD_EFA = {"source": "stage0", "key": "EFA", "reason": "old",
+            "since_utc": "2026-10-01T00:00:00+00:00",
+            "last_seen_utc": "2026-10-01T00:00:00+00:00"}
+
+
+def test_a_stage0_skip_clears_from_the_ledger_once_the_series_recovers(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--layer", str(layer)], runner=_SkippingSnapshotRunner()) == 0
+    assert [(i["source"], i["key"]) for i in _ledger(layer)["items"]] == [("stage0", "EFA")]
+    assert loop.run(["--once", "--layer", str(layer)], runner=_ManifestRunner({})) == 0
+    assert _ledger(layer)["items"] == []
+
+
+def test_a_lagging_cell_clears_from_the_ledger_once_it_catches_up(tmp_path):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-08-21 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert [(i["source"], i["key"]) for i in _ledger(layer)["items"]] == [
+        ("freshness", "BTCUSD_1d")]
+    _write_cell_csv(layer / "data", "BTCUSD", "1d",
+                    ["2026-01-02 00:00:00", "2026-09-10 00:00:00"])
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == []
+
+
+def test_an_old_manifest_carries_a_previous_stage0_item_forward_unchanged(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    _hand_ledger(layer, [_OLD_EFA])
+    (layer / "data").mkdir()
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-01T00:00:00+00:00", "series": {}, "skipped": {}}),
+        encoding="utf-8")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == [_OLD_EFA]
+
+
+def test_no_producer_carries_a_previous_stage0_item_forward_unchanged(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)        # no producer root exists
+    _hand_ledger(layer, [_OLD_EFA])
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == [_OLD_EFA]
+
+
+def test_an_unevaluable_freshness_report_carries_freshness_items_forward(tmp_path, monkeypatch):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+    old = {"source": "freshness", "key": "BTCUSD_1d", "reason": "old",
+           "since_utc": "2026-10-01T00:00:00+00:00",
+           "last_seen_utc": "2026-10-01T00:00:00+00:00"}
+    _hand_ledger(layer, [old])
+    monkeypatch.setattr(loop, "_freshness_report", lambda *a, **k: None)
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert _ledger(layer)["items"] == [old]
+
+
+def test_a_ledger_write_failure_never_changes_the_fire(tmp_path, monkeypatch, capsys):
+    layer = _layer_with_two_registered_cells(tmp_path, "2026-09-10 00:00:00",
+                                             "2026-09-10 00:00:00")
+    _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
+
+    def boom(*a, **k):
+        raise PermissionError("ledger locked")
+    from . import degraded
+    monkeypatch.setattr(degraded, "record", boom)
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    st = _read_status(layer)
+    assert st["items"]["outcome"] == "no_trigger"
+    assert "ledger locked" in st["items"]["degraded_ledger_error"]
+    assert "degraded_ledger_error:" in capsys.readouterr().out
+
+
+def test_stage0_skips_do_not_leak_into_the_next_run_in_the_same_process(tmp_path, monkeypatch):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=0)
+    _with_producer(monkeypatch, tmp_path)
+    assert loop.run(["--once", "--layer", str(layer)], runner=_SkippingSnapshotRunner()) == 0
+    assert _read_status(layer)["items"]["snapshot_skipped_series"] == "EFA"
+    (layer / "data" / "tradfi_snapshot_manifest.json").write_text(json.dumps(
+        {"snapshot_utc": "2026-09-01T00:00:00+00:00", "series": {},
+         "skipped": {"EFA": "old"}}), encoding="utf-8")
+    assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    assert "snapshot_skipped_series" not in _read_status(layer)["items"]
