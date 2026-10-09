@@ -6,7 +6,7 @@ rem the exit code is ALWAYS the python step's code and never a git result.
 rem Registered by the owner (elevated) from morpheus-hub\tasks\xml\27_GauntletWorker.xml.
 rem
 rem COMMIT BLOCK (best-effort, never fails the run, never fails another job):
-rem  * Scope = registry_log.jsonl plus every judged bundle the worker listed in
+rem  * Scope = the chain mirror (registry_log.d) plus every judged bundle the worker listed in
 rem    logs\gauntlet_worker_commit_paths.txt (one repo-relative path per line;
 rem    the artifacts_hash of each v6.1 verdict refers to that bundle). Both
 rem    `git add` and `git commit` read the scope from ONE pathspec file, never
@@ -39,14 +39,14 @@ cd /d "%LAYER%"
 echo ==== %DATE% %TIME% gauntlet worker ==== >> "%LOG%"
 python -m pipeline.gauntlet_worker --max-workers 6 >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
-rem Commit guard (2026-10-09 stopgap, pipeline\commit_guard.py): GitHub blocks
-rem any file over 100 MiB in pushed history, so the registry is committed ONLY
-rem on the guard's exit 0. Exit 3 (at or over the guard), or any other code,
-rem keeps it out of this commit; the chain still grows on disk, and the pause
-rem is an item in logs\degraded_commit.json for the Sentinel.
+rem Chain mirror (2026-10-09 segments design, pipeline\chain_mirror.py): git
+rem tracks research-layer\registry_log.d (LF segments of the chain, none over
+rem 40 MiB), never registry_log.jsonl. The mirror is staged ONLY on sync's exit
+rem 0; exit 3 (refused) or any other code leaves it out of this commit, and a
+rem refusal is an item in logs\degraded_commit.json for the Sentinel.
 rem The listed bundles still commit without it.
 set REG=0
-python -m pipeline.commit_guard >> "%LOG%" 2>&1
+python -m pipeline.chain_mirror sync >> "%LOG%" 2>&1
 rem Exactly 0, never `if errorlevel 1`: that test is ERRORLEVEL >= 1, so a
 rem crash's NTSTATUS code (negative, e.g. -1073741819) would read as "yes".
 if "%ERRORLEVEL%"=="0" set REG=1
@@ -63,21 +63,21 @@ if exist "%LAYER%\logs\chain.lock" (
 if exist "%LIST%" move /y "%LIST%" "%TAKING%" > nul
 set WANT=0
 if exist "%TAKING%" set WANT=1
-rem vs HEAD, not the index: a registry change another session staged is
-rem still uncommitted and still ours to commit.
+rem New segments are UNTRACKED, which `git diff` never reports: ask git status
+rem (it also shows a mirror change another session staged, still ours to commit).
 if "%REG%"=="1" (
-  git diff --quiet HEAD -- research-layer/registry_log.jsonl
-  if errorlevel 1 set WANT=1
+  git status --porcelain -- research-layer/registry_log.d | findstr /r /c:"." > nul
+  if not errorlevel 1 set WANT=1
 )
 if "%WANT%"=="0" goto :done
 type nul > "%SCOPE%"
-if "%REG%"=="1" echo research-layer/registry_log.jsonl>> "%SCOPE%"
+if "%REG%"=="1" echo research-layer/registry_log.d>> "%SCOPE%"
 rem Only bundle paths ride the list (the worker writes nothing else), so a
 rem hand edit naming the registry or a parent directory never reaches git.
 if exist "%TAKING%" findstr /b /c:"research-layer/artifacts/" "%TAKING%" >> "%SCOPE%"
 rem An empty scope must never reach git: `git commit --pathspec-from-file`
 rem with an empty file commits the WHOLE index, another session's staged work
-rem and a held-back registry included (review 2026-10-09). findstr exits 1 on
+rem and an unsynced mirror included (review 2026-10-09). findstr exits 1 on
 rem no match and 2 on an error; both skip the commit.
 findstr /r /c:"[a-z0-9]" "%SCOPE%" > nul
 if errorlevel 1 goto :empty
@@ -86,10 +86,10 @@ if errorlevel 1 goto :keep
 git commit -q -m "gauntlet worker: verdicts %DATE% %TIME%" --pathspec-from-file="%SCOPE%" >> "%LOG%" 2>&1
 if errorlevel 1 goto :keep
 if exist "%TAKING%" del "%TAKING%"
-echo committed registry and listed bundles >> "%LOG%"
+echo committed chain mirror and listed bundles >> "%LOG%"
 goto :done
 :empty
-echo nothing in scope (registry held back, no listed bundle); no commit >> "%LOG%"
+echo nothing in scope (mirror not synced, no listed bundle); no commit >> "%LOG%"
 if exist "%TAKING%" del "%TAKING%"
 goto :done
 :keep
