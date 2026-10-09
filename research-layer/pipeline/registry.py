@@ -226,6 +226,10 @@ PROTOCOL_V61 = "gauntlet-protocol-v6.1"
 # unbounded append; it chunks and releases chain.lock between chunks.
 STATS_BATCH_MAX = 200
 
+# Screen (2026-10-08 design): at most this many specs' write-triplets per
+# chain.lock hold, so a large pending set is written in bounded holds.
+SCREEN_BATCH_MAX = 200
+
 
 @dataclass(frozen=True)
 class ChainSnapshot:
@@ -761,6 +765,38 @@ class Registry:
         if not payloads:
             return snap
         return self._append_at(snap, payloads)
+
+    def record_screen_outcomes_batch(
+            self, snap: ChainSnapshot,
+            items: list[tuple[str, str, dict, str, str, str | None, str]]
+            ) -> ChainSnapshot:
+        """Screen's write-triplet for each (strategy_id, verdict, metrics,
+        artifacts_hash, to, reason, screened_reason), appended in ONE write
+        against `snap` (which the caller has just advance()d under
+        chain.lock). Per strategy, in order: state_change proposed->screened,
+        the 'screened' verdict, state_change screened->`to` -- the same
+        entries record_state_change / record_verdict / record_state_change
+        write, without their full-chain reads. Every check runs before
+        anything is written."""
+        if len(items) > SCREEN_BATCH_MAX:
+            raise ValueError(f"{len(items)} screen outcomes in one hold; "
+                             f"at most {SCREEN_BATCH_MAX}")
+        seen: set[str] = set()
+        out: list[tuple[str, dict]] = []
+        for sid, verdict, metrics, artifacts_hash, to, reason, screened_reason in items:
+            if sid in seen:
+                raise ValueError(f"{sid!r} twice in one screen batch")
+            seen.add(sid)
+            if snap.states.get(sid) != "proposed":
+                raise ValueError(f"{sid!r} is in state {snap.states.get(sid)!r}, "
+                                 f"not 'proposed'")
+            out.append(("state_change", _state_change_payload(
+                sid, "proposed", "screened", screened_reason)))
+            out.append(("verdict", _verdict_payload(
+                sid, "screened", verdict, metrics, artifacts_hash)))
+            out.append(("state_change", _state_change_payload(
+                sid, "screened", to, reason)))
+        return self._append_at(snap, out)
 
     def record_quarantine_decision(self, payload: dict) -> dict:
         """One paper-trading decision, validated and de-duplicated atomically.

@@ -27,12 +27,13 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   deadline (2026-10-02; before that every such result was discarded). The
   measurement that motivated the change: overnight runs on 2026-10-01/02
   wrote 0 verdicts each while evaluating 48-120. **The retries rescue only
-  SHORT holds** (scanner/inbox card batches and similar). The loop's screen
-  stage holds chain.lock for hours overnight, and a long quarantine catch-up
-  holds it for minutes per date. Those holds still leave whole runs with
-  `deferred_lock` equal to their evaluated count; the results are discarded
-  at the end of the run and the next run re-evaluates those candidates. So
-  the overnight zero-write runs are NOT fixed by this. Each retry
+  SHORT holds** (scanner/inbox card batches and similar). Until 2026-10-08
+  the loop's screen stage held chain.lock for hours overnight; a long
+  quarantine catch-up still holds it for minutes per date. Holds that long
+  leave whole runs with `deferred_lock` equal to their evaluated count; the
+  results are discarded at the end of the run and the next run re-evaluates
+  those candidates. So the retries alone did NOT fix the overnight
+  zero-write runs; screen's per-batch holds (next bullet) did. Each retry
   re-checks on the advanced snapshot exactly what the first write does; a
   candidate another writer moved or judged meanwhile is dropped unwritten
   (`dropped_stale`). Results still unwritten at the end stay queued
@@ -44,8 +45,47 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   counts it as an ERROR, so the run exits 1 and the Ops Sentinel FAILs the
   digest. That is an alarm on purpose (an unlocked writer is the defect), not a
   flake. Take chain.lock for every hand-run chain write, as above.
+- **Screen holds chain.lock only for each BATCH write, not for the stage
+  (2026-10-08, Coen's decision; design `docs/2026-10-08-screen-lock-release-design.md`).**
+  `pipeline.screen` evaluates every chunk with NO lock, then flushes the
+  verdicts under ONE non-blocking acquire (holder `screen`) per batch of at
+  most `SCREEN_BATCH_MAX` (200) specs per hold. A hold is normally one
+  chunk (workers x 8 = 56 specs at 7 workers), but after a held lock the
+  pending specs flush back to back in successive holds of up to 200 specs
+  (about 8 s each), with no gap between them. Measured 2026-10-09 on a copy
+  of the live 103,626-entry chain (200 specs, 78 pass / 122 fail): the write
+  costs 0.04 s per spec, so a hold ran 1.1 to 2.5 s (median 2.3 s, max
+  2.5 s); a full 200-spec batch would hold about 8 s. Under
+  the lock it advances the snapshot, re-checks each spec is still `proposed`
+  (one that is not is dropped unwritten and counted `dropped_stale`), writes
+  the bundles, and appends each spec's three entries (screened, verdict,
+  gauntlet/graveyard) in ONE write, so a crash cannot leave a `screened`
+  orphan. Before this the stage held the lock for its whole write phase
+  (5.3 s per spec measured 2026-10-08, 6.8 s on the 2026-10-09 copy, hours
+  overnight) and the worker wrote nothing meanwhile. A batch that meets a held lock is KEPT and
+  retried at the next chunk, then by a final drain of non-blocking attempts
+  every `DRAIN_INTERVAL_S` (5 s) inside `DRAIN_RESERVE_S` (75 s), never past
+  the deadline; the reserve is subtracted from the deadline budget only
+  while a batch is pending. Specs still unwritten stay `proposed` (the next
+  run re-screens them), the exit is 0, and `screen_result.json` counts them
+  in `deferred` and `deferred_lock` (a deadline-stopped flush reports
+  `stopped_at_deadline` instead, and counts in `deferred` only). The
+  loop no longer wraps screen in chain.lock, and a held lock at screen no
+  longer defers the cycle. Same hazard as the worker: an unlocked hand-run
+  writer that moves the chain inside a batch's hold makes that batch write
+  nothing (`ChainMoved`/`UnstableEntry`), exit 1; batches already written
+  stay. That exit, like a `CellError` crash, writes NO `screen_result.json`
+  (the loop unlinked the old one before the run, so none exists). A
+  crashing spec (`CellError`) keeps the earlier batches; it and every later
+  spec stay `proposed`.
 
 ## Pipeline loop (25_PipelineLoop)
+- **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs
+  `pipeline.screen` with `--logs-dir <logs>` and WITHOUT `_lock_and_run`:
+  screen takes chain.lock itself, per batch (Chain lock section). A one-time
+  `ChainLock.info()` probe before it logs a holder and never defers the
+  cycle (a probe, not an acquire). Triage and the composer's real run keep
+  `_lock_and_run`, so a held lock there still defers the cycle.
 - **The loop STOPS AT SCREEN (Build 2a, 2026-09-30).** A cycle runs triage,
   composer and screen; screen moves passers into state `gauntlet` and the
   standalone gauntlet worker (section below) takes them from there. The
@@ -590,7 +630,16 @@ of it.
 - **Reporting.** Every completed non-dry stage run writes
   `logs/<stage>_result.json` (`evaluated`, `deferred`, `deadline_utc`,
   `stopped_at_deadline`) -- the triage_result.json convention; an absent file
-  means "did not report", never "deferred nothing". The loop UNLINKS the
+  means "did not report", never "deferred nothing". **Screen's meanings
+  changed 2026-10-08 (design `docs/2026-10-08-screen-lock-release-design.md`):
+  `evaluated` = specs CHAINED (written), no longer specs merely evaluated;
+  `deferred` = specs not started PLUS specs evaluated but unwritten. Three
+  counters are new (via `deadline.write_result(extra=...)`): `deferred_lock`
+  (evaluated, unwritten because chain.lock stayed held; a lock leftover sets
+  no stop flag by itself, but `stopped_at_deadline` can still be true in the
+  same run when unstarted specs trip the chunk loop's deadline break),
+  `retried_written` (written on a retry after a held lock) and
+  `dropped_stale` (no longer `proposed` when the write came).** The loop UNLINKS the
   screen's before it runs and reads it on cycle_complete into status items
   `deferred_screen` and `stopped_at_deadline=<stage>` (screen is the loop's only
   deadline-aware stage since 2026-10-07; `deferred_gauntlet` is gone).
@@ -691,8 +740,12 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - **It never writes to the chain, and proves it:** size + sha256 before and after,
   on every exit path. It HOLDS `chain.lock` (holder `reextract-shadow`) for its
   duration so the resident scanner and the quarantine daily defer politely instead
-  of appending mid-run; run it clear of 22:30 / 02:30 (the loop), 08:20 (quarantine
-  daily) and 09:00-09:15 (Reader, Sentinel). If the chain still moves, the report
+  of appending mid-run; run it clear of 20:00-07:00 (the loop: one 20:00 fire,
+  PT11H window, ending 07:00), 08:20 (quarantine daily) and 09:00-09:15 (Reader,
+  Sentinel). The cycle guard refuses (exit 2) while `logs/loop.lock` OR
+  `logs/chain.lock` exists: the loop holds loop.lock for the whole cycle, while
+  screen takes chain.lock only per batch write (2026-10-08), so chain.lock alone
+  no longer shows a running cycle. If the chain still moves, the report
   records it as a field and names the legitimate writers - read that before
   blaming the harness.
 - **Money.** Pilot ceiling USD 3, checked before each document (the last document

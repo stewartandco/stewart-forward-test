@@ -1888,10 +1888,19 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                      if getattr(args, "deadline_utc", None) else [])
     # A leftover result from a previous cycle must never read as this one's.
     _deadline.result_path(registry_path, "screen").unlink(missing_ok=True)
-    screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv, *deadline_argv]
-    rc, lock_lost = _lock_and_run("pipeline.screen", screen_argv)
-    if lock_lost:
-        return _defer_midcycle_lock("pipeline.screen")
+    screen_argv = [py, "-m", "pipeline.screen", *reg_argv, *data_argv, *deadline_argv,
+                   "--logs-dir", str(logs_dir)]
+    # 2026-10-08 design: screen takes chain.lock itself, only for each batch
+    # write -- a short hold per batch (measured 2026-10-09: ~2.3 s per 56-spec
+    # chunk, ~8 s at the 200 cap) -- and keeps-and-retries a batch that meets a
+    # held lock. So the loop no longer wraps it in _lock_and_run, and a
+    # holder seen here is logged, never a reason to defer the cycle.
+    screen_lock_seen = ChainLock(logs_dir, holder="loop", purpose=f"{run_id} screen probe").info()
+    if screen_lock_seen:
+        print(f"loop: chain.lock held by {screen_lock_seen.get('holder')!r} as screen starts; "
+              "screen keeps-and-retries; a holder that outlasts the drain "
+              "leaves specs proposed (deferred_lock)", flush=True)
+    rc = _stage(runner, screen_argv, layer)
     if rc != 0:
         return _abort_stage_failed(logs_dir, state, asset_class, "pipeline.screen", rc,
                                    _fresh_counts())

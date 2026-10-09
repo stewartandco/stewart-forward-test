@@ -54,8 +54,10 @@ COMMIT_LIST = "gauntlet_worker_commit_paths.txt"
 # one non-blocking acquire attempt every DRAIN_INTERVAL_S and stops at the
 # reserve or the deadline, whichever comes first. Rationale in the 2026-10-02
 # worker-retry report: it outlasts a scanner card batch several times over,
-# costs ~5% of a 25-minute run, and cannot rescue the loop's hours-long screen
-# hold or a quarantine catch-up, which no affordable reserve could.
+# costs ~5% of a 25-minute run, and cannot rescue a quarantine catch-up, which
+# no affordable reserve could. (It also could not rescue the loop's former
+# hours-long screen hold; since the 2026-10-08 screen-lock-release design,
+# screen holds chain.lock only per batch write, a few seconds each.)
 DRAIN_RESERVE_S = 75.0
 DRAIN_INTERVAL_S = 5.0
 # Injectable so tests drive the drain on a fake clock instead of sleeping.

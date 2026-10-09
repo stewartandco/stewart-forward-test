@@ -333,3 +333,24 @@ def test_gauntlet_pbo_deadline_check_never_fires_on_a_budget_that_fits(tmp_path,
                         .read_text(encoding="utf-8"))
     assert result["deferred"] == 0 and result["stopped_at_deadline"] is False
     assert result["evaluated"] == len(live_sids) + len(dead_sids)
+
+
+def test_write_result_carries_extra_counters_and_keeps_the_old_keys(tmp_path):
+    from .deadline import write_result, read_result
+    reg = tmp_path / "registry_log.jsonl"
+    write_result(reg, "screen", evaluated=3, deferred=2, deadline_utc=None,
+                 stopped_at_deadline=False,
+                 extra={"deferred_lock": 2, "retried_written": 1, "dropped_stale": 0})
+    r = read_result(reg, "screen")
+    assert r["evaluated"] == 3 and r["deferred"] == 2
+    assert r["stopped_at_deadline"] is False
+    assert (r["deferred_lock"], r["retried_written"], r["dropped_stale"]) == (2, 1, 0)
+
+
+def test_write_result_refuses_an_extra_that_shadows_a_core_key(tmp_path):
+    import pytest
+    from .deadline import write_result
+    with pytest.raises(ValueError):
+        write_result(tmp_path / "r.jsonl", "screen", evaluated=0, deferred=0,
+                     deadline_utc=None, stopped_at_deadline=False,
+                     extra={"evaluated": 9})

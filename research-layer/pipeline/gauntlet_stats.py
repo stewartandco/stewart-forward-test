@@ -158,8 +158,10 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
 # happened the family loop starts nothing that would eat into this reserve,
 # and the final drain makes one non-blocking attempt every DRAIN_INTERVAL_S
 # inside it, never past the deadline. The worker's figures (2026-10-02): a
-# reserve that outlasts a scanner card batch several times over; the loop's
-# hours-long screen hold is outlasted by nothing affordable.
+# reserve that outlasts a scanner card batch several times over. (The loop's
+# former hours-long screen hold was outlasted by nothing affordable; since the
+# 2026-10-08 screen-lock-release design, screen holds chain.lock only per
+# batch write, a few seconds each.)
 DRAIN_RESERVE_S = 75.0
 DRAIN_INTERVAL_S = 5.0
 # Injectable so tests drive the drain on a fake clock instead of sleeping.

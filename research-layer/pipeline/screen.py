@@ -25,7 +25,8 @@ from collections.abc import Iterable
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id
 from .parallel import run_all, CellError
-from .registry import Registry
+from .chainlock import ChainLock, ChainLockHeld
+from .registry import Registry, ChainMoved, UnstableEntry, SCREEN_BATCH_MAX
 from .engine import run_spec
 
 PROTOCOL = "screen-protocol-v1"
@@ -37,6 +38,15 @@ DEFAULT_CUTOFF = "2023-12-31"
 # 1,260 specs in ~25 min wall (~1.2 s each) -- 2 s is that, rounded up.
 SCREEN_PRIOR_S_PER_SPEC = 2.0
 SCREEN_CHUNK_PER_WORKER = 8
+
+# 2026-10-08 design: screen takes chain.lock only for each batch write. A
+# batch that meets a held lock is kept and retried at the next chunk
+# boundary, then by a bounded drain: one non-blocking acquire every
+# DRAIN_INTERVAL_S inside DRAIN_RESERVE_S, never past the deadline (the
+# gauntlet worker's values). The reserve is held back only while a batch waits.
+DRAIN_RESERVE_S = 75.0
+DRAIN_INTERVAL_S = 5.0
+_sleep = time.sleep
 
 
 def load_bars(data_dir: Path, asset: str, cutoff: str,
@@ -382,6 +392,8 @@ def run(argv: list[str] | None = None) -> int:
     # selects. Absent = today's behaviour, byte for byte.
     ap.add_argument("--deadline-utc", default=None,
                     help="ISO-8601 instant; defer specs that cannot finish by then")
+    ap.add_argument("--logs-dir", type=Path, default=None,
+                    help="where chain.lock lives (default: <registry dir>/logs)")
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
@@ -402,10 +414,11 @@ def run(argv: list[str] | None = None) -> int:
               f"protocol note before running for real (dry-run is allowed).")
         return 1
 
-    states = registry.strategy_states()
-    specs = [e["payload"] for e in registry.entries()
-             if e["entry_type"] == "strategy_registered"
-             and states.get(e["payload"]["strategy_id"]) == "proposed"]
+    logs_dir = args.logs_dir or (Path(args.registry).resolve().parent / "logs")
+    registered: list[dict] = []
+    snap = registry.snapshot(on_entry=lambda e: registered.append(e["payload"])
+                             if e["entry_type"] == "strategy_registered" else None)
+    specs = [p for p in registered if snap.states.get(p["strategy_id"]) == "proposed"]
     if not specs:
         print("No strategies in 'proposed' state.")
         if not args.dry_run:
@@ -443,76 +456,156 @@ def run(argv: list[str] | None = None) -> int:
     # ordered results; the engine is pure, so fan-out changes scheduling only.
     # Chunked so the budget is asked before EACH chunk whether it can still
     # finish; a spec that is never started stays 'proposed' for the next run.
+    # Each chunk is evaluated with NO lock held; its verdicts are then written
+    # under a short chain.lock hold (flush), kept and retried if it is held.
     workers_eff = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) - 1)
     chunk_size = max(1, workers_eff * SCREEN_CHUNK_PER_WORKER)
-    evaluated = []
+    screened_reason = f"screen run, cutoff {args.cutoff}"
+    pending: list[tuple[dict, dict, bool, str | None]] = []
+    held: set[str] = set()
+    counts = {"written": 0, "retried_written": 0, "dropped_stale": 0}
+    n_pass_written = 0
+    n_started = 0
     stopped_at_deadline = False
-    for chunk in _deadline.chunks(jobs, chunk_size):
-        if budget.active and not budget.fits(len(chunk), budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)):
-            stopped_at_deadline = True
-            break
-        t_c0 = time.time()
-        evaluated.extend(run_all(SpecJob(GATE_MIN_TRADES), chunk, workers=args.workers))
-        budget.record(len(chunk), time.time() - t_c0)
-    deferred = specs[len(evaluated):]
-    specs = specs[:len(evaluated)]
-    if stopped_at_deadline:
-        print(f"DEADLINE: stopped before starting {len(deferred)} of {n_specs_total} "
-              f"specs ({budget.remaining_s():.0f}s left, measured "
-              f"{budget.rate_s(SCREEN_PRIOR_S_PER_SPEC):.2f}s per spec); they stay "
-              f"'proposed' and the next run screens them.", flush=True)
-    if not specs:
-        if not args.dry_run:
-            _deadline.write_result(args.registry, "screen", evaluated=0,
-                                   deferred=len(deferred), deadline_utc=args.deadline_utc,
-                                   stopped_at_deadline=True)
-        return 0
+    last_flush: str | None = None
 
-    results = []
-    for spec, outcome in zip(specs, evaluated):
-        if isinstance(outcome, CellError):
-            # a verdict chain must not silently graveyard a spec that crashed
-            raise RuntimeError(f"{spec['strategy_id']}: {outcome}")
-        result, passed, reason = outcome
-        m = result["metrics"]
-        results.append((spec, result, passed, reason))
-        print(f"{spec['strategy_id']}  {'PASS' if passed else 'fail':<4} "
-              f"trades={m['trades']:>3}  pnl={m['net_pnl']:+.4f}  "
-              f"wr={m['win_rate']:.2f}  dd={m['max_dd']:+.4f}"
-              + (f"  [{reason}]" if reason else ""))
+    def flush() -> str | None:
+        """Write `pending` in holds of <= SCREEN_BATCH_MAX, one non-blocking
+        acquire per hold. Returns "held" when a hold met a held chain.lock,
+        "deadline" when the deadline had passed before a hold could start
+        (either way the rest stays pending), else None. The outcome is kept
+        in `last_flush`: it decides how leftover specs are reported.
+        ChainMoved / UnstableEntry propagate: nothing of that hold was
+        written."""
+        nonlocal snap, n_pass_written, last_flush
+        last_flush = None
+        while pending:
+            if budget.active and (budget.remaining_s() or 0) <= 0:
+                last_flush = "deadline"     # never START a write after the deadline
+                return last_flush
+            batch = pending[:SCREEN_BATCH_MAX]
+            lock = ChainLock(logs_dir, holder="screen",
+                             purpose=f"screen {len(batch)} verdict(s)")
+            try:
+                lock.acquire()
+            except ChainLockHeld:
+                held.update(s["strategy_id"] for s, _, _, _ in pending)
+                last_flush = "held"
+                return last_flush
+            try:
+                snap = registry.advance(snap)
+                live = [x for x in batch
+                        if snap.states.get(x[0]["strategy_id"]) == "proposed"]
+                counts["dropped_stale"] += len(batch) - len(live)
+                items = []
+                for spec, result, passed, reason in live:
+                    bundle = write_artifacts(args.artifacts_dir, spec, result,
+                                             args.cutoff, data_hashes, data_end)
+                    items.append((spec["strategy_id"], "pass" if passed else "fail",
+                                  result["metrics"], bundle_hash(bundle),
+                                  "gauntlet" if passed else "graveyard", reason,
+                                  screened_reason))
+                if items:
+                    snap = registry.record_screen_outcomes_batch(snap, items)
+            finally:
+                lock.release()
+            counts["written"] += len(items)
+            counts["retried_written"] += sum(1 for it in items if it[0] in held)
+            n_pass_written += sum(1 for it in items if it[1] == "pass")
+            del pending[:len(batch)]
+        return None
 
-    n_pass = sum(1 for _, _, p, _ in results if p)
-    if args.dry_run:
-        print(f"\nDRY RUN — {len(results)} screened, {n_pass} would pass, "
-              f"{len(results) - n_pass} would fail; nothing written.")
-        return 0
+    def final_drain() -> None:
+        if not pending:
+            return
+        stop_at = time.monotonic() + DRAIN_RESERVE_S
+        while pending:
+            if flush() in (None, "deadline"):
+                return
+            if time.monotonic() + DRAIN_INTERVAL_S >= stop_at:
+                return
+            if budget.active and (budget.remaining_s() or 0) <= DRAIN_INTERVAL_S:
+                return
+            _sleep(DRAIN_INTERVAL_S)
 
-    n_written = 0
     try:
-        for spec, result, passed, reason in results:
-            sid = spec["strategy_id"]
-            bundle = write_artifacts(args.artifacts_dir, spec, result,
-                                     args.cutoff, data_hashes, data_end)
-            registry.record_state_change(sid, "screened",
-                                         f"screen run, cutoff {args.cutoff}")
-            registry.record_verdict(sid, "screened",
-                                    "pass" if passed else "fail",
-                                    result["metrics"], bundle_hash(bundle))
-            registry.record_state_change(
-                sid, "gauntlet" if passed else "graveyard", reason)
-            n_written += 1
-    except BaseException:
-        print(f"\nPARTIAL WRITE: {n_written}/{len(results)} strategies fully "
-              f"chained before failure — review the registry tail before "
-              f"re-running.", file=sys.stderr)
-        raise
+        for chunk in _deadline.chunks(jobs, chunk_size):
+            # the drain reserve is held back only while a batch is pending
+            # (the gauntlet worker's reserve_s): stop unless this chunk AND
+            # the reserve both fit in what is left
+            reserve = DRAIN_RESERVE_S if pending else 0.0
+            if budget.active and (len(chunk) * budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)
+                                  + reserve > (budget.remaining_s() or 0)):
+                stopped_at_deadline = True
+                break
+            t_c0 = time.time()
+            outcomes = run_all(SpecJob(GATE_MIN_TRADES), chunk, workers=args.workers)
+            budget.record(len(chunk), time.time() - t_c0)
+            for (spec, _), outcome in zip(chunk, outcomes):
+                if isinstance(outcome, CellError):
+                    # a verdict chain must not silently graveyard a spec that
+                    # crashed: keep what was judged so far (one attempt), then
+                    # raise; this spec and every later one stay 'proposed'.
+                    # The crash detail is printed BEFORE the flush, so a
+                    # ChainMoved in that flush cannot hide it from the log.
+                    print(f"CELL ERROR: {spec['strategy_id']}: {outcome}", flush=True)
+                    if not args.dry_run:
+                        flush()
+                    raise RuntimeError(f"{spec['strategy_id']}: {outcome}")
+                n_started += 1
+                result, passed, reason = outcome
+                m = result["metrics"]
+                print(f"{spec['strategy_id']}  {'PASS' if passed else 'fail':<4} "
+                      f"trades={m['trades']:>3}  pnl={m['net_pnl']:+.4f}  "
+                      f"wr={m['win_rate']:.2f}  dd={m['max_dd']:+.4f}"
+                      + (f"  [{reason}]" if reason else ""))
+                if not args.dry_run:
+                    pending.append((spec, result, passed, reason))
+                elif passed:
+                    n_pass_written += 1
+            if not args.dry_run:
+                flush()
+        if not args.dry_run:
+            final_drain()
+    except (ChainMoved, UnstableEntry) as exc:
+        print(f"REFUSED: chain moved or an entry did not round-trip; nothing "
+              f"written for that batch: {exc}", flush=True)
+        return 1
 
-    _deadline.write_result(args.registry, "screen", evaluated=len(results),
-                           deferred=len(deferred), deadline_utc=args.deadline_utc,
-                           stopped_at_deadline=stopped_at_deadline)
-    print(f"\n{len(results)} screened: {n_pass} -> gauntlet, "
-          f"{len(results) - n_pass} -> graveyard"
-          + (f", {len(deferred)} deferred to the next run." if deferred else "."))
+    if args.dry_run:
+        print(f"\nDRY RUN — {n_started} screened, {n_pass_written} would pass, "
+              f"{n_started - n_pass_written} would fail; nothing written.")
+        return 0
+
+    not_started = n_specs_total - n_started
+    # Leftover pending specs are a LOCK deferral (Ruling 4: deferred +
+    # deferred_lock, no stopped_at_deadline) unless the last flush was
+    # stopped by the deadline itself (Ruling 6: deferred only, and the
+    # deadline stopped the run).
+    unwritten_deadline = len(pending) if last_flush == "deadline" else 0
+    unwritten_lock = len(pending) - unwritten_deadline
+    if unwritten_deadline:
+        stopped_at_deadline = True
+    if stopped_at_deadline and not_started:
+        print(f"DEADLINE: stopped before starting {not_started} of {n_specs_total} "
+              f"specs; they stay 'proposed' and the next run screens them.", flush=True)
+    if unwritten_deadline:
+        print(f"DEADLINE: {unwritten_deadline} screened spec(s) not written (the "
+              f"deadline passed before their write could start); they stay "
+              f"'proposed' and the next run screens them.", flush=True)
+    if unwritten_lock:
+        print(f"chain.lock held: {unwritten_lock} screened spec(s) not written; they "
+              f"stay 'proposed' and the next run screens them.", flush=True)
+    _deadline.write_result(
+        args.registry, "screen", evaluated=counts["written"],
+        deferred=not_started + len(pending), deadline_utc=args.deadline_utc,
+        stopped_at_deadline=stopped_at_deadline,
+        extra={"deferred_lock": unwritten_lock, "retried_written": counts["retried_written"],
+               "dropped_stale": counts["dropped_stale"]})
+    print(f"\n{counts['written']} screened: {n_pass_written} -> gauntlet, "
+          f"{counts['written'] - n_pass_written} -> graveyard"
+          + (f", {not_started + len(pending)} deferred to the next run."
+             if not_started + len(pending) else "."))
     return 0
 
 

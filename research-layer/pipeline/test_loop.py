@@ -2843,6 +2843,58 @@ def test_a_completed_cycle_without_the_gauntlet_stage_reports_no_deferred_gauntl
     assert status["items"]["deferred_screen"] == "0"
 
 
+class _LockObservingRunner(FakeRunner):
+    """FakeRunner that records, per python -m stage, who held chain.lock as
+    the stage started; optionally a foreign session takes chain.lock just
+    before screen starts (and keeps it)."""
+    def __init__(self, layer, foreign_at_screen=False, **kw):
+        super().__init__(**kw)
+        self.layer = layer
+        self.foreign_at_screen = foreign_at_screen
+        self.holder_at: dict[str, list] = {}
+
+    def __call__(self, argv, **kw):
+        if argv and argv[0] == sys.executable and "-m" in argv:
+            mod = argv[argv.index("-m") + 1]
+            lock = self.layer / "logs" / "chain.lock"
+            if mod == "pipeline.screen" and self.foreign_at_screen and not lock.exists():
+                ChainLock(self.layer / "logs", holder="session",
+                          purpose="test").acquire()
+            holder = (json.loads(lock.read_text(encoding="utf-8")).get("holder")
+                      if lock.exists() else None)
+            self.holder_at.setdefault(mod, []).append(holder)
+        return super().__call__(argv, **kw)
+
+
+def test_screen_runs_without_the_loop_holding_chain_lock(tmp_path):
+    """2026-10-08 design: the loop no longer wraps screen in _lock_and_run;
+    screen takes chain.lock itself, per batch."""
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = _LockObservingRunner(layer)
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    assert fr.holder_at["pipeline.screen"] == [None]
+    assert all(h == "loop" for h in fr.holder_at["pipeline.triage_batch"])
+    # composer runs twice: the --dry-run preflight takes no lock (loop 4b),
+    # then the real run holds the loop's lock.
+    assert fr.holder_at["pipeline.composer"] == [None, "loop"]
+    screen_argv = _stage_call(fr, "pipeline.screen")
+    assert "--logs-dir" in screen_argv
+    assert screen_argv[screen_argv.index("--logs-dir") + 1] == str(layer / "logs")
+
+
+def test_a_held_chain_lock_at_screen_does_not_defer_the_cycle(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    _seed_crypto_caught_up(layer, 30)
+    fr = _LockObservingRunner(layer, foreign_at_screen=True)
+    rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
+    status = json.loads((layer / "logs" / "pipeline_status.json")
+                        .read_text(encoding="utf-8"))
+    assert status["items"]["outcome"] == "cycle_complete", status["items"]
+    assert rc == 0
+    assert fr.holder_at["pipeline.screen"] == ["session"]
+
+
 # ─── degraded ledger (2026-10-08 per-asset isolation) ───────────────────────
 
 def _ledger(layer):
