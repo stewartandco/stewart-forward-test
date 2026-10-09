@@ -1,0 +1,95 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "4434857629cdbda9d8b0b2d92b8d77b3e51dd5a0a44a39c2c663fd7f5b6c2ed1",
+  "ETHUSD_1d": "6b24123aba5d9e9e9c5f57a8e5f8adde5597fc3d36cd503d52d4e277eacc22e3"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 20,
+     "slow": 80
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_bars": 20
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-31T14:21:46Z",
+  "family": "short_ma_cross_below_ma_regime",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-31-133003-loop-crypto"
+  },
+  "name": "BTC+ETH 1d short_ma_cross_below_ma_regime dshort f20 s80 ml100 al14 m2.5 mb20 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "3042ee8aec83f2f2",
+    "6078cc70ec7b8303",
+    "799502905879efbd",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "9aeedfe2b4f5e2cc",
+    "be7a97c49de94b92",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "short_ma_cross_below_ma_regime-2026-08-31-133003-loop-crypto"
+  },
+  "strategy_id": "5cc96121506c1633",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}
