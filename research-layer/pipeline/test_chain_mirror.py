@@ -411,3 +411,51 @@ def test_check_flags_a_sealed_range_rewritten_identically_in_live_and_segment(tm
     seg.write_bytes(seg.read_bytes().replace(b"note 0001", b"note 9999"))
     assert cm.read_live(reg) == cm.joined(md)
     assert cm.check(reg, md) == "MISMATCH"
+
+
+def test_hard_ceiling_is_50_mib_above_the_segment_size():
+    assert cm.HARD_MAX_BYTES == 50 * 1024 * 1024
+    assert cm.SEGMENT_MAX_BYTES < cm.HARD_MAX_BYTES
+
+
+def test_sync_refuses_a_hand_raised_manifest_max_over_the_hard_ceiling(tmp_path):
+    """A hand-edited segment_max_bytes must never let sync write a segment
+    of any size (final review 2026-10-09)."""
+    reg, md, logs = _setup(tmp_path, 8)
+    line = len(cm.split_lines(cm.read_live(reg))[0])
+    assert cm.sync(reg, md, logs_dir=logs, max_bytes=line * 4).ok
+    man = json.loads((md / cm.MANIFEST).read_text(encoding="utf-8"))
+    man["segment_max_bytes"] = cm.HARD_MAX_BYTES + 1
+    (md / cm.MANIFEST).write_text(json.dumps(man), encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in md.iterdir()}
+    Registry(reg).append("note", {"text": "later"})
+    r = cm.sync(reg, md, logs_dir=logs)
+    assert not r.ok and "hard ceiling" in r.reason
+    assert {p.name: p.read_bytes() for p in md.iterdir()} == before
+    assert [i["source"] for i in _ledger(logs)["items"]] == ["chain_mirror"]
+
+
+def test_sync_refuses_a_fresh_mirror_asked_for_segments_over_the_hard_ceiling(tmp_path):
+    reg, md, logs = _setup(tmp_path, 3)
+    r = cm.sync(reg, md, logs_dir=logs, max_bytes=cm.HARD_MAX_BYTES + 1)
+    assert not r.ok and "hard ceiling" in r.reason
+    assert not (md / cm.MANIFEST).exists()
+    assert cm.sync(reg, md, logs_dir=logs, max_bytes=cm.HARD_MAX_BYTES).ok
+
+
+def test_layout_flags_segments_and_a_manifest_max_over_the_hard_ceiling(tmp_path, monkeypatch):
+    """The ceiling holds whatever the manifest says: a segment over it is a
+    problem even when the manifest's own segment_max_bytes allows it."""
+    _, md = _mirrored(tmp_path)                      # 4-line segments
+    line = len(cm.split_lines((md / "000001.jsonl").read_bytes())[0])
+    man = json.loads((md / cm.MANIFEST).read_text(encoding="utf-8"))
+    man["segment_max_bytes"] = 10 ** 12
+    (md / cm.MANIFEST).write_text(json.dumps(man), encoding="utf-8")
+    assert cm.check_layout(md) == [f"{cm.MANIFEST}: segment_max_bytes {10 ** 12} is over "
+                                   f"the {cm.HARD_MAX_BYTES}-byte hard ceiling"]
+    monkeypatch.setattr(cm, "HARD_MAX_BYTES", line * 2)
+    probs = cm.check_layout(md)
+    assert any(p.startswith(f"{cm.MANIFEST}: segment_max_bytes") for p in probs)
+    for k in (1, 2, 3):                              # two sealed + the active one
+        assert any(p.startswith(f"{cm.segment_name(k)}: ") and "over the" in p
+                   for p in probs), probs

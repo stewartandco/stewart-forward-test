@@ -29,6 +29,10 @@ from .common import GENESIS_HASH, entry_hash
 from .lock import FileLock, FileLockTimeout
 
 SEGMENT_MAX_BYTES = 40 * 1024 * 1024   # under GitHub's 50 MiB warning
+# Never exceeded, whatever a (hand-edited) manifest says: sync refuses an
+# effective segment_max_bytes over it and check_layout flags any segment or
+# manifest value over it (final review 2026-10-09). GitHub warns at 50 MiB.
+HARD_MAX_BYTES = 50 * 1024 * 1024
 FORMAT = "registry-segments-v1"
 MANIFEST = "MANIFEST.json"
 
@@ -146,6 +150,9 @@ def _sync_locked(registry_path: Path, mdir: Path, max_bytes: int) -> SyncResult:
         t.unlink()
     man = load_manifest(mdir, max_bytes)
     max_bytes = man["segment_max_bytes"]
+    if max_bytes > HARD_MAX_BYTES:
+        raise MirrorRefused(f"segment_max_bytes {max_bytes} is over the {HARD_MAX_BYTES}-byte "
+                            f"hard ceiling")
     sealed = man["sealed"]
     buf = read_live(registry_path)
     lines = split_lines(buf)
@@ -288,8 +295,8 @@ def check_layout(mirror_dir) -> list[str]:
     """Problems with a registry_log.d directory, read-only; [] = good.
     Checks the manifest, that the files are exactly the sealed ones plus ONE
     active segment, each sealed file's bytes/sha256/line range, LF only, the
-    size cap, and every cross-segment hash link. The chain walk itself is the
-    verifier's."""
+    size cap (the manifest's, never above HARD_MAX_BYTES), and every
+    cross-segment hash link. The chain walk itself is the verifier's."""
     mdir = Path(mirror_dir)
     if not (mdir / MANIFEST).is_file():
         return [f"{MANIFEST} missing"]
@@ -300,6 +307,10 @@ def check_layout(mirror_dir) -> list[str]:
     probs: list[str] = []
     sealed = man.get("sealed", [])
     maxb = man.get("segment_max_bytes", SEGMENT_MAX_BYTES)
+    if maxb > HARD_MAX_BYTES:
+        probs.append(f"{MANIFEST}: segment_max_bytes {maxb} is over the {HARD_MAX_BYTES}-byte "
+                     f"hard ceiling")
+    maxb = min(maxb, HARD_MAX_BYTES)       # the ceiling holds whatever the manifest says
     want = [segment_name(k) for k in range(1, len(sealed) + 2)]
     have = sorted(p.name for p in mdir.glob("*.jsonl"))
     if have != want:
