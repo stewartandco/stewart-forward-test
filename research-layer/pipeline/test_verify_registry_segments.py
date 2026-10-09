@@ -3,6 +3,7 @@ segments, after checking the manifest (segments design s5)."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -70,3 +71,37 @@ def test_a_directory_without_a_manifest_fails(tmp_path):
     (d / cm.MANIFEST).unlink()
     r = _verify(d)
     assert r.returncode != 0
+
+
+def _clone_with_only_the_mirror(tmp_path):
+    """A public clone after the switch: registry_log.d, no registry_log.jsonl."""
+    _, d = _layer(tmp_path / "src")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    shutil.copytree(d, clone / "registry_log.d")
+    return clone
+
+
+def test_no_path_argument_falls_back_to_the_mirror_when_the_live_file_is_absent(tmp_path):
+    clone = _clone_with_only_the_mirror(tmp_path)
+    r = subprocess.run([sys.executable, str(LAYER / "verify_registry.py")],
+                       cwd=str(clone), capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Verifying registry at registry_log.d" in r.stdout
+    assert "REGISTRY VALID" in r.stdout
+
+
+def test_an_explicit_path_is_never_second_guessed(tmp_path):
+    clone = _clone_with_only_the_mirror(tmp_path)
+    r = subprocess.run([sys.executable, str(LAYER / "verify_registry.py"), "registry_log.jsonl"],
+                       cwd=str(clone), capture_output=True, text=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "Verifying registry at registry_log.jsonl" in r.stdout
+
+
+def test_no_path_argument_prefers_the_live_file_when_it_exists(tmp_path):
+    f, _ = _layer(tmp_path)
+    r = subprocess.run([sys.executable, str(LAYER / "verify_registry.py")],
+                       cwd=str(tmp_path), capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Verifying registry at registry_log.jsonl" in r.stdout

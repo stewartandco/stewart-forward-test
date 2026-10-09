@@ -19,7 +19,7 @@ that died — is provable after the fact.
 | [`schemas/research_card.schema.json`](./schemas/research_card.schema.json) | JSON Schema — research card |
 | [`schemas/strategy_spec.schema.json`](./schemas/strategy_spec.schema.json) | JSON Schema — strategy specification |
 | [`schemas/registry_entry.schema.json`](./schemas/registry_entry.schema.json) | JSON Schema — registry log entry (the hash-chained unit) |
-| [`verify_registry.py`](./verify_registry.py) | Chain walker + invariant checker for `registry_log.jsonl`, mirroring the root `verify.py`. Needs the `pipeline/` package beside it (see below) |
+| [`verify_registry.py`](./verify_registry.py) | Chain walker + invariant checker for `registry_log.jsonl` or the `registry_log.d/` segment directory git tracks (with no argument it reads `registry_log.jsonl`, or `registry_log.d` when only that exists), mirroring the root `verify.py`. Needs the `pipeline/` package beside it (see below) |
 | [`examples/`](./examples) | Worked examples: a research card, a strategy spec, and a valid chained registry log |
 | [`pipeline/`](./pipeline) | Reader pilot: registry writer, Claude-powered card extraction, and human triage CLI |
 
@@ -115,8 +115,9 @@ Git tracks the chain as LF segments in `registry_log.d/` (each at most
 recording every sealed segment's line range, size, sha256 and boundary hashes.
 Joined in order, the segments are the chain. The verifier checks the manifest
 and every cross-segment link, then walks the joined chain exactly as it walks
-a single file. Commits before 2026-10 carry the chain as one
-`registry_log.jsonl`; commits after carry `registry_log.d/`. A VALID result means the hash chain in the segments verifies; it does not say the mirror is current with the live file, which `python -m pipeline.chain_mirror check` compares (MATCH / BEHIND / MISMATCH).
+a single file. Commits before the switch commit ("chain: git tracks
+registry_log.d segments; registry_log.jsonl is local") carry the chain as one
+`registry_log.jsonl`; commits from the switch commit onward carry `registry_log.d/`. A VALID result means the hash chain in the segments verifies; it does not say the mirror is current with the live file, which `python -m pipeline.chain_mirror check` compares (MATCH / BEHIND / MISMATCH).
 
 `verify_registry.py` re-walks the hash chain and then checks nine invariants:
 
