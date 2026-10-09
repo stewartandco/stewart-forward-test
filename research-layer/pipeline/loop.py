@@ -43,7 +43,7 @@ import sys
 import traceback
 
 from . import allowance as _allowance
-from . import commit_guard as _commit_guard
+from . import chain_mirror as _chain_mirror
 from . import commit_list as _commit_list
 from . import deadline as _deadline
 from datetime import datetime, timezone
@@ -408,7 +408,7 @@ def _pathspec_file(paths: list[str]):
 
 
 def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
-    """Repo-relative paths for this cycle's chain delta: the registry plus
+    """Repo-relative paths for this cycle's chain delta: the chain mirror (registry_log.d) plus
     artifacts/<sid> for every strategy_registered entry appended after
     start_line whose bundle exists on disk. start_line is the chain-line
     count taken by the SAME helper (_entry_count) that also measures
@@ -434,7 +434,10 @@ def collect_commit_paths(registry_path: Path, start_line: int) -> list[str]:
     one it chains (commit_list.py) and commit_cycle carries that list."""
     layer = registry_path.parent
     rel_root = "research-layer"
-    paths = [f"{rel_root}/registry_log.jsonl"]
+    # Git tracks the chain's LF segments (chain_mirror.py), never the live
+    # file (segments design 2026-10-09). The caller syncs the mirror first and
+    # drops this entry when the sync was refused.
+    paths = [f"{rel_root}/{_chain_mirror.KEY}"]
     with registry_path.open("r", encoding="utf-8") as f:
         lines = [ln for ln in f if ln.strip()]
     for ln in lines[start_line:]:
@@ -541,7 +544,7 @@ def commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runn
 
 def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Runner,
                   listed: list[str]) -> bool:
-    """Scoped commit of this cycle's chain delta (registry_log.jsonl, the
+    """Scoped commit of this cycle's chain delta (the chain mirror registry_log.d, the
     artifact bundles registered this cycle, and every file on screen's
     commit list). Returns True only when the commit succeeded or there was
     nothing to commit. Best-effort: a git failure is
@@ -565,20 +568,22 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
     layer = registry_path.parent
     repo = layer.parent
     paths = collect_commit_paths(registry_path, start_line)
-    # Commit guard (2026-10-09 stopgap, commit_guard.py): at or over the
-    # guard the registry stays out of this commit and everything else in
-    # scope still commits. A guard that raises is a "no", never a commit of
-    # an unchecked registry and never a failed cycle.
+    # Chain mirror (segments design 2026-10-09): bring registry_log.d up to
+    # date, then stage it. A sync that refuses or raises is a "no" for the
+    # mirror only -- everything else in scope still commits -- and never a
+    # failed cycle.
+    mirror_rel = paths[0]
     try:
-        reg_ok = _commit_guard.registry_committable(
-            registry_path, layer / "logs", guard_bytes=_commit_guard.GUARD_BYTES)
+        res = _chain_mirror.sync(registry_path, layer / _chain_mirror.KEY,
+                                 logs_dir=layer / "logs")
+        mirror_ok = res.ok
+        why = res.reason
     except Exception as exc:              # noqa: BLE001 -- bookkeeping
-        print(f"loop: WARNING commit guard failed ({exc}); registry left out of "
-              f"this commit", flush=True)
-        reg_ok = False
-    if not reg_ok:
-        print("loop: registry left out of this commit (commit guard)", flush=True)
-        paths = paths[1:]                 # collect_commit_paths puts it first
+        mirror_ok, why = False, f"{type(exc).__name__}: {exc}"
+    if not mirror_ok:
+        print(f"loop: WARNING chain mirror not updated ({why}); registry_log.d "
+              f"left out of this commit", flush=True)
+        paths = paths[1:]
     seen = set(paths)
     gone = set()
     for rel in listed:                    # screen's list; a vanished file is skipped
@@ -586,7 +591,7 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
             continue
         if not rel.startswith("research-layer/artifacts/"):
             # Screen lists bundle files only; anything else is a hand edit,
-            # and the registry must never ride in past the commit guard.
+            # and the live registry must never ride in past the mirror.
             gone.add(rel)
             continue
         if _on_disk(layer, rel):
@@ -598,7 +603,7 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
         # Loud, never silent: a garbled hand edit lands here too.
         print(f"loop: WARNING skipped {len(gone)} listed screen path(s) not on disk, "
               f"e.g. {sorted(gone)[0]!r}", flush=True)
-    has_new_artifacts = len(paths) > int(reg_ok)   # more than just the registry line
+    has_new_artifacts = len(paths) > int(mirror_ok)   # more than just the mirror entry
 
     # The scope NEVER travels on the command line (2026-09-01). The fx cycle
     # registered 1,260 strategies, chained them, banked its watermark, and
@@ -619,6 +624,11 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
         if diff.returncode != 0:
             changed = True
             break
+    if mirror_ok and not changed:
+        # New segments are UNTRACKED, which `git diff` never reports.
+        st = runner(["git", "status", "--porcelain", "--", mirror_rel],
+                    cwd=str(repo), capture_output=True, text=True)
+        changed = bool((getattr(st, "stdout", "") or "").strip())
     if not changed and not has_new_artifacts:
         # Nothing changed this cycle -- silent, no commit. Every listed file
         # still on disk is in `paths` (forcing has_new_artifacts), so reaching
@@ -636,7 +646,7 @@ def _commit_cycle(registry_path: Path, start_line: int, run_id: str, runner: Run
             print("loop: WARNING git commit failed (possibly nothing staged)", flush=True)
             return False
     n_listed = sum(1 for x in paths if x.count("/") >= 3)
-    print(f"loop: committed chain delta ({len(paths) - int(reg_ok) - n_listed} artifact bundle(s), "
+    print(f"loop: committed chain delta ({len(paths) - int(mirror_ok) - n_listed} artifact bundle(s), "
           f"{n_listed} listed screen file(s))", flush=True)
     return True
 
