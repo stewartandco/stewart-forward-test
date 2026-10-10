@@ -12,6 +12,15 @@
       "sha256": "2fa7b34ada5f0ad5ca922fc8e2efab9670d7da6734e1c5633862cc316af1d2d4",
       "first_prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000",
       "last_entry_hash": "dfe1326c18e176bdd0851f8871f838436fd37084eb9957e0336bd12fd3de15fc"
+    },
+    {
+      "file": "000002.jsonl",
+      "first_line": 56161,
+      "last_line": 106603,
+      "bytes": 41942260,
+      "sha256": "6a82a6b591f88b2f578527e497e62e0aa77dbe9699926c013814ed28cf06a098",
+      "first_prev_entry_hash": "dfe1326c18e176bdd0851f8871f838436fd37084eb9957e0336bd12fd3de15fc",
+      "last_entry_hash": "90b78e54e9a9bdcaf0884756b75261e6f0c766cd01cafaf2e159611ecff758ee"
     }
   ]
 }
