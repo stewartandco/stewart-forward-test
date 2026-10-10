@@ -941,6 +941,16 @@ def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
                     "quarantine", report.degraded, remove_unseen=remove_unseen)
 
 
+def _split_intraday(quarantined: list[str], specs: dict) -> tuple[list[str], list[str]]:
+    """2b-1 (Ruling R1): the recorder is daily-only until 2b-2. An intraday
+    spec would otherwise be simulated on its asset's DAILY bars."""
+    daily, intraday = [], []
+    for sid in quarantined:
+        tf = specs.get(sid, {}).get("universe", {}).get("timeframe", "1d")
+        (daily if tf == "1d" else intraday).append(sid)
+    return daily, intraday
+
+
 def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         write_ledger: bool = True) -> int:
     layer = Path(__file__).resolve().parent.parent
@@ -991,12 +1001,23 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
              for e in registry.entries()
              if e["entry_type"] == "strategy_registered"}
 
+    quarantined, intraday = _split_intraday(quarantined, specs)
+    intraday_items = []
+    for sid in intraday:
+        tf = specs[sid]["universe"].get("timeframe")
+        print(f"{sid}  skipped: intraday timeframe {tf!r}; the intraday paper "
+              f"stage is not built yet (2b-2)")
+        intraday_items.append({"source": "intraday_unsupported", "key": sid,
+                               "reason": f"{tf} strategy in quarantine; the recorder "
+                                         f"is daily-only until 2b-2"})
+
     if args.review:
         return review(registry, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
 
     if args.catch_up:
         report = DateReport()
+        report.degraded.extend(intraday_items)
         dates = _owed_dates_for_catch_up(registry, quarantined, entered,
                                          specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
@@ -1021,6 +1042,7 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return rc
 
     report = report if report is not None else DateReport()
+    report.degraded.extend(intraday_items)
     try:
         return _record_date(args, registry, quarantined, entered, specs, report)
     finally:
