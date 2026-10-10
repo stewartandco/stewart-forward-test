@@ -159,6 +159,71 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `test_loop_commit_mirror.py`, `test_chain_mirror_wrappers.py` (RUNS copies
   of the three .bat files under cmd.exe against a scratch repo; Windows only).
 
+## Intraday: bar mechanics per bar, statistics on daily marks (2b-1, 2026-10-10)
+- **The rule:** an intraday strategy (timeframe below 1d, session 24x7)
+  is SIMULATED per bar but MEASURED on the equity curve marked once per
+  UTC day. Mechanics use the bar size: the engine's vol-target sizing
+  annualises with bars per year, short financing accrues per bar
+  (`short_financing_per_year / periods_per_year`), and `gate_mask`'s
+  vol_percentile window is 365 x bars per day bars. Every recorded or
+  gated statistic uses daily marks, so the pipeline's 365-based formulas
+  stay correct at every timeframe. A 1d strategy's bars ARE its daily
+  marks: every daily number is unchanged. Design:
+  `docs/2026-10-10-intraday-correctness-design.md`.
+- **`pipeline/bars.py` is the one home of the arithmetic.**
+  `BARS_PER_DAY_24X7` = 15m 96, 30m 48, 1h 24, 4h 6, 12h 2, 1d 1;
+  `bars_per_day(session, tf)`; `bars_per_year` = `cells.SESSION_PERIODS`
+  [session] (default 365) x bars per day. `daily_marks(series)` keeps the
+  LAST (date, value) of each UTC date (key `date[:10]`) and RAISES on
+  out-of-order input; `daily_bars(rows)` is the same for bar dicts.
+  `engine.run_spec` resolves bars per year there (vol-target sizing,
+  per-bar financing) and passes bars per day to `gate_mask`.
+- **Statistics on daily marks:** `plateau.annualized_sharpe`,
+  `gauntlet_core.daily_returns_with_dates`,
+  `gauntlet.daily_returns_from_curve`, `window_vol` (over `daily_bars`),
+  `train_dates` for the walk-forward, and `regime_by_date` on `daily_bars`
+  of BTC (`[:10]` keys). The simcache key uses
+  `gauntlet._resolved_periods(spec)`. `ENGINE_REV` stays "e2" (a 1d
+  strategy's results are bit-identical, so no cached sim is invalidated).
+  Trade-based gates (edge per trade, edge decay, MC p05, ruin, cost stress)
+  are unchanged.
+- **24x7 only:** any non-24x7 session with tf != "1d" raises
+  `bars.IntradayUnsupported` (a `ValueError`), as does an unknown tf.
+  Hazard for 2b-3: a NON-24x7 intraday spec reaching `registry_series`
+  would raise inside it and abort the whole gauntlet/stats pass, so
+  registration must refuse it up front.
+- **Quarantine refuses intraday until 2b-2:** the recorder is daily-only
+  (it would otherwise simulate an intraday spec on its asset's DAILY
+  bars). `quarantine._split_intraday` skips every non-1d quarantined spec,
+  prints `skipped: intraday timeframe ...`, and records it as a degraded
+  item with source `intraday_unsupported` in
+  `logs/degraded_quarantine.json`. Test: `test_quarantine_intraday.py`.
+- **Parity guarantee:** `tools/daily_parity.py` (`dump` before and after a
+  change, then `compare`) fingerprints registered 1d strategies. On
+  2026-10-10, 200 registered 1d strategies (167 of them vol-target or
+  vol-percentile) were bit-identical across the change, 0 errors.
+  `compare` fails on a meta mismatch (seed, cutoff, sample size, registry
+  sha), empty results, or ANY error, so it cannot pass vacuously. Re-run
+  it after any change to `bars.py`, the engine's sizing/financing/gate
+  code, or the statistics above.
+- **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
+  twins of real crypto strategies on a COPY of the chain, runs the real
+  screen and gauntlet on the copy and reads the outcomes side by side. Its
+  `register` REFUSES the live chain (exit 2, nothing written).
+- **The intraday path is dormant:** `cells.ACTIVE_CELLS["crypto"]` is empty
+  until 2b-3, so no scheduled task registers an intraday strategy.
+- **2b-3 hazards (cost these before activating):** `vol_percentile` in
+  `gate_mask` is O(n x 365 x bars_per_day), about 940 s per 1h
+  vol_percentile candidate under perturbation, and
+  `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) is far too low for 1h, so the
+  cycle budget would be misjudged.
+- **The protocol note is a DRAFT and is NOT chained until 2b-3:**
+  `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
+  approves the exact text; it is chained VERBATIM at 2b-3 activation,
+  before the first intraday verdict (the v6.1-amendment pattern). Do not
+  chain it, edit its wording, or treat intraday daily-mark verdicts as
+  protocol-covered before then.
+
 ## Pipeline loop (25_PipelineLoop)
 - **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs
   `pipeline.screen` with `--logs-dir <logs>` and WITHOUT `_lock_and_run`:
