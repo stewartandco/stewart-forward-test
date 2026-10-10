@@ -1,0 +1,17 @@
+{
+  "format": "registry-segments-v1",
+  "segment_max_bytes": 41943040,
+  "line_terminator": "LF",
+  "source": "research-layer/registry_log.jsonl (CRLF on disk)",
+  "sealed": [
+    {
+      "file": "000001.jsonl",
+      "first_line": 1,
+      "last_line": 56160,
+      "bytes": 41941584,
+      "sha256": "2fa7b34ada5f0ad5ca922fc8e2efab9670d7da6734e1c5633862cc316af1d2d4",
+      "first_prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "last_entry_hash": "dfe1326c18e176bdd0851f8871f838436fd37084eb9957e0336bd12fd3de15fc"
+    }
+  ]
+}
