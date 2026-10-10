@@ -40,8 +40,8 @@ def walkforward_report(trades: list[dict], dates: list[str], n_folds: int = 3,
     out = []
     catastrophic = False
     for f in folds:
-        window = set(f["test"])
-        picked = [t for t in trades if t["entry_date"] in window]
+        window = {str(d)[:10] for d in f["test"]}
+        picked = [t for t in trades if str(t["entry_date"])[:10] in window]
         equity, min_equity, net = 1.0, 1.0, 0.0
         for t in picked:
             c = t["return_net"] * t.get("notional_frac", 1.0)

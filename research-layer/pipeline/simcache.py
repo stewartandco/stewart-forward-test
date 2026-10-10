@@ -87,8 +87,9 @@ def cache_key(sid: str, data_shas: dict[str, str], engine_rev: str,
     content-addressed), so the key needs nothing else about the spec.
 
     `periods_per_year` must be the RESOLVED value run_spec itself would use
-    (`cells.SESSION_PERIODS.get(spec["universe"]["session"], 365)`) -- not
-    recomputed here, same discipline as `data_shas`. See this module's
+    (bars per year, `bars.bars_per_year(session, timeframe)`; identical to the
+    prior `cells.SESSION_PERIODS.get(session, 365)` for a 1d spec, 2b-1) --
+    not recomputed here, same discipline as `data_shas`. See this module's
     docstring for why it is a fourth, independent key component rather than
     implied by the other three.
     """

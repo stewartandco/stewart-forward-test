@@ -17,11 +17,12 @@ def test_annualized_sharpe_of_a_flat_curve_is_none():
 
 
 def test_annualized_sharpe_uses_365_day_scaling():
+    from datetime import date, timedelta
     curve = [("2020-01-01", 1.0)]
     v = 1.0
     for i in range(400):
         v *= 1.001 if i % 2 == 0 else 0.9995
-        curve.append((f"d{i}", v))
+        curve.append(((date(2020, 1, 2) + timedelta(days=i)).isoformat(), v))
     sr = annualized_sharpe(curve)
     assert sr is not None and sr > 0
 

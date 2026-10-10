@@ -31,9 +31,9 @@ def regime_by_date(bars: list[dict], ma_len: int = 200) -> dict[str, str]:
             continue
         spread = (closes[i] - ma) / ma
         if abs(spread) <= CHOP_BAND:
-            labels[b["date"]] = "chop"
+            labels[str(b["date"])[:10]] = "chop"
         else:
-            labels[b["date"]] = "trend_up" if spread > 0 else "trend_down"
+            labels[str(b["date"])[:10]] = "trend_up" if spread > 0 else "trend_down"
     return labels
 
 
@@ -41,7 +41,7 @@ def regime_split(trades: list[dict], labels: dict[str, str]) -> dict:
     """Per-bucket trade count, net contribution and win rate."""
     out = {b: {"n": 0, "net": 0.0, "wins": 0} for b in BUCKETS}
     for t in trades:
-        bucket = labels.get(t["entry_date"], "unlabelled")
+        bucket = labels.get(str(t["entry_date"])[:10], "unlabelled")
         c = t["return_net"] * t.get("notional_frac", 1.0)
         out[bucket]["n"] += 1
         out[bucket]["net"] += c

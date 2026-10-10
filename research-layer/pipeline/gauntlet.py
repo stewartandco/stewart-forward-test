@@ -74,6 +74,8 @@ from .plateau import annualized_sharpe, qualifies, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
+from .bars import daily_marks, daily_bars
+from . import bars
 from .gauntlet_core import (FAIL_ORDER, SR_FLOOR, DECAY_MIN_PCT, MC_PATHS,
                             MC_P05_MIN, RUIN_LEVEL, P_RUIN_MAX, DEFAULT_CUTOFF,
                             PURGE_BARS, _date_le, split_trades, contributions,
@@ -269,7 +271,15 @@ def select_survivors(rows: list[dict], grids_by_group: dict,
     return {r["sid"] for r in rows if r["passed"]}, set()
 
 
+def _resolved_periods(spec: dict) -> int:
+    """The bars-per-year engine.run_spec annualises with (2b-1); for tf "1d"
+    exactly cells.SESSION_PERIODS.get(session, 365), the prior key value."""
+    u = spec["universe"]
+    return bars.bars_per_year(u.get("session"), u.get("timeframe", "1d"))
+
+
 def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:
+    equity = daily_marks(equity)
     return [equity[i][1] / equity[i - 1][1] - 1
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
@@ -531,7 +541,8 @@ def _evaluate_candidate(payload: dict) -> dict:
     if benchmark_relative is not None:
         metrics["benchmark_relative"] = benchmark_relative
 
-    train_dates = [d for d, _ in payload["res_equity"] if _date_le(d, cutoff)]
+    train_dates = [d for d, _ in daily_marks(payload["res_equity"])
+                   if _date_le(d, cutoff)]
     metrics["haircut"] = dict(
         harvey_liu_haircut(payload["train_sharpe"] or 0.0,
                            t_years=len(train_dates) / 365.0,
@@ -555,7 +566,7 @@ def _evaluate_candidate(payload: dict) -> dict:
 
     btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
     metrics["regime"] = {"window": "oos",
-                         "buckets": regime_split(oos_t, regime_by_date(btc))}
+                         "buckets": regime_split(oos_t, regime_by_date(daily_bars(btc)))}
 
     return {"sid": sid, "group": g, "passed": passed, "reason": reason,
             "metrics": metrics, "mc_summary": mc_summary, "oos_trades": oos_t}
@@ -642,12 +653,12 @@ def registry_series(all_specs: list[dict], bars_by_cell: dict,
                     for a in s["universe"]["assets"]}
         # SP4 batch review rider: the cached series also depends on the
         # RESOLVED periods_per_year (engine.run_spec derives it the same way
-        # -- cells.SESSION_PERIODS.get(session, 365) -- and it feeds
-        # vol_target's realized-vol sizing), so it must be part of the key or
-        # a SESSION_PERIODS edit would silently serve a stale series instead
-        # of missing. See simcache.cache_key's own docstring.
-        periods_per_year = cells.SESSION_PERIODS.get(
-            s["universe"].get("session"), 365)
+        # -- bars-per-year, 2b-1: identical to the prior
+        # cells.SESSION_PERIODS.get(session, 365) for a 1d spec -- and it
+        # feeds vol_target's realized-vol sizing), so it must be part of the
+        # key or a SESSION_PERIODS edit would silently serve a stale series
+        # instead of missing. See simcache.cache_key's own docstring.
+        periods_per_year = _resolved_periods(s)
         key = simcache.cache_key(sid, data_shas, ENGINE_REV, periods_per_year)
         hit = cache.get(key)
         if hit is not None:
