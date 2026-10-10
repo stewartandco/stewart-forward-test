@@ -163,3 +163,83 @@ def test_max_dd_equal_for_the_hourly_daily_twins():
     res_d = engine.run_spec(_twin_spec("1d"), {"BTCUSD": daily})
     assert res_d["metrics"]["max_dd"] < 0
     assert res_h["metrics"]["max_dd"] == res_d["metrics"]["max_dd"]
+
+
+# ---- 2b-1 final review I2 (spec s5.2): vol targeting and short financing
+# scale by bars-per-year (8760 at 24x7 1h) THROUGH run_spec/simulate_asset ----
+
+def _hourly_rows(closes):
+    """o=h=l=c 24x7 1h bars from 2024-01-01 00:00."""
+    import datetime as _dt
+    t0 = _dt.datetime(2024, 1, 1)
+    return [{"date": (t0 + _dt.timedelta(hours=k)).strftime("%Y-%m-%d %H:%M:%S"),
+             "open": c, "high": c, "low": c, "close": c, "volume": 1.0}
+            for k, c in enumerate(closes)]
+
+
+def test_vol_target_notional_uses_hourly_bars_per_year():
+    """notional_frac == ann_vol / (sd(hourly log returns) * sqrt(8760)).
+    ann_vol 0.1 keeps it far below the engine's only clamp (min(., 1.0));
+    at sqrt(365) the same window would give ~0.51, so a dropped
+    periods_per_year cannot pass."""
+    import statistics
+    closes = [100.0 if k % 2 == 0 else 101.0 for k in range(80)]
+    rows = _hourly_rows(closes)
+    lookback, target = 20, 0.1
+    spec = {"universe": {"assets": ["X"], "session": "24x7", "timeframe": "1h"},
+            "blocks": [
+                {"role": "entry", "type": "ma_cross_dense",
+                 "params": {"fast": 1, "slow": 2, "direction": "long"}},
+                {"role": "stop", "type": "pct_stop", "params": {"pct": 0.5}},
+                {"role": "risk", "type": "vol_target",
+                 "params": {"ann_vol": target, "lookback": lookback}}],
+            "cost_model": {"commission_per_side": 0.0, "slippage_ticks": 0.0}}
+    res = engine.run_spec(spec, {"X": rows})
+    assert res["trades"]
+    t = res["trades"][0]
+    entry_i = next(k for k, b in enumerate(rows) if b["date"] == t["entry_date"])
+    sig = entry_i - 1                       # sized on the signal bar's vol
+    assert sig >= lookback
+    rets = [math.log(closes[k] / closes[k - 1]) for k in range(sig - lookback + 1, sig + 1)]
+    want = target / (statistics.stdev(rets) * math.sqrt(8760))
+    assert 0.05 < want < 1.0                # the min(., 1.0) clamp is not hit
+    assert t["notional_frac"] == pytest.approx(want, rel=1e-12)
+    for t2 in res["trades"]:                # every entry sized the same way
+        assert t2["notional_frac"] == pytest.approx(want, rel=1e-12)
+
+
+def test_short_financing_accrues_per_hourly_bar():
+    """The per-bar accrual on a short is short_financing_per_year / 8760 at
+    24x7 1h (the fx_5d 1d analogue is test_engine_classes' /261)."""
+    max_bars, rate = 5, -0.015
+    closes = [100.0] * 20 + [100.0 - 2.0 * (k + 1) for k in range(30)]
+    rows = _hourly_rows(closes)
+
+    def spec(cost_model):
+        return {"universe": {"assets": ["X"], "session": "24x7", "timeframe": "1h"},
+                "blocks": [
+                    {"role": "entry", "type": "ma_cross_dense",
+                     "params": {"fast": 5, "slow": 15, "direction": "short"}},
+                    {"role": "stop", "type": "pct_stop", "params": {"pct": 0.5}},
+                    {"role": "exit", "type": "time_stop",
+                     "params": {"max_bars": max_bars}},
+                    {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.05}}],
+                "cost_model": cost_model}
+    no_fin = {"commission_per_side": 0.00005, "slippage_ticks": 0.00010}
+    r_old = engine.run_spec(spec(no_fin), {"X": rows})
+    r_new = engine.run_spec(spec(dict(no_fin, short_financing_per_year=rate)),
+                            {"X": rows})
+    assert len(r_old["trades"]) == 1 and len(r_new["trades"]) == 1
+    old_t, new_t = r_old["trades"][0], r_new["trades"][0]
+    assert old_t["side"] == "short"
+    assert (new_t["entry_date"], new_t["exit_date"]) == \
+        (old_t["entry_date"], old_t["exit_date"])
+    assert new_t["return_net"] - old_t["return_net"] == pytest.approx(
+        rate / 8760 * max_bars, abs=1e-15)
+    # and bar by bar while the short is open (marked to market each hour)
+    entry_i = next(k for k, b in enumerate(rows) if b["date"] == new_t["entry_date"])
+    notional = new_t["notional_frac"] * 1.0          # first trade: equity 1.0
+    for k in range(entry_i, entry_i + max_bars):
+        delta = r_new["equity"][k][1] - r_old["equity"][k][1]
+        assert delta == pytest.approx(notional * rate / 8760 * (k - entry_i),
+                                      abs=1e-15)
