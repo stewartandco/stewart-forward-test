@@ -627,7 +627,10 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
         "trades": len(trades),
         "net_pnl": combined[-1] - 1 if combined else 0.0,
         "win_rate": wins / len(trades) if trades else 0.0,
-        "max_dd": -max_drawdown(combined) if combined else 0.0,
+        # 2b-1 (spec s2): a statistic, so measured on the equity marked once
+        # per UTC day; an identity for 1d (unique sorted dates)
+        "max_dd": (-max_drawdown([v for _, v in _bars.daily_marks(
+            list(zip(dates, combined)))]) if combined else 0.0),
         # D15: RECORDED, never gated -- why trades closed, whether any book
         # ended with a position still open (marked to market in equity, never
         # a closed trade), and how many signals were dropped because the
