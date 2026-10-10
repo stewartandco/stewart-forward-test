@@ -1841,7 +1841,9 @@ def propose_families(model: str, accepted: dict[str, dict],
     if message.stop_reason == "refusal":
         print("  model refusal", file=sys.stderr)
         return []
-    text = next(b.text for b in message.content if b.type == "text")
+    text = next((b.text for b in message.content if b.type == "text"), None)
+    if text is None or message.stop_reason == "max_tokens":
+        raise RuntimeError(f"composer: no complete answer (stop_reason={message.stop_reason})")
     return normalize_proposal(json.loads(text)["families"])
 
 

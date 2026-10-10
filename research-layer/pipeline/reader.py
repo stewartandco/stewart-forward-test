@@ -27,6 +27,17 @@ MAX_SINGLE_PASS_CHARS = 150_000
 CHUNK_CHARS = 60_000
 CHUNK_OVERLAP = 2_000
 
+
+class ExtractionFailed(RuntimeError):
+    """A paid extraction call whose answer was unusable (no text block, a
+    max_tokens cut, invalid or incomplete JSON). Carries .usage so the caller
+    can still meter the call: an unmetered failure is how the ledger drifts
+    from the bill."""
+
+    def __init__(self, message: str, usage):
+        super().__init__(message)
+        self.usage = usage
+
 # Structured-output schema for the extraction call. Deliberately simpler than
 # the full card schema: ids, source metadata, and review state are added by
 # code, not the model. (Structured outputs don't support min/max constraints;
@@ -161,8 +172,14 @@ def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
                  if getattr(message, "stop_details", None) else ""),
               file=sys.stderr)
         return [], message.usage
-    text = next(b.text for b in message.content if b.type == "text")
-    return json.loads(text)["claims"], message.usage
+    text = next((b.text for b in message.content if b.type == "text"), None)
+    try:
+        return json.loads(text)["claims"], message.usage
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ExtractionFailed(
+            f"unusable extraction answer on {chunk_label} "
+            f"(stop_reason={message.stop_reason}): {type(exc).__name__}",
+            message.usage) from exc
 
 
 def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dict]:
