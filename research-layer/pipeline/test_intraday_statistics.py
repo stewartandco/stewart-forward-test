@@ -105,3 +105,166 @@ def test_resolved_periods_is_bars_per_year():
         {"universe": {"session": "fx_5d", "timeframe": "1d"}}) == 261
     assert gauntlet._resolved_periods({"universe": {"session": "24x7"}}) == 365
     assert gauntlet._resolved_periods({"universe": {}}) == 365
+
+
+# ---- end to end: an hourly twin through the gauntlet's two verdict paths ----
+#
+# Task 9 (2b-1 addendum A): the daily-mark wiring INSIDE evaluate_standalone
+# and gauntlet._evaluate_candidate (train_dates, the regime ruler's bars) is
+# pinned by running a real engine twin pair. The 1h bars move only in the
+# LAST hour of each UTC day (hours 0-22 sit flat at the prior close, hour 23
+# carries the daily bar's OHLC), so the daily marks of the 1h run are the 1d
+# run. The strategy reads only bar-local facts (ma_cross_ds 1/2 = "up close",
+# swing_stop 1 = the prior bar's low), and the price path never has two up
+# days in a row and never undoes an up day the next day, so both twins take
+# the same trades on the same UTC dates at the same prices.
+
+# 295 train days (not divisible by 3): were train_dates the raw HOURLY
+# stamps, the first walk-forward fold boundary would fall inside day 98
+# (295 // 3), putting that day in two folds; the fixture enters a trade on day
+# 98, so that defect changes a fold's n_trades (pinned below).
+TWIN_CUTOFF_DAY = 295
+
+
+def _twin_closes():
+    pats = [((0.03, -0.01), 120), ((0.01, -0.006, -0.006, -0.006), 100),
+            ((0.03, -0.01), 80), ((0.01, -0.005, -0.005), 60),
+            ((0.01, -0.006, -0.006, -0.006), 60)]
+    closes = [100.0]
+    for pat, n in pats:
+        for i in range(n):
+            closes.append(closes[-1] * (1 + pat[i % len(pat)]))
+    return closes
+
+
+def _twin_bars():
+    import datetime as _dt
+    closes = _twin_closes()
+    day0 = _dt.date(2022, 1, 1)
+    daily, hourly = [], []
+    for k, c in enumerate(closes):
+        d = (day0 + _dt.timedelta(days=k)).isoformat()
+        o = closes[k - 1] if k else c
+        bar = {"open": o, "high": max(o, c), "low": min(o, c), "close": c,
+               "volume": 1.0}
+        daily.append(dict(bar, date=d))
+        for h in range(23):
+            hourly.append({"date": f"{d} {h:02d}:00:00", "open": o, "high": o,
+                           "low": o, "close": o, "volume": 1.0})
+        hourly.append(dict(bar, date=f"{d} 23:00:00"))
+    cutoff = (day0 + _dt.timedelta(days=TWIN_CUTOFF_DAY - 1)).isoformat()
+    return daily, hourly, cutoff
+
+
+def _twin_spec(tf):
+    from . import cells
+    return {
+        # ONE id for both twins: the MC seed is the id, and a shared id makes
+        # the simcache keys differ ONLY by periods_per_year
+        "strategy_id": "c0ffee" * 10 + "abcd",
+        "version": 2,
+        "universe": {"asset_class": "crypto", "assets": ["BTCUSD"],
+                     "session": "24x7", "timeframe": tf},
+        "blocks": [
+            {"role": "entry", "type": "ma_cross_ds",
+             "params": {"fast": 1, "slow": 2, "direction": "long"}},
+            {"role": "stop", "type": "swing_stop", "params": {"lookback": 1}},
+            {"role": "target", "type": "r_multiple", "params": {"r": 1.0}},
+            {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+        ],
+        "provenance": {"sibling_group_id": "twin-" + tf},
+        "cost_model": dict(cells.CLASSES["crypto"]["cost_model"]),
+    }
+
+
+def _assert_true_twins(res_h, res_d):
+    """The fixture's own premise, checked: same trades, same daily marks."""
+    assert len(res_d["trades"]) > 20
+    key = [(str(t["entry_date"])[:10], t["return_net"], t["notional_frac"])
+           for t in res_d["trades"]]
+    assert [(str(t["entry_date"])[:10], t["return_net"], t["notional_frac"])
+            for t in res_h["trades"]] == key
+    assert [v for _, v in bars.daily_marks(res_h["equity"])] == \
+        [v for _, v in res_d["equity"]]
+
+
+def test_evaluate_standalone_hourly_twin_equals_daily():
+    from .engine import run_spec
+    daily, hourly, cutoff = _twin_bars()
+    sh, sd = _twin_spec("1h"), _twin_spec("1d")
+    res_d = run_spec(sd, {"BTCUSD": daily})
+    _assert_true_twins(run_spec(sh, {"BTCUSD": hourly}), res_d)
+    boundary_day = daily[TWIN_CUTOFF_DAY // 3]["date"]
+    assert any(t["entry_date"] == boundary_day for t in res_d["trades"])
+    out_h = gauntlet_core.evaluate_standalone(sh, {"BTCUSD": hourly}, cutoff,
+                                              perturb=False)
+    out_d = gauntlet_core.evaluate_standalone(sd, {"BTCUSD": daily}, cutoff,
+                                              perturb=False)
+    mh, md = out_h["metrics"], out_d["metrics"]
+    assert md["walkforward"]["folds"][0]["n_trades"] > 0
+    assert mh["walkforward"] == md["walkforward"]
+    assert sum(b["n"] for k, b in md["regime"]["buckets"].items()
+               if k != "unlabelled") > 0
+    assert mh["regime"] == md["regime"]
+    for k in ("train_sharpe", "is_vol", "oos_vol", "is_edge_per_trade",
+              "oos_edge_per_trade", "edge_decay_pct", "cost_stress_net_pnl"):
+        assert mh[k] == md[k], k
+    assert (out_h["passed"], out_h["reason"]) == (out_d["passed"], out_d["reason"])
+
+
+def test_evaluate_candidate_hourly_twin_equals_daily():
+    from .cluster import effective_trials
+    from .engine import run_spec
+    daily, hourly, cutoff = _twin_bars()
+    out = {}
+    for spec, rows in ((_twin_spec("1h"), hourly), (_twin_spec("1d"), daily)):
+        sid, sb = spec["strategy_id"], {"BTCUSD": rows}
+        res = run_spec(spec, sb)
+        dated = gauntlet_core.daily_returns_with_dates(res["equity"])
+        rets = [r for _, r in dated]
+        train_sharpe = gauntlet_core._annualized_sharpe_from_returns(
+            [r for d, r in dated if gauntlet_core._date_le(d, cutoff)])
+        trials_n, _labels, trials_var = effective_trials({sid: rets})
+        family = [{"sid": sid, "axes": {}, "score": 1.0,
+                   "screen_trade_count_fail": False, "gauntlet_passed": False}]
+        payload = gauntlet._candidate_payload(
+            spec, sb, res, rets, 1, 1, train_sharpe, trials_n, trials_var,
+            family[0], family, {}, cutoff, False, "native", None, 0, 0)
+        out[spec["universe"]["timeframe"]] = gauntlet._evaluate_candidate(payload)
+    mh, md = out["1h"]["metrics"], out["1d"]["metrics"]
+    assert md["haircut"]["window"] == "train"
+    assert mh["haircut"] == md["haircut"]
+    assert mh["walkforward"] == md["walkforward"]
+    assert mh["regime"] == md["regime"]
+
+
+def test_registry_series_keys_an_hourly_spec_by_its_bars_per_year():
+    """Brief mutant 14: the simcache key's periods_per_year is the RESOLVED
+    bars-per-year, so a 1h spec can never be served a 1d entry."""
+    from . import cells, simcache
+    daily, hourly, _ = _twin_bars()
+    sh, sd = _twin_spec("1h"), _twin_spec("1d")
+    bars_by_cell = {("BTCUSD", "1h"): hourly, ("BTCUSD", "1d"): daily}
+    hashes = {cells.cell_id("BTCUSD", "1h"): "a" * 64,
+              cells.cell_id("BTCUSD", "1d"): "a" * 64}
+
+    class Cache:
+        def __init__(self):
+            self.keys = []
+
+        def get(self, key):
+            self.keys.append(key)
+            return None
+
+        def put(self, key, series, equity_len):
+            pass
+
+    cache = Cache()
+    gauntlet.registry_series([sh, sd], bars_by_cell, hashes, cache, set())
+    shas = {"BTCUSD": "a" * 64}
+    rev = gauntlet.ENGINE_REV
+    sid = sh["strategy_id"]
+    assert sid == sd["strategy_id"]
+    assert cache.keys == [simcache.cache_key(sid, shas, rev, 8760),
+                          simcache.cache_key(sid, shas, rev, 365)]
+    assert cache.keys[0] != cache.keys[1]

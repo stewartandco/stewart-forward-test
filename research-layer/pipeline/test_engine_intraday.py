@@ -79,3 +79,27 @@ def test_run_spec_refuses_intraday_outside_24x7():
             "session": "fx_5d", "timeframe": "1h"}}
     with pytest.raises(_bars.IntradayUnsupported):
         engine.run_spec(spec, {"X": []})
+
+
+def test_run_spec_passes_the_bar_size_to_simulate_asset(monkeypatch):
+    """Task 9 mutant 15: run_spec hands simulate_asset bars_per_day (the
+    percentile window's scale), 24 for a 1h spec and 1 for a 1d spec."""
+    seen = []
+    real = engine.simulate_asset
+
+    def spy(blocks, rows, cost_model, periods_per_year=365, **kw):
+        seen.append(kw.get("bars_per_day"))
+        return real(blocks, rows, cost_model, periods_per_year, **kw)
+    monkeypatch.setattr(engine, "simulate_asset", spy)
+    base = {"blocks": [], "cost_model": {"commission_per_side": 0.0, "slippage_ticks": 0.0}}
+    rows = [{"date": f"2024-01-{i + 1:02d}", "open": 1, "high": 1, "low": 1,
+             "close": 1, "volume": 1} for i in range(5)]
+    for session, tf, want in (("24x7", "1h", 24), ("24x7", "15m", 96),
+                              ("24x7", "1d", 1), ("fx_5d", "1d", 1)):
+        seen.clear()
+        spec = dict(base, universe={"assets": ["X"], "session": session, "timeframe": tf})
+        try:
+            engine.run_spec(spec, {"X": rows})
+        except Exception:
+            pass   # an empty block list may not simulate; the kwarg is what is pinned
+        assert seen == [want], (session, tf, seen)
