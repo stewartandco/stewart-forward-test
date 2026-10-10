@@ -14,13 +14,14 @@ LAYER = Path.cwd()
 if str(LAYER) not in sys.path:
     sys.path.insert(0, str(LAYER))
 
-from pipeline import cells, simcache                                 # noqa: E402
+from pipeline import cells, gauntlet, simcache                        # noqa: E402
 from pipeline.engine import ENGINE_REV, run_spec                     # noqa: E402
 from pipeline.gauntlet_core import (_spec_bars, daily_returns_with_dates,  # noqa: E402
                                     evaluate_standalone)
 from pipeline.plateau import annualized_sharpe                       # noqa: E402
 from pipeline.registry import Registry                               # noqa: E402
 from pipeline.screen import DEFAULT_CUTOFF, load_cell_data           # noqa: E402
+import pipeline
 
 try:
     from pipeline.bars import bars_per_year as _bpy
@@ -28,7 +29,9 @@ try:
     def resolved(spec: dict) -> int:
         u = spec["universe"]
         return _bpy(u.get("session"), u.get("timeframe", "1d"))
-except ImportError:          # the pre-2b-1 code
+except ModuleNotFoundError as exc:          # the pre-2b-1 code
+    if exc.name != "pipeline.bars":
+        raise
     def resolved(spec: dict) -> int:
         return cells.SESSION_PERIODS.get(spec["universe"].get("session"), 365)
 
@@ -76,12 +79,15 @@ def fingerprint(spec: dict, data_dir: Path, cutoff: str) -> dict:
     tres = run_spec(spec, _spec_bars(bars_train, spec))
     ev = evaluate_standalone(spec, full, cutoff, perturb=False)
     shas = {a: hashes[cells.cell_id(a, tf)] for a in spec["universe"]["assets"]}
+    rp = gauntlet._resolved_periods(spec) if hasattr(gauntlet, "_resolved_periods") else resolved(spec)
     return {
         "run_full": _h([res["equity"], res["trades"], res["metrics"]]),
         "run_train": _h([tres["equity"], tres["trades"], tres["metrics"]]),
         "standalone": _h([ev["passed"], ev["reason"], ev["metrics"], ev["mc_summary"]]),
         "dated_returns": _h(daily_returns_with_dates(res["equity"])),
+        "curve_returns": _h(gauntlet.daily_returns_from_curve(res["equity"])),
         "sharpe": repr(annualized_sharpe(res["equity"])),
+        "resolved_periods": rp,
         "cache_key": simcache.cache_key(spec["strategy_id"], shas, ENGINE_REV, resolved(spec)),
         "passed": ev["passed"], "reason": ev["reason"],
     }
@@ -105,16 +111,43 @@ def main(argv=None) -> int:
         x = json.loads(a.a.read_text(encoding="utf-8"))
         y = json.loads(a.b.read_text(encoding="utf-8"))
         bad = []
+        # Check meta existence and identity
+        if "meta" not in x or "meta" not in y:
+            bad.append("meta missing")
+        else:
+            # Print pipeline info
+            x_pipe = x["meta"].get("pipeline_file", "unknown")
+            y_pipe = y["meta"].get("pipeline_file", "unknown")
+            x_bars = x["meta"].get("bars_module", None)
+            y_bars = y["meta"].get("bars_module", None)
+            print(f"A pipeline_file: {x_pipe}, bars_module: {x_bars}")
+            print(f"B pipeline_file: {y_pipe}, bars_module: {y_bars}")
+            # Check meta fields
+            if x["meta"].get("seed") != y["meta"].get("seed"):
+                bad.append(f"seed differs: {x['meta'].get('seed')} != {y['meta'].get('seed')}")
+            if x["meta"].get("cutoff") != y["meta"].get("cutoff"):
+                bad.append(f"cutoff differs: {x['meta'].get('cutoff')} != {y['meta'].get('cutoff')}")
+            if x["meta"].get("sample_n") != y["meta"].get("sample_n"):
+                bad.append(f"sample_n differs: {x['meta'].get('sample_n')} != {y['meta'].get('sample_n')}")
+            if x["meta"].get("registry_sha256") != y["meta"].get("registry_sha256"):
+                bad.append(f"registry_sha256 differs: {x['meta'].get('registry_sha256')} != {y['meta'].get('registry_sha256')}")
+        # Check for empty results or any errors
+        if not x.get("results") or not y.get("results"):
+            bad.append("empty results on one or both sides")
+        if x.get("errors") or y.get("errors"):
+            bad.append(f"errors present - A: {x.get('errors')}, B: {y.get('errors')}")
+            for sid, err in x.get("errors", {}).items():
+                print(f"A error {sid}: {err}")
+            for sid, err in y.get("errors", {}).items():
+                print(f"B error {sid}: {err}")
         if x["sample"] != y["sample"]:
             bad.append("sample differs")
         for sid in sorted(set(x["results"]) | set(y["results"])):
             if x["results"].get(sid) != y["results"].get(sid):
                 bad.append(f"{sid}: {x['results'].get(sid)} != {y['results'].get(sid)}")
-        if x.get("errors") != y.get("errors"):
-            bad.append(f"errors differ: {x.get('errors')} != {y.get('errors')}")
         for line in bad:
             print(line)
-        print(f"compared {len(x['results'])}; mismatches {len(bad)}")
+        print(f"compared {len(x.get('results', {}))}; mismatches {len(bad)}")
         return 0 if not bad else 1
     specs = {e["payload"]["strategy_id"]: e["payload"]
              for e in Registry(a.registry).entries()
@@ -128,7 +161,19 @@ def main(argv=None) -> int:
             errors[sid] = f"{type(exc).__name__}: {exc}"
         if i % 20 == 0:
             print(f"{i}/{len(sample)}", flush=True)
-    a.out.write_text(json.dumps({"sample": sample, "results": results, "errors": errors},
+    # Compute registry SHA256
+    registry_sha256 = _h(a.registry.read_bytes())
+    meta = {
+        "pipeline_file": str(pipeline.__file__),
+        "engine_rev": ENGINE_REV,
+        "bars_module": "pipeline.bars" in sys.modules,
+        "seed": a.seed,
+        "cutoff": a.cutoff,
+        "sample_n": a.sample,
+        "registry_sha256": registry_sha256,
+        "registry_entries": len(specs),
+    }
+    a.out.write_text(json.dumps({"meta": meta, "sample": sample, "results": results, "errors": errors},
                                 indent=1, sort_keys=True), encoding="utf-8")
     print(f"wrote {a.out}: {len(results)} fingerprints, {len(errors)} errors")
     return 0
