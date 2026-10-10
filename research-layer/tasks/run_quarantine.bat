@@ -79,14 +79,29 @@ REM 4. Persist the witnessed record. Scoped pathspec ONLY -- a concurrent sessio
 REM    shares this branch and working tree, and an unscoped add would sweep its
 REM    work into this commit. Guarded so a no-change day makes no commit and
 REM    leaves a clean tree. Never pushed; pushing stays a human action.
-REM    `git diff --quiet` exits 1 when there ARE changes, which is the signal to
-REM    commit, NOT an error -- hence the explicit exit 0 below rather than
-REM    letting that errorlevel leak out as the task's result.
+REM    The change test is `git status --porcelain | findstr`: findstr exits 0 when
+REM    there ARE changes, which is the signal to commit, NOT an error -- hence the
+REM    explicit exit 0 below rather than letting a stray errorlevel leak out as
+REM    the task's result.
+REM Chain mirror (2026-10-09 segments design, pipeline\chain_mirror.py): git
+REM tracks research-layer\registry_log.d (LF segments of the chain, none over
+REM 40 MiB), never registry_log.jsonl. The mirror is staged ONLY on sync's exit
+REM 0; exit 3 (refused) or any other code leaves it out of this commit, and a
+REM refusal is an item in logs\degraded_commit.json for the Sentinel.
+REM The price CSVs still commit without it. The commit is the --only form
+REM (`-- paths`), so nothing another session staged, the live registry included,
+REM can ride along in this commit.
+set QPATHS=research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
+python -m pipeline.chain_mirror sync >> "%LOG%" 2>&1
+REM Exactly 0, never `if errorlevel 1`: that test is ERRORLEVEL >= 1, so a
+REM crash's NTSTATUS code (negative, e.g. -1073741819) would read as "yes".
+if "%ERRORLEVEL%"=="0" set QPATHS=research-layer/registry_log.d %QPATHS%
 cd /d "%REPO%"
-git diff --quiet -- research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
-if errorlevel 1 (
-  git add research-layer/registry_log.jsonl research-layer/data/BTCUSD_1d.csv research-layer/data/ETHUSD_1d.csv
-  git commit -q -m "quarantine: forward record for %QDATE% (+ catch-up)" >> "%LOG%" 2>&1
+REM git status, not git diff: new segments are untracked.
+git status --porcelain -- %QPATHS% | findstr /r /c:"." > nul
+if not errorlevel 1 (
+  git add %QPATHS%
+  git commit -q -m "quarantine: forward record for %QDATE% (+ catch-up)" -- %QPATHS% >> "%LOG%" 2>&1
 )
 
 if "%CATCHUP_RC%"=="1" goto :fail

@@ -108,7 +108,9 @@ class FakeRunner:
     without disturbing every existing assertion that treats fr.calls as a
     plain list of argv lists."""
     def __init__(self, codes=None, triage_reviewed=None, triage_skipped=0,
-                 triage_reports=True, stage_results=None, stage_reports=True):
+                 triage_reports=True, stage_results=None, stage_reports=True,
+                 git_status_out=""):
+        self.git_status_out = git_status_out
         self.calls = []
         self.call_kwargs = []
         self.codes = codes or {}
@@ -175,6 +177,7 @@ class FakeRunner:
             key = argv[0]
         class R: pass
         r = R(); r.returncode = self.codes.get(key, 0)
+        r.stdout = self.git_status_out if list(argv[:2]) == ["git", "status"] else ""
         return r
 
 
@@ -968,7 +971,7 @@ def test_collect_commit_paths_scoped(tmp_path):
     # sid2 deliberately gets no artifacts dir -- its bundle never landed.
 
     paths = loop.collect_commit_paths(registry_path, start_line)
-    assert paths == ["research-layer/registry_log.jsonl",
+    assert paths == ["research-layer/registry_log.d",
                      f"research-layer/artifacts/{sid1}"]
     assert f"research-layer/artifacts/{sid2}" not in paths
 
@@ -1006,14 +1009,16 @@ def test_cycle_complete_commits_scoped(tmp_path):
     assert fr.sid is not None
 
     git_idx = [i for i, c in enumerate(fr.calls) if c and c[0] == "git"]
-    assert len(git_idx) == 3                    # diff (preflight), add, commit
-    i_diff, i_add, i_commit = git_idx
-    assert i_diff < i_add < i_commit             # in order
+    assert len(git_idx) == 4        # diff (preflight), status (mirror), add, commit
+    i_diff, i_status, i_add, i_commit = git_idx
+    assert i_diff < i_status < i_add < i_commit             # in order
+    assert fr.calls[i_status] == ["git", "status", "--porcelain", "--",
+                                  "research-layer/registry_log.d"]
     diff_call, add_call, commit_call = (fr.calls[i_diff], fr.calls[i_add],
                                         fr.calls[i_commit])
     assert "diff" in diff_call and "--quiet" in diff_call
     assert "add" in add_call and "commit" in commit_call
-    reg_path = "research-layer/registry_log.jsonl"
+    reg_path = "research-layer/registry_log.d"
     art_path = f"research-layer/artifacts/{fr.sid}"
     # The diff preflight has no --pathspec-from-file, so its scope is argv;
     # add and commit carry their scope in the file (see
@@ -1079,7 +1084,7 @@ def test_commit_pathspecs_travel_by_file_not_command_line(tmp_path):
     assert rc == 0
     assert len(fr.sids) == n
 
-    expected = ["research-layer/registry_log.jsonl"] +                [f"research-layer/artifacts/{s}" for s in fr.sids]
+    expected = ["research-layer/registry_log.d"] +                [f"research-layer/artifacts/{s}" for s in fr.sids]
     git_calls = [(i, c) for i, c in enumerate(fr.calls) if c and c[0] == "git"]
     diffs = [(i, c) for i, c in git_calls if c[1] == "diff"]
     adds = [(i, c) for i, c in git_calls if c[1] == "add"]
@@ -1189,8 +1194,10 @@ def test_zero_delta_cycle_makes_no_commit_and_no_warning(tmp_path, capsys):
     rc = loop.run(["--once", "--layer", str(layer)], runner=fr)
     assert rc == 0
     git_calls = [c for c in fr.calls if c and c[0] == "git"]
-    assert len(git_calls) == 1                  # only the diff preflight ran
+    assert len(git_calls) == 2                  # the diff preflight, then the mirror status
     assert git_calls[0][1] == "diff"
+    assert git_calls[1] == ["git", "status", "--porcelain", "--",
+                            "research-layer/registry_log.d"]
     captured = capsys.readouterr()
     assert "WARNING" not in captured.out
     assert "committed chain delta" not in captured.out
@@ -1247,7 +1254,7 @@ def test_git_commit_failure_is_loud_but_cycle_still_succeeds(tmp_path, capsys):
     status = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert status["items"]["outcome"] == "cycle_complete"
     git_calls = [c for c in fr.calls if c and c[0] == "git"]
-    assert len(git_calls) == 3                  # diff, add (succeeded), commit (failed)
+    assert len(git_calls) == 4                  # diff, status (mirror), add (succeeded), commit (failed)
     captured = capsys.readouterr()
     assert "WARNING" in captured.out
     assert "git commit failed" in captured.out

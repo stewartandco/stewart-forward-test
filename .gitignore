@@ -3,7 +3,13 @@ __pycache__/
 .pytest_cache/
 
 # Reader v2 scanner runtime artifacts (dashboard reads them from disk; the
-# committed trust asset is registry_log.jsonl, not these)
+# committed trust asset is the chain, tracked as LF segments in
+# research-layer/registry_log.d/, not these)
 research-layer/logs/
 *.lock
 research-layer/inbox/
+# The live chain file is local since the segments switch: git tracks its LF
+# segments in research-layer/registry_log.d/ (chain_mirror.py). Never `git add -f` it.
+research-layer/registry_log.jsonl
+# a sync killed mid-write leaves one; the next sync removes it
+research-layer/registry_log.d/*.tmp

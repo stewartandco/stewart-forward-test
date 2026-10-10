@@ -39,7 +39,7 @@ def test_bundles_listed_by_an_earlier_screen_are_committed_and_the_list_cleared(
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_add,), (i_commit,) = _git(fr, "add"), _git(fr, "commit")
-    want = ["research-layer/registry_log.jsonl"] + paths
+    want = ["research-layer/registry_log.d"] + paths
     assert fr.pathspecs[i_add] == want
     assert fr.pathspecs[i_commit] == want
     assert not (layer / "logs" / "screen_commit_paths.txt").exists()
@@ -69,7 +69,7 @@ def test_a_leftover_taking_file_from_a_killed_commit_is_committed_too(tmp_path):
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_commit,) = _git(fr, "commit")
-    assert fr.pathspecs[i_commit] == ["research-layer/registry_log.jsonl"] + old + new
+    assert fr.pathspecs[i_commit] == ["research-layer/registry_log.d"] + old + new
     assert not (layer / "logs" / "screen_commit_paths.taking").exists()
     assert not (layer / "logs" / "screen_commit_paths.txt").exists()
 
@@ -83,7 +83,7 @@ def test_a_listed_path_missing_on_disk_is_never_handed_to_git(tmp_path):
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_add,) = _git(fr, "add")
-    assert fr.pathspecs[i_add] == ["research-layer/registry_log.jsonl"] + paths   # deduped
+    assert fr.pathspecs[i_add] == ["research-layer/registry_log.d"] + paths   # deduped
 
 
 def test_a_cycle_that_aborts_before_its_commit_leaves_the_list_alone(tmp_path):
@@ -147,7 +147,7 @@ def test_a_bom_at_the_head_of_the_list_does_not_drop_the_first_path(tmp_path):
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_add,) = _git(fr, "add")
-    assert fr.pathspecs[i_add] == ["research-layer/registry_log.jsonl"] + paths
+    assert fr.pathspecs[i_add] == ["research-layer/registry_log.d"] + paths
 
 
 def test_an_orphaned_merging_segment_is_folded_back_in(tmp_path):
@@ -159,7 +159,7 @@ def test_an_orphaned_merging_segment_is_folded_back_in(tmp_path):
     fr = FakeRunner()
     assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
     (i_commit,) = _git(fr, "commit")
-    assert fr.pathspecs[i_commit] == ["research-layer/registry_log.jsonl"] + paths
+    assert fr.pathspecs[i_commit] == ["research-layer/registry_log.d"] + paths
     assert not (layer / "logs" / "screen_commit_paths.txt.merging").exists()
 
 

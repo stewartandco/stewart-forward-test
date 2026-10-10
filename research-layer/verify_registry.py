@@ -60,8 +60,9 @@ invariants:
      stay valid chain history
 
 Usage:
-    python verify_registry.py [path/to/registry_log.jsonl]
+    python verify_registry.py [path/to/registry_log.jsonl | path/to/registry_log.d]
                               [--artifacts-dir DIR] [--data-dir DIR]
+    With no path: registry_log.jsonl, or registry_log.d when only that exists.
 """
 from __future__ import annotations
 
@@ -69,6 +70,7 @@ import sys
 import json
 import hashlib
 import argparse
+import contextlib
 from pathlib import Path
 
 # Invariant 8 needs the SAME fingerprint the composer computes; a second
@@ -92,6 +94,19 @@ from pipeline.blocks import (RETIRED_TYPES,                    # noqa: E402
 # Invariant 11 links a stats entry to a verdict by the WRITER's hash, so the
 # verifier uses the writer's function, not a third copy.
 from pipeline.common import entry_hash                         # noqa: E402
+from pipeline import chain_mirror                               # noqa: E402
+
+
+@contextlib.contextmanager
+def _chain_lines(path: Path):
+    """A chain file, or a registry_log.d directory read as its joined
+    segments (segments design s5; git tracks the directory, the live tree
+    keeps the file)."""
+    if path.is_dir():
+        yield chain_mirror.iter_lines(path)
+    else:
+        with path.open("r", encoding="utf-8") as f:
+            yield f
 
 # Invariant 8 recomputes fingerprints for FROZEN entries against the LIVE
 # block grammar, so it is fair to ask whether a future grammar edit could
@@ -269,7 +284,11 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
         fail(lineno, f"{what} must be a non-empty string, got {value!r}")
         return None
 
-    with log_path.open("r", encoding="utf-8") as f:
+    if log_path.is_dir():
+        for problem in chain_mirror.check_layout(log_path):
+            fail(0, f"SEGMENTS: {problem}")
+
+    with _chain_lines(log_path) as f:
         for lineno, raw in enumerate(f, start=1):
             raw = raw.strip()
             if not raw:
@@ -643,9 +662,9 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify research-layer registry log")
-    ap.add_argument("path", nargs="?",
-                    default="registry_log.jsonl",
-                    help="Path to registry_log.jsonl")
+    ap.add_argument("path", nargs="?", default=None,
+                    help="Path to registry_log.jsonl, or to the registry_log.d directory git tracks "
+                         "(default: registry_log.jsonl, or registry_log.d when only that exists)")
     # Invariant 8's window leg reads OFF-CHAIN evidence. Both default to
     # sitting beside the log, which is the layout the composer writes and the
     # loop's pre-spend gate runs against; pass them when verifying a chain
@@ -655,7 +674,14 @@ def main() -> int:
     ap.add_argument("--data-dir", default=None,
                     help="cached bars (default: data/ beside the log)")
     args = ap.parse_args()
-    log_path = Path(args.path)
+    if args.path is not None:
+        log_path = Path(args.path)           # an explicit path is never second-guessed
+    else:
+        # After the segments switch a public clone carries registry_log.d
+        # only (registry_log.jsonl is local to the live tree).
+        log_path = Path("registry_log.jsonl")
+        if not log_path.exists() and Path("registry_log.d").is_dir():
+            log_path = Path("registry_log.d")
     print(f"Verifying registry at {log_path}")
     print("=" * 70)
     return verify(log_path, args.artifacts_dir, args.data_dir)
