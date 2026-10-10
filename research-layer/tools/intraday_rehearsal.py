@@ -3,9 +3,11 @@ crypto strategies on a COPY of the chain, run the real screen and gauntlet
 worker on the copy, then read the outcomes back side by side.
 
 It only writes to the paths it is given (the COPY registry, the twins file and
-the report); it never touches the live tree. `register` is the one command
-that appends to a chain, so it refuses to run on anything but the path the
-caller names with --registry.
+the report). `register` is the one command that appends to a chain, and it
+REFUSES (exit 2, nothing written) a live chain: a --registry that resolves to
+this layer's own `registry_log.jsonl`, or that sits in a directory which also
+holds a `registry_log.d` (the live tree's segmented layout). Any other path is
+trusted to be a scratch copy.
 
     python -m tools.intraday_rehearsal register --registry COPY \
         --assets BTCUSDT,ETHUSDT --originals 6 --seed 1 --out twins.json
@@ -28,6 +30,25 @@ from pipeline.common import content_id                      # noqa: E402
 from pipeline.registry import Registry                      # noqa: E402
 
 RUN_ID = "rehearsal-2b1"
+LAYER_ROOT = Path(__file__).resolve().parent.parent
+
+
+class LiveChainRefused(SystemExit):
+    pass
+
+
+def refuse_live_chain(registry: Path) -> None:
+    """Raise LiveChainRefused (exit code 2) for anything that looks live."""
+    path = Path(registry).resolve()
+    if path == (LAYER_ROOT / "registry_log.jsonl").resolve():
+        why = f"it is this layer's own registry_log.jsonl ({LAYER_ROOT})"
+    elif (path.parent / "registry_log.d").exists():
+        why = f"{path.parent} also holds registry_log.d (the live layout)"
+    else:
+        return
+    print(f"refusing to register twins on {path}: {why}. "
+          f"Pass a scratch COPY of the chain.", file=sys.stderr)
+    raise LiveChainRefused(2)
 TIMEFRAMES = ("1d", "1h")
 
 
@@ -88,6 +109,7 @@ def make_twin(orig: dict, asset: str, tf: str) -> dict:
 
 def register(registry: Path, assets: list[str], n: int, seed: int,
              out: Path) -> dict:
+    refuse_live_chain(registry)
     reg = Registry(registry)
     specs = {e["payload"]["strategy_id"]: e["payload"]
              for e in reg.entries() if e["entry_type"] == "strategy_registered"}

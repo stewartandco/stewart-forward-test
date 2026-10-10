@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from pipeline.common import content_id
 from pipeline.registry import Registry
 from pipeline.test_gauntlet import gauntlet_registry
@@ -81,5 +83,54 @@ def test_report_reads_verdicts_and_config(tmp_path):
     text = rep.read_text()
     row = next(l for l in text.splitlines() if sid in l)
     assert "pass (77)" in row and "fail" in row and "mc_p05" in row
-    assert "1.500" in row and "0.01000" in row and "0.9000"[:5] in row and "0.2500" in row
+    assert "1.500" in row and "0.01000" in row and "0.900" in row and "0.2500" in row
     assert "| 1d |" in text and "| 1h |" in text
+
+
+def test_register_refuses_a_chain_beside_registry_log_d(tmp_path, capsys):
+    """The live tree keeps registry_log.jsonl next to registry_log.d."""
+    live = tmp_path / "live"
+    live.mkdir()
+    reg, _, orig = _v2_original(live)
+    (live / "registry_log.d").mkdir()
+    chain = live / "reg.jsonl"
+    named = live / "registry_log.jsonl"
+    chain.replace(named)
+    before = named.read_bytes()
+    out = tmp_path / "twins.json"
+    with pytest.raises(SystemExit) as exc:
+        ir.main(["register", "--registry", str(named), "--assets", "BTCUSDT",
+                 "--originals", "1", "--seed", "1", "--out", str(out)])
+    assert exc.value.code == 2
+    assert "refusing" in capsys.readouterr().err
+    assert named.read_bytes() == before
+    assert not out.exists()
+
+
+def test_register_refuses_this_layers_own_registry(tmp_path, monkeypatch, capsys):
+    """Path (a): the layer's own registry_log.jsonl is refused wherever it is."""
+    reg, _, orig = _v2_original(tmp_path)
+    monkeypatch.setattr(ir, "LAYER_ROOT", tmp_path)
+    own = tmp_path / "registry_log.jsonl"
+    reg.log_path.replace(own)
+    before = own.read_bytes()
+    with pytest.raises(SystemExit) as exc:
+        ir.main(["register", "--registry", str(own), "--assets", "BTCUSDT",
+                 "--originals", "1", "--seed", "1", "--out", str(tmp_path / "t.json")])
+    assert exc.value.code == 2
+    assert own.read_bytes() == before
+
+
+def test_pick_originals_excludes_non_crypto_and_non_1d(tmp_path):
+    reg, v1, orig = _v2_original(tmp_path)
+    base = {orig["strategy_id"]: orig}
+
+    def variant(**uni):
+        s = json.loads(json.dumps(orig))
+        s["universe"] = dict(orig["universe"], **uni)
+        s["strategy_id"] = None
+        s["strategy_id"] = content_id(s, "strategy_id")
+        return s
+    fx, hourly = variant(asset_class="fx"), variant(timeframe="1h")
+    specs = {**base, fx["strategy_id"]: fx, hourly["strategy_id"]: hourly}
+    assert ir.pick_originals(specs, 3, 1) == [orig["strategy_id"]]
