@@ -433,7 +433,7 @@ of it.
 - **`--chain` REFUSES until `docs/notes/gauntlet-protocol-v6.1-amendment-1.md`
   is chained** (exit 1, `exit_reason` `refused_no_amendment_note`; first-line
   prefix `gauntlet-protocol-v6.1-amendment-1:`, first occurrence). The note
-  is a DRAFT until Coen approves its exact text; chain it verbatim (the git
+  is chained (line 81246). A note like it is chained verbatim (the git
   blob is LF: check the bytes are LF before chaining, `core.autocrlf` is on).
   Report-only runs are unaffected. The Sentinel does not read the stats
   `exit_reason`; an exit 1 on task 28 would reach the digest as a task result.
@@ -491,8 +491,7 @@ of it.
   `stopped_at_deadline`; since step 7 also `retried_written` /
   `deferred_lock` (T7 flush), `pbo_nulls_computed` / `pbo_nulls_cached` (PBO
   scope) and `expected_max_sharpe_raw` / `expected_max_sharpe_effective` (SR*
-  floor). Sentinel `gauntlet_queue` check (on the UNMERGED
-  `sc-ops-sentinel` branch `feat/gauntlet-queue-check` until cutover): FAIL when the worker
+  floor). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
@@ -515,8 +514,8 @@ of it.
   version 1 with `exit/time_stop`, so after exit-rules-v7 (chain line 32897)
   the buried compositions themselves can never be registered again (invariant
   10; `register_strategy` refuses them). From the
-  `correction-2026-10-02-retrial-path` note (`docs/notes/`; it applies once it
-  is chained, after Coen's approval) each is re-tried inside the D8/D9 unified
+  `correction-2026-10-02-retrial-path` note (`docs/notes/`; chained at line
+  79228) each is re-tried inside the D8/D9 unified
   re-run, in exit-rules-v7's D15(b) form: a version-2 composition with a
   permitted exit set, a NEW strategy id charged to N in full, screened and
   then judged by all six gates from scratch. That replaces the old "once the
@@ -903,13 +902,12 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `expected_cycles`, `triage_limit_used`, `usd_per_card`, `composer_pair_usd`,
   `cycle_spent`. The digest can say WHY a cycle was the size it was.
 - **ExecutionTimeLimit lives in TWO places and the second one wins.**
-  `quant/tasks/xml/25_PipelineLoop.xml` declares it, but
-  `quant/tasks/apply_retry_settings.ps1` re-stamps every `$RETRY_TASKS` entry
-  at the end of every `setup_scheduler.bat` run, and 25_PipelineLoop is on
-  that list. Change it in BOTH places or the override wins -- the same
-  sentence `setup_scheduler.bat` carries at the 25_PipelineLoop line. That
-  mismatch is exactly how the live task sat at PT1H while its XML said PT2H.
-  The current values are XML PT4H + a `$TIME_LIMIT_OVERRIDES` entry of PT4H.
+  `morpheus-hub/tasks/xml/25_PipelineLoop.xml` declares it, but
+  `morpheus-hub/tasks/apply_retry_settings.ps1` re-stamps every `$RETRY_TASKS`
+  entry from its per-task limit table, and 25_PipelineLoop is on that list.
+  Change it in BOTH places or the override wins (that mismatch is how the
+  live task once sat at PT1H while its XML said PT2H). Current values: XML
+  PT11H + override PT11H.
 - The loop WARNs at startup (never refuses -- a nonzero exit would FAIL the
   Sentinel digest) when the LIVE task's window is under PT2H, naming the
   elevated fix command. Reading the task setting is fully defensive: not
@@ -973,7 +971,7 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 ## Quarantine daily catch-up (23_QuarantineDaily, 2026-09-28)
 - **Why:** the daily records ONE date and DEFERS a class whose bar is not
   published yet (equity ETFs are always a day behind at 08:20: their only
-  refresh is loop stage 0 at 22:30, before the US close; FRED fx lags about a
+  refresh is loop stage 0 at 20:00, before the US close; FRED fx lags about a
   week). Deferred dates were meant to be backfilled by hand `--date` runs and
   never were: by 2026-09-28 all 253 equity_etf + 19 fx strategies had ZERO
   forward days (4,764 strategy-days owed). A prose-only rule, now a stage.
@@ -1022,7 +1020,7 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   Benjamini-Hochberg over "the eligible strategies at each assessment" and
   fixes no cadence; weekly keeps the kill arm prompt without re-asking a
   barely-changed record daily. Change the cadence here AND in
-  `quant/tasks/setup_scheduler.bat` in the same pass.
+  `morpheus-hub/tasks/xml/26_LiveGateWeekly.xml` in the same pass.
 - **LIVE is a lifecycle state, not capital** (the note's own words). Money at
   risk stays Coen's separate decision; nothing here can construct a
   `RouterConfig(mode="live")` in trading-systems, and nothing should.
