@@ -74,8 +74,7 @@ from .plateau import annualized_sharpe, qualifies, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
-from .bars import daily_marks, daily_bars
-from . import bars
+from .bars import bars_per_year, daily_marks, daily_bars
 from .gauntlet_core import (FAIL_ORDER, SR_FLOOR, DECAY_MIN_PCT, MC_PATHS,
                             MC_P05_MIN, RUIN_LEVEL, P_RUIN_MAX, DEFAULT_CUTOFF,
                             PURGE_BARS, _date_le, split_trades, contributions,
@@ -275,7 +274,7 @@ def _resolved_periods(spec: dict) -> int:
     """The bars-per-year engine.run_spec annualises with (2b-1); for tf "1d"
     exactly cells.SESSION_PERIODS.get(session, 365), the prior key value."""
     u = spec["universe"]
-    return bars.bars_per_year(u.get("session"), u.get("timeframe", "1d"))
+    return bars_per_year(u.get("session"), u.get("timeframe", "1d"))
 
 
 def daily_returns_from_curve(equity: list[tuple[str, float]]) -> list[float]:

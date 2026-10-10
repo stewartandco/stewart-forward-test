@@ -15,8 +15,10 @@ BUCKETS = ("trend_up", "trend_down", "chop", "unlabelled")
 
 
 def regime_by_date(bars: list[dict], ma_len: int = 200) -> dict[str, str]:
-    """date -> regime label. Bars before the average exists are omitted
-    entirely rather than given a fabricated label."""
+    """date -> regime label, keyed by the date-only `str(date)[:10]` (so an
+    intraday trade matches its UTC day; pass daily bars). Bars before the
+    average exists are omitted entirely rather than given a fabricated
+    label."""
     labels = {}
     closes = [b["close"] for b in bars]
     running = 0.0

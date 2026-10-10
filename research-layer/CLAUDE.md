@@ -176,13 +176,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   [session] (default 365) x bars per day. `daily_marks(series)` keeps the
   LAST (date, value) of each UTC date (key `date[:10]`) and RAISES on
   out-of-order input; `daily_bars(rows)` is the same for bar dicts.
-  `engine.run_spec` resolves bars per year there (vol-target sizing,
-  per-bar financing) and passes bars per day to `gate_mask`.
+  `engine.run_spec` resolves bars per year with `bars.bars_per_year`
+  (vol-target sizing, per-bar financing) and passes bars per day to
+  `gate_mask`.
 - **Statistics on daily marks:** `plateau.annualized_sharpe`,
   `gauntlet_core.daily_returns_with_dates`,
   `gauntlet.daily_returns_from_curve`, `window_vol` (over `daily_bars`),
-  `train_dates` for the walk-forward, and `regime_by_date` on `daily_bars`
-  of BTC (`[:10]` keys). The simcache key uses
+  `train_dates` for the walk-forward, `regime_by_date` on `daily_bars`
+  of BTC (`[:10]` keys), and `engine.run_spec`'s `max_dd` metric (the
+  screen's recorded max drawdown). The simcache key uses
   `gauntlet._resolved_periods(spec)`. `ENGINE_REV` stays "e2" (a 1d
   strategy's results are bit-identical, so no cached sim is invalidated).
   Trade-based gates (edge per trade, edge decay, MC p05, ruin, cost stress)
@@ -190,8 +192,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
 - **24x7 only:** any non-24x7 session with tf != "1d" raises
   `bars.IntradayUnsupported` (a `ValueError`), as does an unknown tf.
   Hazard for 2b-3: a NON-24x7 intraday spec reaching `registry_series`
-  would raise inside it and abort the whole gauntlet/stats pass, so
-  registration must refuse it up front.
+  aborts the whole gauntlet/stats pass. In practice it fails BEFORE
+  `IntradayUnsupported` is reached: `load_cell_data` raises
+  `FileNotFoundError` (no tradfi `*_1h.csv` exists) or the
+  `data_hashes[cell_id]` lookup in `registry_series` raises `KeyError`
+  (no cell hash). Either way, registration must refuse such a spec up
+  front (2b-3).
 - **Quarantine refuses intraday until 2b-2:** the recorder is daily-only
   (it would otherwise simulate an intraday spec on its asset's DAILY
   bars). `quarantine._split_intraday` skips every non-1d quarantined spec,
@@ -203,7 +209,8 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   2026-10-10, 200 registered 1d strategies (167 of them vol-target or
   vol-percentile) were bit-identical across the change, 0 errors.
   `compare` fails on a meta mismatch (seed, cutoff, sample size, registry
-  sha), empty results, or ANY error, so it cannot pass vacuously. Re-run
+  sha), a sample-list mismatch, any per-strategy fingerprint mismatch,
+  empty results, or ANY error, so it cannot pass vacuously. Re-run
   it after any change to `bars.py`, the engine's sizing/financing/gate
   code, or the statistics above.
 - **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
@@ -216,7 +223,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `gate_mask` is O(n x 365 x bars_per_day), about 940 s per 1h
   vol_percentile candidate under perturbation, and
   `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) is far too low for 1h, so the
-  cycle budget would be misjudged.
+  cycle budget would be misjudged. Artifact storage: screen writes the
+  per-bar `equity.csv` into each bundle, and bundles are committed to the
+  PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
+  tens of KB for 1d, so grid scale means tens of GB. Two explicit 2b-3
+  gates: `gauntlet_stats` has never run end to end on an intraday spec,
+  and `tools/intraday_rehearsal.pick_originals`' selection rules (the
+  vol_target/vol_percentile picks, one per family) are untested (only
+  its crypto/1d filter is); both must be exercised in 2b-3's activation
+  rehearsal before any intraday verdict is chained.
 - **The protocol note is a DRAFT and is NOT chained until 2b-3:**
   `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
   approves the exact text; it is chained VERBATIM at 2b-3 activation,

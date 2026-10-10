@@ -6,8 +6,7 @@ import json
 
 from .common import content_id
 from .quarantine import run as quarantine_run
-from .test_gen3b import argv_for, decisions
-from .test_gen3b import flat_dated_bars
+from .test_gen3b import argv_for, decisions, flat_dated_bars
 from .test_quarantine_isolation import _quarantine, btc_and_eth_solo, ledger
 
 

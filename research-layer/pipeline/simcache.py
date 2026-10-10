@@ -44,10 +44,11 @@ annualizes with, `bars.bars_per_year(session, timeframe)` (the caller passes
 mapping lives outside the spec, outside the per-asset data, and outside
 ENGINE_REV, yet feeds vol_target's realized-vol sizing (engine.py's
 `realized_ann_vol`) and therefore the simulated return series itself; it also
-keeps a 1h entry (8760) from ever colliding with a 1d one (365). Without it, a SESSION_PERIODS edit (e.g. correcting fx's
-trading-day count) would silently keep serving every cached fx series computed
-under the OLD mapping instead of missing and re-simulating. (1) plus (2) plus
-(3) plus (4), hashed together, is the cache key.
+keeps a 1h entry (8760) from ever colliding with a 1d one (365). Without
+it, a SESSION_PERIODS edit (e.g. correcting fx's trading-day count) would
+silently keep serving every cached fx series computed under the OLD mapping
+instead of missing and re-simulating. (1) plus (2) plus (3) plus (4), hashed
+together, is the cache key.
 
 CANDIDATES (this pass's own evaluations) are never served from here -- see
 gauntlet.py's own comment at the call site. Only a spec NOT being evaluated

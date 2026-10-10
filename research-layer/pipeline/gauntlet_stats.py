@@ -435,10 +435,11 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
     _, _, skew, kurt = moments(r)
     sr_raw = expected_max_sharpe(trials_n, trials_var)
     sr_star = max(sr_raw, sr_floor) if _positive_number(sr_floor) else sr_raw
-    # The gauntlet's t_years counted the train-window EQUITY points: the
-    # first point plus one per train return (daily_returns_with_dates drops a
-    # step only after equity <= 0). With no train return the haircut takes
-    # its sr <= 0 branch, where t_years is never read.
+    # The gauntlet's t_years counted the train-window DAILY-MARKED equity
+    # points (2b-1: one per UTC day): the first point plus one per train
+    # return (daily_returns_with_dates drops a step only after equity <= 0).
+    # With no train return the haircut takes its sr <= 0 branch, where
+    # t_years is never read.
     n_train_points = len(train_rets) + 1 if train_rets else 0
     return {
         "trials_n": trials_n,
