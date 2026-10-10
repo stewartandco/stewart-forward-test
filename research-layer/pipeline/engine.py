@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+from . import bars as _bars
 from . import cells
 
 # SP4 Task P4: bumped by hand on ANY change to this module that can alter a
@@ -198,8 +199,13 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
     return sig, state
 
 
-def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
-    """AND of all regime/filter blocks; False during any gate's warmup."""
+def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1) -> list[bool]:
+    """AND of all regime/filter blocks; False during any gate's warmup.
+
+    The vol_percentile window is one year of DAILY bars scaled by
+    `bars_per_day` (365 * bars_per_day; Ruling R2), never bars-per-year, so a
+    1d strategy keeps 365 in every session (fx included).
+    """
     closes = [b["close"] for b in bars]
     n = len(bars)
     mask = [True] * n
@@ -218,7 +224,7 @@ def gate_mask(gates: list[dict], bars: list[dict]) -> list[bool]:
         elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
             vol = realized_ann_vol(closes, p["lookback"])
             for i in range(n):
-                r = percentile_rank(vol, i, 365)
+                r = percentile_rank(vol, i, 365 * bars_per_day)
                 if r is None or r > p["max_pctile"]:
                     mask[i] = False
         else:
@@ -384,7 +390,8 @@ def exit_reason_counts(trades: list[dict]) -> dict[str, int]:
 
 
 def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
-                   periods_per_year: int = 365, *, version: int = 1) -> dict:
+                   periods_per_year: int = 365, *, version: int = 1,
+                   bars_per_day: int = 1) -> dict:
     """Run one asset's book.
 
     `version` is the spec's registration version (D15 exit rules v7):
@@ -443,7 +450,7 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
         signal_exits = exits
 
     sig, state = entry_signals(entry, bars)
-    mask = gate_mask(gates, bars) if gates else [True] * len(bars)
+    mask = gate_mask(gates, bars, bars_per_day) if gates else [True] * len(bars)
     atr_series = {}
     for s in stops:
         if s["type"] in ("atr_stop", "atr_stop_dense"):
@@ -590,14 +597,19 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
     # Spec s10 item 4: periods_per_year is derived from the universe's
     # session via the class registry (crypto 24x7 -> 365, fx_5d -> 261);
     # an unrecognised/missing session falls back to 365 (today's behaviour).
-    periods_per_year = cells.SESSION_PERIODS.get(spec["universe"].get("session"), 365)
+    # 2b-1: bar mechanics use the bar size (bars.py). For tf "1d" this is
+    # exactly SESSION_PERIODS.get(session, 365), the prior value.
+    session = spec["universe"].get("session")
+    tf = spec["universe"].get("timeframe", "1d")
+    periods_per_year = _bars.bars_per_year(session, tf)
+    bars_per_day = _bars.bars_per_day(session, tf)
     # D15: a spec without `version` is a legacy (version 1) registration
     version = spec.get("version", 1)
     books = {}
     for asset in spec["universe"]["assets"]:
         books[asset] = simulate_asset(spec["blocks"], bars_by_asset[asset],
                                       spec["cost_model"], periods_per_year,
-                                      version=version)
+                                      version=version, bars_per_day=bars_per_day)
     n = min(len(bars_by_asset[a]) for a in books)
     dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
     for a in books:
@@ -615,7 +627,10 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
         "trades": len(trades),
         "net_pnl": combined[-1] - 1 if combined else 0.0,
         "win_rate": wins / len(trades) if trades else 0.0,
-        "max_dd": -max_drawdown(combined) if combined else 0.0,
+        # 2b-1 (spec s2): a statistic, so measured on the equity marked once
+        # per UTC day; an identity for 1d (unique sorted dates)
+        "max_dd": (-max_drawdown([v for _, v in _bars.daily_marks(
+            list(zip(dates, combined)))]) if combined else 0.0),
         # D15: RECORDED, never gated -- why trades closed, whether any book
         # ended with a position still open (marked to market in equity, never
         # a closed trade), and how many signals were dropped because the

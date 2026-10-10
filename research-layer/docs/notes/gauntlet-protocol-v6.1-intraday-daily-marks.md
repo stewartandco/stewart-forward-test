@@ -1,0 +1,5 @@
+gauntlet-protocol-v6.1-intraday-daily-marks: intraday strategies are simulated per bar and measured on daily marks.
+
+STATUS: DRAFT, NOT CHAINED. Coen approves the exact text; it is chained verbatim at 2b-3 activation, before the first intraday verdict (design 2026-10-10 s7).
+
+Rule. An intraday strategy (timeframe below 1d, session 24x7 only) is simulated bar by bar: vol-target sizing annualises with bars per year (365 x bars per day), short financing accrues per bar, the volatility-percentile regime window is 365 days of bars. Every statistic the gauntlet records or gates on is computed on the equity curve marked once per UTC day (the last bar of each date): the Sharpe floor's train Sharpe, the asset volatility that normalises edge per trade, the effective-trials clustering series, the deflated Sharpe and haircut inputs, the walk-forward folds and the regime labels, and the screen's recorded max drawdown. Trade-based gates (edge per trade, edge decay, Monte Carlo p05, ruin, cost stress) are unchanged. A daily strategy's bars are its daily marks, so every daily verdict before and after this note is computed identically.

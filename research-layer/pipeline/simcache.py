@@ -37,14 +37,18 @@ revision is a guaranteed miss under a new one rather than a silently stale
 hit -- see engine.py's own comment on the constant. (2) is the per-asset data
 sha256 the caller already has from `screen.load_cell_data`; this module does
 not read data files itself. (4) is needed because `periods_per_year` is NOT
-implied by (1)-(3): it comes from `cells.SESSION_PERIODS[universe.session]`
-(engine.py's `run_spec`), a mapping that lives outside the spec, outside the
-per-asset data, and outside ENGINE_REV, yet feeds vol_target's realized-vol
-sizing (engine.py's `realized_ann_vol`) and therefore the simulated return
-series itself. Without it, a SESSION_PERIODS edit (e.g. correcting fx's
-trading-day count) would silently keep serving every cached fx series computed
-under the OLD mapping instead of missing and re-simulating. (1) plus (2) plus
-(3) plus (4), hashed together, is the cache key.
+implied by (1)-(3): it is the RESOLVED bars per year engine.py's `run_spec`
+annualizes with, `bars.bars_per_year(session, timeframe)` (the caller passes
+`gauntlet._resolved_periods(spec)`; 2b-1), identical to
+`cells.SESSION_PERIODS.get(universe.session, 365)` for every 1d spec. That
+mapping lives outside the spec, outside the per-asset data, and outside
+ENGINE_REV, yet feeds vol_target's realized-vol sizing (engine.py's
+`realized_ann_vol`) and therefore the simulated return series itself; it also
+keeps a 1h entry (8760) from ever colliding with a 1d one (365). Without
+it, a SESSION_PERIODS edit (e.g. correcting fx's trading-day count) would
+silently keep serving every cached fx series computed under the OLD mapping
+instead of missing and re-simulating. (1) plus (2) plus (3) plus (4), hashed
+together, is the cache key.
 
 CANDIDATES (this pass's own evaluations) are never served from here -- see
 gauntlet.py's own comment at the call site. Only a spec NOT being evaluated
@@ -87,8 +91,9 @@ def cache_key(sid: str, data_shas: dict[str, str], engine_rev: str,
     content-addressed), so the key needs nothing else about the spec.
 
     `periods_per_year` must be the RESOLVED value run_spec itself would use
-    (`cells.SESSION_PERIODS.get(spec["universe"]["session"], 365)`) -- not
-    recomputed here, same discipline as `data_shas`. See this module's
+    (bars per year, `bars.bars_per_year(session, timeframe)`; identical to the
+    prior `cells.SESSION_PERIODS.get(session, 365)` for a 1d spec, 2b-1) --
+    not recomputed here, same discipline as `data_shas`. See this module's
     docstring for why it is a fourth, independent key component rather than
     implied by the other three.
     """

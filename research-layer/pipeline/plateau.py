@@ -30,13 +30,17 @@ from __future__ import annotations
 
 import math
 
+from .bars import daily_marks
+
 PLATEAU_RATIO = 0.9
 TRADING_DAYS = 365   # crypto trades every day; matches the rest of the pipeline
 
 
 def annualized_sharpe(equity: list[tuple[str, float]]) -> float | None:
     """Annualized Sharpe of a daily equity curve. None when it cannot be
-    computed (too few steps, or no variance) — never a fabricated 0.0."""
+    computed (too few steps, or no variance) — never a fabricated 0.0.
+    Daily-marked (2b-1)."""
+    equity = daily_marks(equity)
     rets = [equity[i][1] / equity[i - 1][1] - 1
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
     if len(rets) < 30:

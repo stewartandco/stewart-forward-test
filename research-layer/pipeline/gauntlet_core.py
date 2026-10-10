@@ -22,6 +22,7 @@ from .plateau import annualized_sharpe, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
+from .bars import daily_marks, daily_bars
 
 PROTOCOL_V61 = "gauntlet-protocol-v6.1"
 DECAY_MIN_PCT = -25.0
@@ -98,8 +99,10 @@ def window_vol(bars_by_asset: dict, assets: list[str], lo: str, hi: str) -> floa
     bars with lo < date <= hi. Returns 0.0 when no window has enough bars."""
     vols = []
     for a in assets:
-        closes = [b["close"] for b in bars_by_asset[a]
-                  if not _date_le(b["date"], lo) and _date_le(b["date"], hi)]
+        rows = daily_bars([b for b in bars_by_asset[a]
+                           if not _date_le(b["date"], lo)
+                           and _date_le(b["date"], hi)])
+        closes = [b["close"] for b in rows]
         if len(closes) < 3:
             continue
         rets = [math.log(closes[i] / closes[i - 1])
@@ -165,7 +168,10 @@ def daily_returns_with_dates(equity: list[tuple[str, float]]
     date-only HERE, in the one place every dated return series is built,
     closes it by construction: every downstream consumer (intersect_returns,
     era_summary's date-string comparisons) sees one format no matter which
-    CSV convention produced the bar."""
+    CSV convention produced the bar.
+
+    2b-1: equity is marked once per UTC day first; identity for daily curves."""
+    equity = daily_marks(equity)
     return [(str(equity[i][0])[:10], equity[i][1] / equity[i - 1][1] - 1)
             for i in range(1, len(equity)) if equity[i - 1][1] > 0]
 
@@ -388,7 +394,7 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     br = _benchmark_relative(spec, spec_bars, compound(contributions(oos_t)), cutoff)
     if br is not None:
         metrics["benchmark_relative"] = br
-    train_dates = [d for d, _ in res["equity"] if _date_le(d, cutoff)]
+    train_dates = [d for d, _ in daily_marks(res["equity"]) if _date_le(d, cutoff)]
     metrics["walkforward"] = dict(
         walkforward_report([t for t in res["trades"]
                             if _date_le(t["entry_date"], cutoff)],
@@ -405,7 +411,7 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
         metrics["perturbation"] = None
     btc = spec_bars.get("BTCUSD") or spec_bars[sorted(spec_bars)[0]]
     metrics["regime"] = {"window": "oos",
-                         "buckets": regime_split(oos_t, regime_by_date(btc))}
+                         "buckets": regime_split(oos_t, regime_by_date(daily_bars(btc)))}
     return {"sid": sid, "passed": passed, "reason": reason, "metrics": metrics,
             "mc_summary": mc_summary, "oos_trades": oos_t}
 

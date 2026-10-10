@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from .engine import simulate_asset
-from .test_screen import breakout_spec_blocks, target_hit_bars, COST
+from .test_screen import breakout_spec_blocks, target_hit_bars, iso_dated, COST
 
 
 # ---------------- engine notional_frac ----------------
@@ -48,7 +48,7 @@ def test_screen_artifacts_still_write(tmp_path):
     from .screen import write_artifacts
     from .engine import run_spec
     from .test_screen import make_screen_spec
-    result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    result = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
     bundle = write_artifacts(tmp_path, make_screen_spec(), result,
                              "2023-12-31", {"BTCUSD_1d": "x"},
                              {"BTCUSD_1d": "2024-01-05"})
@@ -147,7 +147,7 @@ def test_screen_trades_csv_bytes_are_format_stable(tmp_path):
     from .screen import write_artifacts
     from .engine import run_spec
     from .test_screen import make_screen_spec
-    result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    result = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
     bundle = write_artifacts(tmp_path, make_screen_spec(), result,
                              "2023-12-31", {"BTCUSD_1d": "x"},
                              {"BTCUSD_1d": "2024-01-05"})
