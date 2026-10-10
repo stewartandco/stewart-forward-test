@@ -209,6 +209,15 @@ def target_hit_bars():
     return bars
 
 
+def iso_dated(bars):
+    """The same bars re-dated 2023-01-01, 2023-01-02, ... in order. run_spec's
+    max_dd is measured on daily marks (2b-1), and bars.daily_marks needs
+    chronological date strings; labels like 'sig'/'fill' are not."""
+    for i, b in enumerate(bars):
+        b["date"] = f"2023-01-{i + 1:02d}"
+    return bars
+
+
 # ---------------- simulator ----------------
 
 def test_long_breakout_target_hit_math():
@@ -335,7 +344,7 @@ def test_max_drawdown():
 
 
 def test_run_spec_single_asset_metrics():
-    result = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    result = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
     m = result["metrics"]
     assert m["trades"] == 1
     assert m["win_rate"] == pytest.approx(1.0)
@@ -343,21 +352,21 @@ def test_run_spec_single_asset_metrics():
 
 
 def test_run_spec_two_assets_combined():
-    btc = target_hit_bars()
+    btc = iso_dated(target_hit_bars())
     eth = flat_bars(9)
     for i, b in enumerate(eth):
         b["date"] = btc[i]["date"]
     bars = {"BTCUSD": btc, "ETHUSD": eth}
     result = run_spec(make_screen_spec(assets=("BTCUSD", "ETHUSD")), bars)
     # ETH book flat at 1.0; combined = mean -> half the BTC-only pnl
-    solo = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    solo = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
     assert result["metrics"]["net_pnl"] == pytest.approx(solo["metrics"]["net_pnl"] / 2)
     assert result["metrics"]["trades"] == 1
 
 
 def test_run_spec_deterministic():
-    a = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
-    b = run_spec(make_screen_spec(), {"BTCUSD": target_hit_bars()})
+    a = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
+    b = run_spec(make_screen_spec(), {"BTCUSD": iso_dated(target_hit_bars())})
     assert a == b
 
 
