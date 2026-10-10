@@ -86,7 +86,7 @@ def run_scout(*, client, model: str, meter, watchlist_sources: list[dict],
     messages = [{"role": "user", "content": user_prompt}]
     searches = 0
     msg = None
-    for _ in range(MAX_CONTINUATIONS + 1):
+    for attempt in range(MAX_CONTINUATIONS + 1):
         msg = client.messages.create(
             model=model,
             max_tokens=8000,
@@ -99,8 +99,12 @@ def run_scout(*, client, model: str, meter, watchlist_sources: list[dict],
         )
         searches += sum(1 for b in msg.content
                         if getattr(b, "type", "") == "server_tool_use")
-        if msg.stop_reason != "pause_turn":
+        if msg.stop_reason != "pause_turn" or attempt == MAX_CONTINUATIONS:
             break
+        # A paused call that is followed by another is a billed call: meter it
+        # here. The LAST call (finished, or still paused when continuations run
+        # out) is metered once below, with the search charges for the whole run.
+        meter.record_call(model, msg.usage, purpose="scout", agent="reader")
         messages = [{"role": "user", "content": user_prompt},
                     {"role": "assistant", "content": msg.content}]
     meter.record_call(model, msg.usage, purpose="scout", agent="reader",

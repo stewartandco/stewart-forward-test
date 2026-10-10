@@ -170,10 +170,12 @@ def screen_items(client, model: str, items: list[dict], meter,
             continue
         meter.record_call(model, msg.usage, purpose="screen",
                           agent="reader")
-        if msg.stop_reason == "refusal":
-            decisions = {it["item_id"]: ("deferred_screen", "refusal") for it in batch}
+        text = next((b.text for b in msg.content if b.type == "text"), None)
+        if msg.stop_reason in ("refusal", "max_tokens") or text is None:
+            # refusal, a max_tokens cut, or no answer text: re-screen next cycle
+            reason = msg.stop_reason if msg.stop_reason in ("refusal", "max_tokens") else "no_text"
+            decisions = {it["item_id"]: ("deferred_screen", reason) for it in batch}
         else:
-            text = next(b.text for b in msg.content if b.type == "text")
             decisions = parse_screen_response(batch, json.loads(text))
         out.update(decisions)
         _log_decisions(log_path, model, decisions)

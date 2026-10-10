@@ -38,7 +38,7 @@ from .probation import (prioritise_items, process_admissions, process_reviews,
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
-from .reader import build_card, chunk_text, extract_claims_usage
+from .reader import ExtractionFailed, build_card, chunk_text, extract_claims_usage
 from .chainlock import ChainLock, ChainLockHeld
 
 LAYER = Path(__file__).resolve().parent.parent
@@ -172,7 +172,11 @@ def _extract_item(client, model, item, source, page_text, html, *,
     # extraction calls themselves.
     all_claims = []
     for label, chunk in chunk_text(page_text):
-        claims, usage = extract_claims_usage(client, model, label, chunk)
+        try:
+            claims, usage = extract_claims_usage(client, model, label, chunk)
+        except ExtractionFailed as exc:
+            meter.record_call(model, exc.usage, purpose="extract", agent="reader")
+            raise
         meter.record_call(model, usage, purpose="extract",
                           agent="reader")
         all_claims.extend(claims)
@@ -416,7 +420,11 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
         # the scanner's registration paths, inbox included.
         all_claims = []
         for label, chunk in chunk_text(text):
-            claims, usage = extract_claims_usage(client, model, label, chunk)
+            try:
+                claims, usage = extract_claims_usage(client, model, label, chunk)
+            except ExtractionFailed as exc:
+                meter.record_call(model, exc.usage, purpose="inbox_extract", agent="reader")
+                raise
             meter.record_call(model, usage, purpose="inbox_extract",
                               agent="reader")
             all_claims.extend(claims)
