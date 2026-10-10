@@ -122,7 +122,7 @@ def build_matrix(registry: Path, data_dir: Path, simcache_dir: Path,
         sid = s["strategy_id"]
         tf = s["universe"].get("timeframe", "1d")
         shas = {a: hashes[cells.cell_id(a, tf)] for a in s["universe"]["assets"]}
-        ppy = cells.SESSION_PERIODS.get(s["universe"].get("session"), 365)
+        ppy = gauntlet._resolved_periods(s)   # one source for the key (2b-1)
         hit = cache.get(simcache.cache_key(sid, shas, gauntlet.ENGINE_REV, ppy))
         if hit is None:
             missing.append(sid)

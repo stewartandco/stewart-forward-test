@@ -37,11 +37,14 @@ revision is a guaranteed miss under a new one rather than a silently stale
 hit -- see engine.py's own comment on the constant. (2) is the per-asset data
 sha256 the caller already has from `screen.load_cell_data`; this module does
 not read data files itself. (4) is needed because `periods_per_year` is NOT
-implied by (1)-(3): it comes from `cells.SESSION_PERIODS[universe.session]`
-(engine.py's `run_spec`), a mapping that lives outside the spec, outside the
-per-asset data, and outside ENGINE_REV, yet feeds vol_target's realized-vol
-sizing (engine.py's `realized_ann_vol`) and therefore the simulated return
-series itself. Without it, a SESSION_PERIODS edit (e.g. correcting fx's
+implied by (1)-(3): it is the RESOLVED bars per year engine.py's `run_spec`
+annualizes with, `bars.bars_per_year(session, timeframe)` (the caller passes
+`gauntlet._resolved_periods(spec)`; 2b-1), identical to
+`cells.SESSION_PERIODS.get(universe.session, 365)` for every 1d spec. That
+mapping lives outside the spec, outside the per-asset data, and outside
+ENGINE_REV, yet feeds vol_target's realized-vol sizing (engine.py's
+`realized_ann_vol`) and therefore the simulated return series itself; it also
+keeps a 1h entry (8760) from ever colliding with a 1d one (365). Without it, a SESSION_PERIODS edit (e.g. correcting fx's
 trading-day count) would silently keep serving every cached fx series computed
 under the OLD mapping instead of missing and re-simulating. (1) plus (2) plus
 (3) plus (4), hashed together, is the cache key.
