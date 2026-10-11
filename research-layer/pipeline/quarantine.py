@@ -1040,10 +1040,54 @@ def run_one_date_for_catch_up(base: list[str], date: str,
 
 
 def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
-                             remove_unseen: bool) -> None:
+                             remove_unseen: bool,
+                             keep_sources: tuple[str, ...] = ()) -> None:
     from . import degraded
     degraded.record(Path(registry_path).parent / "logs" / degraded.QUARANTINE_LEDGER,
-                    "quarantine", report.degraded, remove_unseen=remove_unseen)
+                    "quarantine", report.degraded, remove_unseen=remove_unseen,
+                    keep_sources=keep_sources)
+
+
+FETCH_SOURCE = "intraday_fetch_failed"
+
+
+def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
+               fetch=None) -> list[dict]:
+    """Fetch every intraday cell a quarantined strategy trades, once each
+    (2b-2 design s3.5): incremental, closed bars only, atomic write, into
+    `data_dir`. Nothing is owed while no intraday strategy is quarantined.
+    A cell whose fetch raises is a degraded item; the step never fails for
+    it -- its days stay owed and catch-up records them after a later
+    successful fetch."""
+    if fetch is None:
+        from .crypto_data import fetch_symbol as fetch
+    cells_owed = sorted({k for sid in quarantined if sid in specs
+                         for k in spec_cells(specs[sid]) if is_intraday_key(k)})
+    if not cells_owed:
+        print("fetch-owed: no intraday cell owed")
+        return []
+    items = []
+    for key in cells_owed:
+        asset, tf = split_cell_key(key)
+        try:
+            fetch(asset, tf, Path(data_dir))
+            print(f"fetch-owed: {key} fetched")
+        except Exception as exc:          # one dead cell must not stop the rest
+            print(f"fetch-owed: {key} FAILED: {exc!r}")
+            items.append({"source": FETCH_SOURCE, "key": key,
+                          "reason": f"fetch of {asset} {tf} failed: {exc!r}"})
+    return items
+
+
+def _write_fetch_ledger(registry_path: Path, items: list[dict]) -> None:
+    """The fetch step is the only authority on FETCH_SOURCE items: it drops
+    a cell's item once that cell fetches, and keeps every other source."""
+    from . import degraded
+    path = Path(registry_path).parent / "logs" / degraded.QUARANTINE_LEDGER
+    previous, _ = degraded.read_items(path)
+    keep = tuple(sorted({i["source"] for i in previous} - {FETCH_SOURCE}))
+    degraded.record(path, "quarantine", items, remove_unseen=True,
+                    keep_sources=keep)
 
 
 def _split_unsupported(quarantined: list[str], specs: dict
@@ -1084,11 +1128,13 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
     ap.add_argument("--catch-up", action="store_true",
                     help="record every owed date (deferred or missed) through "
                          "the --date path, oldest first")
+    ap.add_argument("--fetch-owed", action="store_true",
+                    help="fetch the intraday bars quarantined strategies owe (2b-2)")
     args = ap.parse_args(argv)
 
-    if sum([args.review, bool(args.date), args.catch_up]) != 1:
-        print("Give exactly one of --date YYYY-MM-DD, --review or --catch-up.",
-              file=sys.stderr)
+    if sum([args.review, bool(args.date), args.catch_up, args.fetch_owed]) != 1:
+        print("Give exactly one of --date YYYY-MM-DD, --review, --catch-up or "
+              "--fetch-owed.", file=sys.stderr)
         return 1
     if args.date is not None:
         try:
@@ -1123,6 +1169,14 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
 
     quarantined, intraday_items = _split_unsupported(quarantined, specs)
 
+    if args.fetch_owed:
+        items = fetch_owed(quarantined, specs, args.data_dir)
+        try:
+            _write_fetch_ledger(args.registry, items)
+        except OSError as exc:
+            print(f"degraded_ledger_error: {exc}", file=sys.stderr)
+        return 0
+
     if args.review:
         return review(registry, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
@@ -1148,7 +1202,8 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
                                      and not report.unchecked)
             try:
                 _write_quarantine_ledger(args.registry, report,
-                                         remove_unseen=recovered_is_provable)
+                                         remove_unseen=recovered_is_provable,
+                                         keep_sources=(FETCH_SOURCE,))
             except OSError as exc:
                 print(f"degraded_ledger_error: {exc}", file=sys.stderr)
         return rc
