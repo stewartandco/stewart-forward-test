@@ -470,33 +470,46 @@ def _load_eligible_bars(data_dir: Path, cells: list[str], date: str
     return bars_by_cell, missing, complete
 
 
+def _cell_days(data_dir: Path, key: str, through: str) -> list[str] | None:
+    """The days a cell can be recorded on, up to `through`; None when its
+    price file is missing. Daily: every bar date (today's rule). Intraday:
+    every COMPLETE UTC day (s3.3)."""
+    path = cell_path(data_dir, key)
+    if not path.exists():
+        return None
+    asset, tf = split_cell_key(key)
+    if not is_intraday_key(key):
+        return [b["date"] for b in _daily_bars(data_dir, asset, through)]
+    full = load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
+    return [d for d in complete_days(full, tf) if d <= through]
+
+
 def _owed_by_date(data_dir: Path, spec: dict, after: str,
                   through: str) -> dict[str, set[str]] | None:
-    """{bar date: assets that owed a decision on it} over (after, through].
+    """{day: cells that owed a decision on it} over (after, through].
     None if a price file is missing."""
     owed: dict[str, set[str]] = {}
-    for asset in spec["universe"]["assets"]:
-        if not (data_dir / f"{asset}_1d.csv").exists():
+    for key in spec_cells(spec):
+        days = _cell_days(data_dir, key, through)
+        if days is None:
             return None
-        for b in _daily_bars(data_dir, asset, through):
-            if b["date"] > after:
-                owed.setdefault(b["date"], set()).add(asset)
+        for d in days:
+            if d > after:
+                owed.setdefault(d, set()).add(key)
     return owed
 
 
 def _last_bar_date(data_dir: Path, spec: dict) -> str | None:
-    """The newest bar available across the strategy's universe, or None if any
+    """The newest recordable day across the strategy's cells, or None if any
     price file is missing or empty. This is where the completeness window has
     to end: a record that stopped writing must not audit as complete."""
     latest = None
-    for asset in spec["universe"]["assets"]:
-        if not (data_dir / f"{asset}_1d.csv").exists():
+    for key in spec_cells(spec):
+        days = _cell_days(data_dir, key, "9999-12-31")
+        if not days:
             return None
-        bars = _daily_bars(data_dir, asset, "9999-12-31")
-        if not bars:
-            return None
-        if latest is None or bars[-1]["date"] > latest:
-            latest = bars[-1]["date"]
+        if latest is None or days[-1] > latest:
+            latest = days[-1]
     return latest
 
 
@@ -588,19 +601,19 @@ def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
             # a missing file; say so here rather than let the gap look like
             # "nothing owed"
             if report is not None:
-                for asset in spec["universe"]["assets"]:
-                    path = data_dir / f"{asset}_1d.csv"
+                for key in spec_cells(spec):
+                    path = cell_path(data_dir, key)
                     if not path.exists():
-                        report.degraded.append({"source": "price_file_missing", "key": asset,
-                                                "reason": f"no price file for {asset} at {path}"})
-                    elif not _daily_bars(data_dir, asset, "9999-12-31"):
-                        report.degraded.append({"source": "price_file_missing", "key": asset,
-                                                "reason": f"price file for {asset} has no bars"})
+                        report.degraded.append({"source": "price_file_missing", "key": key,
+                                                "reason": f"no price file for {key} at {path}"})
+                    elif not _cell_days(data_dir, key, "9999-12-31"):
+                        report.degraded.append({"source": "price_file_missing", "key": key,
+                                                "reason": f"price file for {key} has no bars"})
             print(f"catch-up: {sid} skipped (price file missing or empty); "
                   f"--review names it")
             continue
         owed_by_sid[sid] = owed
-        universe_by_sid[sid] = set(spec["universe"]["assets"])
+        universe_by_sid[sid] = set(spec_cells(spec))
     return recordable_owed_dates(owed_by_sid, universe_by_sid,
                                  existing_decisions(registry))
 
