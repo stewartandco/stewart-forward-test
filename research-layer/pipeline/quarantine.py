@@ -428,8 +428,9 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
     FOREVER with its bars on disk, because 'D 00:00:00' never equals 'D'.
     The gauntlet hit the same class of bug on 2026-08-24 and normalizes with
     str()[:10]; this is the recorder's copy of that decision. Daily bars
-    only: intraday timeframes, where the time part is load-bearing, never
-    reach this module."""
+    only: an intraday cell, where the time part is load-bearing, is loaded
+    by `_load_cell_bars` and `_cell_days` with `load_bars(..., timeframe=tf)`
+    and never passes through here."""
     bars = load_bars(data_dir, asset, cutoff)
     for b in bars:
         b["date"] = b["date"][:10]
@@ -519,11 +520,12 @@ def recordable_owed_dates(owed_by_sid: dict[str, dict[str, set[str]]],
     """Sorted bar dates on which some quarantined strategy is owed a decision
     the per-date runner CAN record.
 
-    A date counts for a strategy only when EVERY asset in its universe has a
-    bar on it: the per-date runner defers a strategy missing any asset's bar,
-    so a calendar-gap date is not recordable, and counting it would retry it
-    (and fail) on every run. A date with some assets recorded and others not
-    is owed; the runner writes only the missing rows."""
+    A date counts for a strategy only when EVERY cell in its universe is
+    recordable on it (a bar for a daily cell, a COMPLETE UTC day for an
+    intraday cell): the per-date runner defers a strategy missing any cell's
+    bar, so a calendar-gap date is not recordable, and counting it would
+    retry it (and fail) on every run. A date with some cells recorded and
+    others not is owed; the runner writes only the missing rows."""
     dates: set[str] = set()
     for sid, owed in owed_by_sid.items():
         universe = universe_by_sid[sid]
