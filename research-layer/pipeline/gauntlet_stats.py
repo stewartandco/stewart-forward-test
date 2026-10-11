@@ -86,7 +86,11 @@ One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
 another instance running (that one owns the status file; it is not touched).
-Exit 1: the data or the chain refused the run (status exit_reason says why).
+Exit 1: the data or the chain refused the run, the clustering refused, or
+the run crashed (status exit_reason says which).
+Exit 3: not enough free physical memory to cluster (`deferred_memory`); the
+series are cached and the next run retries. Nonzero on purpose, so the Ops
+Sentinel FAILs the digest the same morning (Coen, 2026-10-11).
 """
 from __future__ import annotations
 
@@ -138,10 +142,15 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # any of it is paged out the pass thrashes (19,092 series: ~4.9 GB needed,
 # 1.4 GB free, 5.8 GB committed but 44 MB resident, 90 min and counting when
 # killed). So the pass starts only when AVAILABLE PHYSICAL memory covers
-# it; otherwise the run stops (exit 0, `deferred_memory`) and the next one
-# retries. The time estimate also scales with n^2 from the n it was
+# it; otherwise the run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`)
+# and the next one retries. The time estimate also scales with n^2 from the n it was
 # measured at (`cluster_n`, carried forward like `cluster_s`).
 CLUSTER_BYTES_PER_N2 = 14.0
+# Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
+# FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
+# morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
+# data or the chain refused the run.
+DEFERRED_MEMORY_EXIT = 3
 # The job's own instance lock (M2). A run is bounded at 5.75 h inside PT6H,
 # so a lock older than 7 h is stale; it is broken only when its holder is
 # also dead, exactly as the worker's.
@@ -724,7 +733,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"physical memory and {avail_mb} MB is available; not started "
                   f"(it would page and thrash). Series are cached; the next run "
                   f"retries.", flush=True)
-            return finish(0, "deferred_memory")
+            return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()
         try:
             clustered = cluster_registry(dated, eq_len, all_specs)

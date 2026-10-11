@@ -600,17 +600,21 @@ of it.
   merge loop touches every page of its n x n matrix on every merge, so a
   partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
   with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
-  PT6H. Short of memory = exit 0 `deferred_memory` (status
-  `cluster_need_mb`, `avail_phys_mb`; the series stay cached; the stats
-  lag WARN is the alarm if it repeats). n grows with the registry, so a
+  PT6H. Short of memory = **exit 3** `deferred_memory` (status
+  `cluster_need_mb`, `avail_phys_mb`; the series stay cached; the next run
+  retries). **Nonzero on purpose (Coen, 2026-10-11, option b): task 28 is
+  `daily` in the Sentinel with no tolerated codes, so a memory deferral
+  FAILs the 09:15 digest the same morning** instead of surfacing only as
+  the 7-day stats-lag WARN. n grows with the registry, so a
   repeating `deferred_memory` is a capacity question for Coen, not a
   constant to raise. **Expect it to defer often on this 16,324 MB box:**
   the need is ~4.9 GB at today's 19,092 series and ~6.5 GB at 22,000,
   against 4.4-4.7 GB seen available by day (night is unmeasured); each
-  deferral comes only after the full series pass, exits 0, and the only
-  alarm is the 7-day stats-lag WARN. Coen's decision (open 2026-10-11):
-  keep it, make `deferred_memory` FAIL the digest, or treat it as the RAM
-  upgrade trigger. One instance at a time
+  deferral comes only after the full series pass and FAILs that morning's
+  digest (exit 3). A digest FAIL whose task-28 result is 3 means "not
+  enough RAM to cluster", not a crash: read the `MEMORY:` line in
+  `logs/gauntlet-stats-run.log`. Repeated nights are the RAM-upgrade
+  signal. One instance at a time
   (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's argmax) and
@@ -707,16 +711,21 @@ of it.
   tolerated for it alone), `28_GauntletStats` in `daily`. Do not rename
   these fields without changing `sc-ops-sentinel` in the same change.
 - **Wrapper exit codes (both tasks, 2026-10-11):** 124 = the task guard's
-  wall ended the run, 4 = the run log was locked so nothing ran (Task
-  guard section). Otherwise the python step's code, as below.
+  wall ended the run, 125 = the guard saw the task's cmd.exe die and ended
+  the tree (normally masked by Task Scheduler's own 267014), 4 = the run log
+  was locked so nothing ran (Task guard section). Otherwise the python step's code, as below.
 - **Worker idle path (2026-10-11):** with nothing queued at the start the
   end-of-run full chain read is skipped (`queued` 0); on 2026-10-10 under
   memory pressure that one read took ~90 min (2.3 s normally).
 - **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
   (routine); 1 = a candidate raised, the run crashed, or setup was refused.
-  Stats: 0 = done, nothing to do, deadline stop, not enough free memory to
-  cluster (`deferred_memory`), chain.lock held, or another instance running; 1 = the data or the chain refused the run, or `--chain`
-  without the amendment-1 note (`refused_no_amendment_note`).
+  Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
+  instance running; 1 = the data or the chain refused the run, or `--chain`
+  without the amendment-1 note (`refused_no_amendment_note`), or the
+  clustering refused (`cluster_refused`), or the run crashed (`crashed`);
+  2 = argparse usage error; 3 = not
+  enough free physical memory to cluster (`deferred_memory`, FAILs the
+  digest on purpose).
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
   Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry
