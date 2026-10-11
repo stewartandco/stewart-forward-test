@@ -213,15 +213,19 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   is recordable for a cell when its last slot (D 00:00 + (bars_per_day -
   1) x tf) is on disk OR any later bar is (`qcells.complete_days`), so a
   missing hour cannot make a day owed forever; a UTC day with no bars at
-  all is not owed (as for daily), so a fetch hole is the fetch alarm's
-  job. Owed days, catch-up and `--review` stay day-based on complete UTC
-  days. Fetch: step 1b of `tasks/run_quarantine.bat` runs `python -m
-  pipeline.quarantine --fetch-owed`: only the intraday cells of
-  quarantined strategies (nothing while none is quarantined;
-  `crypto_data` is imported only when a cell is owed), incremental,
-  closed bars only. The intraday CSVs are gitignored (`data/*.csv`),
-  never committed; the chain pins them by hash. A failed cell is a
-  degraded item with source `intraday_fetch_failed` (key = the cell) in
+  all is not owed (as for daily): an interior hole in an intraday file
+  is silently never owed, and the fetcher never backfills it
+  (`crypto_data.fetch_symbol`); only a FAILED fetch raises
+  `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
+  `--fetch-owed` refetches it from scratch. Owed days, catch-up and
+  `--review` stay day-based on complete UTC days. Fetch: step 1b of
+  `tasks/run_quarantine.bat` runs `python -m pipeline.quarantine
+  --fetch-owed`: only the intraday cells of quarantined strategies
+  (nothing while none is quarantined; `crypto_data` is imported only
+  when a cell is owed), incremental, closed bars only. The intraday CSVs
+  are gitignored (`data/*.csv`), never committed; the chain pins them by
+  hash. A failed cell is a degraded item with source
+  `intraday_fetch_failed` (key = the cell) in
   `logs/degraded_quarantine.json`; the fetch step OWNS those items
   (`_write_fetch_ledger`) and catch-up keeps them (`keep_sources`). A
   Binance 418 ban stops the step at once and marks every remaining cell.
@@ -235,13 +239,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   hazard: each date re-simulates the cell from bar 0 (~100 s per 1h
   vol-percentile cell at today's O(n x 365 x bars_per_day) percentile),
   and the whole intraday file is read per strategy per catch-up or
-  review; bounded only by the 2b-3 incremental percentile, so cost it
-  before activating. Proof: `tools/quarantine_parity.py` (`dump` before
-  and after a change, then `compare`) recomputes a seeded sample of
-  chained daily quarantine days and compares snapshot digests and rows
-  exactly, old code vs new; re-run it after any change to the recorder.
-  The `quarantine` subcommand of `tools/intraday_rehearsal.py` (scratch
-  chain copy, end to end) is planned (Task 10), not built yet. Tests:
+  review and once per date per cell (`_load_cell_bars`); bounded only by
+  the 2b-3 incremental percentile, so cost it before activating. Proof:
+  `tools/quarantine_parity.py` (`dump` before and after a change, then
+  `compare`) recomputes a seeded sample of chained daily quarantine days
+  and compares snapshot digests and rows exactly, old code vs new;
+  re-run it after any change to the recorder. The `quarantine`
+  subcommand of `tools/intraday_rehearsal.py` (scratch chain copy, end
+  to end) is planned (Task 10), not built yet. Tests:
   `test_quarantine_intraday.py`, `test_quarantine_fetch_owed.py`.
   Design: `docs/2026-10-11-intraday-paper-stage-design.md`.
 - **Parity guarantee:** `tools/daily_parity.py` (`dump` before and after a
