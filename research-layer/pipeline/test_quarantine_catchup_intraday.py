@@ -181,3 +181,24 @@ def test_catch_up_names_a_missing_or_empty_hourly_file_by_its_cell(tmp_path, cap
     _owed_dates_for_catch_up(reg, sids, entered, specs, data, report=rep)
     assert [(i["source"], i["key"], i["reason"]) for i in rep.degraded] == [
         ("price_file_missing", "BTCUSD@1h", "price file for BTCUSD@1h has no bars")]
+
+
+def test_a_day_missing_its_last_slot_completes_once_a_later_bar_exists(tmp_path):
+    """s3.3 second clause, end to end: a day without its 23:00 slot is not
+    recorded while it is the newest day, and IS recorded by the next catch-up
+    once a bar dated after it is on disk. The `--date` run must read the whole
+    file to see that later bar, not cut it off at the day it records (Task 5
+    review M2)."""
+    daily, hourly, _ = _twin_bars()
+    last = daily[155]["date"]
+    rows = [b for b in hourly if b["date"][:10] <= last
+            and b["date"] != f"{last} 23:00:00"]
+    reg, data, daily_, sd, sh = _twins(tmp_path, hourly_rows=rows, end=last)
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    assert last not in _days_of(reg, sh["strategy_id"])
+    nxt = daily[156]["date"]
+    rows.append(dict([b for b in hourly if b["date"] == f"{nxt} 00:00:00"][0]))
+    _write(data, "BTCUSD_1h.csv", rows)
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    got = _days_of(reg, sh["strategy_id"])
+    assert last in got and nxt not in got, got
