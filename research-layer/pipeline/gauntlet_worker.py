@@ -27,6 +27,7 @@ from pathlib import Path
 
 from . import deadline as _deadline
 from .chainlock import ChainLock, ChainLockHeld
+from .taskguard import task_started
 from .registry import ChainMoved, ChainSnapshot, Registry, UnstableEntry
 from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
@@ -67,6 +68,11 @@ _sleep = time.sleep
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _run_started(now: datetime) -> datetime:
+    """The task's start as the guard stamped it, else now (taskguard)."""
+    return task_started(now)
 
 
 def _cells(spec: dict) -> list[tuple[str, str]]:
@@ -301,7 +307,7 @@ def run(argv: list[str] | None = None) -> int:
         rows = _row_counts(a.data_dir, {c for s in todo for c in _cells(s)})
         todo.sort(key=lambda s: cost_key(s, rows))
         budget = _deadline.DeadlineBudget(
-            (_now() + timedelta(minutes=a.deadline_minutes)).isoformat(),
+            (_run_started(_now()) + timedelta(minutes=a.deadline_minutes)).isoformat(),
             reserve_s=DRAIN_RESERVE_S, clock=_monotonic)
 
         max_workers = 1
@@ -490,8 +496,17 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{item['spec']['strategy_id']}  deferred: chain.lock held "
                   f"through the run; not written, stays queued", flush=True)
 
-        snap_end, view_end = _read(registry)          # outside the lock
-        left, entered = view_end.queue(snap_end), view_end.entered
+        if todo:
+            snap_end, view_end = _read(registry)      # outside the lock
+            left, entered = view_end.queue(snap_end), view_end.entered
+        else:
+            # Nothing was queued at the start, so nothing this run did can
+            # have queued anything (repair only moves JUDGED strategies), and
+            # a second full chain read would only see other writers' work,
+            # which the next run picks up. Skipping it is the idle path's
+            # whole cost: on 2026-10-10 under memory pressure this read took
+            # ~90 min (2.3 s normally) and outlived the task's time limit.
+            left, entered = [], {}
         status["queued"] = len(left)
         now = _now()
         ages = []
