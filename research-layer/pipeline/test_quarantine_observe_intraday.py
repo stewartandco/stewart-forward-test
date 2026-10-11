@@ -58,3 +58,33 @@ def test_day_events_counts_every_round_trip():
     assert day_events(trades, pos, bars, "2026-10-10") == (3, 3, "enter_long")
     assert day_events(trades[:2], None, bars, "2026-10-10") == (2, 2, "exit")
     assert day_events([], None, bars, "2026-10-10") == (0, 0, "hold")
+
+
+def test_observe_day_passes_the_bar_size_mechanics_to_the_engine(monkeypatch):
+    """2b-2 s3.4: the engine sizes and finances per BAR, so the recorder must
+    hand it the bar-size arithmetic (8760 / 24 for 1h), exactly as the
+    screen and gauntlet do; a daily spec keeps 365 and no bars_per_day."""
+    from . import quarantine
+    real = quarantine.simulate_asset
+    calls = []
+
+    def spy(blocks, bars, cost_model, periods_per_year, **kw):
+        calls.append((periods_per_year, kw))
+        return real(blocks, bars, cost_model, periods_per_year, **kw)
+
+    monkeypatch.setattr(quarantine, "simulate_asset", spy)
+    daily, hourly, _ = _twin_bars()
+    entered, day = daily[150]["date"], daily[151]["date"]
+
+    observe_day(_twin_spec("1h"), {KEY_H: _upto(hourly, day)}, day, entered)
+    assert len(calls) == 1
+    ppy, kw = calls[0]
+    assert ppy == 8760
+    assert kw.get("bars_per_day") == 24
+
+    calls.clear()
+    observe_day(_twin_spec("1d"), {"BTCUSD": _upto(daily, day)}, day, entered)
+    assert len(calls) == 1
+    ppy, kw = calls[0]
+    assert ppy == 365
+    assert kw.get("bars_per_day", 1) == 1
