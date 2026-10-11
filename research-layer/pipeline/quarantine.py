@@ -73,12 +73,14 @@ import argparse
 import traceback
 from pathlib import Path
 
+from . import bars as _bars
 from . import cells
 from .chainlock import ChainLock, ChainLockHeld
 from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
                        DuplicateQuarantineSnapshot,
                        OverlappingQuarantineSupplement)
 from .engine import simulate_asset
+from .qcells import spec_cells
 from .screen import load_bars
 
 MIN_TRADING_DAYS = 60
@@ -288,14 +290,86 @@ def _rebase_index(bars: list[dict], entered: str, asset: str) -> int:
     return idx
 
 
-def observe_day(spec: dict, bars_by_asset: dict[str, list[dict]], date: str,
+def _rebase_index_day(bars: list[dict], entered: str, key: str) -> int:
+    """Intraday zero point: the DAILY MARK of the entry date -- the last bar
+    whose date part is on or before it (2b-2 design s3.4)."""
+    idx = None
+    for i, b in enumerate(bars):
+        if b["date"][:10] <= entered[:10]:
+            idx = i
+    if idx is None:
+        raise ValueError(
+            f"{key}: no bar on or before the quarantine entry date "
+            f"{entered}, so the forward record has no zero point (data starts "
+            f"at {bars[0]['date']}). Rebasing on the first available bar would "
+            f"silently fold pre-quarantine performance into the record.")
+    return idx
+
+
+def day_events(trades: list[dict], position: dict | None, bars: list[dict],
+               date: str) -> tuple[int, int, str]:
+    """(entries, exits, action) for one UTC day of an intraday book.
+
+    entries = trades entered on the day, plus an open position entered on it;
+    exits = trades closed on the day; action = the LATEST event of the day
+    (the engine never enters on the bar it exits, so two events never share a
+    bar), or "hold"."""
+    events: list[tuple[str, str]] = []
+    entries = exits = 0
+    for t in trades:
+        if str(t["entry_date"])[:10] == date:
+            entries += 1
+            events.append((str(t["entry_date"]),
+                           "enter_long" if t["side"] == "long" else "enter_short"))
+        if str(t["exit_date"])[:10] == date:
+            exits += 1
+            events.append((str(t["exit_date"]), "exit"))
+    if position is not None:
+        stamp = str(bars[position["entry_i"]]["date"])
+        if stamp[:10] == date:
+            entries += 1
+            events.append((stamp, "enter_long" if position["side"] == 1
+                           else "enter_short"))
+    return entries, exits, (max(events)[1] if events else "hold")
+
+
+def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
+                      entered: str) -> dict:
+    universe = spec["universe"]
+    session, tf = universe.get("session"), universe["timeframe"]
+    if not bars or bars[-1]["date"][:10] != date:
+        raise ValueError(f"no {key} bar for {date}")
+    book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
+                          _bars.bars_per_year(session, tf),
+                          version=spec.get("version", 1),
+                          bars_per_day=_bars.bars_per_day(session, tf))
+    pos = book["position"]
+    entries, exits, action = day_events(book["trades"], pos, bars, date)
+    base = book["equity"][_rebase_index_day(bars, entered, key)]
+    if base <= 0:
+        raise ValueError(
+            f"{key}: equity baseline at {entered} is {base!r}, so the "
+            f"rebased forward equity for {date} is undefined")
+    return {"strategy_id": spec["strategy_id"], "date": date, "asset": key,
+            "action": action, "price": bars[-1]["close"],
+            "position_frac": pos["notional_frac"] if pos is not None else 0.0,
+            "equity": book["equity"][-1] / base,
+            "entries": entries, "exits": exits}
+
+
+def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
                 entered: str) -> list[dict]:
-    """One decision row per asset in the spec's universe: a RECORD of what the
-    book did on `date`, not an instruction. `bars_by_asset` must already be
-    truncated to bars <= date."""
+    """One decision row per CELL in the spec's universe: a RECORD of what the
+    book did on `date`, not an instruction. `bars_by_cell` must already be
+    truncated to bars <= date. A daily spec's cell key is its bare asset, so
+    its rows are unchanged; an intraday cell records its daily mark (2b-2)."""
     rows = []
-    for asset in spec["universe"]["assets"]:
-        bars = bars_by_asset[asset]
+    intraday = spec["universe"].get("timeframe", "1d") != "1d"
+    for asset in spec_cells(spec):
+        bars = bars_by_cell[asset]
+        if intraday:
+            rows.append(_observe_intraday(spec, asset, bars, date, entered))
+            continue
         if not bars or bars[-1]["date"] != date:
             raise ValueError(f"no {asset} bar for {date}")
         # Spec s10.11 (T3 review): mirror run_spec's periods_per_year
