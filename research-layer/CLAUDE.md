@@ -212,20 +212,27 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `bars_per_year` and `bars_per_day` to the engine. Completeness: a day
   is recordable for a cell when its last slot (D 00:00 + (bars_per_day -
   1) x tf) is on disk OR any later bar is (`qcells.complete_days`), so a
-  missing hour cannot make a day owed forever; a UTC day with no bars at
-  all is not owed (as for daily): an interior hole in an intraday file
-  is silently never owed, and the fetcher never backfills it
+  missing hour cannot make a day owed forever; a missing hour inside a
+  day that has other bars is not a hole (that day is complete and is
+  recorded from the bars present), but a whole UTC day with no bars is
+  silently never owed (as for daily) and the fetcher never backfills it
   (`crypto_data.fetch_symbol`); only a FAILED fetch raises
   `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
-  `--fetch-owed` refetches it from scratch. Owed days, catch-up and
-  `--review` stay day-based on complete UTC days. Fetch: step 1b of
-  `tasks/run_quarantine.bat` runs `python -m pipeline.quarantine
-  --fetch-owed`: only the intraday cells of quarantined strategies
-  (nothing while none is quarantined; `crypto_data` is imported only
-  when a cell is owed), incremental, closed bars only. The intraday CSVs
-  are gitignored (`data/*.csv`), never committed; the chain pins them by
-  hash. A failed cell is a degraded item with source
-  `intraday_fetch_failed` (key = the cell) in
+  `--fetch-owed` refetches it from scratch. The chain is append-only, so
+  the refetch changes FUTURE records only: days already recorded keep
+  the values computed from the holed file. While the CSV is absent its
+  strategies are deferred (missing price file, addendum rule 3); step 1b
+  fetches before recording, so a normal run is unaffected, but if the
+  refetch fails (e.g. a 418 ban) they stay deferred until a fetch
+  succeeds, and a day where nothing at all can record exits 1. Owed
+  days, catch-up and `--review` stay day-based on complete UTC days.
+  Fetch: step 1b of `tasks/run_quarantine.bat` runs `python -m
+  pipeline.quarantine --fetch-owed`: only the intraday cells of
+  quarantined strategies (nothing while none is quarantined;
+  `crypto_data` is imported only when a cell is owed), incremental,
+  closed bars only. The intraday CSVs are gitignored (`data/*.csv`),
+  never committed; the chain pins them by hash. A failed cell is a
+  degraded item with source `intraday_fetch_failed` (key = the cell) in
   `logs/degraded_quarantine.json`; the fetch step OWNS those items
   (`_write_fetch_ledger`) and catch-up keeps them (`keep_sources`). A
   Binance 418 ban stops the step at once and marks every remaining cell.
