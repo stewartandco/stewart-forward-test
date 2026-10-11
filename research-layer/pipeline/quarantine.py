@@ -80,7 +80,8 @@ from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
                        DuplicateQuarantineSnapshot,
                        OverlappingQuarantineSupplement)
 from .engine import simulate_asset
-from .qcells import spec_cells
+from .qcells import (spec_cells, cell_path, split_cell_key, is_intraday_key,
+                     complete_days)
 from .screen import load_bars
 
 MIN_TRADING_DAYS = 60
@@ -178,19 +179,22 @@ def merged_bars_coverage(base: dict, sups: list[dict]) -> dict[str, str]:
     return merged
 
 
-def hash_price_files(data_dir: Path, assets: list[str]) -> dict[str, str]:
+def hash_price_files(data_dir: Path, cells: list[str]) -> dict[str, str]:
     """SHA-256 of each asset's price CSV, byte for byte, exactly as screen.py
     and gauntlet.py already record it in their artifact bundles. An honest
     record of what the file looked like when the rows were written, checkable
     with a plain `sha256sum`.
 
     NOT the re-run guard -- see hash_bars_through for why it cannot be.
+
+    Keyed by cell key (2b-2): a bare asset names its `_1d.csv`, exactly as
+    before.
     """
-    return {a: hashlib.sha256(
-        (data_dir / f"{a}_1d.csv").read_bytes()).hexdigest() for a in assets}
+    return {c: hashlib.sha256(cell_path(data_dir, c).read_bytes()).hexdigest()
+            for c in cells}
 
 
-def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
+def hash_bars_through(data_dir: Path, key: str, date: str) -> str:
     r"""SHA-256 of the bars a date's decisions were actually computed from:
     the CSV header plus every data row dated <= `date`, in file order,
     LF-normalized, one '\n' per line including the last.
@@ -219,7 +223,7 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
     reordered without changing a single value hashes differently and the day
     is refused, which is the safe direction to be wrong in.
     """
-    raw = (data_dir / f"{asset}_1d.csv").read_bytes().replace(b"\r\n", b"\n")
+    raw = cell_path(data_dir, key).read_bytes().replace(b"\r\n", b"\n")
     lines = raw.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()                       # trailing newline, not a row
@@ -227,7 +231,7 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
         # unreachable from run(), which refuses a date with no bar long
         # before this, but this is a public helper with a general contract
         raise ValueError(
-            f"{asset}: price file is empty, so there is nothing to hash as "
+            f"{key}: price file is empty, so there is nothing to hash as "
             f"the provenance of {date}")
     header, rows = lines[0], lines[1:]
     cutoff = date.encode()[:10]
@@ -241,9 +245,9 @@ def hash_bars_through(data_dir: Path, asset: str, date: str) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def hash_bars_used(data_dir: Path, assets: list[str],
+def hash_bars_used(data_dir: Path, cells: list[str],
                    date: str) -> dict[str, str]:
-    return {a: hash_bars_through(data_dir, a, date) for a in assets}
+    return {c: hash_bars_through(data_dir, c, date) for c in cells}
 
 
 def snapshot_conflicts(recorded: dict[str, str],
@@ -432,21 +436,38 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
     return bars
 
 
-def _load_eligible_bars(data_dir: Path, assets: list[str],
-                        date: str) -> tuple[dict[str, list[dict]], dict[str, Path]]:
-    """(bars <= date per asset, {asset: path} of MISSING price files). A
-    missing file defers the strategies that trade it (2026-10-08 addendum
-    rule 3); the caller turns 'every owing strategy deferred for a missing
-    bar or file' into the total-stall refusal."""
-    bars_by_asset: dict[str, list[dict]] = {}
+def _load_cell_bars(data_dir: Path, key: str, date: str) -> tuple[list[dict], bool]:
+    """(bars <= date, is `date` complete for this cell). A daily cell is
+    exactly today's path: its bars normalized to the date part, complete when
+    the last bar IS the date. An intraday cell loads its whole file once (the
+    completeness rule needs to know whether a later day exists, s3.3) and
+    truncates in memory."""
+    asset, tf = split_cell_key(key)
+    if not is_intraday_key(key):
+        bars = _daily_bars(data_dir, asset, date)
+        return bars, bool(bars) and bars[-1]["date"] == date
+    full = load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
+    upto = [b for b in full if b["date"][:10] <= date]
+    return upto, date in complete_days(full, tf)
+
+
+def _load_eligible_bars(data_dir: Path, cells: list[str], date: str
+                        ) -> tuple[dict[str, list[dict]], dict[str, Path],
+                                   dict[str, bool]]:
+    """(bars <= date per cell, {cell: path} of MISSING price files,
+    {cell: date complete}). A missing file defers the strategies that trade
+    it (2026-10-08 addendum rule 3); the caller turns 'every owing strategy
+    deferred for a missing bar or file' into the total-stall refusal."""
+    bars_by_cell: dict[str, list[dict]] = {}
     missing: dict[str, Path] = {}
-    for asset in assets:
-        path = data_dir / f"{asset}_1d.csv"
+    complete: dict[str, bool] = {}
+    for key in cells:
+        path = cell_path(data_dir, key)
         if not path.exists():
-            missing[asset] = path
+            missing[key] = path
             continue
-        bars_by_asset[asset] = _daily_bars(data_dir, asset, date)
-    return bars_by_asset, missing
+        bars_by_cell[key], complete[key] = _load_cell_bars(data_dir, key, date)
+    return bars_by_cell, missing, complete
 
 
 def _owed_by_date(data_dir: Path, spec: dict, after: str,
@@ -739,7 +760,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     owing: list[str] = []
     n_present = 0
     for sid in eligible:
-        keys = [(sid, args.date, a) for a in specs[sid]["universe"]["assets"]]
+        keys = [(sid, args.date, a) for a in spec_cells(specs[sid])]
         if all(k in seen_keys for k in keys):
             n_present += len(keys)
         else:
@@ -755,24 +776,21 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     bars_by_asset: dict[str, list[dict]] = {}
     ready: list[str] = []
     if eligible:
-        bars_by_asset, missing_files = _load_eligible_bars(
+        bars_by_asset, missing_files, complete = _load_eligible_bars(
             args.data_dir,
-            sorted({a for sid in eligible
-                    for a in specs[sid]["universe"]["assets"]}),
+            sorted({a for sid in eligible for a in spec_cells(specs[sid])}),
             args.date)
         for asset, path in sorted(missing_files.items()):
             report.degraded.append({"source": "price_file_missing", "key": asset,
                                     "reason": f"no price file for {asset} at {path}"})
         for sid in eligible:
-            assets = specs[sid]["universe"]["assets"]
+            assets = spec_cells(specs[sid])
             gone = [a for a in assets if a in missing_files]
             if gone:
                 print(f"{sid}  deferred: no price file for {gone[0]} at "
                       f"{missing_files[gone[0]]}")
                 continue
-            missing = [a for a in assets
-                       if not bars_by_asset[a]
-                       or bars_by_asset[a][-1]["date"] != args.date]
+            missing = [a for a in assets if not complete[a]]
             if missing:
                 a = missing[0]
                 ends = (f"data ends {bars_by_asset[a][-1]['date']}"
@@ -830,7 +848,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     try:
         if ready:
             assets = sorted({a for sid in ready
-                             for a in specs[sid]["universe"]["assets"]})
+                             for a in spec_cells(specs[sid])})
             # Provenance BEFORE any decision row, because invariant 9 asks for
             # an EARLIER snapshot: recording the bars afterwards would prove
             # nothing about what the rows were computed from.
@@ -897,7 +915,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                           f"them are deferred, the rest record.", file=sys.stderr)
                     kept = []
                     for sid in ready:
-                        hit = sorted(set(specs[sid]["universe"]["assets"])
+                        hit = sorted(set(spec_cells(specs[sid]))
                                      & set(conflicted))
                         if hit:
                             print(f"{sid}  deferred: {reasons[hit[0]]}")
@@ -905,7 +923,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                             kept.append(sid)
                     ready = kept
                     keep_assets = {a for sid in ready
-                                   for a in specs[sid]["universe"]["assets"]}
+                                   for a in spec_cells(specs[sid])}
                     bars_digests = {a: d for a, d in bars_digests.items()
                                     if a in keep_assets}
                     if not ready:
@@ -1015,14 +1033,29 @@ def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
                     "quarantine", report.degraded, remove_unseen=remove_unseen)
 
 
-def _split_intraday(quarantined: list[str], specs: dict) -> tuple[list[str], list[str]]:
-    """2b-1 (Ruling R1): the recorder is daily-only until 2b-2. An intraday
-    spec would otherwise be simulated on its asset's DAILY bars."""
-    daily, intraday = [], []
+def _split_unsupported(quarantined: list[str], specs: dict
+                       ) -> tuple[list[str], list[dict]]:
+    """2b-2 (design s3.6): every 24x7 timeframe in bars.BARS_PER_DAY_24X7 is
+    recorded. An intraday spec the engine cannot simulate (a non-24x7
+    session, an unknown timeframe) is skipped and reported as degraded
+    (`intraday_unsupported`) rather than crash the date; registration-time
+    refusal of such a spec belongs to 2b-3."""
+    keep, items = [], []
     for sid in quarantined:
-        tf = specs.get(sid, {}).get("universe", {}).get("timeframe", "1d")
-        (daily if tf == "1d" else intraday).append(sid)
-    return daily, intraday
+        universe = specs.get(sid, {}).get("universe", {})
+        tf = universe.get("timeframe", "1d")
+        session = universe.get("session")
+        if tf != "1d":
+            try:
+                _bars.bars_per_day(session, tf)
+            except _bars.IntradayUnsupported as exc:
+                print(f"{sid}  skipped: intraday timeframe {tf!r} in session "
+                      f"{session!r} is not supported ({exc})")
+                items.append({"source": "intraday_unsupported", "key": sid,
+                              "reason": f"{tf} strategy in session {session!r}: {exc}"})
+                continue
+        keep.append(sid)
+    return keep, items
 
 
 def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
@@ -1075,15 +1108,7 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
              for e in registry.entries()
              if e["entry_type"] == "strategy_registered"}
 
-    quarantined, intraday = _split_intraday(quarantined, specs)
-    intraday_items = []
-    for sid in intraday:
-        tf = specs[sid]["universe"].get("timeframe")
-        print(f"{sid}  skipped: intraday timeframe {tf!r}; the intraday paper "
-              f"stage is not built yet (2b-2)")
-        intraday_items.append({"source": "intraday_unsupported", "key": sid,
-                               "reason": f"{tf} strategy in quarantine; the recorder "
-                                         f"is daily-only until 2b-2"})
+    quarantined, intraday_items = _split_unsupported(quarantined, specs)
 
     if args.review:
         return review(registry, quarantined, entered, specs,
