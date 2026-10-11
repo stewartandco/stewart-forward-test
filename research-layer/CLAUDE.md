@@ -218,17 +218,22 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   silently never owed (as for daily) and the fetcher never backfills it
   (`crypto_data.fetch_symbol`); only a FAILED fetch raises
   `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
-  `--fetch-owed` refetches it from scratch. The chain is append-only and
-  the refetch changes only records not yet chained: an already-chained
-  day keeps its holed-file rows, and a strategy that still owes a day
-  whose chained snapshot covers the cell is deferred as `restated` (rule
-  2), every run, until a human resolves it -- so a repair is a
-  deliberate, Coen-gated act, not routine. While the CSV is absent its
-  strategies are deferred (missing price file, addendum rule 3); step 1b
-  fetches before recording, so a normal run is unaffected, but if the
-  refetch fails (e.g. a 418 ban) they stay deferred until a fetch
-  succeeds, and a day where nothing records and no row is already
-  chained for that date exits 1 (the total-stall rule). Owed days,
+  `--fetch-owed` refetches it from scratch. The chain is append-only: a
+  refetch leaves every chained row as it is, but it changes `bars_sha256`
+  for every already-chained date at or after the hole (`hash_bars_through`
+  covers all bars up to the date), so a strategy that still owes such a
+  date on that cell is deferred as `restated` (rule 2), every run, until a
+  human resolves it -- so a repair is a deliberate, Coen-gated act, not
+  routine. A restated-only deferral exits 0, not 1 (`deferred_only`), so a
+  repair-stalled date does not turn the task red; it records a `restated`
+  item keyed by the cell in `logs/degraded_quarantine.json`, which the
+  Sentinel's `research_degraded` check turns WARN, then FAIL after 3 days.
+  While the CSV is absent its strategies are deferred (missing price file,
+  addendum rule 3); step 1b fetches before recording, so a normal run is
+  unaffected, but if the refetch fails (e.g. a 418 ban) they stay deferred
+  until a fetch succeeds, and a day where nothing records and no eligible
+  strategy is already fully chained for that date (`n_present == 0`) exits
+  1 (the total-stall rule). Owed days,
   catch-up and `--review` stay day-based on complete UTC days. Fetch:
   step 1b of `tasks/run_quarantine.bat` runs `python -m
   pipeline.quarantine --fetch-owed`: only the intraday cells of
