@@ -218,15 +218,19 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   silently never owed (as for daily) and the fetcher never backfills it
   (`crypto_data.fetch_symbol`); only a FAILED fetch raises
   `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
-  `--fetch-owed` refetches it from scratch. The chain is append-only, so
-  the refetch changes FUTURE records only: days already recorded keep
-  the values computed from the holed file. While the CSV is absent its
+  `--fetch-owed` refetches it from scratch. The chain is append-only and
+  the refetch changes only records not yet chained: an already-chained
+  day keeps its holed-file rows, and a strategy that still owes a day
+  whose chained snapshot covers the cell is deferred as `restated` (rule
+  2), every run, until a human resolves it -- so a repair is a
+  deliberate, Coen-gated act, not routine. While the CSV is absent its
   strategies are deferred (missing price file, addendum rule 3); step 1b
   fetches before recording, so a normal run is unaffected, but if the
   refetch fails (e.g. a 418 ban) they stay deferred until a fetch
-  succeeds, and a day where nothing at all can record exits 1. Owed
-  days, catch-up and `--review` stay day-based on complete UTC days.
-  Fetch: step 1b of `tasks/run_quarantine.bat` runs `python -m
+  succeeds, and a day where nothing records and no row is already
+  chained for that date exits 1 (the total-stall rule). Owed days,
+  catch-up and `--review` stay day-based on complete UTC days. Fetch:
+  step 1b of `tasks/run_quarantine.bat` runs `python -m
   pipeline.quarantine --fetch-owed`: only the intraday cells of
   quarantined strategies (nothing while none is quarantined;
   `crypto_data` is imported only when a cell is owed), incremental,
