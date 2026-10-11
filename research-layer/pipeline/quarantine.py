@@ -1059,19 +1059,34 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
     A cell whose fetch raises is a degraded item; the step never fails for
     it -- its days stay owed and catch-up records them after a later
     successful fetch."""
-    if fetch is None:
-        from .crypto_data import fetch_symbol as fetch
     cells_owed = sorted({k for sid in quarantined if sid in specs
                          for k in spec_cells(specs[sid]) if is_intraday_key(k)})
     if not cells_owed:
         print("fetch-owed: no intraday cell owed")
         return []
+    # Imported only once a cell is owed: a run with nothing to fetch must not
+    # depend on crypto_data importing.
+    from .crypto_data import BinanceBanned
+    if fetch is None:
+        from .crypto_data import fetch_symbol as fetch
     items = []
-    for key in cells_owed:
+    for n, key in enumerate(cells_owed):
         asset, tf = split_cell_key(key)
         try:
             fetch(asset, tf, Path(data_dir))
             print(f"fetch-owed: {key} fetched")
+        except BinanceBanned as exc:
+            # An IP-wide ban shared by every Binance consumer on this box:
+            # stop at once (more calls can extend it) and owe every cell left.
+            print(f"fetch-owed: {key} FAILED: {exc!r}; Binance IP ban, "
+                  f"stopping", file=sys.stderr)
+            items.append({"source": FETCH_SOURCE, "key": key,
+                          "reason": f"fetch of {asset} {tf} failed: {exc!r}"})
+            for rest in cells_owed[n + 1:]:
+                items.append({"source": FETCH_SOURCE, "key": rest,
+                              "reason": "skipped: Binance IP ban (418) on "
+                                        f"{key}; not fetched this run"})
+            break
         except Exception as exc:          # one dead cell must not stop the rest
             print(f"fetch-owed: {key} FAILED: {exc!r}")
             items.append({"source": FETCH_SOURCE, "key": key,

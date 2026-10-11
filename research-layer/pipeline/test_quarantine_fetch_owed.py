@@ -106,3 +106,58 @@ def test_the_wrapper_runs_fetch_owed_before_the_date():
     date = [i for i, ln in enumerate(cmds) if "--date" in ln]
     assert len(fetch) == 1 and len(date) == 1 and fetch[0] < date[0]
     assert 'if "%FETCH_RC%"=="1" goto :fail' in [ln.strip() for ln in cmds]
+
+
+def test_a_binance_ban_stops_the_fetch_and_owes_every_remaining_cell(tmp_path):
+    """HTTP 418 is an IP-wide ban shared by every Binance consumer on this
+    box: one more call can extend it, so the loop must stop at once."""
+    from .crypto_data import BinanceBanned
+    a = _twin_spec("1h")
+    b = json.loads(json.dumps(a))
+    b["strategy_id"] = "b" * 16
+    b["universe"]["assets"] = ["ETHUSD"]
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        raise BinanceBanned("418 from Binance: IP-wide ban")
+    items = fetch_owed([a["strategy_id"], b["strategy_id"]], _specs(a, b),
+                       tmp_path, fetch=fetch)
+    assert calls == ["BTCUSD"]
+    assert [(i["source"], i["key"]) for i in items] == [
+        (FETCH_SOURCE, "BTCUSD@1h"), (FETCH_SOURCE, "ETHUSD@1h")]
+    assert "ban" in items[1]["reason"].lower() and "418" in items[1]["reason"]
+
+
+def test_nothing_owed_never_imports_crypto_data(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "pipeline.crypto_data", None)
+    sd = _twin_spec("1d")
+    assert fetch_owed([sd["strategy_id"]], _specs(sd), tmp_path) == []
+
+
+def test_a_crashed_fetch_step_still_lets_the_record_run_and_fails_the_task(
+        tmp_path, monkeypatch):
+    """Behavioural: a --fetch-owed that exits 1 must not skip --date or
+    --catch-up or the commit, and the task's final exit is 1."""
+    import os
+    import pytest
+    if os.name != "nt":
+        pytest.skip("runs the .bat under cmd.exe")
+    from . import test_chain_mirror_wrappers as w
+    stub = (
+        "import sys, pathlib\n"
+        "L = pathlib.Path(__file__).resolve().parent.parent\n"
+        "with open(L / 'logs' / 'calls.txt', 'a') as f:\n"
+        "    f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "with open(L / 'registry_log.jsonl', 'a') as f: f.write('{\"q\": 1}\\n')\n"
+        "if '--fetch-owed' in sys.argv:\n"
+        "    sys.exit(1)\n")
+    repo, bat = w._scratch(tmp_path, "run_quarantine.bat")
+    (repo / "research-layer/pipeline/quarantine.py").write_text(stub)
+    code = w._run(bat)
+    calls = (repo / "research-layer/logs/calls.txt").read_text().splitlines()
+    assert calls[0].startswith("--fetch-owed")
+    assert any(c.startswith("--date") for c in calls) and "--catch-up" in calls
+    assert code == 1
+    assert w._git(repo, "rev-list", "--count", "HEAD").strip() == "2"
