@@ -69,6 +69,36 @@ def _verify(reg):
     return r.returncode, r.stdout + r.stderr
 
 
+# The fixture registers its strategies by hand (`_register_quarantined`):
+# their provenance carries no card_ids, and a second twin that differs only in
+# provenance is a duplicate composition. The verifier reports both against the
+# strategy_registered entries; those are the ONLY failures it may report.
+FIXTURE_COMPLAINTS = ("provenance.card_ids must be a list of strings",
+                      "duplicate composition already registered as")
+
+
+def _assert_only_fixture_failures(reg):
+    """The chain verifies apart from the fixture's own registrations: the walk
+    ran to its summary (a crash before it cannot pass), and every failure line
+    is a known fixture complaint, so every quarantine row is covered by an
+    earlier snapshot under its cell key (invariant 9)."""
+    rc, out = _verify(reg)
+    assert "REGISTRY VALID" in out or "REGISTRY INVALID" in out, out
+    fails = [ln for ln in out.splitlines() if ln.lstrip().startswith("line ")]
+    assert all(any(c in ln for c in FIXTURE_COMPLAINTS) for ln in fails), out
+    assert rc == (1 if fails else 0), out
+
+
+def _rewrite_close(data, name, rows, stamp):
+    """Restate one bar: rewrite `name` with the bar dated `stamp` closing 1.0
+    higher."""
+    rows = [dict(b) for b in rows]
+    hit = [b for b in rows if b["date"] == stamp]
+    assert len(hit) == 1, stamp
+    hit[0]["close"] += 1.0
+    _write(data, name, rows)
+
+
 def test_daily_and_hourly_on_one_asset_use_disjoint_keys(tmp_path):
     reg, data, daily, sd, sh = _twins(tmp_path)
     day = daily[151]["date"]
@@ -81,14 +111,7 @@ def test_daily_and_hourly_on_one_asset_use_disjoint_keys(tmp_path):
             if e["entry_type"] == "quarantine_data_snapshot"][0]
     assert set(snap["bars_sha256"]) == {"BTCUSD", "BTCUSD@1h"}
     assert set(snap["data_sha256"]) == {"BTCUSD", "BTCUSD@1h"}
-    rc, out = _verify(reg)
-    # The verifier flags the fixture's own hand-registered twins (their
-    # provenance carries no card_ids), so rc is 1 for a reason this test does
-    # not own. What it owns: no failure line names a quarantine entry, i.e.
-    # every row is covered by an earlier snapshot under its cell key.
-    fails = [ln for ln in out.splitlines() if ln.lstrip().startswith("line ")]
-    assert not [ln for ln in fails if "quarantine_decision" in ln
-                or "quarantine_data_snapshot" in ln], out
+    _assert_only_fixture_failures(reg)
 
 
 def test_an_incomplete_intraday_day_defers_only_its_strategy(tmp_path, capsys):
@@ -138,3 +161,52 @@ def test_a_non_24x7_intraday_spec_is_deferred_not_a_crash(tmp_path, capsys):
     assert bad["strategy_id"] not in {r["strategy_id"] for r in decisions(reg)}
     items = [i for i in ledger(reg)["items"] if i["source"] == "intraday_unsupported"]
     assert [i["key"] for i in items] == [bad["strategy_id"]]
+
+
+def test_a_recorded_intraday_strategy_is_not_reguarded(tmp_path, capsys):
+    """Rule 1 on a cell key: the 1h strategy records `day` while the daily
+    class lags; then one hourly bar of `day` is restated and the daily bar
+    publishes. The 1h strategy owes nothing, so its restated cell raises no
+    RESTATED alarm, no deferral line and no ledger item; the 1d one records."""
+    daily, hourly, _ = _twin_bars()
+    day = daily[151]["date"]
+    reg, data, daily, sd, sh = _twins(tmp_path)
+    _write(data, "BTCUSD_1d.csv", [b for b in daily if b["date"] < day])
+    assert quarantine_run(argv_for(reg, data, "--date", day)) == 0
+    assert {r["strategy_id"] for r in decisions(reg)} == {sh["strategy_id"]}
+    _write(data, "BTCUSD_1d.csv", daily)
+    _rewrite_close(data, "BTCUSD_1h.csv", hourly, f"{day} 05:00:00")
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", day)) == 0
+    out = capsys.readouterr()
+    assert "RESTATED" not in out.err, out.err
+    assert f"{sh['strategy_id']}  deferred" not in out.out, out.out
+    assert not [i for i in ledger(reg)["items"] if i["source"] == "restated"]
+    assert sd["strategy_id"] in {r["strategy_id"] for r in decisions(reg)}
+    _assert_only_fixture_failures(reg)
+
+
+def test_a_kept_intraday_cell_gets_a_supplement_after_a_daily_restatement(tmp_path):
+    """Rule 2 then a supplement, on a cell key: `day`'s base snapshot covers
+    BTCUSD only (the 1h day was incomplete). The 1h day then completes, a
+    second 1d strategy owes `day`, and the daily bar of `day` was restated:
+    the 1d owner defers, the 1h strategy records, and a supplement covers
+    BTCUSD@1h before its row (invariant 9)."""
+    daily, hourly, _ = _twin_bars()
+    day = daily[151]["date"]
+    cut = [b for b in hourly if b["date"] < f"{day} 23:00:00"]
+    reg, data, daily, sd, sh = _twins(tmp_path, hourly_rows=cut)
+    assert quarantine_run(argv_for(reg, data, "--date", day)) == 0
+    assert {r["strategy_id"] for r in decisions(reg)} == {sd["strategy_id"]}
+    sd2 = json.loads(json.dumps(_twin_spec("1d")))
+    sd2["provenance"] = {"sibling_group_id": "twin-1d-b"}
+    sd2 = _register_quarantined(reg, sd2, daily[150]["date"])
+    _write(data, "BTCUSD_1h.csv", hourly)
+    _rewrite_close(data, "BTCUSD_1d.csv", daily, day)
+    assert quarantine_run(argv_for(reg, data, "--date", day)) == 0
+    sids = {r["strategy_id"] for r in decisions(reg)}
+    assert sh["strategy_id"] in sids and sd2["strategy_id"] not in sids
+    sups = [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_data_snapshot_supplement"]
+    assert [set(s["bars_sha256"]) for s in sups] == [{"BTCUSD@1h"}]
+    _assert_only_fixture_failures(reg)
