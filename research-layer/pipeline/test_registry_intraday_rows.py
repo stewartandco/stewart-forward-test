@@ -41,10 +41,11 @@ def test_a_cell_key_without_counts_is_refused():
         validated_quarantine_decision(row)
 
 
+@pytest.mark.parametrize("field", ["entries", "exits"])
 @pytest.mark.parametrize("bad", [-1, 1.0, True, "1", None])
-def test_a_count_must_be_a_non_negative_int(bad):
-    with pytest.raises(ValueError, match="entries"):
-        validated_quarantine_decision(_hourly(entries=bad))
+def test_a_count_must_be_a_non_negative_int(field, bad):
+    with pytest.raises(ValueError, match="must be a non-negative int"):
+        validated_quarantine_decision(_hourly(**{field: bad}))
 
 
 def test_a_malformed_cell_key_is_refused():
