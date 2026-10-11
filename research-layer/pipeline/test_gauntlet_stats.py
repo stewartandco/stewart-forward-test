@@ -81,7 +81,9 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                # step 7: T7 flush (B), PBO scope (C), SR* floor (D)
                "retried_written", "deferred_lock", "pbo_nulls_computed",
                "pbo_nulls_cached", "expected_max_sharpe_raw",
-               "expected_max_sharpe_effective"}
+               "expected_max_sharpe_effective",
+               # 2026-10-11 orphan incident: memory-aware cluster admission
+               "cluster_n", "cluster_need_mb", "avail_phys_mb"}
 
 
 def _status(tmp_path):
@@ -1399,3 +1401,92 @@ def test_a_huge_integer_is_no_sr_star_floor_and_does_not_raise():
     v.on_entry({"entry_type": "gauntlet_stats", "ts_utc": "u",
                 "payload": {"expected_max_sharpe_raw": 10 ** 400}})
     assert v.sr_floor is None and v.sr_floor_hash is None
+
+
+
+# ---- 2026-10-11 orphan incident: cluster admission ----
+
+def test_cluster_estimate_scales_with_n_squared():
+    assert gs.cluster_estimate_s(None, None, 19092) == gs.CLUSTER_PRIOR_S
+    assert gs.cluster_estimate_s(374.1, None, 19092) == 374.1
+    est = gs.cluster_estimate_s(374.1, 17333, 19092)
+    assert abs(est - 374.1 * (19092 / 17333) ** 2) < 1e-9 and est > 450
+
+
+def test_cluster_need_matches_the_measured_footprint():
+    # step 7 measured +2.4 GB of commit at n = 13,730; the constant covers it
+    # whether that figure was decimal GB or GiB
+    assert gs.cluster_need_mb(13730) * 2**20 >= 2.4 * 2**30
+    # the 2026-10-11 night: 19,092 series need ~4.9 GB, 1.4 GB was free
+    assert 4800 < gs.cluster_need_mb(19092) < 5000
+
+
+def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeypatch, capsys):
+    """Free RAM under the n^2 footprint: no pass starts (it would page and
+    thrash), exit 0 deferred_memory, nothing chained, the series stay
+    cached, the numbers are in the status. With the memory, it clusters."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series: 4500)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 1400)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert not calls
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["cluster_need_mb"], st["avail_phys_mb"]) ==         ("deferred_memory", 4500, 1400)
+    assert st["stopped_at_deadline"] is False and st["verdicts_without_stats"] == 1
+    assert sum(1 for _ in reg.entries()) == n
+    assert "MEMORY: clustering" in capsys.readouterr().out
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 8000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert calls == [1] and _status(tmp_path)["exit_reason"] == "done"
+
+
+def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: None)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert calls == [1]
+
+
+def test_cluster_n_is_carried_and_scales_the_estimate(tmp_path, monkeypatch):
+    """The estimate is the measured cluster_s scaled by (n / cluster_n)^2.
+    The fixture has one series: 600 s measured at 10 series scales to 6 s,
+    which fits in 100 s left where the unscaled 600 s would not. Without a
+    cluster_n the same seed is a deadline stop, and cluster_s/cluster_n are
+    carried forward unchanged by a run that does not cluster."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    _frozen(monkeypatch)
+    calls = _count_clustering(monkeypatch, advance_s=5.0)
+    hours = 100.0 / 3600
+    _seed_status(tmp_path, cluster_s=600.0)                 # no n: unscaled
+    assert _stats_run(reg, data, tmp_path, hours) == 0
+    st = _status(tmp_path)
+    assert not calls and (st["exit_reason"], st["cluster_n"]) == ("deadline", None)
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10)
+    assert _stats_run(reg, data, tmp_path, hours) == 0
+    st = _status(tmp_path)
+    assert calls == [1] and st["exit_reason"] == "done"
+    assert (st["cluster_s"], st["cluster_n"]) == (5.0, 1)   # re-measured at n = 1
+
+
+def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
+    """The guard's stamp says the task began 6 h ago: a 5.75 h deadline is
+    already spent before the series pass, so nothing is computed."""
+    from datetime import datetime, timedelta, timezone
+    from .taskguard import STARTED_ENV
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setenv(STARTED_ENV, (datetime.now(timezone.utc)
+                                     - timedelta(hours=6)).isoformat())
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert not calls and _status(tmp_path)["exit_reason"] == "deadline"

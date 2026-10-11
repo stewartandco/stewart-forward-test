@@ -724,3 +724,70 @@ def test_the_v61_amendment_note_is_not_the_v61_note(tmp_path):
     assert _status(tmp_path)["exit_reason"] == "refused_no_protocol_note"
     assert sum(1 for _ in reg.entries()) == n
     assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+
+
+# ---- 2026-10-10 orphan incident: the idle path and the task's clock ----
+
+def _count_snapshots(monkeypatch):
+    from .registry import Registry
+    calls = []
+    real = Registry.snapshot
+
+    def counted(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+    monkeypatch.setattr(Registry, "snapshot", counted)
+    return calls
+
+
+def test_an_empty_queue_reads_the_chain_once(tmp_path, monkeypatch):
+    """With nothing queued at the start, the end-of-run read is skipped: on
+    2026-10-10 that second full read took ~90 min under memory pressure and
+    outlived the task's PT28M limit. The status still says queued 0."""
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0            # judges the only candidate
+    calls = _count_snapshots(monkeypatch)
+    assert _run(reg, data, tmp_path) == 0            # now nothing is queued
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["queued"], st["oldest_queued_age_hours"]) == \
+        ("drained", 0, 0.0)
+    assert len(calls) == 1
+
+
+def test_a_queued_run_still_rereads_for_its_status(tmp_path, monkeypatch):
+    reg, spec, data = _setup(tmp_path)
+    calls = _count_snapshots(monkeypatch)
+    assert _run(reg, data, tmp_path) == 0
+    assert len(calls) == 2
+
+
+def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
+    """The guard stamps the task's start; 30 minutes already gone leaves a
+    25-minute deadline spent, so the candidate is not started."""
+    from datetime import datetime, timedelta, timezone
+    from .taskguard import STARTED_ENV
+    reg, spec, data = _setup(tmp_path)
+    monkeypatch.setenv(STARTED_ENV, (datetime.now(timezone.utc)
+                                     - timedelta(minutes=30)).isoformat())
+    assert _run(reg, data, tmp_path) == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "gauntlet"
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["deferred_deadline"], st["evaluated"]) == \
+        ("deadline", 1, 0)
+
+
+def test_run_started_ignores_unusable_stamps(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from .taskguard import STARTED_ENV
+    now = datetime(2026, 10, 11, 7, 0, tzinfo=timezone.utc)
+    for bad in ("garbage", (now + timedelta(minutes=5)).isoformat(),
+                (now - timedelta(days=2)).isoformat()):
+        monkeypatch.setenv(STARTED_ENV, bad)
+        assert gw._run_started(now) == now
+    good = now - timedelta(minutes=3)
+    monkeypatch.setenv(STARTED_ENV, good.isoformat())
+    assert gw._run_started(now) == good
+    monkeypatch.setenv(STARTED_ENV, good.replace(tzinfo=None).isoformat())
+    assert gw._run_started(now) == good              # naive = UTC
+    monkeypatch.delenv(STARTED_ENV)
+    assert gw._run_started(now) == now

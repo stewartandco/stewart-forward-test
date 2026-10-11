@@ -69,7 +69,7 @@ BUNDLE = "research-layer/artifacts/cccc000000000001/config.json"
 
 
 MIRROR = "research-layer/registry_log.d"
-REAL = ("chain_mirror.py", "lock.py", "common.py", "degraded.py")
+REAL = ("chain_mirror.py", "lock.py", "common.py", "degraded.py", "taskguard.py")
 
 
 def _scratch(tmp_path, bat: str, max_bytes: int | None = None) -> tuple[Path, Path]:
@@ -368,3 +368,108 @@ def test_worker_with_an_unchanged_mirror_and_no_list_makes_no_commit_attempt(tmp
     assert _git(repo, "rev-parse", "HEAD") == head
     text = log.read_text(encoding="utf-8", errors="replace")
     assert "commit skipped" not in text and "committed" not in text
+
+
+# ---- task guard (incident 2026-10-10/11) through the real wrappers ----
+
+def _sleeper_stub(repo, module, pid_dir):
+    """Replace a scratch job with one that starts a grandchild (both record
+    their pids) and then sleeps: the 2026-10-10 python that would not die."""
+    body = (
+        "import os, subprocess, sys, time\n"
+        f"d = {str(pid_dir)!r}\n"
+        "g = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(300)'])\n"
+        "open(os.path.join(d, 'grandchild.pid'), 'w').write(str(g.pid))\n"
+        "open(os.path.join(d, 'job.pid'), 'w').write(str(os.getpid()))\n"
+        "time.sleep(300)\n")
+    (repo / "research-layer" / "pipeline" / f"{module}.py").write_text(body, encoding="utf-8")
+
+
+def _set_wall(bat, seconds):
+    text = bat.read_bytes().decode("ascii")
+    import re
+    new, n = re.subn(r"--wall-s \d+", f"--wall-s {seconds}", text)
+    assert n == 1
+    bat.write_bytes(new.encode("ascii"))
+
+
+def _env():
+    env = dict(os.environ)
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    env.pop("RL_TASKGUARD", None)
+    return env
+
+
+@pytest.mark.parametrize("bat,module,log", [
+    ("run_gauntlet_worker.bat", "gauntlet_worker", "gauntlet-worker-run.log"),
+    ("run_gauntlet_stats.bat", "gauntlet_stats", "gauntlet-stats-run.log"),
+])
+def test_killing_the_wrappers_cmd_ends_its_python(tmp_path, bat, module, log):
+    """The incident exactly: Task Scheduler's stop = TerminateProcess on the
+    wrapper's cmd.exe. The python step and anything it started must die."""
+    from .test_taskguard import _alive, _kill, _wait_dead, _wait_file
+    repo, path = _scratch(tmp_path, bat)
+    _sleeper_stub(repo, module, tmp_path)
+    p = subprocess.Popen(["cmd", "/c", str(path)], env=_env())
+    job = int(_wait_file(tmp_path / "job.pid"))
+    g = int(_wait_file(tmp_path / "grandchild.pid"))
+    try:
+        p.kill()
+        p.wait(timeout=10)
+        assert _wait_dead(job) and _wait_dead(g), "the python outlived its wrapper"
+        text = (repo / "research-layer" / "logs" / log).read_text(encoding="utf-8")
+        assert "taskguard: parent process exited" in text
+    finally:
+        for pid in (job, g):
+            if _alive(pid):
+                _kill(pid)
+
+
+def test_the_wall_ends_the_run_and_the_next_fire_logs_normally(tmp_path):
+    from .test_taskguard import _alive, _kill, _wait_dead
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    _set_wall(bat, 4)
+    _sleeper_stub(repo, "gauntlet_worker", tmp_path)
+    r = subprocess.run(["cmd", "/c", str(bat)], env=_env(), timeout=120)
+    g = int((tmp_path / "grandchild.pid").read_text())
+    try:
+        assert r.returncode == 124
+        assert _wait_dead(g)
+    finally:
+        if _alive(g):
+            _kill(g)
+    log = repo / "research-layer" / "logs" / "gauntlet-worker-run.log"
+    assert "taskguard: wall 4s reached" in log.read_text(encoding="utf-8").splitlines()[-1]
+    # the killed run held nothing: the next fire opens the log and runs
+    (repo / "research-layer" / "pipeline" / "gauntlet_worker.py").write_text(
+        STUBS["gauntlet_worker"], encoding="utf-8")
+    assert _run(bat) == 0
+    assert log.read_text(encoding="utf-8").splitlines()[-1].endswith("exit 0 ==== ")
+
+
+def test_a_locked_run_log_exits_4_and_runs_nothing(tmp_path):
+    """An orphan holding the log the way cmd's `>>` does (no write sharing):
+    the wrapper must not run blind and exit 0 (2026-10-10 16:30-17:30)."""
+    from .test_taskguard import _alive, _kill, _wait_file
+    repo, bat = _scratch(tmp_path, "run_gauntlet_worker.bat")
+    logs = repo / "research-layer" / "logs"
+    holder = tmp_path / "holder.bat"
+    pid_file = tmp_path / "holder.pid"
+    holder.write_text(
+        "@echo off\r\n"
+        f"python -c \"import os, time; open(r'{pid_file}', 'w').write(str(os.getpid())); "
+        f"time.sleep(120)\" >> \"{logs / 'gauntlet-worker-run.log'}\" 2>&1\r\n",
+        encoding="ascii")
+    h = subprocess.Popen(["cmd", "/c", str(holder)], env=_env())
+    orphan = int(_wait_file(pid_file))
+    h.kill()                                   # the orphan keeps the handle
+    h.wait(timeout=10)
+    before = (repo / "research-layer" / "registry_log.jsonl").read_bytes()
+    try:
+        assert _run(bat) == 4
+        assert (repo / "research-layer" / "registry_log.jsonl").read_bytes() == before
+        assert "run log locked" in (logs / "gauntlet-worker-run.locked.log").read_text()
+    finally:
+        if _alive(orphan):
+            _kill(orphan)

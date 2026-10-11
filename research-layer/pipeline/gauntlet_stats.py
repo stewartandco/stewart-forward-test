@@ -111,7 +111,8 @@ from .stats import (moments, sharpe, psr, expected_max_sharpe, percentile,
 from .pbo import cscv_pbo, distinct_configs, permutation_null, percentile_of
 from .plateau import qualifies
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
-                            _annualized_sharpe_from_returns)
+                            _annualized_sharpe_from_returns, available_phys_mb)
+from .taskguard import task_started
 # Module-level names on purpose: the tests replace them to prove the job
 # calls the gauntlet's own functions rather than a copy.
 from .gauntlet import cluster_registry, registry_series, sibling_families
@@ -129,6 +130,18 @@ SERIES_CHUNK = 10
 # (about 1.5 h at 11.8k strategies, Ruling 13). Each PBO null likewise needs
 # the measured mean (status `pbo_null_mean_s`) or gauntlet's PBO_NULL_PRIOR_S.
 CLUSTER_PRIOR_S = 2 * 3600.0
+# Incident 2026-10-11: clustering holds one n x n float64 matrix (8 n^2
+# bytes) plus transients, measured at +2.4 GB of commit at n = 13,730 (step
+# 7), i.e. 12.7 bytes per n^2 if that was decimal GB, 13.7 if GiB;
+# rounded up past both. Its merge loop updates a whole
+# column per merge, so it touches every page of the matrix every merge: if
+# any of it is paged out the pass thrashes (19,092 series: ~4.9 GB needed,
+# 1.4 GB free, 5.8 GB committed but 44 MB resident, 90 min and counting when
+# killed). So the pass starts only when AVAILABLE PHYSICAL memory covers
+# it; otherwise the run stops (exit 0, `deferred_memory`) and the next one
+# retries. The time estimate also scales with n^2 from the n it was
+# measured at (`cluster_n`, carried forward like `cluster_s`).
+CLUSTER_BYTES_PER_N2 = 14.0
 # The job's own instance lock (M2). A run is bounded at 5.75 h inside PT6H,
 # so a lock older than 7 h is stale; it is broken only when its holder is
 # also dead, exactly as the worker's.
@@ -152,7 +165,8 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "expected_max_sharpe_effective", "registered_n",
                  "trials_common_days", "stopped_at_deadline", "chained",
                  "cluster_s", "pbo_null_mean_s",
-                 "pbo_nulls_computed", "pbo_nulls_cached")
+                 "pbo_nulls_computed", "pbo_nulls_cached",
+                 "cluster_n", "cluster_need_mb", "avail_phys_mb")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -491,6 +505,42 @@ def _prior_timings(logs_dir: Path) -> tuple[float | None, float | None]:
     return pos(st.get("cluster_s")), pos(st.get("pbo_null_mean_s"))
 
 
+def _run_started_epoch() -> float:
+    """Epoch seconds the deadline counts from: the task's start (taskguard),
+    so startup counts against --deadline-hours; else now. Expressed on this
+    module's `time.time()` clock (the one every deadline check reads) as
+    now minus the time already spent."""
+    now = datetime.now(timezone.utc)
+    return time.time() - (now - task_started(now)).total_seconds()
+
+
+def _prior_cluster_n(logs_dir: Path) -> int | None:
+    """The series count `cluster_s` was measured at (carried forward with
+    it); None when the last status has none."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    v = st.get("cluster_n") if isinstance(st, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def cluster_estimate_s(prior_s: float | None, prior_n: int | None, n: int) -> float:
+    """The clustering pass's expected duration: the last measured one scaled
+    by (n / the n it was measured at)^2, the pass being O(n^2) per merge
+    sweep; unscaled when that n is unknown; CLUSTER_PRIOR_S before any
+    measurement."""
+    if not prior_s:
+        return CLUSTER_PRIOR_S
+    if prior_n and n > 0:
+        return prior_s * (n / prior_n) ** 2
+    return prior_s
+
+
+def cluster_need_mb(n: int) -> int:
+    return math.ceil(CLUSTER_BYTES_PER_N2 * n * n / 2**20)
+
+
 def _fmt(v) -> str:
     return "-" if v is None else str(v)
 
@@ -520,11 +570,12 @@ def run(argv: list[str] | None = None) -> int:
                     help="append gauntlet_stats entries (off = report only)")
     ap.add_argument("--report", type=Path, default=None)
     a = ap.parse_args(argv)
-    t_end = time.time() + a.deadline_hours * 3600
+    t_end = _run_started_epoch() + a.deadline_hours * 3600
     a.logs_dir.mkdir(parents=True, exist_ok=True)
     simcache_dir = a.simcache_dir or (a.registry.resolve().parent / "simcache")
     vintage = vintage_date(date.today())
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
+    prior_cluster_n = _prior_cluster_n(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -538,6 +589,9 @@ def run(argv: list[str] | None = None) -> int:
               "stopped_at_deadline": False, "chained": bool(a.chain),
               # carried forward until this run measures its own (I5)
               "cluster_s": prior_cluster_s, "pbo_null_mean_s": prior_null_s,
+              "cluster_n": prior_cluster_n,
+              # this run's admission check, when it got that far (2026-10-11)
+              "cluster_need_mb": None, "avail_phys_mb": None,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -654,7 +708,8 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         # Ruling 14 + I5: never start a clustering pass the PT6H wall would
         # kill with no status written. The time left must cover the estimate
         # (last measured duration, else CLUSTER_PRIOR_S), not merely be > 0.
-        cluster_est = prior_cluster_s or CLUSTER_PRIOR_S
+        n_cluster = len(dated)
+        cluster_est = cluster_estimate_s(prior_cluster_s, status["cluster_n"], n_cluster)
         left_s = t_end - time.time()
         if left_s < cluster_est:
             status["stopped_at_deadline"] = True
@@ -662,6 +717,14 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"{max(left_s, 0.0):.0f}s left is under the clustering estimate "
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
+        need_mb, avail_mb = cluster_need_mb(n_cluster), available_phys_mb()
+        status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
+        if avail_mb is not None and avail_mb < need_mb:
+            print(f"MEMORY: clustering {n_cluster} series needs ~{need_mb} MB of "
+                  f"physical memory and {avail_mb} MB is available; not started "
+                  f"(it would page and thrash). Series are cached; the next run "
+                  f"retries.", flush=True)
+            return finish(0, "deferred_memory")
         t_cluster0 = time.time()
         try:
             clustered = cluster_registry(dated, eq_len, all_specs)
@@ -669,6 +732,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             print(f"REFUSED: clustering: {exc}", flush=True)
             return finish(1, "cluster_refused")
         status["cluster_s"] = round(time.time() - t_cluster0, 1)
+        status["cluster_n"] = n_cluster
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
         # Ruling 35: ONE SR* floor per run, from the same single read.

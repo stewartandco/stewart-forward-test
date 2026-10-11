@@ -476,6 +476,32 @@ def available_commit_mb() -> int | None:
         return None
 
 
+def available_phys_mb() -> int | None:
+    """Physical memory the OS can hand out without paging (Windows:
+    GlobalMemoryStatusEx ullAvailPhys: free + standby). Commit is the wrong
+    test for a working set that must stay RESIDENT: on 2026-10-11 the stats
+    job's clustering was committed in full (5.8 GB) yet 44 MB resident, and
+    thrashed the pagefile for 90 minutes. None where unknowable."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                        ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                        ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                        ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+        m = _MS()
+        m.dwLength = ctypes.sizeof(m)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            return None
+        return int(m.ullAvailPhys // 2**20)
+    except Exception:
+        return None
+
+
 @contextlib.contextmanager
 def worker_env():
     """Set WORKER_BLAS_ENV for the duration of a pool. Spawned workers read

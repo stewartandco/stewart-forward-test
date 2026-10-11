@@ -396,6 +396,114 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   cards that a failed composer had never consumed. Absent key -> falls back to
   the pre-triage count.
 
+## Task guard: a stopped task leaves nothing running (incident 2026-10-10/11)
+- **Why:** at a task's ExecutionTimeLimit Task Scheduler terminates ONLY the
+  process it launched, the wrapper's `cmd.exe` (TaskScheduler event 329,
+  action result 0x8007042B). Windows never kills children with their parent.
+  On 2026-10-10 the 16:00 worker's python outlived its PT28M wrapper by over
+  an hour holding `gauntlet_worker.lock`; on 2026-10-11 the 01:00 stats run's
+  python outlived PT6H by 45 min with 5.8 GB committed. Worse, cmd opens a
+  `>>` target WITHOUT write sharing and the orphan kept the inherited
+  handle, so the 16:30/17:00/17:30 fires could not open the run log: cmd
+  skipped every redirected command, python never started, ERRORLEVEL stayed
+  0, and each fire exited 0 having done nothing (reproduced in scratch).
+- **Mechanism (`pipeline/taskguard.py`, stdlib + ctypes):**
+  `run_gauntlet_worker.bat` and `run_gauntlet_stats.bat` re-run themselves
+  under `"%PY%" -m pipeline.taskguard ... -- cmd /d /c "%~f0"`
+  (`RL_TASKGUARD=1` marks the inner copy). The inner cmd and everything it
+  starts sit in one job object with KILL_ON_JOB_CLOSE, and the guard's tree
+  is that job PLUS every descendant of the inner cmd by parent pid. The
+  guard ends the tree (a) at its wall, exit 124; (b) when the outer cmd Task
+  Scheduler kills dies, exit 125; (c) if the guard itself is killed (the
+  job's last handle closes). It also ends anything a NORMAL run leaves
+  behind (log line `the run left N process(es) running`) and returns the
+  inner wrapper's exit code unchanged. The wall counts from the outer
+  cmd.exe's creation (the task's start), clamped to at most 10 min before
+  the guard started, so a hand run from an old console is not killed at
+  once. Walls: worker 1600 s + 45 s grace inside PT28M (a held append/index
+  lock may stretch the kill to 150 s); stats 21300 s + 60 s inside PT6H (up
+  to 240 s). The worker's 150 s can run PAST PT28M (1600 + 150 + up to 30 s
+  for the tree to go = ~1780 s): Task Scheduler then stops the outer cmd and
+  the task result is 267014, not 124, but the guard is not stopped with it
+  and still ends the tree before the next :00/:30 fire. A hand run of a
+  wrapper typed into an ALREADY-OPEN cmd console runs inside that console's
+  cmd.exe, so its clock starts the 10-min clamp back (wall ~16.7 min, worker
+  deadline ~15 min); run it as `cmd /c tasks\run_gauntlet_worker.bat` or
+  from PowerShell for the full window. **Change a task's
+  ExecutionTimeLimit and its wrapper's `--wall-s` together.**
+- **⚠ `%PY%` is the interpreter by ABSOLUTE path, never bare `python`
+  (cold review 2026-10-11, reproduced).** On this box bare `python`
+  resolves to the WindowsApps PythonManager alias first (User PATH lists
+  WindowsApps before Python\bin). It is a packaged app: it and the runtime it
+  starts BREAK OUT of the job, and the guard's parent would be the alias, not
+  the cmd. `Python\bin\python.exe` is the PyManager SHIM (not a link: its
+  `python.exe.__target__` names `pythoncore-3.14-64\python.exe`), measured
+  2026-10-11 as one process that stays in the job and passes the exit code
+  through. A PyManager reinstall or default change rewrites `__target__` and
+  so changes the interpreter silently; after one, re-run
+  `test_taskguard.py` and `test_chain_mirror_wrappers.py`. The guard backs this up (it watches the nearest
+  non-launcher ancestor and sweeps escaped descendants, logging `N had
+  escaped the job`), but an escape line in the log means a wrapper is
+  calling a launcher again: fix the wrapper. A new wrapper uses `%PY%` too.
+- **Never mid-write.** Before a kill the guard suspends the whole tree and
+  checks the locks it was given: `--lock` (logs\chain.lock,
+  registry_log.d.lock) is waited for up to `--grace-s`; `--hard-lock`
+  (registry_log.jsonl.lock, the chain's append FileLock) and an in-tree
+  git.exe holding `.git\index.lock` up to `--hard-grace-s`. Between checks
+  the tree is resumed so the holder can finish; past the grace it kills
+  anyway and says `killed while busy`. A kill inside an append leaves a torn
+  tail every later writer refuses (ChainMoved); a dead git leaves an
+  index.lock that blocks all git. A lock file that has named nobody for
+  over 5 s is not waited on. After a kill (and once the tree is gone, so
+  nothing holds the log) it writes its log line, then removes a lock ONLY
+  when it names a pid the guard just killed (provably dead, the loop's
+  dead-pid fast path): the `--release-lock` instance lock
+  (gauntlet_worker.lock / gauntlet_stats.lock) always; a `--lock`
+  (chain.lock, the mirror lock) only when no killed pid also held a
+  `--hard-lock`. Why (round-2 review): only the 20:00 loop breaks a dead
+  holder's chain.lock, so one left by a kill would stall every chain writer
+  (worker `deferred_lock` and no commit, stats, quarantine) for up to a day,
+  mostly silently. If the killed tree DID hold the append lock the log says
+  `LEFT chain.lock in place ... check the chain`: run `verify_registry.py`
+  before removing it by hand. A `--hard-lock` is never removed.
+- **Known gap:** a process that escaped the job (only a packaged launcher
+  does) AND whose parent then died is not reachable by the parent-pid sweep.
+  Nothing in the pipeline does that today; `%PY%` keeps everything in the
+  job.
+- **What a guard kill looks like:** the run log's last line is
+  `taskguard: wall Ns reached; ended the task's process tree (exit 124)` (or
+  `parent process exited ...`), with NO `==== ... exit N ====` line for that
+  run, and the task result is 124. Treat a `taskguard:` line as that run's
+  terminator in the pre-merge checklist below. A 124 is a defect to read (the
+  job's own deadline should have ended it first), never weather.
+- **Wrapper exit 4 = the run log is locked** by another process: nothing
+  ran, a line went to `logs\gauntlet-worker-run.locked.log` (or
+  `gauntlet-stats-run.locked.log`). With the guard this should never happen;
+  if it does, find the holder (scoped, never by image name) before anything.
+- **The worker's git block uses `|| goto :keep`**, never `if errorlevel 1`,
+  after a redirected git: a failed `>>` leaves ERRORLEVEL unchanged, so the
+  old test fell through and deleted the bundle list with nothing committed.
+- **The task clock.** The guard always sets (overwrites)
+  `RL_TASK_STARTED_UTC` to the task's start as above; the worker's 25-minute
+  deadline and the stats job's `--deadline-hours` count from it
+  (`taskguard.task_started`), so python's startup counts (3 min 19 s on
+  2026-10-10 under memory pressure). A missing, future or over-a-day-old
+  stamp means "now" (hand runs and tests are unchanged).
+- **Fail open:** if the job object cannot be made the command still runs
+  under the wall, the parent watch and the descendant sweep, with a
+  `taskguard: WARNING no job object` line.
+- **Proof on the real S4U path** (Interactive tasks do NOT show the bug:
+  stopping one sends Ctrl+C to its console): `tools/taskguard_s4u_check.ps1`,
+  run by hand ELEVATED. It registers two throwaway S4U tasks with a PT1M
+  limit (the old wrapper shape as a control, the guarded shape), reads
+  heartbeats, prints PASS/FAIL and unregisters them.
+- Tests: `test_taskguard.py` (real process trees: wall, parent death, a
+  killed guard, the lock waits, stragglers, a python escaping the job via the
+  WindowsApps alias, and a CONTROL proving the orphan survives without the
+  guard) and the guard tests at the end of
+  `test_chain_mirror_wrappers.py` (the real .bat: kill the outer cmd, wall
+  then a clean next fire, locked log -> 4).
+
 ## Gauntlet worker + recorded statistics (Build 2a, 2026-09-30)
 Design: `docs/2026-09-30-gauntlet-at-scale-design.md`. Why: the gauntlet's first
 phase re-simulated and clustered EVERY registered strategy before judging any
@@ -436,7 +544,8 @@ of it.
   48 to identical verdicts on unchanged data, but on a day the data refreshed
   in between the re-judgement could differ. Before any such git command in the
   live tree, ALL of: the last line of `logs/gauntlet-worker-run.log` is the
-  current run's `==== ... exit N ====` line; no `.git/index.lock`,
+  current run's `==== ... exit N ====` line (or its `taskguard:` kill
+  line); no `.git/index.lock`,
   `logs/gauntlet_worker.lock` or `logs/chain.lock`; `git diff --cached` is
   empty; and the next :00/:30 fire is more than a few minutes away.
 - **Run order and failure rules.** (1) Orphan repair: a v6.1 verdict with no
@@ -482,7 +591,26 @@ of it.
   time left covers its estimate (the last measured duration, `cluster_s` in
   its status file, else a 2 h prior), and each PBO null only when the time
   left covers the measured mean (`pbo_null_mean_s`, else 60 s); a pass that
-  does not fit is a deadline stop. One instance at a time
+  does not fit is a deadline stop. **Since 2026-10-11 the clustering
+  estimate is `cluster_s` x (n / `cluster_n`)^2** (`cluster_n` = the series
+  count it was measured at, carried forward with it), **and the pass starts
+  only when AVAILABLE PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (14) x
+  n^2 bytes** (`gauntlet_core.available_phys_mb`; unknown = no block; 14
+  covers step 7's "+2.4 GB at 13,730" read as GB or GiB). The
+  merge loop touches every page of its n x n matrix on every merge, so a
+  partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
+  with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
+  PT6H. Short of memory = exit 0 `deferred_memory` (status
+  `cluster_need_mb`, `avail_phys_mb`; the series stay cached; the stats
+  lag WARN is the alarm if it repeats). n grows with the registry, so a
+  repeating `deferred_memory` is a capacity question for Coen, not a
+  constant to raise. **Expect it to defer often on this 16,324 MB box:**
+  the need is ~4.9 GB at today's 19,092 series and ~6.5 GB at 22,000,
+  against 4.4-4.7 GB seen available by day (night is unmeasured); each
+  deferral comes only after the full series pass, exits 0, and the only
+  alarm is the 7-day stats-lag WARN. Coen's decision (open 2026-10-11):
+  keep it, make `deferred_memory` FAIL the digest, or treat it as the RAM
+  upgrade trigger. One instance at a time
   (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's argmax) and
@@ -578,10 +706,16 @@ of it.
   the Sentinel's `hourly` list (267009, still running at the 09:15 digest, is
   tolerated for it alone), `28_GauntletStats` in `daily`. Do not rename
   these fields without changing `sc-ops-sentinel` in the same change.
+- **Wrapper exit codes (both tasks, 2026-10-11):** 124 = the task guard's
+  wall ended the run, 4 = the run log was locked so nothing ran (Task
+  guard section). Otherwise the python step's code, as below.
+- **Worker idle path (2026-10-11):** with nothing queued at the start the
+  end-of-run full chain read is skipped (`queued` 0); on 2026-10-10 under
+  memory pressure that one read took ~90 min (2.3 s normally).
 - **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
   (routine); 1 = a candidate raised, the run crashed, or setup was refused.
-  Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
-  instance running; 1 = the data or the chain refused the run, or `--chain`
+  Stats: 0 = done, nothing to do, deadline stop, not enough free memory to
+  cluster (`deferred_memory`), chain.lock held, or another instance running; 1 = the data or the chain refused the run, or `--chain`
   without the amendment-1 note (`refused_no_amendment_note`).
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
