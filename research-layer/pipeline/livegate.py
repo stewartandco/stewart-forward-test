@@ -75,9 +75,12 @@ def daily_returns(series: list[tuple[str, float]]) -> list[float]:
 
 
 def closed_forward_trades(rows: list[dict]) -> int:
-    """Closed trades across every asset. observe_day writes action='exit' on
-    the bar a position closes, and never enters on the bar it exits."""
-    return sum(1 for r in rows if r.get("action") == "exit")
+    """Closed trades across every asset. A daily row records at most one
+    event, so observe_day's action='exit' counts one (it never enters on the
+    bar it exits). An intraday row (2b-2) is a whole UTC day of an hourly
+    book and carries the day's closed-trade count in `exits`."""
+    return sum(r["exits"] if "exits" in r else (1 if r.get("action") == "exit" else 0)
+               for r in rows)
 
 
 def rebuilt_cone(train_contributions: list[float], n_trades: int,
