@@ -38,6 +38,11 @@ QUARANTINE_DECISION_KEYS = ("strategy_id", "date", "asset", "action", "price",
                             "position_frac", "equity")
 QUARANTINE_ACTIONS = frozenset({"enter_long", "enter_short", "exit", "hold"})
 
+# 2b-2 (design s3.2): an INTRADAY row names its cell ("BTCUSDT@1h") in
+# `asset` and adds the day's trade counts. A daily row (bare asset) keeps the
+# 7-field shape above, byte for byte.
+QUARANTINE_INTRADAY_KEYS = QUARANTINE_DECISION_KEYS + ("entries", "exits")
+
 # The price data a day's decisions were computed from, hashed two ways:
 # `data_sha256` is the whole file (what screen.py and gauntlet.py record for
 # the same CSVs) and `bars_sha256` covers only the bars up to and including
@@ -111,12 +116,26 @@ def validated_quarantine_decision(payload: dict) -> dict:
     default=str and allow_nan, so a stray object would be silently stringified
     and a NaN would be written as bare `NaN`, which is not valid strict JSON.
     """
-    missing = [k for k in QUARANTINE_DECISION_KEYS if k not in payload]
+    from .qcells import SEP, split_cell_key
+    asset = payload.get("asset")
+    intraday = isinstance(asset, str) and SEP in asset
+    expected = QUARANTINE_INTRADAY_KEYS if intraday else QUARANTINE_DECISION_KEYS
+    missing = [k for k in expected if k not in payload]
     if missing:
         raise ValueError(f"quarantine decision missing {missing}")
-    extra = sorted(set(payload) - set(QUARANTINE_DECISION_KEYS))
+    extra = sorted(set(payload) - set(expected))
     if extra:
         raise ValueError(f"quarantine decision has unknown keys {extra}")
+    if intraday:
+        try:
+            split_cell_key(asset)
+        except ValueError as exc:
+            raise ValueError(f"quarantine decision asset: {exc}") from None
+        for k in ("entries", "exits"):
+            v = payload[k]
+            if type(v) is not int or v < 0:
+                raise ValueError(f"quarantine decision {k} must be a "
+                                 f"non-negative int, got {v!r}")
     for k in ("strategy_id", "asset"):
         if not isinstance(payload[k], str) or not payload[k]:
             raise ValueError(f"quarantine decision {k} must be a non-empty string")
