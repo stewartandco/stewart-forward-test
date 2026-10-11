@@ -1423,8 +1423,9 @@ def test_cluster_need_matches_the_measured_footprint():
 
 def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeypatch, capsys):
     """Free RAM under the n^2 footprint: no pass starts (it would page and
-    thrash), exit 0 deferred_memory, nothing chained, the series stay
-    cached, the numbers are in the status. With the memory, it clusters."""
+    thrash), exit 3 deferred_memory (nonzero: the Sentinel FAILs the
+    digest, Coen 2026-10-11), nothing chained, the series stay cached, the
+    numbers are in the status. With the memory, it clusters (exit 0)."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
@@ -1432,7 +1433,8 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
     calls = _count_clustering(monkeypatch)
     monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series: 4500)
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 1400)
-    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert gs.DEFERRED_MEMORY_EXIT == 3
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
     assert not calls
     st = _status(tmp_path)
     assert (st["exit_reason"], st["cluster_need_mb"], st["avail_phys_mb"]) ==         ("deferred_memory", 4500, 1400)
