@@ -400,6 +400,10 @@ class Tree:
     def __init__(self, job: Job | None, root: int) -> None:
         self.job, self.root = job, root
         self.root_born = created_at(root)
+        # pid -> image name, as last seen alive: the log names what it killed
+        # (2026-10-13 01:30: two stragglers had escaped the job and the log
+        # could not say what they were).
+        self.names: dict[int, str] = {}
 
     def pids(self) -> tuple[list[int], list[int]]:
         """(all live pids in the tree, the ones outside the job)."""
@@ -409,7 +413,9 @@ class Tree:
         if self.root in table:
             desc.add(self.root)
         escaped = sorted(p for p in desc - jobbed if p in table)
-        return sorted(jobbed | set(escaped)), escaped
+        every = sorted(jobbed | set(escaped))
+        self.names.update({p: table[p][1] for p in every if p in table})
+        return every, escaped
 
     def terminate(self, code: int, pids: list[int]) -> None:
         if self.job is not None:
@@ -606,7 +612,8 @@ def run(argv: list[str] | None = None) -> int:
                     tree, rc, a.lock, a.hard_lock, a.git_dir, a.grace_s, a.hard_grace_s)
                 _wait_gone(tree, TREE_GONE_WAIT_S)
                 note(a.log, f"the run left {len(killed)} process(es) running "
-                            f"(pids {killed}); ended them" + _tail(busy, escaped))
+                            f"({_named(killed, tree)}); ended them"
+                            + _tail(busy, escaped, tree))
                 release_after_kill(a, killed)
             return rc
         if r == WAIT_OBJECT_0 + 1:
@@ -626,7 +633,7 @@ def run(argv: list[str] | None = None) -> int:
     survivors = _wait_gone(tree, TREE_GONE_WAIT_S)    # handles released first
     extra = f"; STILL ALIVE: {survivors}" if survivors else ""
     note(a.log, f"{why}; ended the task's process tree (exit {code})"
-                + _tail(busy, escaped) + extra)
+                + _tail(busy, escaped, tree) + extra)
     release_after_kill(a, killed)
     return code
 
@@ -653,10 +660,16 @@ def release_after_kill(a, killed: list[int]) -> None:
                         f"and held no write lock")
 
 
-def _tail(busy: list[str], escaped: list[int]) -> str:
+def _named(pids: list[int], tree=None) -> str:
+    """'pid image' pairs, from the names the tree saw while they were alive."""
+    names = getattr(tree, "names", {}) or {}
+    return ", ".join(f"{p} {names.get(p, '?')}" for p in pids)
+
+
+def _tail(busy: list[str], escaped: list[int], tree=None) -> str:
     out = ""
     if escaped:
-        out += f"; {len(escaped)} had escaped the job (pids {escaped})"
+        out += f"; {len(escaped)} had escaped the job ({_named(escaped, tree)})"
     if busy:
         out += f"; killed while busy: {'; '.join(busy)}"
     return out
