@@ -376,7 +376,10 @@ def test_a_python_that_escapes_the_job_is_still_ended(tmp_path):
     try:
         assert p.wait(timeout=90) == tg.WALL_EXIT
         assert _wait_dead(pid), "an escaped python outlived the guard"
-        assert "escaped the job" in log.read_text()
+        text = log.read_text()
+        assert "escaped the job" in text
+        assert "python.exe" in text.split("escaped the job", 1)[1], \
+            "the log must name the escaped processes"
     finally:
         if _alive(pid):
             _kill(pid)
@@ -397,7 +400,9 @@ def test_stragglers_after_a_normal_exit_are_ended(tmp_path):
     try:
         assert r.returncode == 0
         assert _wait_dead(g)
-        assert "left 1 process(es) running" in log.read_text()
+        text = log.read_text()
+        assert "left 1 process(es) running" in text
+        assert f"{g} python.exe" in text, "the log must name what it ended"
     finally:
         if _alive(g):
             _kill(g)
