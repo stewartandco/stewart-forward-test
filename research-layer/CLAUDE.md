@@ -261,8 +261,8 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `compare`) recomputes a seeded sample of chained daily quarantine days
   and compares snapshot digests and rows exactly, old code vs new;
   re-run it after any change to the recorder. The `quarantine`
-  subcommand of `tools/intraday_rehearsal.py` (scratch chain copy, end
-  to end) is planned (Task 10), not built yet. Tests:
+  subcommand of `tools/intraday_rehearsal.py` runs the whole stage end
+  to end on a scratch chain COPY and refuses the live chain. Tests:
   `test_quarantine_intraday.py`, `test_quarantine_fetch_owed.py`.
   Design: `docs/2026-10-11-intraday-paper-stage-design.md`.
 - **Parity guarantee:** `tools/daily_parity.py` (`dump` before and after a
