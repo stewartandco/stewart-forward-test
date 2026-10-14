@@ -229,6 +229,10 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
     assert f"| 12 | 12 | {n_entries} | {n_exits} |" in row
     assert "catch-up: nothing owed" in text
     assert "catch-up runs: 3 " in text                       # 10 + 2 + nothing owed
+    assert "1h only: 12 date(s)" in text and "for 12 1h strategy-day(s)" in text
+    for d in owed:                                           # timed per date
+        assert any(l.startswith(f"- {d}: ") and l.endswith(", 1, 0")
+                   for l in text.splitlines())
     assert "unrecorded bar dates in window: 0" in text      # the review lines
     assert "days=" in text                                   # the live gate read it
     assert "seconds per strategy-day" in text

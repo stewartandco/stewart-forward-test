@@ -240,8 +240,11 @@ class _Tee:
 
     def __init__(self, echo):
         self.echo, self.buf = echo, io.StringIO()
+        self.marks: list[tuple[float, str]] = []    # (clock, date) per catch-up date
 
     def write(self, s):
+        if s.startswith("catch-up: --date "):
+            self.marks.append((time.perf_counter(), s.split()[-1]))
         self.echo.write(s)
         self.buf.write(s)
         return len(s)
@@ -250,8 +253,10 @@ class _Tee:
         self.echo.flush()
 
 
-def _captured(fn, argv) -> tuple[int, str, float]:
-    """(exit code, stdout then stderr text, seconds) of an in-process CLI."""
+def _captured(fn, argv, date_secs: dict | None = None) -> tuple[int, str, float]:
+    """(exit code, stdout then stderr text, seconds) of an in-process CLI.
+    Given `date_secs`, the seconds each `catch-up: --date D` pass took (to
+    the next date's line, or the end of the run) are added under D."""
     out, err = _Tee(sys.stdout), _Tee(sys.stderr)
     t0 = time.perf_counter()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -259,7 +264,12 @@ def _captured(fn, argv) -> tuple[int, str, float]:
             rc = fn(argv)
         except SystemExit as exc:
             rc = exc.code if isinstance(exc.code, int) else 1
-    return rc, out.buf.getvalue() + err.buf.getvalue(), time.perf_counter() - t0
+    t1 = time.perf_counter()
+    if date_secs is not None:
+        ends = [t for t, _ in out.marks[1:]] + [t1]
+        for (t, d), end in zip(out.marks, ends):
+            date_secs[d] = date_secs.get(d, 0.0) + end - t
+    return rc, out.buf.getvalue() + err.buf.getvalue(), t1 - t0
 
 
 def verify_failures(registry: Path, data_dir: Path) -> tuple[int, list[str], str]:
@@ -323,9 +333,13 @@ def _record_rows(registry: Path, sids: list[str]) -> dict[str, list[dict]]:
     return rows
 
 
+def _decisions(registry: Path) -> list[dict]:
+    return [e["payload"] for e in Registry(registry).entries()
+            if e["entry_type"] == "quarantine_decision"]
+
+
 def _n_decisions(registry: Path) -> int:
-    return sum(1 for e in Registry(registry).entries()
-               if e["entry_type"] == "quarantine_decision")
+    return len(_decisions(registry))
 
 
 def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
@@ -375,9 +389,10 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
 
     decisions_before = _n_decisions(registry)
     catchup_secs = 0.0
+    date_secs: dict[str, float] = {}
     if not blocked:
         for k in range(MAX_CATCHUP_RUNS):
-            rc, text, secs = _captured(q.run, base + ["--catch-up"])
+            rc, text, secs = _captured(q.run, base + ["--catch-up"], date_secs)
             catchup_secs += secs
             catchup_rcs.append(rc)
             log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
@@ -387,7 +402,17 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
                 break
             if rc != 0:
                 break
-    strategy_days = _n_decisions(registry) - decisions_before
+    new_rows = _decisions(registry)[decisions_before:]
+    strategy_days = len(new_rows)
+    picked_set = set(picked)
+    twin_by_date: dict[str, int] = {}
+    other_by_date: dict[str, int] = {}
+    for r in new_rows:
+        book = twin_by_date if r["strategy_id"] in picked_set else other_by_date
+        book[r["date"]] = book.get(r["date"], 0) + 1
+    only_twins = sorted(d for d in twin_by_date if d not in other_by_date)
+    only_secs = sum(date_secs.get(d, 0.0) for d in only_twins)
+    only_rows = sum(twin_by_date[d] for d in only_twins)
 
     rc_rev, review_text, _ = _captured(q.run, base + ["--review"])
     rc_gate, gate_text, _ = _captured(livegate.run, [
@@ -465,7 +490,19 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
           f"- catch-up wall time {catchup_secs:.1f}s for {strategy_days} "
           f"strategy-day(s) chained (every quarantined strategy on the copy)",
           f"- seconds per strategy-day: {per_day} (wall clock including chain "
-          f"reads and snapshots, so an upper bound)", "",
+          f"reads and snapshots, so an upper bound)",
+          f"- 1h only: {len(only_twins)} date(s) on which ONLY the picked 1h "
+          f"twins recorded took {only_secs:.1f}s for {only_rows} 1h "
+          f"strategy-day(s) = "
+          + (f"{only_secs / only_rows:.1f}" if only_rows else "n/a")
+          + " seconds per 1h strategy-day (per-date pass time, chain reads "
+          "included)",
+          f"- rows chained by OTHER quarantined strategies on the copy: "
+          f"{sum(other_by_date.values())} over {len(other_by_date)} date(s) "
+          f"({', '.join(f'{d}: {n}' for d, n in sorted(other_by_date.items())) or 'none'})",
+          "", "Per catch-up date (seconds, picked-twin rows, other rows):", "",
+          *[f"- {d}: {date_secs[d]:.1f}s, {twin_by_date.get(d, 0)}, "
+            f"{other_by_date.get(d, 0)}" for d in sorted(date_secs)], "",
           f"## --review (the picked twins, exit {rc_rev})", "", "```",
           *_sid_blocks(review_text, picked), "```", "",
           f"## Live gate (`--dry-run`, exit {rc_gate})", "", "```",
