@@ -13,13 +13,32 @@ trusted to be a scratch copy.
         --assets BTCUSDT,ETHUSDT --originals 6 --seed 1 --out twins.json
     python -m tools.intraday_rehearsal report --registry COPY \
         --twins twins.json --artifacts-dir ART --out report.md
+    python -m tools.intraday_rehearsal quarantine --registry COPY \
+        --data-dir SCRATCH_DATA --twins twins.json --entered YYYY-MM-DD \
+        [--n 2] --out report.md
+
+`quarantine` (2b-2 design s7) is the recorder's end-to-end proof on the
+COPY: it moves the first --n 1h twins to `quarantine` BY HAND (screened,
+gauntlet, a synthetic gauntlet `pass` with metrics {"rehearsal": true}, then
+quarantine stamped <entered>T00:00:00Z) -- no twin passed the real gauntlet,
+so the transition is made on the copy only and the report says so -- then
+runs the real `pipeline.quarantine` --fetch-owed (a real Binance fetch into
+--data-dir), --catch-up until "nothing owed" (at most 10 runs), --review and
+`pipeline.livegate --dry-run`, with `verify_registry.py` before the appends
+and after the whole run. It refuses the live chain exactly as `register`
+does, and writes logs/ only beside the COPY.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import random
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 LAYER = Path.cwd()
@@ -37,7 +56,7 @@ class LiveChainRefused(SystemExit):
     pass
 
 
-def refuse_live_chain(registry: Path) -> None:
+def refuse_live_chain(registry: Path, what: str = "register twins") -> None:
     """Raise LiveChainRefused (exit code 2) for anything that looks live."""
     path = Path(registry).resolve()
     if path == (LAYER_ROOT / "registry_log.jsonl").resolve():
@@ -46,7 +65,7 @@ def refuse_live_chain(registry: Path) -> None:
         why = f"{path.parent} also holds registry_log.d (the live layout)"
     else:
         return
-    print(f"refusing to register twins on {path}: {why}. "
+    print(f"refusing to {what} on {path}: {why}. "
           f"Pass a scratch COPY of the chain.", file=sys.stderr)
     raise LiveChainRefused(2)
 TIMEFRAMES = ("1d", "1h")
@@ -207,6 +226,279 @@ def render(twins: dict, rows: dict[str, dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---- quarantine: the 2b-2 end-to-end proof on a chain copy ----
+
+MAX_CATCHUP_RUNS = 10
+HAND_REASON = "rehearsal-2b2: hand transition on a chain COPY (design s7)"
+SYNTHETIC_METRICS = {"rehearsal": True}
+_FAIL_LINE = re.compile(r"^  line (\d+): ")
+
+
+class _Tee:
+    """Echo to the real stream and keep a copy for the report. Deliberately
+    not an io.TextIOBase: its finalizer would flush a stream already closed."""
+
+    def __init__(self, echo):
+        self.echo, self.buf = echo, io.StringIO()
+
+    def write(self, s):
+        self.echo.write(s)
+        self.buf.write(s)
+        return len(s)
+
+    def flush(self):
+        self.echo.flush()
+
+
+def _captured(fn, argv) -> tuple[int, str, float]:
+    """(exit code, stdout then stderr text, seconds) of an in-process CLI."""
+    out, err = _Tee(sys.stdout), _Tee(sys.stderr)
+    t0 = time.perf_counter()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = fn(argv)
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else 1
+    return rc, out.buf.getvalue() + err.buf.getvalue(), time.perf_counter() - t0
+
+
+def verify_failures(registry: Path, data_dir: Path) -> tuple[int, list[str], str]:
+    """(exit code, the `  line N: ...` failure lines, verdict line) of
+    verify_registry.py on the copy, with the copy's own data dir."""
+    r = subprocess.run([sys.executable, str(LAYER_ROOT / "verify_registry.py"),
+                        str(registry), "--data-dir", str(data_dir)],
+                       capture_output=True, text=True, cwd=str(LAYER_ROOT),
+                       encoding="utf-8", errors="replace")
+    lines = (r.stdout + r.stderr).splitlines()
+    fails = [ln for ln in lines if _FAIL_LINE.match(ln)]
+    verdict = next((ln.strip() for ln in lines if "REGISTRY " in ln),
+                   "(no verdict line)")
+    return r.returncode, fails, verdict
+
+
+def _n_lines(path: Path) -> int:
+    with Path(path).open("rb") as f:
+        return sum(1 for _ in f)
+
+
+def hand_quarantine(registry: Path, sids: list[str], entered: str) -> list[int]:
+    """The hand transition, on the COPY: screened -> gauntlet -> synthetic
+    pass -> quarantine at <entered>T00:00:00Z. Returns the 1-based chain line
+    of each synthetic verdict (the only lines a protocol invariant may flag
+    as the known artefact of this step)."""
+    reg = Registry(registry)
+    synthetic = []
+    for sid in sids:
+        reg.record_state_change(sid, "screened", HAND_REASON)
+        reg.record_state_change(sid, "gauntlet", HAND_REASON)
+        synthetic.append(_n_lines(registry) + 1)
+        reg.record_verdict(sid, "gauntlet", "pass", dict(SYNTHETIC_METRICS),
+                           "0" * 64)
+        reg.record_state_change(sid, "quarantine", HAND_REASON,
+                                ts_utc=f"{entered}T00:00:00Z")
+    return synthetic
+
+
+def _sid_blocks(text: str, sids: list[str]) -> list[str]:
+    """The lines of a --review / livegate printout that belong to `sids`: a
+    line starting with one of them, plus the indented lines under it."""
+    out, keep = [], False
+    for line in text.splitlines():
+        if any(line.startswith(s) for s in sids):
+            keep = True
+            out.append(line)
+        elif keep and line.startswith("  "):
+            out.append(line)
+        else:
+            keep = False
+    return out
+
+
+def _record_rows(registry: Path, sids: list[str]) -> dict[str, list[dict]]:
+    rows: dict[str, list[dict]] = {s: [] for s in sids}
+    for e in Registry(registry).entries():
+        if (e["entry_type"] == "quarantine_decision"
+                and e["payload"]["strategy_id"] in rows):
+            rows[e["payload"]["strategy_id"]].append(e["payload"])
+    return rows
+
+
+def _n_decisions(registry: Path) -> int:
+    return sum(1 for e in Registry(registry).entries()
+               if e["entry_type"] == "quarantine_decision")
+
+
+def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
+               n: int, out: Path) -> int:
+    """The s7 proof on a COPY. Exit 0 = every proof criterion held, 1 = one
+    failed (the report says which), 3 = BLOCKED (a fetch failed: no catch-up
+    is attempted, the report names the failed cells)."""
+    refuse_live_chain(registry, "run the quarantine rehearsal")
+    from pipeline import quarantine as q
+    from pipeline import livegate, degraded
+    from pipeline.registry import parse_iso_date
+    parse_iso_date(entered, "--entered")
+    registry, data_dir = Path(registry), Path(data_dir)
+    if not data_dir.is_dir():
+        raise SystemExit(f"no scratch data dir at {data_dir}")
+    twins = json.loads(Path(twins_path).read_text(encoding="utf-8"))
+    picked = [s for s, t in twins.items() if t["tf"] == "1h"][:n]
+    if len(picked) < n:
+        raise SystemExit(f"only {len(picked)} 1h twins in {twins_path}, wanted {n}")
+    states = Registry(registry).strategy_states()
+    wrong = {s: states.get(s, "unregistered") for s in picked
+             if states.get(s) != "proposed"}
+    if wrong:
+        raise SystemExit(f"every picked twin must be 'proposed' on the copy "
+                         f"(a fresh copy + register); found {wrong}")
+    specs = {e["payload"]["strategy_id"]: e["payload"]
+             for e in Registry(registry).entries()
+             if e["entry_type"] == "strategy_registered"}
+
+    base = ["--registry", str(registry), "--data-dir", str(data_dir),
+            "--artifacts-dir", str(registry.parent / "artifacts")]
+    log: list[str] = []
+    catchup_rcs: list[int] = []
+    nothing_owed = False
+
+    print("verify BEFORE the hand transition ...", flush=True)
+    v_before = verify_failures(registry, data_dir)
+    synthetic = hand_quarantine(registry, picked, entered)
+    print(f"hand transition: {len(picked)} twin(s) -> quarantine at {entered}",
+          flush=True)
+
+    rc, text, secs = _captured(q.run, base + ["--fetch-owed"])
+    log.append(f"$ quarantine --fetch-owed  (rc {rc}, {secs:.1f}s)\n{text}")
+    ledger, _ = degraded.read_items(registry.parent / "logs"
+                                    / degraded.QUARANTINE_LEDGER)
+    blocked = [i for i in ledger if i.get("source") == q.FETCH_SOURCE]
+
+    decisions_before = _n_decisions(registry)
+    catchup_secs = 0.0
+    if not blocked:
+        for k in range(MAX_CATCHUP_RUNS):
+            rc, text, secs = _captured(q.run, base + ["--catch-up"])
+            catchup_secs += secs
+            catchup_rcs.append(rc)
+            log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
+                       f"{secs:.1f}s)\n{text}")
+            if "catch-up: nothing owed" in text:
+                nothing_owed = True
+                break
+            if rc != 0:
+                break
+    strategy_days = _n_decisions(registry) - decisions_before
+
+    rc_rev, review_text, _ = _captured(q.run, base + ["--review"])
+    rc_gate, gate_text, _ = _captured(livegate.run, [
+        "--registry", str(registry), "--data-dir", str(data_dir), "--dry-run"])
+    print("verify AFTER the rehearsal ...", flush=True)
+    v_after = verify_failures(registry, data_dir)
+
+    # what each picked twin owed: every complete day in (entered, data end]
+    rows = _record_rows(registry, picked)
+    owed: dict[str, list[str]] = {}
+    for sid in picked:
+        last = q._last_bar_date(data_dir, specs[sid])
+        by_date = (q._owed_by_date(data_dir, specs[sid], entered, last)
+                   if last else None)
+        owed[sid] = sorted(by_date or {})
+    missing = {s: sorted(set(owed[s]) - {r["date"] for r in rows[s]})
+               for s in picked}
+
+    before_set = set(v_before[1])
+    new_fails = [ln for ln in v_after[1] if ln not in before_set]
+    synth_new = [ln for ln in new_fails
+                 if int(_FAIL_LINE.match(ln).group(1)) in synthetic]
+    other_new = [ln for ln in new_fails if ln not in synth_new]
+    per_line: dict[str, list[str]] = {}
+    for ln in synth_new:
+        per_line.setdefault(_FAIL_LINE.match(ln).group(1), []).append(ln)
+
+    review_blocks = {s: "\n".join(_sid_blocks(review_text, [s])) for s in picked}
+    review_ok = rc_rev == 0 and all(
+        "unrecorded bar dates in window: 0" in review_blocks[s]
+        and "partially recorded dates: 0" in review_blocks[s] for s in picked)
+    gate_lines = _sid_blocks(gate_text, picked)
+    gate_ok = rc_gate == 0 and all(
+        any(ln.startswith(s) and "days=" in ln for ln in gate_lines)
+        for s in picked)
+    ok = (not blocked and nothing_owed and all(owed.values())
+          and not any(missing.values()) and review_ok and gate_ok
+          and not other_new and all(len(v) <= 1 for v in per_line.values()))
+    status = "BLOCKED" if blocked else ("PASS" if ok else "FAIL")
+
+    L = ["# Intraday paper-stage rehearsal (2b-2, design s7)", "",
+         f"Status: **{status}**", "",
+         f"Chain COPY `{registry}`; scratch data `{data_dir}`; logs beside the copy.", "",
+         f"{len(picked)} 1h twin(s) from `{twins_path}` moved to `quarantine` BY "
+         f"HAND on the copy (screened, gauntlet, a synthetic gauntlet `pass` with "
+         f"metrics `{json.dumps(SYNTHETIC_METRICS)}` and artifacts hash 64 zeros, "
+         f"then quarantine at `{entered}T00:00:00Z`): no twin passed the real "
+         f"gauntlet, so this transition is the rehearsal's own, never a recorder "
+         f"output.", ""]
+    if blocked:
+        L += ["## BLOCKED: the fetch failed", ""]
+        L += [f"- `{i['key']}`: {i['reason']}" for i in blocked] + [""]
+    L += ["## Rows per strategy", "",
+          "| strategy | original | cell | owed days | days | entries | exits "
+          "| first | last | missing |",
+          "|---|---|---|---:|---:|---:|---:|---|---|---|"]
+    for sid in picked:
+        r = rows[sid]
+        dates = sorted({x["date"] for x in r})
+        L.append(f"| `{sid}` | `{twins[sid]['original']}` | "
+                 f"{', '.join(sorted({x['asset'] for x in r})) or '-'} | "
+                 f"{len(owed[sid])} | {len(dates)} | "
+                 f"{sum(x.get('entries', 0) for x in r)} | "
+                 f"{sum(x.get('exits', 0) for x in r)} | "
+                 f"{dates[0] if dates else '-'} | {dates[-1] if dates else '-'} | "
+                 f"{', '.join(missing[sid]) or 'none'} |")
+    L += ["", "Recorded dates per strategy:", ""]
+    for sid in picked:
+        L.append(f"- `{sid}`: "
+                 + (", ".join(sorted({x['date'] for x in rows[sid]})) or "none"))
+    per_day = (f"{catchup_secs / strategy_days:.1f}" if strategy_days else "n/a")
+    L += ["", "## Timing", "",
+          f"- catch-up runs: {len(catchup_rcs)} (exit codes {catchup_rcs}); "
+          f"reached `catch-up: nothing owed`: {nothing_owed}",
+          f"- catch-up wall time {catchup_secs:.1f}s for {strategy_days} "
+          f"strategy-day(s) chained (every quarantined strategy on the copy)",
+          f"- seconds per strategy-day: {per_day} (wall clock including chain "
+          f"reads and snapshots, so an upper bound)", "",
+          f"## --review (the picked twins, exit {rc_rev})", "", "```",
+          *_sid_blocks(review_text, picked), "```", "",
+          f"## Live gate (`--dry-run`, exit {rc_gate})", "", "```",
+          *(gate_lines or [gate_text.strip()[-2000:]]), "```", "",
+          "## verify_registry.py", "",
+          f"verify BEFORE (exit {v_before[0]}, {v_before[2]}): "
+          f"{len(v_before[1])} failure line(s)", "",
+          "```", *(v_before[1] or ["(none)"]), "```", "",
+          f"verify AFTER (exit {v_after[0]}, {v_after[2]}): "
+          f"{len(v_after[1])} failure line(s)", "",
+          "```", *(v_after[1] or ["(none)"]), "```", ""]
+    if not new_fails:
+        L.append("The rehearsal added no new failure line.")
+    else:
+        if synth_new:
+            L.append("Known artefact of the hand transition (the synthetic "
+                     f"verdict, lines {sorted(int(k) for k in per_line)}), not a "
+                     "recorder defect:")
+            L += [f"- `{ln.strip()}`" for ln in synth_new]
+        if other_new:
+            L.append("UNEXPECTED new failure lines:")
+            L += [f"- `{ln.strip()}`" for ln in other_new]
+        else:
+            L.append("Apart from that artefact the rehearsal added no new "
+                     "failure line.")
+    L += ["", "## Console log", "", "```", *[x.rstrip() for x in log], "```", ""]
+    Path(out).write_text("\n".join(L) + "\n", encoding="utf-8")
+    print(f"wrote {out}: {status}")
+    if blocked:
+        return 3
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m tools.intraday_rehearsal")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -221,7 +513,16 @@ def main(argv=None) -> int:
     p.add_argument("--twins", type=Path, required=True)
     p.add_argument("--artifacts-dir", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
+    qp = sub.add_parser("quarantine")
+    qp.add_argument("--registry", type=Path, required=True)
+    qp.add_argument("--data-dir", type=Path, required=True)
+    qp.add_argument("--twins", type=Path, required=True)
+    qp.add_argument("--entered", required=True)
+    qp.add_argument("--n", type=int, default=2)
+    qp.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
+    if a.cmd == "quarantine":
+        return quarantine(a.registry, a.data_dir, a.twins, a.entered, a.n, a.out)
     if a.cmd == "register":
         twins = register(a.registry, [x for x in a.assets.split(",") if x],
                          a.originals, a.seed, a.out)
