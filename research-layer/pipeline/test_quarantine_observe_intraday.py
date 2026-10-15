@@ -31,6 +31,7 @@ def test_hourly_twin_records_the_daily_twin_s_day():
             checked += 1
             assert rh["action"] == rd["action"], day
         assert rh["exits"] == (1 if rd["action"] == "exit" else 0), day
+        assert rh["entries"] == (1 if rd["action"].startswith("enter") else 0), day
     assert checked > 5          # the fixture really trades in the window
 
 
