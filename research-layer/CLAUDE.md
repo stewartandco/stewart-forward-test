@@ -198,12 +198,75 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `data_hashes[cell_id]` lookup in `registry_series` raises `KeyError`
   (no cell hash). Either way, registration must refuse such a spec up
   front (2b-3).
-- **Quarantine refuses intraday until 2b-2:** the recorder is daily-only
-  (it would otherwise simulate an intraday spec on its asset's DAILY
-  bars). `quarantine._split_intraday` skips every non-1d quarantined spec,
-  prints `skipped: intraday timeframe ...`, and records it as a degraded
-  item with source `intraday_unsupported` in
-  `logs/degraded_quarantine.json`. Test: `test_quarantine_intraday.py`.
+- **Quarantine records intraday strategies (2b-2, 2026-10-11):** the
+  recorder writes one row per CELL per UTC day. The cell key
+  (`pipeline/qcells.py`) is `ASSET@TF` (`BTCUSDT@1h`) for an intraday tf
+  and the bare asset for 1d; `"X@1d"` is never valid. The key names the
+  row's `asset`, the snapshot's digest key and the price file
+  (`data/<ASSET>_<TF>.csv`). An intraday row has 9 fields: the 7 daily
+  ones plus `entries` and `exits` (non-negative ints, never bool;
+  `registry.QUARANTINE_INTRADAY_KEYS`); a daily row is the 7-field
+  shape, byte for byte. Price, position and equity are the book at the
+  day's LAST bar, rebased at the entry day's last bar, and `action` =
+  the day's LAST event (enter/exit/hold). `observe_day` passes
+  `bars_per_year` and `bars_per_day` to the engine. Completeness: a day
+  is recordable for a cell when its last slot (D 00:00 + (bars_per_day -
+  1) x tf) is on disk OR any later bar is (`qcells.complete_days`), so a
+  missing hour cannot make a day owed forever; a missing hour inside a
+  day that has other bars is not a hole (that day is complete and is
+  recorded from the bars present), but a whole UTC day with no bars is
+  silently never owed (as for daily) and the fetcher never backfills it
+  (`crypto_data.fetch_symbol`); only a FAILED fetch raises
+  `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
+  `--fetch-owed` refetches it from scratch. The chain is append-only: a
+  refetch leaves every chained row as it is, but it changes `bars_sha256`
+  for every already-chained date at or after the hole (`hash_bars_through`
+  covers all bars up to the date), so a strategy that still owes such a
+  date on that cell is deferred as `restated` (rule 2), every run, until a
+  human resolves it -- so a repair is a deliberate, Coen-gated act, not
+  routine. A restated-only deferral exits 0, not 1 (`deferred_only`), so a
+  repair-stalled date does not turn the task red; it records a `restated`
+  item keyed by the cell in `logs/degraded_quarantine.json`, which the
+  Sentinel's `research_degraded` check turns WARN, then FAIL after 3 days.
+  While the CSV is absent its strategies are deferred (missing price file,
+  addendum rule 3); step 1b fetches before recording, so a normal run is
+  unaffected, but if the refetch fails (e.g. a 418 ban) they stay deferred
+  until a fetch succeeds, and a day where nothing records and no eligible
+  strategy is already fully chained for that date (`n_present == 0`) exits
+  1 (the total-stall rule). Owed days,
+  catch-up and `--review` stay day-based on complete UTC days. Fetch:
+  step 1b of `tasks/run_quarantine.bat` runs `python -m
+  pipeline.quarantine --fetch-owed`: only the intraday cells of
+  quarantined strategies (nothing while none is quarantined;
+  `crypto_data` is imported only when a cell is owed), incremental,
+  closed bars only. The intraday CSVs are gitignored (`data/*.csv`),
+  never committed; the chain pins them by hash. A failed cell is a
+  degraded item with source `intraday_fetch_failed` (key = the cell) in
+  `logs/degraded_quarantine.json`; the fetch step OWNS those items
+  (`_write_fetch_ledger`) and catch-up keeps them (`keep_sources`). A
+  Binance 418 ban stops the step at once and marks every remaining cell.
+  A fetch failure never blocks the daily record: only a crash of the
+  step is carried to the task's exit code (`FETCH_RC`), after the record
+  is committed. A non-24x7 intraday spec is deferred with a degraded
+  item `intraday_unsupported` (`_split_unsupported`), never a crash;
+  registration-time refusal is 2b-3. The live gate's
+  `closed_forward_trades` (`pipeline/livegate.py`) SUMS `exits` on rows
+  that carry them and counts `action == "exit"` on daily rows. Cost
+  hazard: each date re-simulates the cell from bar 0 (measured in the
+  2026-10-15 rehearsal: ~145 s pure simulation per 1h vol-percentile
+  strategy-day, ~175 s per strategy-day including chain I/O, at today's
+  O(n x 365 x bars_per_day) percentile),
+  and the whole intraday file is read per strategy per catch-up or
+  review and once per date per cell (`_load_cell_bars`); bounded only by
+  the 2b-3 incremental percentile, so cost it before activating. Proof:
+  `tools/quarantine_parity.py` (`dump` before and after a change, then
+  `compare`) recomputes a seeded sample of chained daily quarantine days
+  and compares snapshot digests and rows exactly, old code vs new;
+  re-run it after any change to the recorder. The `quarantine`
+  subcommand of `tools/intraday_rehearsal.py` runs the whole stage end
+  to end on a scratch chain COPY and refuses the live chain. Tests:
+  `test_quarantine_intraday.py`, `test_quarantine_fetch_owed.py`.
+  Design: `docs/2026-10-11-intraday-paper-stage-design.md`.
 - **Parity guarantee:** `tools/daily_parity.py` (`dump` before and after a
   change, then `compare`) fingerprints registered 1d strategies. On
   2026-10-10, 200 registered 1d strategies (167 of them vol-target or
@@ -215,8 +278,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   code, or the statistics above.
 - **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
   twins of real crypto strategies on a COPY of the chain, runs the real
-  screen and gauntlet on the copy and reads the outcomes side by side. Its
-  `register` REFUSES the live chain (exit 2, nothing written).
+  screen and gauntlet on the copy and reads the outcomes side by side.
+  `quarantine` moves 1h twins to quarantine on the copy by a synthetic
+  gauntlet transition, then runs the real recorder with a REAL Binance
+  fetch into its scratch data dir. Both `register` and `quarantine`
+  REFUSE the live chain, and `quarantine` also refuses the live data dir
+  (exit 2, nothing written).
 - **The intraday path is dormant:** `cells.ACTIVE_CELLS["crypto"]` is empty
   until 2b-3, so no scheduled task registers an intraday strategy.
 - **2b-3 hazards (cost these before activating):** `vol_percentile` in
@@ -235,9 +302,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
 - **The protocol note is a DRAFT and is NOT chained until 2b-3:**
   `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
   approves the exact text; it is chained VERBATIM at 2b-3 activation,
-  before the first intraday verdict (the v6.1-amendment pattern). Do not
-  chain it, edit its wording, or treat intraday daily-mark verdicts as
-  protocol-covered before then.
+  before the first intraday verdict (the v6.1-amendment pattern). Since
+  2b-2 it has a second paragraph, "Quarantine and the live gate" (the
+  cell key, entries/exits, the completeness rule, the live gate's sum of
+  exits). Do not chain it, edit its wording, or treat intraday daily-mark
+  verdicts as protocol-covered before then.
 
 ## Pipeline loop (25_PipelineLoop)
 - **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs

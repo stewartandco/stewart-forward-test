@@ -57,6 +57,15 @@ REM    writes a partial bar.
 python -m pipeline.data_fetch >> "%LOG%" 2>&1
 if errorlevel 1 goto :fail
 
+REM 1b. Fetch the intraday cells quarantined strategies owe (2b-2 design s3.5).
+REM     Nothing to fetch while no intraday strategy is quarantined. A failed
+REM     cell is a degraded item, never a failed run; only a crash of the step
+REM     itself is carried to the task's exit code, and it never blocks the
+REM     daily record. Exactly 0, never `if errorlevel 1` (NTSTATUS is negative).
+set FETCH_RC=0
+python -m pipeline.quarantine --fetch-owed >> "%LOG%" 2>&1
+if not "%ERRORLEVEL%"=="0" set FETCH_RC=1
+
 REM 2. Resolve yesterday in UTC.
 python -c "import datetime as d, pathlib; pathlib.Path(r'%LAYER%\logs\qdate.txt').write_text((d.datetime.now(d.timezone.utc) - d.timedelta(days=1)).strftime('%%Y-%%m-%%d'))"
 if errorlevel 1 goto :fail
@@ -105,6 +114,7 @@ if not errorlevel 1 (
 )
 
 if "%CATCHUP_RC%"=="1" goto :fail
+if "%FETCH_RC%"=="1" goto :fail
 echo done, exit 0 >> "%LOG%"
 echo. >> "%LOG%"
 endlocal
