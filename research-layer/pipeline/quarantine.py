@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import sys
 import json
+import time
 import hashlib
 import argparse
 import traceback
@@ -1051,6 +1052,7 @@ def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
 
 
 FETCH_SOURCE = "intraday_fetch_failed"
+FETCH_PACING_S = 0.2                    # crypto_data.main's pause between cells
 
 
 def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
@@ -1060,7 +1062,13 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
     `data_dir`. Nothing is owed while no intraday strategy is quarantined.
     A cell whose fetch raises is a degraded item; the step never fails for
     it -- its days stay owed and catch-up records them after a later
-    successful fetch."""
+    successful fetch.
+
+    Binance safety follows crypto_data.main: cells are paced FETCH_PACING_S
+    apart, and a ban (418) or a rate limit that reaches this loop (retries
+    exhausted, or a Retry-After beyond the cap) stops the fetch at once and
+    owes every cell left. No long back-off sleep inside the 08:20 task: the
+    next day's run retries."""
     cells_owed = sorted({k for sid in quarantined if sid in specs
                          for k in spec_cells(specs[sid]) if is_intraday_key(k)})
     if not cells_owed:
@@ -1068,11 +1076,14 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
         return []
     # Imported only once a cell is owed: a run with nothing to fetch must not
     # depend on crypto_data importing.
-    from .crypto_data import BinanceBanned
+    from .crypto_data import BinanceBanned, RateLimited
     if fetch is None:
         from .crypto_data import fetch_symbol as fetch
     items = []
     for n, key in enumerate(cells_owed):
+        if n:
+            time.sleep(FETCH_PACING_S)    # the IP budget is shared with every
+                                          # Binance consumer on this box
         asset, tf = split_cell_key(key)
         try:
             fetch(asset, tf, Path(data_dir))
@@ -1087,6 +1098,20 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
             for rest in cells_owed[n + 1:]:
                 items.append({"source": FETCH_SOURCE, "key": rest,
                               "reason": "skipped: Binance IP ban (418) on "
+                                        f"{key}; not fetched this run"})
+            break
+        except RateLimited as exc:
+            # crypto_data.main aborts its whole run here: the next call would
+            # keep hammering the shared IP and invite a 418. Record and stop;
+            # no back-off sleep in the 08:20 task (the next run retries).
+            print(f"fetch-owed: {key} FAILED: {exc!r}; Binance rate limit "
+                  f"(retry_after {exc.retry_after}s), stopping", file=sys.stderr)
+            items.append({"source": FETCH_SOURCE, "key": key,
+                          "reason": f"fetch of {asset} {tf} failed: Binance "
+                                    f"rate limit: {exc!r}"})
+            for rest in cells_owed[n + 1:]:
+                items.append({"source": FETCH_SOURCE, "key": rest,
+                              "reason": "skipped: Binance rate limit (429) on "
                                         f"{key}; not fetched this run"})
             break
         except Exception as exc:          # one dead cell must not stop the rest

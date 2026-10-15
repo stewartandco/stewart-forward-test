@@ -161,3 +161,54 @@ def test_a_crashed_fetch_step_still_lets_the_record_run_and_fails_the_task(
     assert any(c.startswith("--date") for c in calls) and "--catch-up" in calls
     assert code == 1
     assert w._git(repo, "rev-list", "--count", "HEAD").strip() == "2"
+
+
+def _two_cells():
+    a = _twin_spec("1h")
+    b = json.loads(json.dumps(a))
+    b["strategy_id"] = "b" * 16
+    b["universe"]["assets"] = ["ETHUSD"]
+    return [a["strategy_id"], b["strategy_id"]], _specs(a, b)
+
+
+def test_a_rate_limit_stops_the_fetch_and_owes_every_remaining_cell(
+        tmp_path, monkeypatch):
+    """crypto_data.main aborts its whole run on a RateLimited that reaches it
+    (retries exhausted, or a Retry-After beyond the cap): another call keeps
+    hammering the shared IP and invites a 418. The 08:20 task records and
+    stops at once (no long sleep); the next day's run retries."""
+    from . import quarantine
+    from .crypto_data import RateLimited
+    sleeps = []
+    monkeypatch.setattr(quarantine.time, "sleep", sleeps.append)
+    ids, specs = _two_cells()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        raise RateLimited(120.0, retry_ok=False)
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch)
+    assert calls == ["BTCUSD"]
+    assert [(i["source"], i["key"]) for i in items] == [
+        (FETCH_SOURCE, "BTCUSD@1h"), (FETCH_SOURCE, "ETHUSD@1h")]
+    assert all("rate limit" in i["reason"].lower() for i in items)
+    assert sleeps == []
+
+
+def test_cells_are_paced_like_crypto_data(tmp_path, monkeypatch):
+    """The same 0.2 s pause crypto_data.main takes between cells: the IP
+    budget is shared with every Binance consumer on this box. A failed cell
+    is still followed by the pause before the next."""
+    from . import quarantine
+    events = []
+    monkeypatch.setattr(quarantine.time, "sleep",
+                        lambda s: events.append(("sleep", s)))
+    ids, specs = _two_cells()
+
+    def fetch(sym, tf, d):
+        events.append(("fetch", sym))
+        if sym == "BTCUSD":
+            raise RuntimeError("HTTP 451")
+        return {}
+    fetch_owed(ids, specs, tmp_path, fetch=fetch)
+    assert events == [("fetch", "BTCUSD"), ("sleep", 0.2), ("fetch", "ETHUSD")]
