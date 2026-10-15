@@ -68,6 +68,26 @@ def refuse_live_chain(registry: Path, what: str = "register twins") -> None:
     print(f"refusing to {what} on {path}: {why}. "
           f"Pass a scratch COPY of the chain.", file=sys.stderr)
     raise LiveChainRefused(2)
+
+
+def refuse_live_data_dir(data_dir: Path, what: str) -> None:
+    """Raise LiveChainRefused (exit code 2) for a data dir that looks live:
+    this layer's own data/, or the data/ beside a directory holding
+    registry_log.d. --fetch-owed writes *_1h.csv into the data dir, so a
+    copied registry paired with the live data dir would still write into
+    the live tree."""
+    path = Path(data_dir).resolve()
+    if path == (LAYER_ROOT / "data").resolve():
+        why = f"it is this layer's own data/ ({LAYER_ROOT})"
+    elif (path.parent / "registry_log.d").exists():
+        why = f"{path.parent} also holds registry_log.d (the live layout)"
+    else:
+        return
+    print(f"refusing to {what} with data dir {path}: {why}. "
+          f"Pass a scratch data dir.", file=sys.stderr)
+    raise LiveChainRefused(2)
+
+
 TIMEFRAMES = ("1d", "1h")
 
 
@@ -232,6 +252,7 @@ MAX_CATCHUP_RUNS = 10
 HAND_REASON = "rehearsal-2b2: hand transition on a chain COPY (design s7)"
 SYNTHETIC_METRICS = {"rehearsal": True}
 _FAIL_LINE = re.compile(r"^  line (\d+): ")
+_GATE_LINE = re.compile(r"^(\S+)\s+days=\s*(\d+)\s+trades=\s*(\d+)\s")
 
 
 class _Tee:
@@ -348,6 +369,7 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     failed (the report says which), 3 = BLOCKED (a fetch failed: no catch-up
     is attempted, the report names the failed cells)."""
     refuse_live_chain(registry, "run the quarantine rehearsal")
+    refuse_live_data_dir(data_dir, "run the quarantine rehearsal")
     from pipeline import quarantine as q
     from pipeline import livegate, degraded
     from pipeline.registry import parse_iso_date
@@ -445,11 +467,24 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
         "unrecorded bar dates in window: 0" in review_blocks[s]
         and "partially recorded dates: 0" in review_blocks[s] for s in picked)
     gate_lines = _sid_blocks(gate_text, picked)
-    gate_ok = rc_gate == 0 and all(
-        any(ln.startswith(s) and "days=" in ln for ln in gate_lines)
-        for s in picked)
+    # the gate must READ the record: its days and trades per twin equal the
+    # chained dates and the summed exits, not merely print a line
+    gate_expect = {s: (len({r["date"] for r in rows[s]}),
+                       sum(r.get("exits", 0) for r in rows[s])) for s in picked}
+    gate_seen: dict[str, tuple[int, int]] = {}
+    for ln in gate_lines:
+        m = _GATE_LINE.match(ln)
+        if m and m.group(1) in gate_expect:
+            gate_seen[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+    gate_ok = rc_gate == 0 and all(gate_seen.get(s) == gate_expect[s]
+                                   for s in picked)
+    # a verify that crashed, printed nothing or said anything but VALID is
+    # not evidence: both runs must exit 0 with the VALID verdict
+    verify_ok = all(v[0] == 0 and "REGISTRY VALID" in v[2]
+                    for v in (v_before, v_after))
     ok = (not blocked and nothing_owed and all(owed.values())
           and not any(missing.values()) and review_ok and gate_ok
+          and verify_ok
           and not other_new and all(len(v) <= 1 for v in per_line.values()))
     status = "BLOCKED" if blocked else ("PASS" if ok else "FAIL")
 
@@ -462,6 +497,15 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
          f"then quarantine at `{entered}T00:00:00Z`): no twin passed the real "
          f"gauntlet, so this transition is the rehearsal's own, never a recorder "
          f"output.", ""]
+    L += ["## Checks", "",
+          f"- fetch succeeded: {not blocked}",
+          f"- catch-up reached nothing owed: {nothing_owed}",
+          f"- every owed day recorded: {all(owed.values()) and not any(missing.values())}",
+          f"- --review shows no gap: {review_ok}",
+          f"- live gate read the record (days, trades) expected "
+          f"{gate_expect} seen {gate_seen}: {gate_ok}",
+          f"- verify BEFORE and AFTER exit 0 and REGISTRY VALID: {verify_ok}",
+          f"- no unexpected new verify failure: {not other_new}", ""]
     if blocked:
         L += ["## BLOCKED: the fetch failed", ""]
         L += [f"- `{i['key']}`: {i['reason']}" for i in blocked] + [""]

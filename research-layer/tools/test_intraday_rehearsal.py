@@ -153,7 +153,7 @@ def _hourly_twin_setup(tmp_path):
     orig["strategy_id"] = content_id(orig, "strategy_id")
     reg.register_strategy(orig)
     twins_path = tmp_path / "twins.json"
-    ir.main(["register", "--registry", str(reg.log_path), "--assets", "BTCUSD",
+    ir.main(["register", "--registry", str(reg.log_path), "--assets", "ETHUSD",
              "--originals", "1", "--seed", "1", "--out", str(twins_path)])
     twins = json.loads(twins_path.read_text())
     sid = next(s for s, t in twins.items() if t["tf"] == "1h")
@@ -203,7 +203,7 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
                   "--data-dir", str(data), "--twins", str(twins_path),
                   "--entered", entered, "--n", "1", "--out", str(out)])
     assert rc == 0
-    assert calls == [("BTCUSD", "1h")]                       # fetch-owed ran
+    assert calls == [("ETHUSD", "1h")]                       # fetch-owed ran
     entries = list(Registry(reg.log_path).entries())
     trans = [(e["payload"]["to"], e["ts_utc"]) for e in entries
              if e["entry_type"] == "state_change"
@@ -218,7 +218,7 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
             if e["entry_type"] == "quarantine_decision"
             and e["payload"]["strategy_id"] == sid]
     assert sorted(r["date"] for r in rows) == owed
-    assert all(r["asset"] == "BTCUSD@1h" for r in rows)
+    assert all(r["asset"] == "ETHUSD@1h" for r in rows)
     text = out.read_text(encoding="utf-8")
     assert sid in text
     for d in owed:
@@ -238,6 +238,9 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
     assert "seconds per strategy-day" in text
     assert "verify before" in text.lower() and "verify after" in text.lower()
     assert "no new failure" in text.lower()
+    assert "REGISTRY VALID" in text
+    gate = next(l for l in text.splitlines() if l.startswith(sid) and "days=" in l)
+    assert f"days=  12 trades={n_exits:>3}" in gate          # the gate read the record
 
 
 def test_quarantine_refuses_a_twin_that_is_not_proposed(tmp_path, monkeypatch):
@@ -254,3 +257,84 @@ def test_quarantine_refuses_a_twin_that_is_not_proposed(tmp_path, monkeypatch):
     assert "proposed" in str(exc.value.code)
     assert reg.log_path.read_bytes() == before
     assert calls == []
+
+
+def _run_quarantine(tmp_path, monkeypatch, reg, twins_path, data, daily, fake_fetch):
+    from pipeline import crypto_data
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", daily[150]["date"], "--n", "1", "--out", str(out)])
+    return rc, out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("which,result", [
+    ("after", (1, [], "(no verdict line)")),                    # verify crashed
+    ("after", (0, [], "Empty log.")),                           # not a VALID verdict
+    ("before", (1, ["  line 3: x"], "REGISTRY INVALID - 1/9 entries fail.")),
+])
+def test_quarantine_fails_unless_verify_says_valid(tmp_path, monkeypatch, which, result):
+    reg, twins_path, sid, data, daily, fake_fetch, calls = _hourly_twin_setup(tmp_path)
+    real = ir.verify_failures
+    seen = []
+
+    def fake_verify(registry, data_dir):
+        seen.append(1)
+        if (which == "before") == (len(seen) == 1):
+            return result
+        return real(registry, data_dir)
+    monkeypatch.setattr(ir, "verify_failures", fake_verify)
+    rc, text = _run_quarantine(tmp_path, monkeypatch, reg, twins_path, data,
+                               daily, fake_fetch)
+    assert len(seen) == 2
+    assert rc == 1
+    assert "Status: **FAIL**" in text
+
+
+@pytest.mark.parametrize("line", [
+    "{sid}  days=   0 trades=  0 terminal=1.0000 cone_p01=    n/a psr=0.5000  -> HOLD",
+    "{sid}  days=  12 trades= 99 terminal=1.0000 cone_p01=    n/a psr=0.5000  -> HOLD",
+    "{sid}  days=  11 trades={exits:>3} terminal=1.0000 cone_p01=    n/a psr=0.5000  -> HOLD",
+])
+def test_quarantine_fails_when_the_gate_misreads_the_record(tmp_path, monkeypatch, line):
+    from pipeline import livegate
+    reg, twins_path, sid, data, daily, fake_fetch, calls = _hourly_twin_setup(tmp_path)
+
+    def fake_gate(argv):
+        exits = sum(e["payload"]["exits"] for e in Registry(reg.log_path).entries()
+                    if e["entry_type"] == "quarantine_decision"
+                    and e["payload"]["strategy_id"] == sid)
+        print(line.format(sid=sid, exits=exits))
+        return 0
+    monkeypatch.setattr(livegate, "run", fake_gate)
+    rc, text = _run_quarantine(tmp_path, monkeypatch, reg, twins_path, data,
+                               daily, fake_fetch)
+    assert rc == 1
+    assert "Status: **FAIL**" in text
+
+
+@pytest.mark.parametrize("layout", ["own", "beside_d"])
+def test_quarantine_refuses_the_live_data_dir(tmp_path, monkeypatch, capsys, layout):
+    from pipeline import crypto_data
+    reg, twins_path, sid, data, daily, fake_fetch, calls = _hourly_twin_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    live = tmp_path / "livetree"
+    live.mkdir()
+    if layout == "own":
+        monkeypatch.setattr(ir, "LAYER_ROOT", live)
+    else:
+        (live / "registry_log.d").mkdir()
+    live_data = live / "data"
+    live_data.mkdir()
+    before = reg.log_path.read_bytes()
+    out = tmp_path / "report.md"
+    with pytest.raises(SystemExit) as exc:
+        ir.main(["quarantine", "--registry", str(reg.log_path),
+                 "--data-dir", str(live_data), "--twins", str(twins_path),
+                 "--entered", daily[150]["date"], "--n", "1", "--out", str(out)])
+    assert exc.value.code == 2
+    assert "refusing" in capsys.readouterr().err
+    assert reg.log_path.read_bytes() == before
+    assert list(live_data.iterdir()) == []
+    assert calls == [] and not out.exists()
