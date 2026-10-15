@@ -118,6 +118,11 @@ Day D is recordable for an intraday cell when either:
 - **any bar dated after D** is on disk (so an hour the exchange never
   published cannot make D owed forever).
 
+Both rules apply only to a UTC day with at least one bar for the cell: the
+days come from the bars present (`qcells.complete_days`), so a UTC day with
+no bars at all is never recorded (a hole in the file). The recorder does not
+invent days; a hole detector is a 2b-3 activation precondition.
+
 `crypto_data.fetch_symbol` writes closed bars only (it drops the open kline
 by the exchange's own `close_time`), so at the 08:20 local run (00:20 UTC)
 yesterday's 23:00 bar is on disk and yesterday is complete. A strategy's day
@@ -201,10 +206,16 @@ cell.
 ### 3.8 Morpheus
 
 `morpheus-hub` copies `quarantine_decision` payloads into its forward book
-as plain dicts (`research_chain/state.py`) and never counts exits, so the
-cell key shows as the cell's label and the two counts pass through. No
-Morpheus change. The plan includes a read-only check that its tests accept a
-9-field row.
+as plain dicts (`research_chain/state.py`), so the cell key shows as the
+cell's label and the two counts pass through. The plan includes a read-only
+check that its tests accept a 9-field row. Morpheus does count exits:
+`backend/app/connectors/forward_test/service.py:135` sets `closed_trades` to
+the number of rows with `action == "exit"`, so for an intraday strategy it
+would undercount (at most one closed trade per day, where the live gate sums
+`exits`). That is display only and dormant while no intraday strategy is
+quarantined. No Morpheus change in 2b-2: the fix (sum `exits` when a row
+carries it, as `livegate.closed_forward_trades` does) is a 2b-3 activation
+precondition.
 
 ## 4. The protocol note (DRAFT, chained at 2b-3 activation)
 
@@ -212,7 +223,7 @@ One paragraph is appended to `docs/notes/gauntlet-protocol-v6.1-intraday-daily-m
 one line, ASCII, the note's existing format. Draft text (Coen approves the
 exact wording when 2b-3 is ready to chain the note):
 
-`Quarantine and the live gate. An intraday strategy's forward record is one quarantine_decision per cell per UTC day, written at the day's last bar: the cell is named ASSET@TF (for example BTCUSDT@1h) in the row's asset field and in that day's data snapshot; price, position and equity are the book at the day's last bar; the row adds entries and exits, the trades the strategy opened and closed that day. A day is complete when the cell's last bar of the day is on disk, or when any later bar is. The live gate counts closed forward trades as the sum of exits over these rows, and a trading day for a 24x7 strategy is a UTC calendar day. Daily strategies' rows are unchanged.`
+`Quarantine and the live gate. An intraday strategy's forward record is one quarantine_decision per cell per UTC day, written at the day's last bar: the cell is named ASSET@TF (for example BTCUSDT@1h) in the row's asset field and in that day's data snapshot; price, position and equity are the book at the day's last bar; the row adds entries and exits, the trades the strategy opened and closed that day. A UTC day with at least one bar is complete when the cell's last bar of the day is on disk, or when any later bar is; a UTC day with no bars at all is never recorded (a hole in the file). The live gate counts closed forward trades as the sum of exits over these rows, and a trading day for a 24x7 strategy is a UTC calendar day. Daily strategies' rows are unchanged.`
 
 The note stays a DRAFT and NOT chained. The chaining order holds by
 construction: an intraday strategy reaches quarantine only after an
