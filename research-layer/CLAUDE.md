@@ -252,8 +252,10 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   registration-time refusal is 2b-3. The live gate's
   `closed_forward_trades` (`pipeline/livegate.py`) SUMS `exits` on rows
   that carry them and counts `action == "exit"` on daily rows. Cost
-  hazard: each date re-simulates the cell from bar 0 (~100 s per 1h
-  vol-percentile cell at today's O(n x 365 x bars_per_day) percentile),
+  hazard: each date re-simulates the cell from bar 0 (measured in the
+  2026-10-15 rehearsal: ~145 s pure simulation per 1h vol-percentile
+  strategy-day, ~175 s per strategy-day including chain I/O, at today's
+  O(n x 365 x bars_per_day) percentile),
   and the whole intraday file is read per strategy per catch-up or
   review and once per date per cell (`_load_cell_bars`); bounded only by
   the 2b-3 incremental percentile, so cost it before activating. Proof:
@@ -276,8 +278,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   code, or the statistics above.
 - **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
   twins of real crypto strategies on a COPY of the chain, runs the real
-  screen and gauntlet on the copy and reads the outcomes side by side. Its
-  `register` REFUSES the live chain (exit 2, nothing written).
+  screen and gauntlet on the copy and reads the outcomes side by side.
+  `quarantine` moves 1h twins to quarantine on the copy by a synthetic
+  gauntlet transition, then runs the real recorder with a REAL Binance
+  fetch into its scratch data dir. Both `register` and `quarantine`
+  REFUSE the live chain, and `quarantine` also refuses the live data dir
+  (exit 2, nothing written).
 - **The intraday path is dormant:** `cells.ACTIVE_CELLS["crypto"]` is empty
   until 2b-3, so no scheduled task registers an intraday strategy.
 - **2b-3 hazards (cost these before activating):** `vol_percentile` in
