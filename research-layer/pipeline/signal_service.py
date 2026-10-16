@@ -111,9 +111,11 @@ def parse_daily_csv(raw: bytes, name: str = "price file") -> list[dict]:
     with each date cut to its date part as quarantine._daily_bars does.
     test_signal_service pins it equal to load_bars on the same file.
     Minors item 3: a header without every column (a BOM-prefixed `date`
-    included), a short row, a non-numeric or non-finite price, a date that is
-    not YYYY-MM-DD, or bytes that are not UTF-8 raise DataRefused naming
-    `name` and the row (the physical line, the header being row 1)."""
+    included), a short row, a row longer than the header, a non-numeric or
+    non-finite price, a non-positive open/high/low/close (volume may be 0), a
+    date that is not YYYY-MM-DD, a duplicate date (same day, time part
+    ignored), or bytes that are not UTF-8 raise DataRefused naming `name` and
+    the row (the physical line, the header being row 1)."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -126,20 +128,30 @@ def parse_daily_csv(raw: bytes, name: str = "price file") -> list[dict]:
             raise DataRefused(f"{name}: row 1 (header {head!r}) lacks column(s) "
                               f"{', '.join(lacking)}")
     bars = []
+    seen: dict[str, int] = {}               # day -> the physical row it was first on
     for row in reader:
         cells_ = [row.get(c) for c in COLUMNS]
         try:
+            if None in row:                  # csv.DictReader files extra fields under None
+                raise ValueError(f"long row ({len(head) + len(row[None])} fields, header "
+                                 f"has {len(head)})")
             if any(v is None for v in cells_):
                 raise ValueError(f"short row ({sum(v is not None for v in cells_)} of "
                                  f"{len(COLUMNS)} columns)")
             if not _DATE.match(cells_[0]):
                 raise ValueError(f"date {cells_[0]!r} is not YYYY-MM-DD")
             dt.date.fromisoformat(cells_[0][:10])
+            day = cells_[0][:10]
+            if day in seen:
+                raise ValueError(f"duplicate date {day} (first on row {seen[day]})")
+            seen[day] = reader.line_num
             bar = {"date": cells_[0]}
             for c, v in zip(COLUMNS[1:], cells_[1:]):
                 bar[c] = float(v)
                 if not math.isfinite(bar[c]):
                     raise ValueError(f"{c} {v!r} is not finite")
+                if c != "volume" and bar[c] <= 0:
+                    raise ValueError(f"{c} {v!r} is not positive")
         except ValueError as exc:
             raise DataRefused(f"{name}: row {reader.line_num}: {exc}") from None
         bars.append(bar)

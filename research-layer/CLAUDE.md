@@ -1377,12 +1377,26 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   file refuses too: `Registry.snapshot` reads a missing file as an empty
   chain, which used to print "nothing written" and exit 0. An existing chain
   with nothing in quarantine/live still exits 0.
-- **A malformed price CSV refuses the whole run (minors item 3).** A header
-  without every column (a BOM-prefixed `date` included), a short row, a
-  non-numeric or non-finite price, a date that is not `YYYY-MM-DD` (Python
-  3.11+ `fromisoformat` alone would take `20260102`), or bytes that are not
-  UTF-8 raise `DataRefused` naming the file and the row (the physical line,
-  header = row 1): exit 2, nothing written, never a traceback.
+- **A malformed price CSV refuses the whole run (minors item 3 + review
+  follow-up).** A header without every column (a BOM-prefixed `date`
+  included), a short row, a row LONGER than the header (csv.DictReader files
+  the extras under the `None` key), a non-numeric or non-finite price, a
+  non-positive open/high/low/close (volume may be 0), a date that is not
+  `YYYY-MM-DD` (Python 3.11+ `fromisoformat` alone would take `20260102`), a
+  second row for the same day (time part ignored; the message names the
+  first row), or bytes that are not UTF-8 raise `DataRefused` naming the file
+  and the row (the physical line, header = row 1): exit 2, nothing written,
+  never a traceback.
+- **⚠ Deferrals alone exit 0 and have NO Sentinel channel yet.** A run that
+  publishes some strategies and defers others prints the deferrals to
+  `logs/signal-run.log` and lists them under `deferred` in the targets file,
+  but the task result is 0 and nothing the Ops Sentinel reads carries them
+  (no degraded-ledger item, no status file), so a strategy deferred day after
+  day is silent. Harmless TODAY only because every served strategy trades
+  BTCUSD+ETHUSD, so any deferral defers everything and exits 2. **Before any
+  strategy whose universe is not BTCUSD+ETHUSD is served, add a Sentinel
+  channel for deferrals** (e.g. a `logs/degraded_*.json` item read by
+  `research_degraded`, the quarantine pattern).
 - **Retention (minors item 4).** After a successful publish,
   `targets-<YYYY-MM-DD>.json` files beyond the newest `KEEP_TARGETS` (30) by
   the date in the name are deleted. Never the file just written (even if a
@@ -1390,7 +1404,7 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `.json.tmp` are never touched; a file that cannot be deleted (a reader holds
   it) is printed (`could not prune ...`) and skipped. A refusal prunes nothing.
 - **Exit codes (M8):** 0 written (or nothing served; deferrals alone are
-  still 0); **2 = REFUSED** (no strategy publishable, stale or partial
+  still 0, see the Sentinel warning above); **2 = REFUSED** (no strategy publishable, stale or partial
   bar_end, a malformed CSV row, missing registry), nothing written; 1 = an
   unhandled crash (Python's own); 4 = the wrapper could not open its run log;
   124 / 125 = the task guard ended the run (wall / the task's cmd.exe

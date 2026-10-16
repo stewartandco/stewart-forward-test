@@ -570,6 +570,29 @@ def test_a_malformed_csv_row_refuses_naming_the_file_and_row(tmp_path, capsys, l
     assert "ETHUSD_1d.csv" in out and f"row {row}" in out, out
 
 
+@pytest.mark.parametrize("lines,row,why", [
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,1,1,9"], 3, "long row"),
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,1,1",
+      "2026-01-01 00:00:00,1,1,1,1,1"], 4, "duplicate date 2026-01-01 (first on row 2)"),
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,0,1"], 3, "close '0' is not positive"),
+    ([GOOD_HEAD, "2026-01-01,1,1,-1,1,1"], 2, "low '-1' is not positive"),
+])
+def test_a_long_duplicate_or_non_positive_row_refuses(tmp_path, capsys, lines, row, why):
+    """Review follow-up: a row longer than the header (DictReader's None key),
+    a second row for the same day, or a non-positive open/high/low/close
+    refuses the run naming the file and the physical row."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "ETHUSD_1d.csv").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    out = _refused(tmp_path, reg, data, capsys)
+    assert f"ETHUSD_1d.csv: row {row}: {why}" in out, out
+
+
+def test_a_zero_volume_bar_still_parses():
+    """Volume may be 0 (a quiet bar); only the prices must be positive."""
+    raw = (GOOD_HEAD + "\n2026-01-01,1,1,1,1,0\n").encode("utf-8")
+    assert S.parse_daily_csv(raw, "X_1d.csv")[0]["volume"] == 0.0
+
+
 def test_parse_daily_csv_refuses_undecodable_bytes():
     with pytest.raises(S.DataRefused, match="X_1d.csv"):
         S.parse_daily_csv(b"date,open\n\xff\xfe\n", "X_1d.csv")
