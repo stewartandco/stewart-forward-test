@@ -298,3 +298,194 @@ def test_plan_with_nothing_ready_plans_nothing():
     p = _plan_provenance(_V(), D, [], {}, {}, {})
     assert (p.refusal, p.write, p.ready, p.conflicted, p.deferred) == (
         None, None, [], [], [])
+
+
+# ---- Task 5: the write phase (design s3.5-3.6) ----
+
+from .test_gen3b import (quarantined_two_asset, race_before_lock, run_verifier,
+                         snapshots, take_back)
+from .test_quarantine_isolation import (btc_and_eth_solo,
+                                        quarantined_split_calendar_full,
+                                        restate)
+
+
+def _count_full_reads(monkeypatch):
+    """snapshot() calls, and a hard failure on any other full-chain read
+    (entries / strategy_states / the head-hash walk)."""
+    calls = []
+    real = Registry.snapshot
+
+    def counted(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    def forbidden(self, *a, **k):
+        raise AssertionError("a full chain read outside snapshot()")
+
+    monkeypatch.setattr(Registry, "snapshot", counted)
+    for name in ("entries", "strategy_states", "_head_hash"):
+        monkeypatch.setattr(Registry, name, forbidden)
+    return calls
+
+
+def test_a_date_reads_the_chain_once(tmp_path, monkeypatch):
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    calls = _count_full_reads(monkeypatch)
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    monkeypatch.undo()
+    assert len(calls) == 1
+    assert len(decisions(reg)) == 3
+
+
+def test_catch_up_over_four_dates_reads_the_chain_once(tmp_path, monkeypatch):
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    calls = _count_full_reads(monkeypatch)
+    assert _catch_up(reg, data) == 0
+    monkeypatch.undo()
+    assert len(calls) == 1
+    assert len(decisions(reg)) == 4
+
+
+def test_a_chain_moved_date_costs_one_more_read(tmp_path, monkeypatch):
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    real = quarantine_mod.run_one_date_for_catch_up
+
+    def rewrite_before_second(base, date, report, view=None, registry=None):
+        if date == "2023-01-23":
+            _rewrite_last_line(reg)
+        return real(base, date, report, view=view, registry=registry)
+
+    monkeypatch.setattr(quarantine_mod, "run_one_date_for_catch_up",
+                        rewrite_before_second)
+    calls = _count_full_reads(monkeypatch)
+    assert _catch_up(reg, data) == 1
+    monkeypatch.undo()
+    assert len(calls) == 2
+
+
+def test_simulation_runs_before_the_lock_and_the_append_inside_it(
+        tmp_path, monkeypatch):
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    lock_path = reg.log_path.parent / "logs" / "chain.lock"
+    during_sim, during_append = [], []
+    real_obs, real_app = quarantine_mod.observe_day, Registry._append_at
+
+    def obs(*a, **k):
+        during_sim.append(lock_path.exists())
+        return real_obs(*a, **k)
+
+    def app(self, snap, items):
+        during_append.append((lock_path.exists(), [t for t, _ in items]))
+        return real_app(self, snap, items)
+
+    monkeypatch.setattr(quarantine_mod, "observe_day", obs)
+    monkeypatch.setattr(Registry, "_append_at", app)
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert during_sim == [False, False]
+    assert during_append == [(True, ["quarantine_data_snapshot"]
+                              + ["quarantine_decision"] * 3)]
+
+
+def test_a_simulation_raise_writes_nothing_for_the_date(tmp_path, monkeypatch,
+                                                        capsys):
+    """Spec s3.6 / ruling R5: the second strategy's raise withholds the FIRST
+    one's rows too. The date stays owed and the run raises (exit 1)."""
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    before = reg.log_path.read_bytes()
+    real = quarantine_mod.observe_day
+    calls = []
+
+    def second_raises(spec, *x):
+        calls.append(spec["strategy_id"])
+        if len(calls) == 2:
+            raise ValueError("equity baseline is 0.0")
+        return real(spec, *x)
+
+    monkeypatch.setattr(quarantine_mod, "observe_day", second_raises)
+    with pytest.raises(ValueError, match="equity baseline"):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert len(calls) == 2
+    assert reg.log_path.read_bytes() == before
+    assert "PARTIAL WRITE" not in capsys.readouterr().err
+    monkeypatch.undo()
+    view = QuarantineView.build(reg)
+    owed = quarantine_mod._owed_dates_for_catch_up(
+        view, sorted([a["strategy_id"], b["strategy_id"]]), view.entry_dates(),
+        view.specs(), data)
+    assert "2023-01-22" in owed
+
+
+def test_a_strategy_leaving_quarantine_mid_run_raises_and_writes_nothing(
+        tmp_path, monkeypatch):
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    race_before_lock(monkeypatch, lambda: reg.record_state_change(
+        two["strategy_id"], "graveyard", "test"))
+    with pytest.raises(ValueError, match="is not in quarantine"):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    monkeypatch.undo()
+    assert decisions(reg) == []
+    assert snapshots(reg) == []
+
+
+def test_an_unlocked_append_inside_the_lock_window_is_chain_moved(
+        tmp_path, monkeypatch, capsys):
+    """The worker's alarm (CLAUDE.md Chain lock): a hand-run writer that
+    appends WITHOUT chain.lock between our tail read and our append makes
+    the date write nothing and fail."""
+    reg, spec, data = quarantined(tmp_path)
+    real = Registry.advance
+
+    def advance_then_foreign_append(self, snap, on_entry=None):
+        out = real(self, snap, on_entry=on_entry)
+        Registry.append(self, "note", {"text": "unlocked hand write"})
+        return out
+
+    monkeypatch.setattr(Registry, "advance", advance_then_foreign_append)
+    with pytest.raises(ChainMoved):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    monkeypatch.undo()
+    assert "CHAIN MOVED" in capsys.readouterr().err
+    assert decisions(reg) == [] and snapshots(reg) == []
+    assert [e["entry_type"] for e in reg.entries()][-1] == "note"
+
+
+def test_a_row_chained_before_the_run_is_skipped_uncompared(tmp_path, capsys):
+    """Ruling R3 / Review Focus 3: a row already on the chain at the run's
+    one read is skipped exactly as today's pre-filter skipped it -- even if
+    today's recomputation differs -- and only the missing cell records."""
+    reg, spec, data = quarantined_two_asset(tmp_path)
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    assert quarantine_run(argv) == 0
+    gone = {p["asset"]: p for _, p in take_back(reg, 2)}
+    btc, eth = gone["BTCUSD"], gone["ETHUSD"]
+    reg.append("quarantine_decision", dict(btc, equity=7.25))
+    capsys.readouterr()
+    assert quarantine_run(argv) == 0
+    rows = {r["asset"]: r for r in decisions(reg)}
+    assert rows["BTCUSD"]["equity"] == 7.25 and rows["ETHUSD"] == eth
+    assert "1 decision(s) chained, 1 already present" in capsys.readouterr().out
+
+
+def test_a_restated_strategy_is_not_simulated(tmp_path, monkeypatch, capsys):
+    """Review Focus 5: the pre-lock plan drops it before simulation; the
+    under-lock plan still defers it with today's lines."""
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    simulated = []
+    real = quarantine_mod.observe_day
+    monkeypatch.setattr(quarantine_mod, "observe_day",
+                        lambda s, *x: simulated.append(s["strategy_id"]) or real(s, *x))
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert simulated == [spec["strategy_id"]]
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err
+    assert f"{two['strategy_id']}  deferred:" in cap.out
+
+
+def test_a_fast_path_day_verifies(tmp_path):
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-23")) == 0
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
