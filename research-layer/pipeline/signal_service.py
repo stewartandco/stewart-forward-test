@@ -12,16 +12,30 @@ holds through the next bar, sized exactly as the engine sizes it.
 FRESHNESS (fix round 1, I-1): every asset a served strategy names must end on
 the SAME last bar date (bar_end). An asset whose CSV is missing, empty or ends
 earlier makes the run REFUSE: it prints every asset's last date, writes
-nothing and exits 1, so the executor holds (its 26 h rule) and the Sentinel
-sees task 31 fail. A lagging asset is never published as flat or omitted --
-the same case quarantine.observe_day refuses ("no <asset> bar for <date>").
+nothing and exits REFUSED_EXIT (2), so the executor holds (its 26 h rule) and
+the Sentinel sees task 31 fail. A lagging asset is never published as flat or
+omitted -- the same case quarantine.observe_day refuses ("no <asset> bar for
+<date>").
+
+NOTHING FRESH IS A REFUSAL TOO (fix wave, I2): bar_end must be at least the
+bar that closed at the start of the UTC day (`--as-of` - 1 day; `--as-of`
+defaults to the UTC date today), so uniformly stale data never rewrites an
+old targets file and exits 0. A registry file that does not exist refuses
+too (Registry.snapshot would read it as an empty chain: "nothing written",
+exit 0). Exit codes: 0 written (or nothing served on an existing chain),
+REFUSED_EXIT = 2 for every refusal, 1 = an unhandled crash (Python's own).
+
+The module is NOT named signal.py (fix wave, C1): run by path, a pipeline/
+script puts pipeline/ first on sys.path, and a pipeline/signal.py shadowed
+the stdlib `signal` that subprocess imports, so taskguard.py died before it
+started. test_signal_service pins every pipeline/ stem off the stdlib names.
 
 Each CSV is read ONCE: data_digest is the sha256 of exactly the bytes the bars
 were parsed from (M-1), with screen.load_bars' parsing rules (test-pinned).
 
 Usage (from research-layer/):
-    python -m pipeline.signal [--registry registry_log.jsonl] [--data-dir data]
-                              [--out-dir logs/signals]
+    python -m pipeline.signal_service [--registry registry_log.jsonl]
+        [--data-dir data] [--out-dir logs/signals] [--as-of YYYY-MM-DD]
 """
 from __future__ import annotations
 
@@ -32,6 +46,7 @@ import hashlib
 import io
 import json
 import os
+import time
 from pathlib import Path
 
 from . import cells
@@ -39,6 +54,9 @@ from .engine import ENGINE_REV, simulate_asset
 from .registry import Registry
 
 STATES = {"quarantine", "live"}
+REFUSED_EXIT = 2          # every refusal; an unhandled crash exits 1
+REPLACE_RETRIES = 8       # os.replace retries on PermissionError (a Windows reader)
+REPLACE_SLEEP_S = 0.25
 
 
 def _synthetic_next(bars: list[dict]) -> dict:
@@ -71,7 +89,7 @@ class DataRefused(Exception):
 def parse_daily_csv(raw: bytes) -> list[dict]:
     """screen.load_bars' parse, from bytes already read (cutoff = everything),
     with each date cut to its date part as quarantine._daily_bars does.
-    test_signal pins it equal to load_bars on the same file."""
+    test_signal_service pins it equal to load_bars on the same file."""
     bars = []
     for row in csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=None)):
         bars.append({"date": row["date"], "open": float(row["open"]),
@@ -109,17 +127,49 @@ def load_assets(data_dir: Path, users: dict[str, list[str]]) -> tuple[str, dict,
     return bar_end, bars_by, sha_by
 
 
+def check_fresh(bar_end: str, as_of: dt.date) -> None:
+    """I2: refuse unless bar_end is at least the daily bar that closed at the
+    start of `as_of` (UTC), i.e. as_of - 1 day."""
+    want = as_of - dt.timedelta(days=1)
+    if dt.date.fromisoformat(bar_end) < want:
+        raise DataRefused(f"stale: bar_end {bar_end} is older than {want.isoformat()}, "
+                          f"the bar that closed at the start of {as_of.isoformat()} UTC")
+
+
+def _utc_today() -> dt.date:
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
+def _publish(tmp: Path, path: Path) -> None:
+    """os.replace, retried REPLACE_RETRIES times on PermissionError (Windows
+    refuses the replace while a reader holds the target open), then raised."""
+    for attempt in range(REPLACE_RETRIES + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_RETRIES:
+                raise
+            time.sleep(REPLACE_SLEEP_S)
+
+
 def _spec_sha(spec: dict) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def run(argv=None) -> int:
     here = Path(__file__).resolve().parent.parent
-    ap = argparse.ArgumentParser(prog="pipeline.signal")
+    ap = argparse.ArgumentParser(prog="pipeline.signal_service")
     ap.add_argument("--registry", type=Path, default=here / "registry_log.jsonl")
     ap.add_argument("--data-dir", type=Path, default=here / "data")
     ap.add_argument("--out-dir", type=Path, default=here / "logs" / "signals")
+    ap.add_argument("--as-of", type=dt.date.fromisoformat, default=None,
+                    help="UTC date of the run (default: today UTC); bar_end must be >= this - 1 day")
     a = ap.parse_args(argv)
+    as_of = a.as_of or _utc_today()
+    if not a.registry.is_file():
+        print(f"REFUSED (nothing written): no registry file {a.registry}")
+        return REFUSED_EXIT
     specs, max_dd = {}, {}
 
     def on_entry(e):
@@ -143,9 +193,10 @@ def run(argv=None) -> int:
             users.setdefault(asset, []).append(sid)
     try:
         bar_end, bars_by, digest = load_assets(a.data_dir, users)
+        check_fresh(bar_end, as_of)
     except DataRefused as exc:
         print(f"REFUSED (nothing written): {exc}")
-        return 1
+        return REFUSED_EXIT
     out = {}
     for sid, spec in served.items():
         assets = {x: next_bar_position(spec, bars_by[x]) for x in spec["universe"]["assets"]}
@@ -158,7 +209,7 @@ def run(argv=None) -> int:
     tmp = path.with_suffix(".json.tmp")
     try:
         tmp.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)          # the executor never sees a torn file
+        _publish(tmp, path)            # the executor never sees a torn file
     finally:
         if tmp.exists():
             tmp.unlink()

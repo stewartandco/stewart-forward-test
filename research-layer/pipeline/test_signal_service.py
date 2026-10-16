@@ -1,4 +1,5 @@
-"""Build 4a task 7: the read-only next-bar signal service (pipeline/signal.py).
+"""Build 4a task 7: the read-only next-bar signal service
+(pipeline/signal_service.py; renamed from signal.py in the fix wave, C1).
 
 SPEC is a verbatim copy of ONE real strategy_registered payload (strategy
 9b6753a48c4d0ccd, crypto 1d, state quarantine on a 2026-10-16 copy of the
@@ -12,11 +13,14 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from pipeline import signal as S
+from pipeline import signal_service as S
 from pipeline.engine import simulate_asset
 from pipeline.registry import Registry
 from pipeline.screen import load_bars
@@ -161,9 +165,12 @@ def _tree(root: Path) -> dict:
             for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _argv(tmp_path, reg, data):
+def _argv(tmp_path, reg, data, as_of=None):
+    # default: the run's UTC day is the day after the fixture's last bar,
+    # i.e. that bar is the one that closed at the start of the day (fresh)
+    as_of = as_of or _next(_bars(_fixture_series()))
     return ["--registry", str(reg.log_path), "--data-dir", str(data),
-            "--out-dir", str(tmp_path / "logs" / "signals")]
+            "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", as_of]
 
 
 def test_the_service_never_writes_the_chain(tmp_path, capsys):
@@ -231,11 +238,11 @@ def test_nothing_to_serve_writes_nothing(tmp_path):
 
 # ---------------- fix round 1: freshness, one read per file ----------------
 
-def _refused(tmp_path, reg, data, capsys):
+def _refused(tmp_path, reg, data, capsys, as_of=None):
     before = _tree(tmp_path)
-    rc = S.run(_argv(tmp_path, reg, data))
+    rc = S.run(_argv(tmp_path, reg, data, as_of))
     out = capsys.readouterr().out
-    assert rc != 0
+    assert rc == S.REFUSED_EXIT == 2                         # M8: a refusal is 2, a crash 1
     assert _tree(tmp_path) == before                         # nothing written, anywhere
     assert not (tmp_path / "logs").exists()
     return out
@@ -307,3 +314,149 @@ def test_parse_daily_csv_matches_load_bars(tmp_path):
     got = S.parse_daily_csv(raw)
     assert got == ref
     assert [b["date"] for b in got] == ["2026-01-01", "2026-01-02", "2026-01-03"]
+
+
+def test_parse_daily_csv_matches_load_bars_with_a_blank_line_and_reordered_columns(tmp_path):
+    """Columns are read by NAME (an extra column is ignored, order does not
+    matter) and a blank line is skipped, exactly as load_bars does."""
+    rows = ["volume,close,extra,date,low,high,open",
+            "20,2.25,x,2026-01-02,1.5,2.5,2.0",
+            "",
+            "10,1.25,y,2026-01-01,0.5,1.5,1.0"]
+    raw = ("\n".join(rows) + "\n").encode("utf-8")
+    (tmp_path / "XUSD_1d.csv").write_bytes(raw)
+    ref = load_bars(tmp_path, "XUSD", "9999-12-31")
+    got = S.parse_daily_csv(raw)
+    assert got == ref
+    assert got == [
+        {"date": "2026-01-01", "open": 1.0, "high": 1.5, "low": 0.5, "close": 1.25, "volume": 10.0},
+        {"date": "2026-01-02", "open": 2.0, "high": 2.5, "low": 1.5, "close": 2.25, "volume": 20.0}]
+
+
+# ---------------- fix wave: C1 (stdlib shadowing) --------------------------
+
+PIPELINE = Path(__file__).resolve().parent
+
+
+def test_no_pipeline_module_shadows_a_stdlib_module():
+    """C1: run by path, a pipeline/ script puts pipeline/ first on sys.path;
+    pipeline/signal.py shadowed the stdlib `signal` that subprocess imports."""
+    clash = sorted(p.name for p in PIPELINE.glob("*.py") if p.stem in sys.stdlib_module_names)
+    assert clash == []
+
+
+def test_taskguard_runs_by_path():
+    """C1: trading-systems' run_executor.bat runs pipeline/taskguard.py BY
+    PATH; with a pipeline/signal.py present it died importing subprocess."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run([sys.executable, str(PIPELINE / "taskguard.py"), "--help"],
+                       cwd=str(PIPELINE.parent.parent), env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "usage" in r.stdout, (r.stdout, r.stderr)
+
+
+# ---------------- fix wave: I2 (nothing fresh = refused), M8, M6 -----------
+
+def test_uniformly_stale_data_refuses_and_writes_nothing(tmp_path, capsys):
+    """I2(a): every asset ends on the same, but old, bar: never rewrite an old
+    targets file and exit 0."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    out = _refused(tmp_path, reg, data, capsys, as_of=(last + dt.timedelta(days=2)).isoformat())
+    assert "stale" in out and bars[-1]["date"] in out
+
+
+def test_the_bar_that_closed_at_the_start_of_the_day_is_fresh(tmp_path):
+    """I2 boundary: as_of = bar_end + 1 day publishes; as_of = bar_end too."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    for days in (1, 0):
+        assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=days)).isoformat())) == 0
+    assert (tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json").exists()
+
+
+def test_as_of_defaults_to_the_utc_date(tmp_path, monkeypatch):
+    reg, data, bars = _fixture_layer(tmp_path)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    argv = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--out-dir", str(tmp_path / "logs" / "signals")]
+    monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=2))
+    assert S.run(argv) == 2
+    assert not (tmp_path / "logs").exists()
+    monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=1))
+    assert S.run(argv) == 0
+
+
+def test_utc_today_is_the_utc_date():
+    assert S._utc_today() == dt.datetime.now(dt.timezone.utc).date()
+
+
+def test_a_missing_registry_refuses_and_writes_nothing(tmp_path, capsys):
+    """I2(b): a missing registry_log.jsonl is not an empty chain."""
+    _, data, _ = _fixture_layer(tmp_path)
+    missing = tmp_path / "nope" / "registry_log.jsonl"
+    before = _tree(tmp_path)
+    rc = S.run(["--registry", str(missing), "--data-dir", str(data),
+                "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"])
+    assert rc == 2
+    assert "no registry file" in capsys.readouterr().out
+    assert _tree(tmp_path) == before and not (tmp_path / "logs").exists()
+
+
+def test_the_module_exits_2_on_a_refusal(tmp_path):
+    """M8 end to end, as the wrapper runs it: `python -m pipeline.signal_service`."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    r = subprocess.run([sys.executable, "-m", "pipeline.signal_service",
+                        "--registry", str(tmp_path / "registry_log.jsonl"),
+                        "--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "out")],
+                       cwd=str(PIPELINE.parent), env=env, capture_output=True, text=True,
+                       timeout=120)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSED" in r.stdout and not (tmp_path / "out").exists()
+
+
+def _replace_failing(n, calls):
+    real = os.replace
+
+    def fake(src, dst):
+        calls.append(dst)
+        if len(calls) <= n:
+            raise PermissionError(13, "in use by another process")
+        return real(src, dst)
+    return fake
+
+
+def test_publish_retries_a_held_target(tmp_path, monkeypatch):
+    """M6: Windows refuses the replace while the executor reads the file; the
+    publish retries (short sleeps) and succeeds."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    calls, sleeps = [], []
+    monkeypatch.setattr(S.os, "replace", _replace_failing(S.REPLACE_RETRIES, calls))
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    assert len(calls) == S.REPLACE_RETRIES + 1 == 9
+    assert sleeps == [S.REPLACE_SLEEP_S] * 8 and 0 < S.REPLACE_SLEEP_S <= 1
+    out = tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json"
+    assert json.loads(out.read_text(encoding="utf-8"))["bar_end"] == bars[-1]["date"]
+    assert sorted(p.name for p in out.parent.iterdir()) == [out.name]
+
+
+def test_publish_gives_up_after_the_retries(tmp_path, monkeypatch):
+    """M6: past the retries it raises (a crash, exit 1) and leaves the previous
+    targets file whole and no tmp behind."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    out = tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json"
+    out.parent.mkdir(parents=True)
+    out.write_text('{"previous": true}', encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(S.os, "replace", _replace_failing(10 ** 6, calls))
+    monkeypatch.setattr(S.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        S.run(_argv(tmp_path, reg, data))
+    monkeypatch.undo()
+    assert len(calls) == S.REPLACE_RETRIES + 1
+    assert json.loads(out.read_text(encoding="utf-8")) == {"previous": True}
+    assert sorted(p.name for p in out.parent.iterdir()) == [out.name]
