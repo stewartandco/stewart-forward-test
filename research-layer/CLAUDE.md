@@ -28,8 +28,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   measurement that motivated the change: overnight runs on 2026-10-01/02
   wrote 0 verdicts each while evaluating 48-120. **The retries rescue only
   SHORT holds** (scanner/inbox card batches and similar). Until 2026-10-08
-  the loop's screen stage held chain.lock for hours overnight; a long
-  quarantine catch-up still holds it for minutes per date. Holds that long
+  the loop's screen stage held chain.lock for hours overnight; a quarantine
+  date holds it for a tail read plus one append since 2026-10-16 (max 0.33 s
+  measured). Before that fast path, holds of minutes per date. Holds that long
   leave whole runs with `deferred_lock` equal to their evaluated count; the
   results are discarded at the end of the run and the next run re-evaluates
   those candidates. So the retries alone did NOT fix the overnight
@@ -255,7 +256,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   hazard: each date re-simulates the cell from bar 0 (measured in the
   2026-10-15 rehearsal: ~145 s pure simulation per 1h vol-percentile
   strategy-day, ~175 s per strategy-day including chain I/O, at today's
-  O(n x 365 x bars_per_day) percentile),
+  O(n x 365 x bars_per_day) percentile; chain I/O removed from that figure
+  by the 2026-10-16 fast path; simulation still runs per date, now outside
+  chain.lock),
   and the whole intraday file is read per strategy per catch-up or
   review and once per date per cell (`_load_cell_bars`); bounded only by
   the 2b-3 incremental percentile, so cost it before activating. Proof:
@@ -1275,8 +1278,49 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   so a calendar-gap date is never retried forever.
 - A failed date never strands later ones (exceptions included) but makes the
   run exit 1; the wrapper STILL commits what was recorded, then exits 1.
-- Cost: ~4-7 min per date on the 2026-09 chain (each date re-reads the chain
-  and re-simulates only the strategies that still owe it, rule 1). Steady state is one or two dates a day.
+- Cost: measured in the 2026-10-16 replay on a copy of the live chain (cut at
+  129,001 entries, just before that day's 08:20 daily): a `--date` pass of
+  196 rows now takes about 2.5 min (148 s, chain.lock held 0.08 s; was 1,244 s
+  with the lock held 1,230 s). A `--catch-up` date can still take tens of
+  minutes: 490 rows took 2,308 s with the lock held 0.33 s (was 3,954 s / 3,818
+  s), because the remaining ~4.7 s per row is strategy simulation and
+  price-file reads, not chain I/O. Whole replay 86.6 min old, 40.9 min new;
+  old and new appended identical entries (688: 686 rows, 1 base snapshot, 1
+  supplement) and both chains are VALID. Only strategies that still owe a row
+  are simulated (rule 1). Steady state is one or two dates a day. Since the
+  2026-10-16 fast path (`docs/2026-10-16-quarantine-fastpath-design.md`) a run
+  reads the chain ONCE (`pipeline/quarantine_view.py`, `QuarantineView`) and
+  catch-up shares that read across its dates; each date simulates BEFORE
+  taking chain.lock and holds it for a tail read plus one append (measured max
+  hold 0.33 s on the 2026-10-16 replay, against 4 h 27 min for the
+  2026-10-15 daily, 382 rows). `Registry.advance(snap, on_entry=None)` gained
+  the callback that keeps the view current. A chain.lock already held by a
+  live holder is probed BEFORE simulation (`ChainLock.info()` plus
+  `holder_alive()`): the date defers with exit 0 and the unchanged
+  `deferred_lock` line, without simulating; the acquire-time check stays as
+  the backstop.
+- **A date is all or nothing (2026-10-16).** A raise in simulation or
+  validation, a `ChainMoved` (an unlocked writer, or a rewritten log:
+  `CHAIN MOVED:` on stderr), or a strategy that left quarantine while the run
+  simulated writes NOTHING for the date; it stays owed and the run exits 1.
+  The old `PARTIAL WRITE` path is gone. In catch-up a `ChainMoved` date
+  rebuilds the view with a fresh read and the later dates still run. A
+  supplement that lands while the run simulates is ordinary coverage (rule 2
+  if it disagrees), not a refusal. As built: a `ChainMoved` BEFORE the date's
+  single append prints `CHAIN MOVED: ...; nothing written for <date>` and
+  exits 1. A `ChainMoved` from the tail read right AFTER a successful append
+  prints the row lines and summary, then `CHAIN MOVED after the write: the N
+  entries above for <date> WERE chained ...`, and exits 1 (the date IS
+  recorded). A row already on the chain at the run's one read is skipped
+  without comparison, as before; a row that lands while the run simulates is
+  compared (identical: skipped and counted; different:
+  `DuplicateQuarantineDecision`, nothing written). A supplement that
+  disagrees with this run's bars defers the owing strategies, exit 0; it was
+  a REFUSED exit 1 before (behaviour change accepted by Coen 2026-10-16).
+- Tools and tests: `tools/quarantine_replay.py` (subcommands `prefix`, `run`,
+  `compare`) replays the daily and catch-up on a COPY of the chain cut at a
+  prefix; read-only against the live chain, never scheduled. Tests:
+  `test_quarantine_fastpath.py`, `tools/test_quarantine_replay.py`.
 - Backfilled rows stay visible as backfills in `--review` (write time vs bar
   date); catch-up records every owed strategy alike, so it is a schedule,
   never a selection.
