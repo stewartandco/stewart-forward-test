@@ -1372,10 +1372,71 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `morpheus-hub/tasks/xml/26_LiveGateWeekly.xml` in the same pass.
 - **LIVE is a lifecycle state, not capital** (the note's own words). Money at
   risk stays Coen's separate decision; nothing here can construct a
-  `RouterConfig(mode="live")` in trading-systems, and nothing should.
+  `RouterConfig(mode="live")` in trading-systems, and nothing should;
+  `pipeline/signal_service.py` (build 4a) only writes next-bar targets to
+  logs/signals/ for the trading-systems executor (section below).
 - Reachability, from the note: graduation is a MULTI-YEAR proposition
   (Sharpe 1.3 ~ 587 days best case). Do not read a slow record as a weak
   strategy; it may be a large cohort.
+
+## Signal service (build 4a, 31_SignalService)
+- `python -m pipeline.signal_service` (wrapper `tasks/run_signal_service.bat`, task
+  `\Morpheus\31_SignalService`, daily 08:45, after the 08:20 quarantine
+  daily) writes `logs/signals/targets-<bar_end>.json` for every crypto 1d
+  strategy in state `quarantine` or `live`: `{bar_end, engine_rev,
+  data_digest {asset: sha256 of data/<asset>_1d.csv}, written_utc,
+  strategies {sid: {spec_sha, max_dd (the screened verdict's, or null),
+  assets {asset: {side long|short|flat, frac}}}}}`. The trading-systems
+  executor reads exactly this shape; change it only together with the
+  executor.
+- **READ-ONLY.** One `Registry.snapshot()` read (complete lines only), never
+  an append, never `logs/chain.lock`, never data/, never git. The file is
+  published by `os.replace` from a `.json.tmp`, so the executor never reads a
+  torn file. logs/ is gitignored: a targets file is never committed.
+- **P1, the synthetic next bar:** entries (and time / declared exits) fill at
+  the NEXT open from the last close's decision, so a plain run cannot see a
+  decision taken on the last close. `next_bar_position` appends one flat bar
+  (open = high = low = close = the last close) and reads the engine's own
+  position after it, with periods per year and version derived exactly as
+  `quarantine.observe_day` does. An intrabar stop/target on the next bar is
+  by construction not foreseen. Edge case: the engine checks barriers only
+  after the entry bar, so a position entered at D's open whose stop/target
+  D's close already crossed is predicted FLAT (the synthetic open gaps
+  through the level); the real D+1 could still hold if it gapped back
+  without touching the level. That is not in the parity check's excused
+  class (stop/target exits) and was not observed there (3656 compared,
+  2026-10-16). Tests: `test_signal_service.py`.
+- **Every served asset must end on bar_end (fix round 1).** Each
+  `data/<asset>_1d.csv` is read ONCE; `data_digest` is the sha256 of exactly
+  the bytes the bars were parsed from (`parse_daily_csv` = `screen.load_bars`'
+  parse, test-pinned). bar_end is the latest last-bar date; if any served
+  asset's file is missing (the error names the asset and every strategy that
+  trades it), empty, or ends earlier, the run prints every asset's last date,
+  writes NOTHING and exits 2 -- never a flat or omitted asset under a fresh
+  bar_end. The executor then holds (its 26 h rule) and the Sentinel sees
+  task 31 fail. Same case `quarantine.observe_day` refuses.
+- **Nothing fresh is a refusal too (fix wave, I2).** bar_end must be at least
+  the daily bar that closed at the start of the run's UTC day (`--as-of` - 1
+  day; `--as-of YYYY-MM-DD` defaults to the UTC date today and exists for
+  tests). Uniformly stale data (every asset on the same OLD bar) therefore
+  refuses instead of rewriting an old targets file and exiting 0. A missing
+  registry file refuses too: `Registry.snapshot` reads a missing file as an
+  empty chain, which used to print "nothing written" and exit 0. An existing
+  chain with nothing in quarantine/live still exits 0.
+- **Exit codes (M8):** 0 written (or nothing served); **2 = REFUSED** (lagging,
+  missing or empty asset file; stale bar_end; missing registry), nothing
+  written; 1 = an unhandled crash (Python's own); 4 = the wrapper could not
+  open its run log. The publish's `os.replace` is retried up to 8 times
+  (0.25 s apart) on PermissionError, which Windows raises while a reader
+  holds the target open, then raises (exit 1).
+- **The module is `signal_service.py`, NEVER `signal.py` (fix wave, C1).**
+  A script run BY PATH puts its own directory first on sys.path, and
+  trading-systems' `run_executor.bat` runs `pipeline\taskguard.py` by path:
+  a `pipeline/signal.py` shadowed the stdlib `signal` that `subprocess`
+  imports, so the guard died (ImportError) before it started. No
+  `pipeline/*.py` may share a name with a stdlib module
+  (`sys.stdlib_module_names`); `test_signal_service.py` pins it and runs
+  `taskguard.py --help` by path.
 
 ## Triage escalations -- REMOVED by D44 (2026-09-26)
 - The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone
