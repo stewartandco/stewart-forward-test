@@ -323,7 +323,11 @@ def _plan_provenance(view, date: str, ready: list[str],
     addendum): covered-but-different defers the strategies that trade the
     asset, and the cells the kept strategies need that nothing covers yet
     get a supplement. Coverage is the base then supplements in chain order,
-    first writer wins (merged_bars_coverage)."""
+    first writer wins (merged_bars_coverage). An empty `ready` plans nothing;
+    "every owing strategy deferred" is `conflicted` non-empty with `ready`
+    empty."""
+    if not ready:
+        return _Provenance()
     recorded = view.snapshots().get(date)
     sups = view.supplements().get(date, [])
     if recorded is None and not sups:

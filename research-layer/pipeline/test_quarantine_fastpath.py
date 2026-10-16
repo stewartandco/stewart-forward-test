@@ -281,8 +281,20 @@ def test_plan_counts_supplement_coverage_first_writer_wins():
 
 
 def test_plan_does_not_supplement_assets_of_deferred_strategies():
+    specs = {**SPECS, "X": _sp("BTCUSD", "SOLUSD")}
     base = {"bars_sha256": {"BTCUSD": H["e"]}}
-    p = _plan_provenance(_V(snaps={D: base}), D, ["AB"], SPECS,
-                         {"BTCUSD": H["a"], "ETHUSD": H["b"]},
-                         {"BTCUSD": H["c"], "ETHUSD": H["d"]})
-    assert p.ready == [] and p.write is None
+    p = _plan_provenance(_V(snaps={D: base}), D, ["B", "X"], specs,
+                         {"BTCUSD": H["a"], "ETHUSD": H["b"], "SOLUSD": H["c"]},
+                         {"BTCUSD": H["d"], "ETHUSD": H["e"], "SOLUSD": H["f"]})
+    assert p.ready == ["B"]
+    assert [s for s, _ in p.deferred] == ["X"]
+    assert p.conflicted == ["BTCUSD"]
+    assert p.write == ("quarantine_data_snapshot_supplement", {
+        "date": D, "data_sha256": {"ETHUSD": H["e"]},
+        "bars_sha256": {"ETHUSD": H["b"]}})
+
+
+def test_plan_with_nothing_ready_plans_nothing():
+    p = _plan_provenance(_V(), D, [], {}, {}, {})
+    assert (p.refusal, p.write, p.ready, p.conflicted, p.deferred) == (
+        None, None, [], [], [])
