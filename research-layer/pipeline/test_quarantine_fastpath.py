@@ -418,10 +418,11 @@ def test_a_simulation_raise_writes_nothing_for_the_date(tmp_path, monkeypatch,
 def test_a_strategy_leaving_quarantine_mid_run_raises_and_writes_nothing(
         tmp_path, monkeypatch):
     reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
-    race_before_lock(monkeypatch, lambda: reg.record_state_change(
+    fired = race_before_lock(monkeypatch, lambda: reg.record_state_change(
         two["strategy_id"], "graveyard", "test"))
     with pytest.raises(ValueError, match="is not in quarantine"):
         quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert fired == [1]
     monkeypatch.undo()
     assert decisions(reg) == []
     assert snapshots(reg) == []
@@ -489,3 +490,108 @@ def test_a_fast_path_day_verifies(tmp_path):
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-23")) == 0
     out = run_verifier(reg.log_path)
     assert out.returncode == 0, out.stdout
+
+
+# ---- Task 5 fix round 1 ----
+
+def test_a_chain_moved_after_the_append_reports_what_landed(
+        tmp_path, monkeypatch, capsys):
+    """The post-append advance is the only ChainMoved that can strike AFTER
+    the date's entries are on the chain: the message must say they WERE
+    chained, never 'nothing written', and the run still fails loudly. On a
+    plain --date run the view is built by snapshot(), so advance() call 1 is
+    the under-lock one and call 2 the post-append one."""
+    reg, spec, data = quarantined(tmp_path)
+    real = Registry.advance
+    calls = []
+
+    def second_call_moves(self, snap, on_entry=None):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ChainMoved("forced")
+        return real(self, snap, on_entry=on_entry)
+
+    monkeypatch.setattr(Registry, "advance", second_call_moves)
+    report = quarantine_mod.DateReport()
+    with pytest.raises(ChainMoved):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                       report=report)
+    monkeypatch.undo()
+    assert len(calls) == 2
+    assert len(decisions(reg)) == 1
+    assert len(snapshots(reg)) == 1
+    cap = capsys.readouterr()
+    assert "WERE chained" in cap.err
+    assert "nothing written" not in cap.err
+    assert "1 decision(s) chained" in cap.out
+    assert report.unchecked is True
+
+
+def test_a_plan_that_changes_under_the_lock_refuses_and_writes_nothing(
+        tmp_path, monkeypatch, capsys):
+    reg, spec, two, data = quarantined_split_calendar_full(tmp_path)
+    before = reg.log_path.read_bytes()
+    real = quarantine_mod._plan_provenance
+    calls = []
+
+    def plan(view, date, ready, specs, bars_digests, data_digests):
+        out = real(view, date, ready, specs, bars_digests, data_digests)
+        calls.append(1)
+        if len(calls) == 2:
+            out.ready = list(out.ready) + ["ghost"]
+        return out
+
+    monkeypatch.setattr(quarantine_mod, "_plan_provenance", plan)
+    report = quarantine_mod.DateReport()
+    rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                        report=report)
+    monkeypatch.undo()
+    assert rc == 1
+    assert len(calls) == 2
+    assert "without being simulated" in capsys.readouterr().err
+    assert reg.log_path.read_bytes() == before
+    assert report.unchecked is True
+
+
+def test_a_pre_lock_refusal_simulates_nothing(tmp_path, monkeypatch, capsys):
+    """Ruling R7: a refusal the pre-lock plan already knows simulates nothing;
+    the plan under the lock refuses again."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.append("quarantine_data_snapshot_supplement",
+               snap_payload(data, ["BTCUSD"]))
+    simulated = []
+    real = quarantine_mod.observe_day
+    monkeypatch.setattr(quarantine_mod, "observe_day",
+                        lambda *a, **k: simulated.append(1) or real(*a, **k))
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    assert "has supplement provenance but no base" in capsys.readouterr().err
+    assert simulated == []
+
+
+def test_a_held_lock_defers_before_simulating(tmp_path, monkeypatch, capsys):
+    """A held chain.lock no longer costs a whole date's simulation: the
+    polite deferral (exit 0) comes first, and a simulation that would raise
+    does not pre-empt it."""
+    from .chainlock import ChainLock
+    reg, spec, data = quarantined(tmp_path)
+    simulated = []
+    real = quarantine_mod.observe_day
+    monkeypatch.setattr(quarantine_mod, "observe_day",
+                        lambda *a, **k: simulated.append(1) or real(*a, **k))
+    before = reg.log_path.read_bytes()
+    other = ChainLock(reg.log_path.parent / "logs", holder="session",
+                      purpose="manual work")
+    other.acquire()
+    try:
+        report = quarantine_mod.DateReport()
+        rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                            report=report)
+    finally:
+        other.release()
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "deferred_lock" in cap.out and "--date 2023-01-22" in cap.out
+    assert simulated == []
+    assert report.unchecked is True
+    assert reg.log_path.read_bytes() == before

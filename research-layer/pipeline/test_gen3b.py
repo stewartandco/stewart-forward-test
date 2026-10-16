@@ -589,7 +589,8 @@ def race_before_lock(monkeypatch, append):
     """Run `append()` ONCE, just before the recorder takes chain.lock: the
     window the 2026-10-16 fast path opens between its one chain read and its
     write (simulation runs in it). Another writer that respects chain.lock
-    can only land there."""
+    can only land there. Returns the `fired` list: a test asserts it is
+    non-empty, so a race that never ran cannot pass silently."""
     real = quarantine_mod.ChainLock
     fired = []
 
@@ -601,6 +602,7 @@ def race_before_lock(monkeypatch, append):
             super().acquire()
 
     monkeypatch.setattr(quarantine_mod, "ChainLock", Racy)
+    return fired
 
 
 def test_decision_row_shape_and_values_on_entry_day(tmp_path):
@@ -915,10 +917,11 @@ def test_a_concurrent_writer_is_absorbed_not_crashed(tmp_path, capsys,
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
     landed = take_back(reg, 2)                    # the snapshot and the row
-    race_before_lock(monkeypatch,
+    fired = race_before_lock(monkeypatch,
                      lambda: [reg.append(t, p) for t, p in landed])
     capsys.readouterr()
     rc = quarantine_run(argv)
+    assert fired == [1]
     assert rc == 0
     assert len(decisions(reg)) == 1
     assert len(snapshots(reg)) == 1
@@ -1156,10 +1159,11 @@ def test_a_duplicate_with_different_content_is_fatal(tmp_path, capsys,
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
     [(_, row)] = take_back(reg, 1)
-    race_before_lock(monkeypatch, lambda: reg.append(
+    fired = race_before_lock(monkeypatch, lambda: reg.append(
         "quarantine_decision", dict(row, equity=9.9999)))
     with pytest.raises(DuplicateQuarantineDecision):
         quarantine_run(argv)
+    assert fired == [1]
     assert [r["equity"] for r in decisions(reg)] == [9.9999]
 
 
@@ -1171,10 +1175,11 @@ def test_an_identical_duplicate_is_still_absorbed(tmp_path, capsys,
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
     [(_, row)] = take_back(reg, 1)
-    race_before_lock(monkeypatch,
+    fired = race_before_lock(monkeypatch,
                      lambda: reg.append("quarantine_decision", row))
     capsys.readouterr()
     rc = quarantine_run(argv)
+    assert fired == [1]
     assert rc == 0
     assert len(decisions(reg)) == 1
     assert "0 decision(s) chained, 1 already present" in capsys.readouterr().out
@@ -1297,10 +1302,11 @@ def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
     be repaired. The writer's check therefore runs under the same lock as the
     append, and the loser reconciles against what landed."""
     reg, spec, data = quarantined(tmp_path)
-    race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
         snap_payload(data, ["BTCUSD"])))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     assert len(snapshots(reg)) == 1
     assert len(decisions(reg)) == 1
 
@@ -1312,10 +1318,11 @@ def test_a_conflicting_concurrent_snapshot_defers_its_strategy(tmp_path, capsys,
     (rule 2) the owing strategy is deferred (RESTATED, exit 0) rather than the
     day refused."""
     reg, spec, data = quarantined(tmp_path)
-    race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
         dict(snap_payload(data, ["BTCUSD"]), bars_sha256={"BTCUSD": "b" * 64})))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     cap = capsys.readouterr()
     assert "RESTATED" in cap.err
     assert f"{spec['strategy_id']}  deferred:" in cap.out
@@ -2117,10 +2124,11 @@ def test_an_identical_concurrent_supplement_is_reconciled(tmp_path, capsys,
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
     extend_ethusd(data)
-    race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
         snap_payload(data, ["ETHUSD"])))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     assert len(supplements(reg)) == 1
     assert len(decisions(reg)) == 3
 
@@ -2134,10 +2142,11 @@ def test_a_conflicting_concurrent_supplement_defers_its_strategy(
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
     extend_ethusd(data)
-    race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
         dict(snap_payload(data, ["ETHUSD"]), bars_sha256={"ETHUSD": "e" * 64})))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     cap = capsys.readouterr()
     assert "RESTATED" in cap.err
     assert f"{two['strategy_id']}  deferred:" in cap.out
@@ -2241,9 +2250,10 @@ def test_a_base_and_supplement_landing_before_the_lock_are_reconciled(
         reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
         reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
 
-    race_before_lock(monkeypatch, other_run)
+    fired = race_before_lock(monkeypatch, other_run)
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     assert len(decisions(reg)) == 3
     assert len(snapshots(reg)) == 1
     assert len(supplements(reg)) == 1

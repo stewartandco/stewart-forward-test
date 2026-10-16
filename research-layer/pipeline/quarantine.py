@@ -63,8 +63,8 @@ Conventions:
     free, and `--review` lists it among the dates never recorded.
   * A date is recorded all or nothing (2026-10-16 fast path): every row is
     simulated and validated before chain.lock is taken, and the date's
-    provenance plus rows go to the chain in ONE append. A failure anywhere
-    writes nothing; the date stays owed and the run exits 1.
+    provenance plus rows go to the chain in ONE append. A failure before
+    that append writes nothing; the date stays owed and the run exits 1.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -101,10 +101,11 @@ MAX_LISTED_GAPS = 12
 # first; the rest wait for the next run. Each date re-simulates every READY
 # strategy (observe_day runs before the `seen` skip), but since the
 # 2026-10-16 fast path it shares the run's one chain read and holds
-# chain.lock only for a tail read plus one append. Steady state owes one or two dates a
-# day (equity lags a day, FRED fx arrives weekly), so 10 bounds a catch-up
-# after an outage to under an hour. A date refused every run keeps its slot
-# (oldest first) -- that needs a human, and the run exits 1 each time.
+# chain.lock only for a tail read plus one append. Steady state owes one or
+# two dates a day (equity lags a day, FRED fx arrives weekly), so 10 bounds a
+# catch-up after an outage to under an hour. A date refused every run keeps
+# its slot (oldest first) -- that needs a human, and the run exits 1 each
+# time.
 MAX_CATCHUP_DATES = 10
 
 CONE_CAVEAT = (
@@ -944,7 +945,17 @@ def _record_date(args, registry: Registry, view: QuarantineView,
     # here writes nothing and the date stays owed: a date is all or nothing
     # (s3.6). The lock is then held for a tail read plus ONE append.
     rows_by_sid: dict[str, list[dict]] = {}
+    lock = None
     if ready:
+        logs_dir = args.registry.parent / "logs"
+        lock = ChainLock(logs_dir, holder="quarantine",
+                         purpose=f"daily {args.date}")
+        # Probe BEFORE simulating: a held lock no longer costs a whole date's
+        # simulation, and the polite deferral keeps its old precedence over a
+        # simulation raise. The acquire below stays as the backstop (the lock
+        # can appear between this probe and it).
+        if lock.info() is not None and lock.holder_alive():
+            return _defer_for_lock(lock, args.date, report)
         assets = sorted({a for sid in ready for a in spec_cells(specs[sid])})
         bars_digests = hash_bars_used(args.data_dir, assets, args.date)
         data_digests = hash_price_files(args.data_dir, assets)
@@ -957,22 +968,11 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                 validated_quarantine_decision(row) for row in
                 observe_day(specs[sid], bars_by_asset, args.date, entered[sid])]
 
-    lock = None
     if ready:
-        logs_dir = args.registry.parent / "logs"
-        lock = ChainLock(logs_dir, holder="quarantine",
-                         purpose=f"daily {args.date}")
         try:
             lock.acquire()
         except ChainLockHeld:
-            if lock.is_stale():
-                print("WARN: chain.lock is stale (>3h); if no writer is "
-                      "alive, remove logs/chain.lock or let the loop's "
-                      "two-strike rule break it", file=sys.stderr)
-            print(f"deferred_lock: chain.lock held, skipping {args.date}; "
-                  f"re-run with --date {args.date} to backfill")
-            report.unchecked = True
-            return 0
+            return _defer_for_lock(lock, args.date, report)
 
     try:
         written: list[dict] = []
@@ -1048,11 +1048,6 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                 # tail instead.
                 _under_lock(report, args.date,
                             lambda: registry._append_at(view.snap, items))
-                # Move the view over what we just wrote (still under the lock,
-                # O(own tail)), so the next catch-up date's advance starts from
-                # our last line: a rewritten head between dates is then a
-                # ChainMoved, not an unread tail (amends plan ruling R6).
-                _under_lock(report, args.date, lambda: view.advance(registry))
             for row in written:
                 print(f"{row['strategy_id']}  {row['asset']}  "
                       f"{row['action']:<11} "
@@ -1062,10 +1057,43 @@ def _record_date(args, registry: Registry, view: QuarantineView,
 
         print(f"\n{len(written)} decision(s) chained, {n_skipped} already "
               f"present.")
+        if ready and items:
+            # Move the view over what we just wrote (still under the lock,
+            # O(own tail)), so the next catch-up date's advance starts from
+            # our last line: a rewritten head between dates is then a
+            # ChainMoved, not an unread tail (amends plan ruling R6). Not
+            # through _under_lock: the date's entries ARE on the chain by now,
+            # so "nothing written" would be false. The date still fails loudly
+            # (the alarm); the next catch-up does not owe it, its rows exist.
+            try:
+                view.advance(registry)
+            except ChainMoved as exc:
+                report.unchecked = True
+                print(f"CHAIN MOVED after the write: the {len(items)} "
+                      f"entr{'y' if len(items) == 1 else 'ies'} above for "
+                      f"{args.date} WERE chained; the chain then moved under "
+                      f"chain.lock ({exc}). A writer appended without "
+                      f"chain.lock, or the log was rewritten -- see "
+                      f"research-layer/CLAUDE.md, Chain lock.",
+                      file=sys.stderr)
+                raise
         return 0
     finally:
         if lock is not None:
             lock.release()
+
+
+def _defer_for_lock(lock: ChainLock, date: str, report: DateReport) -> int:
+    """chain.lock is held by another writer: defer the date politely (exit 0,
+    nothing recorded). Shared by the pre-simulation probe and the acquire."""
+    if lock.is_stale():
+        print("WARN: chain.lock is stale (>3h); if no writer is "
+              "alive, remove logs/chain.lock or let the loop's "
+              "two-strike rule break it", file=sys.stderr)
+    print(f"deferred_lock: chain.lock held, skipping {date}; "
+          f"re-run with --date {date} to backfill")
+    report.unchecked = True
+    return 0
 
 
 def _under_lock(report: DateReport, date: str, step):
