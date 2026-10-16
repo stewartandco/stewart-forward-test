@@ -522,9 +522,38 @@ def test_a_chain_moved_after_the_append_reports_what_landed(
     assert len(snapshots(reg)) == 1
     cap = capsys.readouterr()
     assert "WERE chained" in cap.err
+    assert ("the 1 decision row(s) above plus the date's provenance "
+            "snapshot/supplement WERE chained") in cap.err
     assert "nothing written" not in cap.err
     assert "1 decision(s) chained" in cap.out
     assert report.unchecked is True
+
+
+def test_the_post_append_alarm_counts_rows_only_when_no_provenance_landed(
+        tmp_path, monkeypatch, capsys):
+    """Provenance already chained for the date: the batch is rows alone, so
+    the alarm must not claim a snapshot/supplement landed with it."""
+    reg, spec, data = quarantined(tmp_path)
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
+    real = Registry.advance
+    calls = []
+
+    def second_call_moves(self, snap, on_entry=None):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ChainMoved("forced")
+        return real(self, snap, on_entry=on_entry)
+
+    monkeypatch.setattr(Registry, "advance", second_call_moves)
+    with pytest.raises(ChainMoved):
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    monkeypatch.undo()
+    assert len(calls) == 2
+    assert len(decisions(reg)) == 1
+    assert len(snapshots(reg)) == 1
+    err = capsys.readouterr().err
+    assert "the 1 decision row(s) above WERE chained" in err
+    assert "provenance" not in err.split("WERE chained")[0]
 
 
 def test_a_plan_that_changes_under_the_lock_refuses_and_writes_nothing(

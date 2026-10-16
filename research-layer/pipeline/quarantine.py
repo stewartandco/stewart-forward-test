@@ -1078,9 +1078,11 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                 view.advance(registry)
             except ChainMoved as exc:
                 report.unchecked = True
-                print(f"CHAIN MOVED after the write: the {len(items)} "
-                      f"entr{'y' if len(items) == 1 else 'ies'} above for "
-                      f"{args.date} WERE chained; the chain then moved under "
+                landed = (f"the {len(written)} decision row(s) above"
+                          + (" plus the date's provenance "
+                             "snapshot/supplement" if plan.write else ""))
+                print(f"CHAIN MOVED after the write for {args.date}: "
+                      f"{landed} WERE chained; the chain then moved under "
                       f"chain.lock ({exc}). A writer appended without "
                       f"chain.lock, or the log was rewritten -- see "
                       f"research-layer/CLAUDE.md, Chain lock.",
