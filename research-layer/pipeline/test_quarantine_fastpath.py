@@ -595,3 +595,36 @@ def test_a_held_lock_defers_before_simulating(tmp_path, monkeypatch, capsys):
     assert simulated == []
     assert report.unchecked is True
     assert reg.log_path.read_bytes() == before
+
+
+# ---- final whole-branch review fixes ----
+
+def test_a_repeated_cell_in_one_universe_chains_one_row(tmp_path):
+    """A universe that repeats an asset yields two identical rows in one
+    date's batch. The old per-row `seen` guard skipped the second; the batch
+    append must too, or the chain verifies INVALID (duplicate decision)."""
+    from .common import content_id
+    from .test_gen3b import ENTERED
+    from .test_gauntlet import gauntlet_registry
+    from .test_screen import dated_target_hit_bars, write_data_dir
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_state_change(spec["strategy_id"], "graveyard",
+                            "replaced by the repeated-asset fixture")
+    twin = json.loads(json.dumps(spec))
+    twin["universe"] = dict(twin["universe"], assets=["BTCUSD", "BTCUSD"])
+    twin["strategy_id"] = None
+    twin["strategy_id"] = content_id(twin, "strategy_id")
+    reg.register_strategy(twin)
+    reg.record_state_change(twin["strategy_id"], "screened", "test")
+    reg.record_state_change(twin["strategy_id"], "gauntlet", None)
+    reg.record_state_change(twin["strategy_id"], "quarantine", "test",
+                            ts_utc=f"{ENTERED}T00:00:00Z")
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    rows = [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_decision"
+            and e["payload"]["strategy_id"] == twin["strategy_id"]
+            and e["payload"]["date"] == "2023-01-22"]
+    assert len(rows) == 1 and rows[0]["asset"] == "BTCUSD"
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout

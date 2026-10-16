@@ -1016,6 +1016,7 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                 return 1
             states = view.states()
             chained = view.decision_keys()
+            batch: set[tuple[str, str, str]] = set()
             items = [plan.write] if plan.write else []
             for sid in plan.ready:
                 for row in rows_by_sid[sid]:
@@ -1035,10 +1036,18 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                             raise dup
                         n_skipped += 1
                         continue
+                    if key in batch:
+                        # a universe that repeats an asset yields the same
+                        # row twice in one date; the chain takes it once (the
+                        # old per-row `seen` guard), or the verifier calls
+                        # the duplicate decision INVALID
+                        n_skipped += 1
+                        continue
                     if states.get(sid) != "quarantine":
                         raise ValueError(
                             f"strategy {sid!r} is not in quarantine")
                     items.append(("quarantine_decision", row))
+                    batch.add(key)
                     written.append(row)
             if items:
                 # provenance first (invariant 9 asks for an EARLIER
