@@ -61,6 +61,10 @@ Conventions:
     nobody got around to running. The day is owed and covered the same way as
     any other missed day -- an explicit `--date` backfill once the lock is
     free, and `--review` lists it among the dates never recorded.
+  * A date is recorded all or nothing (2026-10-16 fast path): every row is
+    simulated and validated before chain.lock is taken, and the date's
+    provenance plus rows go to the chain in ONE append. A failure before
+    that append writes nothing; the date stays owed and the run exits 1.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -72,14 +76,17 @@ import time
 import hashlib
 import argparse
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bars as _bars
 from . import cells
 from .chainlock import ChainLock, ChainLockHeld
-from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
-                       DuplicateQuarantineSnapshot,
-                       OverlappingQuarantineSupplement)
+from .registry import (Registry, parse_iso_date, ChainMoved,
+                       DuplicateQuarantineDecision,
+                       validated_quarantine_decision,
+                       validated_quarantine_snapshot)
+from .quarantine_view import QuarantineView
 from .engine import simulate_asset
 from .qcells import (spec_cells, cell_path, split_cell_key, is_intraday_key,
                      complete_days)
@@ -91,13 +98,16 @@ MIN_TRADING_DAYS = 60
 BACKFILL_LAG_DAYS = 2
 MAX_LISTED_GAPS = 12
 # --catch-up re-runs at most this many owed dates per invocation, oldest
-# first; the rest wait for the next run. Each date re-reads the chain and
-# re-simulates every READY strategy (observe_day runs before the `seen` skip):
-# measured 2026-09-28 at ~4-7 min per date on the live chain, holding
-# chain.lock for each date's write phase. Steady state owes one or two dates a
-# day (equity lags a day, FRED fx arrives weekly), so 10 bounds a catch-up
-# after an outage to under an hour. A date refused every run keeps its slot
-# (oldest first) -- that needs a human, and the run exits 1 each time.
+# first; the rest wait for the next run. Each date re-simulates every READY
+# strategy (observe_day runs before the `seen` skip), but since the
+# 2026-10-16 fast path it shares the run's one chain read and holds
+# chain.lock only for two tail reads plus one append (well under a second per
+# date). Wall time is dominated by simulation: minutes to tens of minutes per
+# date (the 2026-10-16 replay measured one 490-row date at 2,308 s), so 10
+# dates bound the chain.lock exposure of a catch-up, not its duration.
+# Steady state owes one or two dates a day (equity lags a day, FRED fx
+# arrives weekly). A date refused every run keeps its slot (oldest first) --
+# that needs a human, and the run exits 1 each time.
 MAX_CATCHUP_DATES = 10
 
 CONE_CAVEAT = (
@@ -132,16 +142,19 @@ def decision_entries(registry: Registry) -> list[dict]:
 
 
 def existing_decisions(registry: Registry) -> set[tuple[str, str, str]]:
-    """Cheap in-process pre-filter only. The authoritative de-duplication is
-    Registry.record_quarantine_decision, which re-checks under the lock."""
+    """Kept as the oracle for QuarantineView (test_quarantine_fastpath.py
+    pins the view to it) and for hand tools. The recorder reads through
+    QuarantineView, not this; its authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view."""
     return {(d["strategy_id"], d["date"], d["asset"])
             for d in decision_entries(registry)}
 
 
 def data_snapshots(registry: Registry) -> dict[str, dict]:
-    """{date: payload} for every snapshot on the chain. A cheap pre-read only;
-    the authoritative uniqueness check is Registry.record_quarantine_snapshot,
-    which re-checks under the lock.
+    """{date: payload} for every snapshot on the chain. Kept as the oracle
+    for QuarantineView and for hand tools; the recorder reads through
+    QuarantineView, and its authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view.
 
     FIRST payload wins on a duplicated date, matching the writer (which
     refuses the second) and verify_registry.py (which reports it and keeps the
@@ -157,13 +170,29 @@ def data_snapshots(registry: Registry) -> dict[str, dict]:
 def snapshot_supplements(registry: Registry) -> dict[str, list[dict]]:
     """{date: [payloads in chain order]} for every
     quarantine_data_snapshot_supplement on the chain (2026-08-27 addendum).
-    A cheap pre-read only, like data_snapshots; the authoritative disjointness
-    check is Registry.record_quarantine_snapshot_supplement under the lock."""
+    Kept as the oracle for QuarantineView and for hand tools, like
+    data_snapshots; the recorder's authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view."""
     out: dict[str, list[dict]] = {}
     for e in registry.entries():
         if e["entry_type"] == "quarantine_data_snapshot_supplement":
             out.setdefault(e["payload"]["date"], []).append(e["payload"])
     return out
+
+
+def _rows_of(source) -> list[dict]:
+    """decision_entries from a QuarantineView (the recorder's one read), or
+    from anything with entries() (a Registry; test stubs)."""
+    if isinstance(source, QuarantineView):
+        return source.decision_rows()
+    return decision_entries(source)
+
+
+def _keys_of(source) -> set[tuple[str, str, str]]:
+    """existing_decisions, from a QuarantineView or anything with entries()."""
+    if isinstance(source, QuarantineView):
+        return source.decision_keys()
+    return existing_decisions(source)
 
 
 def merged_bars_coverage(base: dict, sups: list[dict]) -> dict[str, str]:
@@ -277,6 +306,85 @@ def snapshot_conflicts(recorded: dict[str, str],
                 f"recorded (chained {recorded[asset]}, recomputed "
                 f"{current[asset]})")
     return reasons
+
+
+@dataclass
+class _Provenance:
+    """What the chain's provenance for one date lets a --date pass write
+    (2026-10-16 fast path s3.5). Computed from a view, so the recorder asks
+    it twice: before chain.lock, to simulate only what can record, and under
+    it, to decide. The rules are the old write phase's, verbatim."""
+    refusal: str | None = None
+    write: tuple[str, dict] | None = None   # (entry_type, payload) or None
+    ready: list[str] = field(default_factory=list)
+    conflicted: list[str] = field(default_factory=list)
+    reasons: dict[str, str] = field(default_factory=dict)
+    deferred: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _plan_provenance(view, date: str, ready: list[str],
+                     specs: dict[str, dict], bars_digests: dict[str, str],
+                     data_digests: dict[str, str]) -> _Provenance:
+    """`bars_digests` / `data_digests` cover every cell the `ready`
+    strategies trade. No base and no supplement: write the base. A
+    supplement with no base, or a base with no usable bars_sha256: refuse
+    (a defective chain needs human eyes). Otherwise rule 2 (2026-10-08
+    addendum): covered-but-different defers the strategies that trade the
+    asset, and the cells the kept strategies need that nothing covers yet
+    get a supplement. Coverage is the base then supplements in chain order,
+    first writer wins (merged_bars_coverage). An empty `ready` plans nothing;
+    "every owing strategy deferred" is `conflicted` non-empty with `ready`
+    empty."""
+    if not ready:
+        return _Provenance()
+    recorded = view.snapshots().get(date)
+    sups = view.supplements().get(date, [])
+    if recorded is None and not sups:
+        return _Provenance(ready=list(ready), write=(
+            "quarantine_data_snapshot", validated_quarantine_snapshot(
+                {"date": date, "data_sha256": dict(data_digests),
+                 "bars_sha256": dict(bars_digests)})))
+    if recorded is None:
+        return _Provenance(refusal=(
+            f"REFUSED: {date} has supplement provenance but no base "
+            f"quarantine_data_snapshot -- a defective chain needs human "
+            f"eyes, not more rows."))
+    if (not isinstance(recorded.get("bars_sha256"), dict)
+            or not recorded["bars_sha256"]):
+        # fails CLOSED, the `or {}` precedent: a base snapshot with no
+        # usable bars_sha256 covers nothing, and papering over it with a
+        # supplement for everything would legitimise a fabricated root
+        return _Provenance(refusal=(
+            f"REFUSED: the quarantine_data_snapshot chained for {date} "
+            f"carries no usable bars_sha256 map, so it covers nothing -- "
+            f"{', '.join(sorted(bars_digests))} included -- and cannot be "
+            f"supplemented honestly."))
+    covered = merged_bars_coverage(recorded, sups)
+    conflicted = sorted(a for a in bars_digests
+                        if a in covered and covered[a] != bars_digests[a])
+    reasons = dict(zip(conflicted, snapshot_conflicts(
+        covered, {a: bars_digests[a] for a in conflicted})))
+    kept: list[str] = []
+    deferred: list[tuple[str, str]] = []
+    for sid in ready:
+        hit = sorted(set(spec_cells(specs[sid])) & set(conflicted))
+        if hit:
+            deferred.append((sid, reasons[hit[0]]))
+        else:
+            kept.append(sid)
+    keep_cells = {a for sid in kept for a in spec_cells(specs[sid])}
+    new_cells = sorted(a for a in bars_digests
+                       if a in keep_cells and a not in covered)
+    write = None
+    if kept and new_cells:
+        # the backfill of a class deferred when the base was chained
+        write = ("quarantine_data_snapshot_supplement",
+                 validated_quarantine_snapshot({
+                     "date": date,
+                     "data_sha256": {a: data_digests[a] for a in new_cells},
+                     "bars_sha256": {a: bars_digests[a] for a in new_cells}}))
+    return _Provenance(write=write, ready=kept, conflicted=conflicted,
+                       reasons=reasons, deferred=deferred)
 
 
 def _rebase_index(bars: list[dict], entered: str, asset: str) -> int:
@@ -584,7 +692,8 @@ def catch_up(dates: list[str], run_date) -> tuple[int, bool]:
     return 0, left == 0
 
 
-def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
+def _owed_dates_for_catch_up(source: "QuarantineView | Registry",
+                             quarantined: list[str],
                              entered: dict[str, str], specs: dict[str, dict],
                              data_dir: Path,
                              report: "DateReport | None" = None) -> list[str]:
@@ -618,7 +727,7 @@ def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
         owed_by_sid[sid] = owed
         universe_by_sid[sid] = set(spec_cells(spec))
     return recordable_owed_dates(owed_by_sid, universe_by_sid,
-                                 existing_decisions(registry))
+                                 _keys_of(source))
 
 
 def _truncated(items: list[str]) -> str:
@@ -693,7 +802,7 @@ def _report_completeness(registry_rows: list[dict], spec: dict | None,
               f"{BACKFILL_LAG_DAYS}d of its bar")
 
 
-def review(registry: Registry, quarantined: list[str],
+def review(source: "QuarantineView | Registry", quarantined: list[str],
            entered: dict[str, str], specs: dict[str, dict],
            artifacts_dir: Path, data_dir: Path) -> int:
     """Report progress against the pre-declared minimum. WRITES NOTHING."""
@@ -702,7 +811,7 @@ def review(registry: Registry, quarantined: list[str],
         return 0
 
     rows_by_sid: dict[str, list[dict]] = {}
-    for r in decision_entries(registry):
+    for r in _rows_of(source):
         rows_by_sid.setdefault(r["strategy_id"], []).append(r)
 
     for sid in quarantined:
@@ -745,9 +854,9 @@ class DateReport:
         self.unchecked = False
 
 
-def _record_date(args, registry: Registry, quarantined: list[str],
-                 entered: dict[str, str], specs: dict[str, dict],
-                 report: DateReport) -> int:
+def _record_date(args, registry: Registry, view: QuarantineView,
+                 quarantined: list[str], entered: dict[str, str],
+                 specs: dict[str, dict], report: DateReport) -> int:
     """The --date path: record one trading day for every eligible strategy."""
     if not quarantined:
         print("No strategies in 'quarantine' state.")
@@ -772,7 +881,7 @@ def _record_date(args, registry: Registry, quarantined: list[str],
     # simulated and guarded. A fully recorded strategy's rows are already on
     # the chain; re-simulating it only fed its assets into the provenance
     # check, so one restated asset refused every OTHER strategy's day.
-    seen_keys = existing_decisions(registry)
+    seen_keys = view.decision_keys()
     owing: list[str] = []
     n_present = 0
     for sid in eligible:
@@ -835,203 +944,205 @@ def _record_date(args, registry: Registry, quarantined: list[str],
                   file=sys.stderr)
             return 1
 
-    # The write phase below (snapshot, then decision rows) is the only part
-    # of a --date run that touches the chain. Eligibility resolution and bar
-    # loading above are cheap local reads and must not hold the lock; the
-    # lock is acquired as late as correctness allows, right before the first
-    # possible chain write, and only when there is one to make (ready is
-    # empty here when nobody was eligible, when every eligible strategy was
-    # already fully recorded (rule 1), or when every owing one was deferred
-    # behind rows already chained; in each case nothing below writes anything
-    # and taking the lock would just waste other writers' window time).
+    # Fast path (2026-10-16 design s3.5): everything that does not need the
+    # lock happens before it -- the date's digests, a provenance plan from
+    # the run's one read (so a strategy deferred for a restated asset is
+    # never simulated), and EVERY row's simulation and validation. A raise
+    # here writes nothing and the date stays owed: a date is all or nothing
+    # (s3.6). The lock is then held for a tail read plus ONE append.
+    rows_by_sid: dict[str, list[dict]] = {}
     lock = None
     if ready:
         logs_dir = args.registry.parent / "logs"
         lock = ChainLock(logs_dir, holder="quarantine",
                          purpose=f"daily {args.date}")
+        # Probe BEFORE simulating: a held lock no longer costs a whole date's
+        # simulation, and the polite deferral keeps its old precedence over a
+        # simulation raise. The acquire below stays as the backstop (the lock
+        # can appear between this probe and it).
+        if lock.info() is not None and lock.holder_alive():
+            return _defer_for_lock(lock, args.date, report)
+        assets = sorted({a for sid in ready for a in spec_cells(specs[sid])})
+        bars_digests = hash_bars_used(args.data_dir, assets, args.date)
+        data_digests = hash_price_files(args.data_dir, assets)
+        pre = _plan_provenance(view, args.date, ready, specs, bars_digests,
+                               data_digests)
+        # a refusal simulates nothing; the plan under the lock refuses again
+        # (ruling R7)
+        for sid in ([] if pre.refusal else pre.ready):
+            rows_by_sid[sid] = [
+                validated_quarantine_decision(row) for row in
+                observe_day(specs[sid], bars_by_asset, args.date, entered[sid])]
+
+    if ready:
         try:
             lock.acquire()
         except ChainLockHeld:
-            if lock.is_stale():
-                print("WARN: chain.lock is stale (>3h); if no writer is "
-                      "alive, remove logs/chain.lock or let the loop's "
-                      "two-strike rule break it", file=sys.stderr)
-            print(f"deferred_lock: chain.lock held, skipping {args.date}; "
-                  f"re-run with --date {args.date} to backfill")
-            report.unchecked = True
-            return 0
+            return _defer_for_lock(lock, args.date, report)
 
     try:
+        written: list[dict] = []
+        n_skipped = n_present
         if ready:
-            assets = sorted({a for sid in ready
-                             for a in spec_cells(specs[sid])})
-            # Provenance BEFORE any decision row, because invariant 9 asks for
-            # an EARLIER snapshot: recording the bars afterwards would prove
-            # nothing about what the rows were computed from.
-            bars_digests = hash_bars_used(args.data_dir, assets, args.date)
-            recorded = data_snapshots(registry).get(args.date)
-            sups = snapshot_supplements(registry).get(args.date, [])
-            if recorded is None and not sups:
-                try:
-                    registry.record_quarantine_snapshot(
-                        {"date": args.date,
-                         "data_sha256": hash_price_files(args.data_dir, assets),
-                         "bars_sha256": bars_digests})
-                except DuplicateQuarantineSnapshot as dup:
-                    # another process chained this date's provenance between
-                    # the read above and this write; reconcile against what
-                    # landed
-                    recorded = dup.chained
-                    sups = snapshot_supplements(registry).get(args.date, [])
-            if recorded is not None or sups:
-                if recorded is None:
-                    # The two chain reads above are separate un-locked walks,
-                    # so a concurrent run can chain base+supplement BETWEEN
-                    # them and leave this one seeing 'supplement but no base'
-                    # on a healthy chain. Read the base again before crying
-                    # defect: after the re-read, a supplement with genuinely
-                    # no base can only be a hand-appended entry (the writer
-                    # requires the base), which the verifier rejects --
-                    # recording against it would compound the defect.
-                    recorded = data_snapshots(registry).get(args.date)
-                if recorded is None:
-                    print(f"REFUSED: {args.date} has supplement provenance "
-                          f"but no base quarantine_data_snapshot -- a "
-                          f"defective chain needs human eyes, not more rows.",
-                          file=sys.stderr)
-                    return 1
-                if (not isinstance(recorded.get("bars_sha256"), dict)
-                        or not recorded["bars_sha256"]):
-                    # fails CLOSED, the `or {}` precedent: a base snapshot
-                    # with no usable bars_sha256 covers nothing, and papering
-                    # over it with a supplement for everything would
-                    # legitimise a fabricated provenance root
-                    print(f"REFUSED: the quarantine_data_snapshot chained "
-                          f"for {args.date} carries no usable bars_sha256 "
-                          f"map, so it covers nothing -- "
-                          f"{', '.join(sorted(bars_digests))} included -- "
-                          f"and cannot be supplemented honestly.",
-                          file=sys.stderr)
-                    return 1
-                covered = merged_bars_coverage(recorded, sups)
-                conflicted = sorted(a for a in bars_digests
-                                    if a in covered and covered[a] != bars_digests[a])
-                if conflicted:
-                    # Rule 2 (2026-10-08 addendum): covered-but-different
-                    # defers the owing strategies that trade the asset; the
-                    # rest record. No row is ever chained over a restated bar.
-                    reasons = dict(zip(conflicted, snapshot_conflicts(
-                        covered, {a: bars_digests[a] for a in conflicted})))
-                    for a in conflicted:
-                        report.degraded.append({"source": "restated", "key": a,
-                                                "reason": reasons[a]})
-                    print(f"RESTATED: the provenance chained for {args.date} "
-                          f"does not match the bars this run would use for "
-                          f"{', '.join(conflicted)}; the strategies trading "
-                          f"them are deferred, the rest record.", file=sys.stderr)
-                    kept = []
-                    for sid in ready:
-                        hit = sorted(set(spec_cells(specs[sid]))
-                                     & set(conflicted))
-                        if hit:
-                            print(f"{sid}  deferred: {reasons[hit[0]]}")
-                        else:
-                            kept.append(sid)
-                    ready = kept
-                    keep_assets = {a for sid in ready
-                                   for a in spec_cells(specs[sid])}
-                    bars_digests = {a: d for a, d in bars_digests.items()
-                                    if a in keep_assets}
-                    if not ready:
-                        report.deferred_only = True
-                        print(f"\n0 decision(s) chained, {n_present} already "
-                              f"present; every owing strategy deferred (restated).")
-                        return 0
-                new_assets = sorted(set(bars_digests) - set(covered))
-                if new_assets:
-                    # the backfill of a class deferred when the base was
-                    # chained
-                    try:
-                        registry.record_quarantine_snapshot_supplement(
-                            {"date": args.date,
-                             "data_sha256": hash_price_files(args.data_dir,
-                                                             new_assets),
-                             "bars_sha256": {a: bars_digests[a]
-                                             for a in new_assets}})
-                    except OverlappingQuarantineSupplement as clash:
-                        # a concurrent writer covered (some of) these assets
-                        # between the read above and this write; absorb only
-                        # an IDENTICAL cover -- anything else is
-                        # irreconcilable. Deliberately kept a loud whole-day
-                        # refusal (not a rule-2 deferral): a rare race that
-                        # writes nothing; on the next run the landed
-                        # supplement is ordinary coverage and rule 2 applies.
-                        landed = clash.chained.get("bars_sha256", {})
-                        if any(landed.get(a) != bars_digests[a]
-                               for a in new_assets):
-                            print(f"REFUSED: a concurrent supplement for "
-                                  f"{args.date} covers {new_assets} with "
-                                  f"different bar hashes than this run "
-                                  f"computed.", file=sys.stderr)
-                            return 1
-
-        seen = existing_decisions(registry)
-        n_written, n_skipped = 0, n_present
-        try:
-            for sid in ready:
-                for row in observe_day(specs[sid], bars_by_asset, args.date,
-                                       entered[sid]):
+            pre_keys = seen_keys
+            _under_lock(report, args.date, lambda: view.advance(registry))
+            # The same decision against what is on the chain NOW: another
+            # writer may have chained this date's provenance or rows while
+            # we simulated.
+            plan = _plan_provenance(view, args.date, ready, specs,
+                                    bars_digests, data_digests)
+            if plan.refusal:
+                print(plan.refusal, file=sys.stderr)
+                return 1
+            if plan.conflicted:
+                # Rule 2 (2026-10-08 addendum): covered-but-different defers
+                # the owing strategies that trade the asset; the rest record.
+                # No row is ever chained over a restated bar.
+                for a in plan.conflicted:
+                    report.degraded.append({"source": "restated", "key": a,
+                                            "reason": plan.reasons[a]})
+                print(f"RESTATED: the provenance chained for {args.date} "
+                      f"does not match the bars this run would use for "
+                      f"{', '.join(plan.conflicted)}; the strategies trading "
+                      f"them are deferred, the rest record.", file=sys.stderr)
+                for sid, reason in plan.deferred:
+                    print(f"{sid}  deferred: {reason}")
+                if not plan.ready:
+                    report.deferred_only = True
+                    print(f"\n0 decision(s) chained, {n_present} already "
+                          f"present; every owing strategy deferred (restated).")
+                    return 0
+            late = [sid for sid in plan.ready if sid not in rows_by_sid]
+            if late:
+                report.unchecked = True
+                print(f"REFUSED: the provenance for {args.date} changed under "
+                      f"chain.lock so that {', '.join(late)} became recordable "
+                      f"without being simulated; nothing written -- re-run "
+                      f"the date.", file=sys.stderr)
+                return 1
+            states = view.states()
+            chained = view.decision_keys()
+            batch: set[tuple[str, str, str]] = set()
+            items = [plan.write] if plan.write else []
+            for sid in plan.ready:
+                for row in rows_by_sid[sid]:
                     key = (row["strategy_id"], row["date"], row["asset"])
-                    if key in seen:
+                    if key in chained:
+                        # Ruling R3: a row on the chain at our one read is
+                        # skipped as today's pre-filter skipped it. One that
+                        # landed while we simulated is absorbed only when
+                        # IDENTICAL -- same key with different numbers means
+                        # the data or the spec moved underneath us.
+                        landed = view.decision_payload(key)
+                        if key not in pre_keys and landed != row:
+                            dup = DuplicateQuarantineDecision(
+                                "quarantine decision already chained for "
+                                f"{key[0]} {key[1]} {key[2]}")
+                            dup.chained = landed
+                            raise dup
                         n_skipped += 1
                         continue
-                    try:
-                        registry.record_quarantine_decision(row)
-                    except DuplicateQuarantineDecision as dup:
-                        # Another process chained this row between our
-                        # snapshot of `seen` and this write. The structural
-                        # guarantee held -- no duplicate exists -- so a
-                        # scheduler retry overlapping the daily job resolves
-                        # quietly and truthfully instead of paging someone.
-                        # Only this case is absorbed; every other ValueError
-                        # from the writer means a malformed payload and stays
-                        # fatal.
-                        #
-                        # But absorb ONLY when the chained row is identical
-                        # to the one just computed. Same key with different
-                        # numbers means the data or the spec moved underneath
-                        # us, and silently discarding the losing row would
-                        # hide exactly that.
-                        if getattr(dup, "chained", None) != row:
-                            raise
-                        seen.add(key)
+                    if key in batch:
+                        # a universe that repeats an asset yields the same
+                        # row twice in one date; the chain takes it once (the
+                        # old per-row `seen` guard), or the verifier calls
+                        # the duplicate decision INVALID
                         n_skipped += 1
                         continue
-                    seen.add(key)
-                    n_written += 1
-                    print(f"{sid}  {row['asset']}  {row['action']:<11} "
-                          f"px={row['price']:.2f}  "
-                          f"pos={row['position_frac']:.3f} "
-                          f" eq={row['equity']:.4f}")
-        except BaseException:
-            print(f"\nPARTIAL WRITE: {n_written} decision(s) chained before "
-                  f"failure. Re-running this date is a no-op for what "
-                  f"landed.", file=sys.stderr)
-            raise
+                    if states.get(sid) != "quarantine":
+                        raise ValueError(
+                            f"strategy {sid!r} is not in quarantine")
+                    items.append(("quarantine_decision", row))
+                    batch.add(key)
+                    written.append(row)
+            if items:
+                # provenance first (invariant 9 asks for an EARLIER
+                # snapshot), then the rows in today's order. The view is not
+                # moved onto _append_at's returned snapshot (that would skip
+                # on_entry for our own rows); it is advanced over our own
+                # tail instead.
+                _under_lock(report, args.date,
+                            lambda: registry._append_at(view.snap, items))
+            for row in written:
+                print(f"{row['strategy_id']}  {row['asset']}  "
+                      f"{row['action']:<11} "
+                      f"px={row['price']:.2f}  "
+                      f"pos={row['position_frac']:.3f} "
+                      f" eq={row['equity']:.4f}")
 
-        print(f"\n{n_written} decision(s) chained, {n_skipped} already "
+        print(f"\n{len(written)} decision(s) chained, {n_skipped} already "
               f"present.")
+        if ready and items:
+            # Move the view over what we just wrote (still under the lock,
+            # O(own tail)), so the next catch-up date's advance starts from
+            # our last line: a rewritten head between dates is then a
+            # ChainMoved, not an unread tail (amends plan ruling R6). Not
+            # through _under_lock: the date's entries ARE on the chain by now,
+            # so "nothing written" would be false. The date still fails loudly
+            # (the alarm); the next catch-up does not owe it, its rows exist.
+            try:
+                view.advance(registry)
+            except ChainMoved as exc:
+                report.unchecked = True
+                landed = (f"the {len(written)} decision row(s) above"
+                          + (" plus the date's provenance "
+                             "snapshot/supplement" if plan.write else ""))
+                print(f"CHAIN MOVED after the write for {args.date}: "
+                      f"{landed} WERE chained; the chain then moved under "
+                      f"chain.lock ({exc}). A writer appended without "
+                      f"chain.lock, or the log was rewritten -- see "
+                      f"research-layer/CLAUDE.md, Chain lock.",
+                      file=sys.stderr)
+                raise
         return 0
     finally:
         if lock is not None:
             lock.release()
 
 
-def run_one_date_for_catch_up(base: list[str], date: str,
-                              report: DateReport) -> tuple[int, bool]:
+def _defer_for_lock(lock: ChainLock, date: str, report: DateReport) -> int:
+    """chain.lock is held by another writer: defer the date politely (exit 0,
+    nothing recorded). Shared by the pre-simulation probe and the acquire."""
+    if lock.is_stale():
+        print("WARN: chain.lock is stale (>3h); if no writer is "
+              "alive, remove logs/chain.lock or let the loop's "
+              "two-strike rule break it", file=sys.stderr)
+    print(f"deferred_lock: chain.lock held, skipping {date}; "
+          f"re-run with --date {date} to backfill")
+    report.unchecked = True
+    return 0
+
+
+def _under_lock(report: DateReport, date: str, step):
+    """Run one chain step of the write phase; a ChainMoved means the log is
+    not where our read left it (rewritten, truncated, or appended WITHOUT
+    chain.lock): nothing is written for the date, say so, and re-raise."""
+    try:
+        return step()
+    except ChainMoved as exc:
+        report.unchecked = True
+        print(f"CHAIN MOVED: {exc}; nothing written for {date}. A writer "
+              f"appended without chain.lock, or the log was rewritten -- "
+              f"see research-layer/CLAUDE.md, Chain lock.", file=sys.stderr)
+        raise
+
+
+def run_one_date_for_catch_up(base: list[str], date: str, report: DateReport,
+                              view: QuarantineView | None = None,
+                              registry: Registry | None = None
+                              ) -> tuple[int, bool]:
     one = DateReport()
     try:
-        rc = run(base + ["--date", date], report=one, write_ledger=False)
+        rc = run(base + ["--date", date], report=one, write_ledger=False,
+                 view=view)
+    except ChainMoved:
+        # Spec s3.4: the date fails like any raise, and the shared view is
+        # rebuilt with a fresh read so the dates after it are not stranded
+        # on a snapshot the chain no longer matches.
+        one.unchecked = True
+        if view is not None:
+            view.rebuild(registry)
+        raise
     except BaseException:
         one.unchecked = True            # a raise: this date was not fully checked
         raise
@@ -1158,7 +1269,8 @@ def _split_unsupported(quarantined: list[str], specs: dict
 
 
 def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
-        write_ledger: bool = True) -> int:
+        write_ledger: bool = True,
+        view: QuarantineView | None = None) -> int:
     layer = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path, default=layer / "registry_log.jsonl")
@@ -1201,13 +1313,18 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return 1
 
     registry = Registry(args.registry)
-    states = registry.strategy_states()
-    entered = quarantine_entry_dates(registry)
+    # ONE chain read per run (2026-10-16 fast path s3.1). Catch-up hands the
+    # same view to every date's pass, which moves it over the tail only; a
+    # ChainMoved here fails that date (run_one_date_for_catch_up rebuilds).
+    if view is None:
+        view = QuarantineView.build(registry)
+    else:
+        view.advance(registry)
+    states = view.states()
+    entered = view.entry_dates()
     quarantined = sorted(sid for sid, st in states.items()
                          if st == "quarantine")
-    specs = {e["payload"]["strategy_id"]: e["payload"]
-             for e in registry.entries()
-             if e["entry_type"] == "strategy_registered"}
+    specs = view.specs()
 
     quarantined, intraday_items = _split_unsupported(quarantined, specs)
 
@@ -1220,18 +1337,19 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return 0
 
     if args.review:
-        return review(registry, quarantined, entered, specs,
+        return review(view, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
 
     if args.catch_up:
         report = DateReport()
         report.degraded.extend(intraday_items)
-        dates = _owed_dates_for_catch_up(registry, quarantined, entered,
+        dates = _owed_dates_for_catch_up(view, quarantined, entered,
                                          specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
                 str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
         rc, reached_all = catch_up(
-            dates, lambda d: run_one_date_for_catch_up(base, d, report))
+            dates, lambda d: run_one_date_for_catch_up(
+                base, d, report, view=view, registry=registry))
         if write_ledger:
             # The authoritative pass: it removes recovered items, but only
             # when it reached every owed date (design s3.1, Review Focus 1)
@@ -1253,7 +1371,8 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
     report = report if report is not None else DateReport()
     report.degraded.extend(intraday_items)
     try:
-        return _record_date(args, registry, quarantined, entered, specs, report)
+        return _record_date(args, registry, view, quarantined, entered, specs,
+                            report)
     finally:
         if write_ledger:
             # --date only ADDS or refreshes: it sees one date, so an item it

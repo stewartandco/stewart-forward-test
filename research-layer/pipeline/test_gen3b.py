@@ -575,6 +575,36 @@ def decisions(reg):
             if e["entry_type"] == "quarantine_decision"]
 
 
+def take_back(reg, n):
+    """Remove the chain's last `n` entries and return them as
+    (entry_type, payload): a hand-trimmed chain for staging a partial day or
+    a race. The bytes before them are untouched, so the chain stays valid."""
+    raw = reg.log_path.read_bytes().splitlines(keepends=True)
+    gone = [json.loads(line) for line in raw[-n:]]
+    reg.log_path.write_bytes(b"".join(raw[:-n]))
+    return [(e["entry_type"], e["payload"]) for e in gone]
+
+
+def race_before_lock(monkeypatch, append):
+    """Run `append()` ONCE, just before the recorder takes chain.lock: the
+    window the 2026-10-16 fast path opens between its one chain read and its
+    write (simulation runs in it). Another writer that respects chain.lock
+    can only land there. Returns the `fired` list: a test asserts it is
+    non-empty, so a race that never ran cannot pass silently."""
+    real = quarantine_mod.ChainLock
+    fired = []
+
+    class Racy(real):
+        def acquire(self):
+            if not fired:
+                fired.append(1)
+                append()
+            super().acquire()
+
+    monkeypatch.setattr(quarantine_mod, "ChainLock", Racy)
+    return fired
+
+
 def test_decision_row_shape_and_values_on_entry_day(tmp_path):
     reg, spec, data = quarantined(tmp_path)
     rc = quarantine_run(["--registry", str(reg.log_path), "--data-dir",
@@ -604,17 +634,17 @@ def test_quarantine_date_run_holds_lock_while_writing(tmp_path, monkeypatch):
     reg, spec, data = quarantined(tmp_path)
     lock_path = reg.log_path.parent / "logs" / "chain.lock"
 
-    orig_record = Registry.record_quarantine_decision
+    orig_append = Registry._append_at
     seen_during_write = []
 
-    def spy_record(self, payload):
+    def spy_append(self, snap, items):
         seen_during_write.append(lock_path.exists())
         if lock_path.exists():
             info = json.loads(lock_path.read_text(encoding="utf-8"))
             seen_during_write.append(info["holder"])
-        return orig_record(self, payload)
+        return orig_append(self, snap, items)
 
-    monkeypatch.setattr(Registry, "record_quarantine_decision", spy_record)
+    monkeypatch.setattr(Registry, "_append_at", spy_append)
 
     rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
 
@@ -843,20 +873,9 @@ def test_review_flags_a_partially_recorded_date(tmp_path, capsys, monkeypatch):
     re-run never happens. It gets its own line, naming the missing asset."""
     reg, spec, data = quarantined_two_asset(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
-    real = Registry.record_quarantine_decision
-    calls = []
-
-    def flaky(self, payload):
-        calls.append(payload)
-        if len(calls) == 2:                      # BTCUSD lands, ETHUSD does not
-            raise RuntimeError("chain write blew up")
-        return real(self, payload)
-
-    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
-    with pytest.raises(RuntimeError):
-        quarantine_run(argv)
-    monkeypatch.undo()
-    assert len(decisions(reg)) == 1
+    assert quarantine_run(argv) == 0
+    take_back(reg, 1)                            # ETHUSD's row; BTCUSD stays
+    assert [r["asset"] for r in decisions(reg)] == ["BTCUSD"]
 
     capsys.readouterr()
     quarantine_run(argv_for(reg, data, "--review"))
@@ -891,36 +910,40 @@ def test_a_truncated_gap_list_says_what_it_dropped(tmp_path, capsys):
 
 def test_a_concurrent_writer_is_absorbed_not_crashed(tmp_path, capsys,
                                                      monkeypatch):
-    """A scheduler retry overlapping the daily job is routine. The registry
-    still refuses the duplicate structurally; run() reports it as already
-    present rather than paging someone with a traceback."""
+    """A scheduler retry overlapping the daily job is routine: another run
+    chains the same snapshot and row while this one simulates. Under the
+    lock this run sees them, writes nothing, and reports already present."""
     reg, spec, data = quarantined(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
-    assert len(decisions(reg)) == 1
-    # the row lands after this run snapshots `seen`, so the pre-filter misses
-    # it and the registry's under-lock guard is what fires
-    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    landed = take_back(reg, 2)                    # the snapshot and the row
+    fired = race_before_lock(monkeypatch,
+                     lambda: [reg.append(t, p) for t, p in landed])
     capsys.readouterr()
     rc = quarantine_run(argv)
+    assert fired == [1]
     assert rc == 0
     assert len(decisions(reg)) == 1
+    assert len(snapshots(reg)) == 1
     assert "0 decision(s) chained, 1 already present" in capsys.readouterr().out
 
 
 def test_only_the_duplicate_case_is_absorbed(tmp_path, capsys, monkeypatch):
-    """A malformed payload must still be fatal: run() catches
-    DuplicateQuarantineDecision, not ValueError."""
+    """A malformed payload must still be fatal: run() absorbs only a
+    DuplicateQuarantineDecision, never a ValueError. Since the 2026-10-16
+    fast path the payload is validated before anything is written, so the
+    date writes nothing at all (all or nothing, s3.6)."""
     reg, spec, data = quarantined(tmp_path)
 
-    def bad(self, payload):
+    def bad(payload):
         raise ValueError("malformed payload")
 
-    monkeypatch.setattr(Registry, "record_quarantine_decision", bad)
+    monkeypatch.setattr(quarantine_mod, "validated_quarantine_decision", bad)
     with pytest.raises(ValueError, match="malformed payload"):
         quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
-    assert "PARTIAL WRITE" in capsys.readouterr().err
+    assert "PARTIAL WRITE" not in capsys.readouterr().err
     assert decisions(reg) == []
+    assert snapshots(reg) == []
 
 
 def test_duplicate_error_is_a_valueerror_subclass():
@@ -996,33 +1019,29 @@ def test_strategy_that_never_trades_records_flat_holds(tmp_path):
     assert r["equity"] == pytest.approx(1.0)
 
 
-def test_partial_write_is_announced_and_recovers_on_rerun(tmp_path, capsys,
-                                                          monkeypatch):
-    """The module's own crash promise: what landed stays, and re-running the
-    date completes it rather than duplicating it."""
+def test_a_failed_write_leaves_the_date_untouched_and_recovers_on_rerun(
+        tmp_path, capsys, monkeypatch):
+    """Spec s3.6 (2026-10-16): a date is all or nothing. A failure at the
+    write leaves the chain byte-identical, the date stays owed, and the
+    re-run records the whole day. (Replaces the PARTIAL WRITE test.)"""
     reg, spec, data = quarantined_two_asset(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
-    real = Registry.record_quarantine_decision
-    calls = []
+    before = reg.log_path.read_bytes()
 
-    def flaky(self, payload):
-        calls.append(payload)
-        if len(calls) == 2:
-            raise RuntimeError("chain write blew up")
-        return real(self, payload)
+    def boom(self, snap, items):
+        raise RuntimeError("chain write blew up")
 
-    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
+    monkeypatch.setattr(Registry, "_append_at", boom)
     with pytest.raises(RuntimeError):
         quarantine_run(argv)
-    assert "PARTIAL WRITE: 1 decision(s) chained" in capsys.readouterr().err
-    assert len(decisions(reg)) == 1
+    assert "PARTIAL WRITE" not in capsys.readouterr().err
+    assert reg.log_path.read_bytes() == before
 
     monkeypatch.undo()
     assert quarantine_run(argv) == 0
     rows = decisions(reg)
-    assert len(rows) == 2
     assert {r["asset"] for r in rows} == {"BTCUSD", "ETHUSD"}
-    assert "1 already present" in capsys.readouterr().out
+    assert "2 decision(s) chained, 0 already present" in capsys.readouterr().out
 
 
 def test_out_of_order_backfill_matches_forward_order(tmp_path):
@@ -1133,26 +1152,19 @@ def test_rebase_refuses_when_no_bar_precedes_the_entry(tmp_path):
 
 def test_a_duplicate_with_different_content_is_fatal(tmp_path, capsys,
                                                      monkeypatch):
-    """'Already present' must mean already present AND identical. Same key
-    with different numbers means the data or the spec moved underneath us,
-    and discarding the losing row in silence would hide exactly that.
-
-    `existing_decisions` is stubbed empty so the cheap `seen` pre-filter
-    misses and the writer's own guard -- the one that holds under a real
-    race, inside the lock -- is what gets exercised."""
+    """'Already present' must mean already present AND identical. A row for
+    the same key landing while this run simulates, with DIFFERENT numbers,
+    means the data or the spec moved underneath us: raise, write nothing."""
     reg, spec, data = quarantined(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
-    row = decisions(reg)[0]
-    assert len(decisions(reg)) == 1
-    # replace the chained row with the same key carrying different numbers
-    lines = reg.log_path.read_text(encoding="utf-8").splitlines()
-    reg.log_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
-    reg.append("quarantine_decision", dict(row, equity=9.9999))
-
-    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    [(_, row)] = take_back(reg, 1)
+    fired = race_before_lock(monkeypatch, lambda: reg.append(
+        "quarantine_decision", dict(row, equity=9.9999)))
     with pytest.raises(DuplicateQuarantineDecision):
         quarantine_run(argv)
+    assert fired == [1]
+    assert [r["equity"] for r in decisions(reg)] == [9.9999]
 
 
 def test_an_identical_duplicate_is_still_absorbed(tmp_path, capsys,
@@ -1162,10 +1174,12 @@ def test_an_identical_duplicate_is_still_absorbed(tmp_path, capsys,
     reg, spec, data = quarantined(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
     quarantine_run(argv)
-    assert len(decisions(reg)) == 1
-    monkeypatch.setattr(quarantine_mod, "existing_decisions", lambda r: set())
+    [(_, row)] = take_back(reg, 1)
+    fired = race_before_lock(monkeypatch,
+                     lambda: reg.append("quarantine_decision", row))
     capsys.readouterr()
     rc = quarantine_run(argv)
+    assert fired == [1]
     assert rc == 0
     assert len(decisions(reg)) == 1
     assert "0 decision(s) chained, 1 already present" in capsys.readouterr().out
@@ -1288,12 +1302,11 @@ def test_an_identical_concurrent_snapshot_is_reconciled_not_duplicated(
     be repaired. The writer's check therefore runs under the same lock as the
     append, and the loser reconciles against what landed."""
     reg, spec, data = quarantined(tmp_path)
-    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
-    # the snapshot lands after this run reads the chain, so the pre-read
-    # misses it and the writer's under-lock guard is what fires
-    monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
+        snap_payload(data, ["BTCUSD"])))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     assert len(snapshots(reg)) == 1
     assert len(decisions(reg)) == 1
 
@@ -1305,11 +1318,11 @@ def test_a_conflicting_concurrent_snapshot_defers_its_strategy(tmp_path, capsys,
     (rule 2) the owing strategy is deferred (RESTATED, exit 0) rather than the
     day refused."""
     reg, spec, data = quarantined(tmp_path)
-    reg.record_quarantine_snapshot(
-        dict(snap_payload(data, ["BTCUSD"]), bars_sha256={"BTCUSD": "b" * 64}))
-    monkeypatch.setattr(quarantine_mod, "data_snapshots", lambda r: {})
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot(
+        dict(snap_payload(data, ["BTCUSD"]), bars_sha256={"BTCUSD": "b" * 64})))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     cap = capsys.readouterr()
     assert "RESTATED" in cap.err
     assert f"{spec['strategy_id']}  deferred:" in cap.out
@@ -1613,19 +1626,8 @@ def test_a_partial_day_still_backfills_after_a_refresh(tmp_path, capsys,
     complete the day rather than refuse it."""
     reg, spec, data = quarantined_two_asset(tmp_path)
     argv = argv_for(reg, data, "--date", "2023-01-22")
-    real = Registry.record_quarantine_decision
-    calls = []
-
-    def flaky(self, payload):
-        calls.append(payload)
-        if len(calls) == 2:
-            raise RuntimeError("chain write blew up")
-        return real(self, payload)
-
-    monkeypatch.setattr(Registry, "record_quarantine_decision", flaky)
-    with pytest.raises(RuntimeError):
-        quarantine_run(argv)
-    monkeypatch.undo()
+    assert quarantine_run(argv) == 0
+    take_back(reg, 1)                              # a crash left ETHUSD unrecorded
     assert len(decisions(reg)) == 1
 
     for asset in ("BTCUSD", "ETHUSD"):          # overnight refresh
@@ -2122,28 +2124,34 @@ def test_an_identical_concurrent_supplement_is_reconciled(tmp_path, capsys,
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
     extend_ethusd(data)
-    reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
-    # this run's pre-read misses the supplement; the under-lock guard fires
-    monkeypatch.setattr(quarantine_mod, "snapshot_supplements", lambda r: {})
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
+        snap_payload(data, ["ETHUSD"])))
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
     assert len(supplements(reg)) == 1
     assert len(decisions(reg)) == 3
 
 
-def test_a_conflicting_concurrent_supplement_refuses(tmp_path, capsys,
-                                                     monkeypatch):
+def test_a_conflicting_concurrent_supplement_defers_its_strategy(
+        tmp_path, capsys, monkeypatch):
+    """Ruling R2 (2026-10-16 fast path): a supplement that lands while this
+    run simulates is ordinary coverage under the lock, so a disagreeing one
+    is a rule-2 restatement -- the owing strategy defers, exit 0 -- where
+    the old write-time race refused the day. Nothing is chained over it."""
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
     extend_ethusd(data)
-    reg.record_quarantine_snapshot_supplement(
-        dict(snap_payload(data, ["ETHUSD"]),
-             bars_sha256={"ETHUSD": "e" * 64}))
-    monkeypatch.setattr(quarantine_mod, "snapshot_supplements", lambda r: {})
+    fired = race_before_lock(monkeypatch, lambda: reg.record_quarantine_snapshot_supplement(
+        dict(snap_payload(data, ["ETHUSD"]), bars_sha256={"ETHUSD": "e" * 64})))
     capsys.readouterr()
-    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
-    assert "REFUSED" in capsys.readouterr().err
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
+    cap = capsys.readouterr()
+    assert "RESTATED" in cap.err
+    assert f"{two['strategy_id']}  deferred:" in cap.out
     assert len(decisions(reg)) == 1            # only the first run's row
+    assert len(supplements(reg)) == 1
 
 
 def test_restated_bar_on_a_supplemented_asset_defers_its_strategy(tmp_path, capsys):
@@ -2229,31 +2237,28 @@ def test_time_stamped_dates_record_like_bare_dates(tmp_path, capsys):
     assert "partially recorded dates: 0" in review
 
 
-def test_a_base_landing_between_the_two_chain_reads_is_reconciled(
+def test_a_base_and_supplement_landing_before_the_lock_are_reconciled(
         tmp_path, capsys, monkeypatch):
-    """data_snapshots and snapshot_supplements are two separate un-locked
-    walks of the log: a concurrent run can chain base+supplement BETWEEN
-    them, leaving this run seeing 'supplement but no base' on a perfectly
-    healthy chain. The runner must read the base again before crying defect
-    -- a false REFUSED here would page the Sentinel for nothing."""
+    """The fast path reads the chain once and re-reads only the tail under
+    the lock. A concurrent run that chains a base AND a supplement for the
+    date in between is seen whole: no provenance written, every row
+    recorded, the chain valid."""
     reg, spec, two, data = quarantined_split_calendar(tmp_path)
-    quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
     extend_ethusd(data)
-    reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
-    real = quarantine_mod.data_snapshots
-    calls = {"n": 0}
 
-    def racy(registry):
-        calls["n"] += 1
-        return {} if calls["n"] == 1 else real(registry)
+    def other_run():
+        reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD"]))
+        reg.record_quarantine_snapshot_supplement(snap_payload(data, ["ETHUSD"]))
 
-    monkeypatch.setattr(quarantine_mod, "data_snapshots", racy)
+    fired = race_before_lock(monkeypatch, other_run)
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
-    assert calls["n"] >= 2                     # it actually re-read
+    assert fired == [1]
     assert len(decisions(reg)) == 3
     assert len(snapshots(reg)) == 1
     assert len(supplements(reg)) == 1
+    out = run_verifier(reg.log_path)
+    assert out.returncode == 0, out.stdout
 
 
 def test_a_file_with_no_bars_yet_defers_with_its_own_wording(tmp_path,

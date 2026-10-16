@@ -3,6 +3,7 @@ import json
 
 from . import quarantine as quarantine_mod
 from .quarantine import run as quarantine_run
+from .quarantine_view import QuarantineView
 from .common import content_id
 from .test_gauntlet import gauntlet_registry
 from .test_gen3b import (ENTERED, argv_for, decisions, dated_target_hit_bars,
@@ -148,9 +149,9 @@ def test_only_restated_strategies_owing_is_deferred_only_and_exits_zero(tmp_path
     quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))     # both record
     restate(data, "ETHUSD", "2023-01-21", "2023-01-21,100.0,100.0,100.0,101.0,1.0")
     # B owes again only if its row is absent: hide it from the pre-filter view
-    real = quarantine_mod.existing_decisions
-    monkeypatch.setattr(quarantine_mod, "existing_decisions",
-                        lambda r: {k for k in real(r) if k[0] != b["strategy_id"]})
+    real = QuarantineView.decision_keys
+    monkeypatch.setattr(QuarantineView, "decision_keys",
+                        lambda self: {k for k in real(self) if k[0] != b["strategy_id"]})
     rep = quarantine_mod.DateReport()
     rc = quarantine_run(argv_for(reg, data, "--date", "2023-01-22"), report=rep)
     assert rc == 0 and rep.deferred_only is True
