@@ -1315,10 +1315,34 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `morpheus-hub/tasks/xml/26_LiveGateWeekly.xml` in the same pass.
 - **LIVE is a lifecycle state, not capital** (the note's own words). Money at
   risk stays Coen's separate decision; nothing here can construct a
-  `RouterConfig(mode="live")` in trading-systems, and nothing should.
+  `RouterConfig(mode="live")` in trading-systems, and nothing should;
+  `pipeline/signal.py` (build 4a) only writes next-bar targets to
+  logs/signals/ for the trading-systems executor (section below).
 - Reachability, from the note: graduation is a MULTI-YEAR proposition
   (Sharpe 1.3 ~ 587 days best case). Do not read a slow record as a weak
   strategy; it may be a large cohort.
+
+## Signal service (build 4a, 31_SignalService)
+- `python -m pipeline.signal` (wrapper `tasks/run_signal_service.bat`, task
+  `\Morpheus\31_SignalService`, daily 08:45, after the 08:20 quarantine
+  daily) writes `logs/signals/targets-<bar_end>.json` for every crypto 1d
+  strategy in state `quarantine` or `live`: `{bar_end, engine_rev,
+  data_digest {asset: sha256 of data/<asset>_1d.csv}, written_utc,
+  strategies {sid: {spec_sha, max_dd (the screened verdict's, or null),
+  assets {asset: {side long|short|flat, frac}}}}}`. The trading-systems
+  executor reads exactly this shape; change it only together with the
+  executor.
+- **READ-ONLY.** One `Registry.snapshot()` read (complete lines only), never
+  an append, never `logs/chain.lock`, never data/, never git. The file is
+  published by `os.replace` from a `.json.tmp`, so the executor never reads a
+  torn file. logs/ is gitignored: a targets file is never committed.
+- **P1, the synthetic next bar:** entries (and time / declared exits) fill at
+  the NEXT open from the last close's decision, so a plain run cannot see a
+  decision taken on the last close. `next_bar_position` appends one flat bar
+  (open = high = low = close = the last close) and reads the engine's own
+  position after it, with periods per year and version derived exactly as
+  `quarantine.observe_day` does. An intrabar stop/target on the next bar is
+  by construction not foreseen. Tests: `test_signal.py`.
 
 ## Triage escalations -- REMOVED by D44 (2026-09-26)
 - The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone
