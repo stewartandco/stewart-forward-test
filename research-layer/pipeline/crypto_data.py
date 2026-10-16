@@ -1,11 +1,16 @@
 """Research-layer-native fetcher for the expanded crypto grid (SP5 spec s6).
 
-Keyless Binance spot klines, run as an explicit deliberate command -- never on
-a schedule, never implicit -- because a generation pins to the snapshot it was
-bred on (same posture as `pipeline.tradfi_data`):
+Keyless Binance spot klines. Explicit hand runs stay legal and are the
+default posture (a generation pins to the snapshot it was bred on, same as
+`pipeline.tradfi_data`):
 
     python -m pipeline.crypto_data fetch --timeframes 1d
     python -m pipeline.crypto_data fetch --timeframes 1d,4h --assets BTCUSDT
+
+The one scheduled caller is `pipeline.crypto_refresh` (task 32), which runs
+daily for the ACTIVE crypto cells and passes `end_ms=` (see
+`last_complete_utc_day_end_ms`) so every CSV ends on the last complete UTC day
+even when a refresh runs late or is re-run in the afternoon.
 
 Ban safety is the design constraint, not a nicety: HTTP 418 is an IP-WIDE ban
 on this box, and every Binance consumer (legacy `data_fetch`, trading-systems'
@@ -155,9 +160,21 @@ def _read_existing(path: Path) -> dict[str, tuple]:
     return rows
 
 
-def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None) -> dict:
+def last_complete_utc_day_end_ms(now_ms: int) -> int:
+    """Epoch ms of 00:00 UTC of `now_ms`'s UTC date: the exclusive end cap
+    that keeps exactly the daily bars that closed before today began (UTC)."""
+    return now_ms - now_ms % TF_MS["1d"]
+
+
+def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None,
+                 end_ms: int | None = None) -> dict:
     """Fetch every COMPLETE `tf` kline for `symbol` into `data_dir`, resuming
     incrementally from any existing CSV.
+
+    `end_ms` is an optional exclusive cap on top of the closed-bar rule: a
+    kline is kept only if its close time is `< end_ms`. It filters rows only
+    -- pagination still advances from the RAW batch and stops on a short one.
+    `None` (the default) is the closed-bar rule alone, exactly as before.
 
     Completeness comes from the exchange's own close_time (index 6), not a
     local date comparison: the currently-open kline arrives as the last
@@ -210,6 +227,8 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
             # admitting a genuinely-closed bar one run later.
             if k[6] >= now_ms - SKEW_MARGIN_MS:
                 continue
+            if end_ms is not None and k[6] >= end_ms:
+                continue                 # past the caller's end cap
             merged[_ms_to_date(k[0])] = (
                 _ms_to_date(k[0]), str(float(k[1])), str(float(k[2])),
                 str(float(k[3])), str(float(k[4])), str(float(k[5])))
