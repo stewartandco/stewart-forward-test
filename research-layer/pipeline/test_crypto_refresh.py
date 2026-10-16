@@ -204,13 +204,36 @@ def test_a_hard_rate_limit_stops_like_a_ban(tmp_path):
     assert out["aborted"]
 
 
-def test_a_retryable_rate_limit_sleeps_and_retries_next_pass(tmp_path):
+def test_a_retryable_rate_limit_that_reaches_us_stops_the_run(tmp_path):
+    # fetch_symbol already retried it; retry_ok=True is still an exhausted 429.
     fake = Fake(tmp_path / "data", {B: [cd.RateLimited(7, retry_ok=True), None]})
     sleeps = Sleeps()
     out = _run(tmp_path, fake, [A, B, C], sleep=sleeps)
-    assert 7 in sleeps.calls
-    assert fake.symbols().count(B) == 2 and C in fake.symbols()
-    assert out["items"] == [] and out["aborted"] is None
+    assert fake.symbols() == [A, B]                # B not retried, C never called
+    assert 7 not in sleeps.calls
+    items = {i["key"]: i for i in out["items"]}
+    assert set(items) == {B, C}
+    assert items[C]["reason"].startswith("skipped: Binance rate limit (429) on XUSDT")
+    assert out["aborted"]
+    assert set(out["fetched"]) == {f"{A}_1d"}
+
+
+def test_a_ban_in_a_retry_pass_stops_and_keeps_the_earlier_failures(tmp_path):
+    # Pass 1: A and B fail, C completes. Retry pass: A is banned. B (failed,
+    # still pending) is not retried and keeps its own failure item; A's item
+    # now reports the ban; C stays fetched.
+    fake = Fake(tmp_path / "data", {
+        A: [urllib.error.URLError("a-boom"), cd.BinanceBanned("418")],
+        B: [urllib.error.URLError("b-boom")]})
+    out = _run(tmp_path, fake, [A, B, C])
+    assert fake.symbols() == [A, B, C, A]
+    items = {i["key"]: i for i in out["items"]}
+    assert set(items) == {A, B}
+    assert "BinanceBanned" in items[A]["reason"]
+    assert "b-boom" in items[B]["reason"]
+    assert out["aborted"]
+    assert set(out["fetched"]) == {f"{C}_1d"}
+    assert set(_manifest(tmp_path / "data")) == {f"{C}_1d"}
 
 
 def test_the_manifest_is_still_written_when_a_fetch_crashes(tmp_path):

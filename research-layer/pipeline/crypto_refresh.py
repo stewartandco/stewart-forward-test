@@ -25,13 +25,12 @@ so the run is over well before the 08:20 quarantine daily. The first pass is
 not gated: a late or hand run still refreshes every cell. A cell still failed
 at the end keeps a `crypto_refresh_failed` item.
 
-BAN / RATE LIMIT. `BinanceBanned` (418) or a `RateLimited` with
-`retry_ok=False` (429 with a Retry-After beyond the cap) stops the run at
-once (more calls could extend an IP-wide ban shared with every Binance
+BAN / RATE LIMIT. `BinanceBanned` (418) or ANY `RateLimited` that reaches
+this module (429; fetch_symbol has already retried it, sleeping up to 120 s
+per try, so retry_ok or not it is exhausted) stops the run at once, with no
+sleep (more calls could extend an IP-wide ban shared with every Binance
 consumer on this box): that cell gets a failure item and every cell not yet
-completed a `skipped: ...` item. A `RateLimited` with `retry_ok=True` sleeps
-its `retry_after` and counts as a failed attempt for this pass; the retry
-pass picks the cell up.
+completed a `skipped: ...` item.
 
 LEDGER. Items = fetch failures + `admission_problems` over the active cells,
 written with `degraded.record(..., remove_unseen=True)`: a recovered item
@@ -162,11 +161,10 @@ def refresh(data_dir: Path, cell_list: list[tuple[str, str]], *, now_ms: int,
                     aborted = f"Binance IP ban (418) on {key}"
                     skip_why = f"skipped: Binance IP ban (418) on {key}; not fetched this run"
                 except RateLimited as exc:
-                    if exc.retry_ok:
-                        note_failure(cell, exc)
-                        sleep(exc.retry_after)
-                        still_failed.append(cell)
-                        continue
+                    # fetch_symbol has already retried (3 tries, up to 120 s
+                    # each) before a RateLimited reaches here, retry_ok or not:
+                    # stop like a ban, no sleep (crypto_data.main and
+                    # quarantine.fetch_owed do the same).
                     failed[cell] = (f"fetch of {asset} {tf} failed: Binance rate "
                                     f"limit: {exc!r}")
                     print(f"crypto_refresh: {names[cell]} FAILED: {exc!r}; Binance "
