@@ -186,3 +186,103 @@ def test_catch_up_sees_a_state_change_between_dates(tmp_path, monkeypatch):
                         bury_after_first)
     assert _catch_up(reg, data) == 0
     assert {r["date"] for r in decisions(reg)} == {"2023-01-22"}
+
+
+from .quarantine import _plan_provenance
+
+H = {c: c * 64 for c in "abcdef"}          # six distinct valid digests
+
+
+class _V:
+    def __init__(self, snaps=None, sups=None):
+        self._s, self._u = snaps or {}, sups or {}
+
+    def snapshots(self):
+        return dict(self._s)
+
+    def supplements(self):
+        return {d: list(v) for d, v in self._u.items()}
+
+
+def _sp(*assets):
+    return {"universe": {"assets": list(assets)}}
+
+
+SPECS = {"A": _sp("BTCUSD"), "B": _sp("ETHUSD"), "AB": _sp("BTCUSD", "ETHUSD")}
+D = "2023-01-22"
+
+
+def test_plan_writes_a_base_snapshot_when_the_date_has_none():
+    p = _plan_provenance(_V(), D, ["A", "B"], SPECS,
+                         {"BTCUSD": H["a"], "ETHUSD": H["b"]},
+                         {"BTCUSD": H["c"], "ETHUSD": H["d"]})
+    assert p.refusal is None and p.ready == ["A", "B"] and p.conflicted == []
+    assert p.write == ("quarantine_data_snapshot", {
+        "date": D, "data_sha256": {"BTCUSD": H["c"], "ETHUSD": H["d"]},
+        "bars_sha256": {"BTCUSD": H["a"], "ETHUSD": H["b"]}})
+
+
+def test_plan_refuses_a_supplement_without_a_base():
+    p = _plan_provenance(_V(sups={D: [{"bars_sha256": {"ETHUSD": H["b"]}}]}),
+                         D, ["A"], SPECS, {"BTCUSD": H["a"]}, {"BTCUSD": H["c"]})
+    assert p.refusal == (
+        f"REFUSED: {D} has supplement provenance but no base "
+        f"quarantine_data_snapshot -- a defective chain needs human eyes, "
+        f"not more rows.")
+    assert p.write is None
+
+
+def test_plan_refuses_a_base_with_no_usable_bars_map():
+    p = _plan_provenance(_V(snaps={D: {"bars_sha256": {}}}), D, ["A"], SPECS,
+                         {"BTCUSD": H["a"]}, {"BTCUSD": H["c"]})
+    assert p.refusal == (
+        f"REFUSED: the quarantine_data_snapshot chained for {D} carries no "
+        f"usable bars_sha256 map, so it covers nothing -- BTCUSD included -- "
+        f"and cannot be supplemented honestly.")
+
+
+def test_plan_writes_nothing_when_everything_is_covered_and_matches():
+    p = _plan_provenance(_V(snaps={D: {"bars_sha256": {"BTCUSD": H["a"]}}}),
+                         D, ["A"], SPECS, {"BTCUSD": H["a"]}, {"BTCUSD": H["c"]})
+    assert (p.refusal, p.write, p.ready, p.conflicted) == (None, None, ["A"], [])
+
+
+def test_plan_supplements_only_the_uncovered_assets():
+    p = _plan_provenance(_V(snaps={D: {"bars_sha256": {"BTCUSD": H["a"]}}}),
+                         D, ["A", "AB"], SPECS,
+                         {"BTCUSD": H["a"], "ETHUSD": H["b"]},
+                         {"BTCUSD": H["c"], "ETHUSD": H["d"]})
+    assert p.write == ("quarantine_data_snapshot_supplement", {
+        "date": D, "data_sha256": {"ETHUSD": H["d"]},
+        "bars_sha256": {"ETHUSD": H["b"]}})
+    assert p.ready == ["A", "AB"]
+
+
+def test_plan_defers_the_strategies_trading_a_restated_asset():
+    base = {"bars_sha256": {"BTCUSD": H["a"], "ETHUSD": H["e"]}}
+    p = _plan_provenance(_V(snaps={D: base}), D, ["A", "B", "AB"], SPECS,
+                         {"BTCUSD": H["a"], "ETHUSD": H["b"]},
+                         {"BTCUSD": H["c"], "ETHUSD": H["d"]})
+    assert p.conflicted == ["ETHUSD"]
+    assert p.ready == ["A"]
+    assert [sid for sid, _ in p.deferred] == ["B", "AB"]
+    assert p.reasons["ETHUSD"] == p.deferred[0][1]
+    assert "ETHUSD: the bars up to this date have changed" in p.reasons["ETHUSD"]
+    assert p.write is None
+
+
+def test_plan_counts_supplement_coverage_first_writer_wins():
+    base = {"bars_sha256": {"BTCUSD": H["a"]}}
+    sups = [{"bars_sha256": {"ETHUSD": H["b"]}},
+            {"bars_sha256": {"ETHUSD": H["e"]}}]      # defective overlap
+    p = _plan_provenance(_V(snaps={D: base}, sups={D: sups}), D, ["B"], SPECS,
+                         {"ETHUSD": H["b"]}, {"ETHUSD": H["d"]})
+    assert (p.conflicted, p.ready, p.write) == ([], ["B"], None)
+
+
+def test_plan_does_not_supplement_assets_of_deferred_strategies():
+    base = {"bars_sha256": {"BTCUSD": H["e"]}}
+    p = _plan_provenance(_V(snaps={D: base}), D, ["AB"], SPECS,
+                         {"BTCUSD": H["a"], "ETHUSD": H["b"]},
+                         {"BTCUSD": H["c"], "ETHUSD": H["d"]})
+    assert p.ready == [] and p.write is None

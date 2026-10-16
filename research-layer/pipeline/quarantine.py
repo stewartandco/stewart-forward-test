@@ -72,6 +72,7 @@ import time
 import hashlib
 import argparse
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bars as _bars
@@ -296,6 +297,81 @@ def snapshot_conflicts(recorded: dict[str, str],
                 f"recorded (chained {recorded[asset]}, recomputed "
                 f"{current[asset]})")
     return reasons
+
+
+@dataclass
+class _Provenance:
+    """What the chain's provenance for one date lets a --date pass write
+    (2026-10-16 fast path s3.5). Computed from a view, so the recorder asks
+    it twice: before chain.lock, to simulate only what can record, and under
+    it, to decide. The rules are the old write phase's, verbatim."""
+    refusal: str | None = None
+    write: tuple[str, dict] | None = None   # (entry_type, payload) or None
+    ready: list[str] = field(default_factory=list)
+    conflicted: list[str] = field(default_factory=list)
+    reasons: dict[str, str] = field(default_factory=dict)
+    deferred: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _plan_provenance(view, date: str, ready: list[str],
+                     specs: dict[str, dict], bars_digests: dict[str, str],
+                     data_digests: dict[str, str]) -> _Provenance:
+    """`bars_digests` / `data_digests` cover every cell the `ready`
+    strategies trade. No base and no supplement: write the base. A
+    supplement with no base, or a base with no usable bars_sha256: refuse
+    (a defective chain needs human eyes). Otherwise rule 2 (2026-10-08
+    addendum): covered-but-different defers the strategies that trade the
+    asset, and the cells the kept strategies need that nothing covers yet
+    get a supplement. Coverage is the base then supplements in chain order,
+    first writer wins (merged_bars_coverage)."""
+    recorded = view.snapshots().get(date)
+    sups = view.supplements().get(date, [])
+    if recorded is None and not sups:
+        return _Provenance(ready=list(ready), write=(
+            "quarantine_data_snapshot", validated_quarantine_snapshot(
+                {"date": date, "data_sha256": dict(data_digests),
+                 "bars_sha256": dict(bars_digests)})))
+    if recorded is None:
+        return _Provenance(refusal=(
+            f"REFUSED: {date} has supplement provenance but no base "
+            f"quarantine_data_snapshot -- a defective chain needs human "
+            f"eyes, not more rows."))
+    if (not isinstance(recorded.get("bars_sha256"), dict)
+            or not recorded["bars_sha256"]):
+        # fails CLOSED, the `or {}` precedent: a base snapshot with no
+        # usable bars_sha256 covers nothing, and papering over it with a
+        # supplement for everything would legitimise a fabricated root
+        return _Provenance(refusal=(
+            f"REFUSED: the quarantine_data_snapshot chained for {date} "
+            f"carries no usable bars_sha256 map, so it covers nothing -- "
+            f"{', '.join(sorted(bars_digests))} included -- and cannot be "
+            f"supplemented honestly."))
+    covered = merged_bars_coverage(recorded, sups)
+    conflicted = sorted(a for a in bars_digests
+                        if a in covered and covered[a] != bars_digests[a])
+    reasons = dict(zip(conflicted, snapshot_conflicts(
+        covered, {a: bars_digests[a] for a in conflicted})))
+    kept: list[str] = []
+    deferred: list[tuple[str, str]] = []
+    for sid in ready:
+        hit = sorted(set(spec_cells(specs[sid])) & set(conflicted))
+        if hit:
+            deferred.append((sid, reasons[hit[0]]))
+        else:
+            kept.append(sid)
+    keep_cells = {a for sid in kept for a in spec_cells(specs[sid])}
+    new_cells = sorted(a for a in bars_digests
+                       if a in keep_cells and a not in covered)
+    write = None
+    if kept and new_cells:
+        # the backfill of a class deferred when the base was chained
+        write = ("quarantine_data_snapshot_supplement",
+                 validated_quarantine_snapshot({
+                     "date": date,
+                     "data_sha256": {a: data_digests[a] for a in new_cells},
+                     "bars_sha256": {a: bars_digests[a] for a in new_cells}}))
+    return _Provenance(write=write, ready=kept, conflicted=conflicted,
+                       reasons=reasons, deferred=deferred)
 
 
 def _rebase_index(bars: list[dict], entered: str, asset: str) -> int:
