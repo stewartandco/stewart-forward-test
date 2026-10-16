@@ -11,8 +11,10 @@ one read plus their tails.
 
 Every accessor returns exactly what the module-level reader of the same name
 in quarantine.py returns -- those readers keep their bodies as the oracle the
-view is tested against (test_quarantine_fastpath.py) -- and hands out copies,
-so a caller can never edit the view by accident."""
+view is tested against (test_quarantine_fastpath.py) -- and hands out SHALLOW
+copies: the containers are copied, the chained payload dicts (specs,
+snapshots, supplements, decision_payload) are shared, so a caller must not
+mutate them."""
 from __future__ import annotations
 
 from .registry import ChainSnapshot, Registry

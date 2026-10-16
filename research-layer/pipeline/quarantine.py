@@ -142,16 +142,19 @@ def decision_entries(registry: Registry) -> list[dict]:
 
 
 def existing_decisions(registry: Registry) -> set[tuple[str, str, str]]:
-    """Cheap in-process pre-filter only. The authoritative de-duplication is
-    Registry.record_quarantine_decision, which re-checks under the lock."""
+    """Kept as the oracle for QuarantineView (test_quarantine_fastpath.py
+    pins the view to it) and for hand tools. The recorder reads through
+    QuarantineView, not this; its authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view."""
     return {(d["strategy_id"], d["date"], d["asset"])
             for d in decision_entries(registry)}
 
 
 def data_snapshots(registry: Registry) -> dict[str, dict]:
-    """{date: payload} for every snapshot on the chain. A cheap pre-read only;
-    the authoritative uniqueness check is Registry.record_quarantine_snapshot,
-    which re-checks under the lock.
+    """{date: payload} for every snapshot on the chain. Kept as the oracle
+    for QuarantineView and for hand tools; the recorder reads through
+    QuarantineView, and its authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view.
 
     FIRST payload wins on a duplicated date, matching the writer (which
     refuses the second) and verify_registry.py (which reports it and keeps the
@@ -167,8 +170,9 @@ def data_snapshots(registry: Registry) -> dict[str, dict]:
 def snapshot_supplements(registry: Registry) -> dict[str, list[dict]]:
     """{date: [payloads in chain order]} for every
     quarantine_data_snapshot_supplement on the chain (2026-08-27 addendum).
-    A cheap pre-read only, like data_snapshots; the authoritative disjointness
-    check is Registry.record_quarantine_snapshot_supplement under the lock."""
+    Kept as the oracle for QuarantineView and for hand tools, like
+    data_snapshots; the recorder's authority is the under-lock re-plan plus
+    _append_at's refusal of any byte appended since the view."""
     out: dict[str, list[dict]] = {}
     for e in registry.entries():
         if e["entry_type"] == "quarantine_data_snapshot_supplement":
