@@ -26,10 +26,15 @@ with Coen's pre-approved merge; it lands before B3 touches the recorder.
   exact 1h equality.
 - **2026-10-17, this design:**
   - **One design, sequenced pieces.** This one spec covers B, C, D and
-    activation, built as separate plans in the order **B -> C -> D ->
-    activation**, each with its own Coen-gated merge.
-  - **The compute/cost sign-off is taken after B lands**, so the numbers in
-    front of Coen are real, not the pre-B slow path.
+    activation, built as separate plans, each with its own Coen-gated
+    merge.
+  - **Order (Coen, option B): the daily part first.** D's daily part (D-d)
+    and Switch 1 (1d) go FIRST, then **B -> C -> D's intraday part (D-i) ->
+    Switch 2**. **Switch 1's cost sign-off uses today's 1d costs**; the
+    intraday sign-off is taken after B lands, so its numbers are real, not
+    the pre-B slow path.
+  - **Admission line (Coen, option b): at least 365 days of history before
+    the cutoff**: 76 assets (D-d1).
   - **Activation is TWO commits, measured apart (Coen's option a):**
     **Switch 1 = SP5 Phase 3 as planned**, crypto per cell at **1d only** on
     the assets with pre-2024 history; **Switch 2 = intraday timeframes**, a
@@ -143,21 +148,25 @@ stays dark is a month of forward record not accumulating.
 
 | Plan | Repo(s) | Gate to start | Gate to merge |
 |---|---|---|---|
-| B engine speed | stewart-forward-test | this spec approved | Coen; parity + replay proofs |
-| C safety rails | stewart-forward-test, morpheus-hub | B merged | Coen; suites |
-| D activation data (daily part D-d, intraday part D-i) | stewart-forward-test | C merged | Coen; rehearsal reports |
-| Sign-off 1 (1d) | report only | B merged; refreshed on D-d's rehearsal | Coen signs |
-| Switch 1: crypto per cell at 1d | stewart-forward-test, morpheus-hub, sc-ops-sentinel worktree | D-d merged + sign-off 1 | Coen; grid record text approved |
-| Sign-off 2 (intraday) | report only | Switch 1 live; D-i's rehearsal + Switch 1's real operating numbers | Coen signs |
-| Switch 2: intraday timeframes | stewart-forward-test | sign-off 2 | Coen; protocol note text approved |
+| # | Plan | Repo(s) | Gate to start | Gate to merge |
+|---|---|---|---|---|
+| 1 | D-d + Switch 1: daily data, refresh task, crypto per cell at 1d | stewart-forward-test, morpheus-hub, sc-ops-sentinel worktree | this spec approved | Coen: sign-off 1 signed, grid record + brief texts approved, 8.6 preconditions |
+| 2 | B engine speed | stewart-forward-test | spec approved (may start in parallel with plan 1; merges after it) | Coen; parity + replay proofs |
+| 3 | C safety rails | stewart-forward-test, morpheus-hub | B merged | Coen; suites |
+| 4 | D-i intraday data, bundle shape, intraday rehearsal | stewart-forward-test | C merged | Coen; rehearsal report |
+| 5 | Switch 2: intraday timeframes | stewart-forward-test | D-i merged + sign-off 2 | Coen; protocol note + brief texts approved |
 
-Each plan gets its own writing-plans pass when it starts (B's plan first,
-from this spec). C and D are independent in code, so the builder may
-PREPARE D while C is in review, but D merges after C. D-d and D-i may be
-one plan or two (builder's call); D-i must merge before Switch 2.
-Claude's call (s10b Q1, Coen answered "continue"): the agreed order
-stands; Switch 1 does NOT jump ahead of B and C, although a 1d-only
-activation needs neither the fast percentile nor the intraday rails.
+Sign-off 1 (1d) is a report inside plan 1, on TODAY's code (Coen's
+order): at 1d the vol_percentile window is 365 bars, so B changes little
+for it. Sign-off 2 (intraday) is a report before plan 5, on B's code,
+measured on D-i's rehearsal and corrected by Switch 1's real operating
+numbers. Each plan gets its own writing-plans pass when it starts (plan 1
+first, from this spec). Claude's calls: B may be BUILT in its own worktree
+while plan 1 is in review or rolling out, but merges after Switch 1 is
+live and has had its supervised first generation, so the two changes never
+land in the same window; plan 1 and B touch different code (cells/composer
+/refresh vs engine/gauntlet_core/quarantine) except quarantine load, which
+is why B3 matters soon after Switch 1 (s11).
 
 ## 5. Plan B: engine speed
 
@@ -218,7 +227,7 @@ Claude's call: a tracked, hand-edited acknowledgement file
 named hole that is a real exchange gap, so a genuine Binance outage does
 not FAIL the digest forever; an acknowledged hole is still printed. The
 detector applies to 1d crypto files too (a whole missing daily bar is the
-same failure), from Switch 1.
+same failure), once plan 3 merges (after Switch 1).
 
 **C2. Stale-feed alarm.** A fetch that succeeds but brings nothing new is
 invisible today. After each fetch, a cell whose last CLOSED bar is older
@@ -269,15 +278,15 @@ parity re-run (C1/C2 touch the fetch path).
 
 **D-d1. Admission, as a check, not a guess.** Admission line: every active
 cell has **at least 365 days of history before `screen.DEFAULT_CUTOFF`**
-(first bar on or before 2022-12-31). Claude's call (s10b Q2, Coen answered
-"continue"): 365 days is the longest warm-up any block needs
+(first bar on or before 2022-12-31). Coen's decision (option b, 10-17;
+Claude's reasoning when offering it): 365 days is the longest warm-up any block needs
 (`gate_mask`'s vol_percentile window), and a cell with weeks of training
 data buries every spec on `trade_count` while still adding to N. That
 excludes the ten 2024 starters (ENA, ETHFI, JUP, PYTH, RENDER, STRK, TAO,
 WIF, ZK, ZRO) and fourteen short-history assets (GAS, GLM, PROM, ARB, SUI,
 FLOKI, PEPE, PENDLE, WLD, SEI, TIA, ORDI, JTO, BONK; first 1d bars
-2023-03-17 to 2023-12-15), leaving **76 assets**. The alternatives Coen was
-offered: first bar on or before the cutoff (90 assets) or at least 730
+2023-03-17 to 2023-12-15), leaving **76 assets**. The alternatives Coen
+declined: first bar on or before the cutoff (90 assets) or at least 730
 days (69 assets); Switch 1 writes the active asset tuple as a literal (D-d
 prepares and tests it). D-d adds a per-CELL check, run by the switch's
 test suite against the real data and by the refresh task every run.
@@ -302,8 +311,11 @@ not in D). One run fetches closed bars incrementally for every active cell
 (90 at Switch 1; the intraday cells join at Switch 2 with no code change,
 because it reads `cells.active_cells("crypto")`), cell-isolated: a failed
 cell is a degraded item and the others continue; a Binance 418 stops the
-run at once and marks the rest (2b-2's rule). It runs C1/C2 and D-d1's
-check on every cell. Its ledger is a new `logs/degraded_crypto_refresh.json`
+run at once and marks the rest (2b-2's rule). It runs D-d1's check on every
+cell, and C1/C2 hook into it when plan 3 (C) merges (until then a stale or
+holed 1d cell is still caught downstream: the loop's freshness preflight
+reports or blocks it, quarantine defers on a missing bar, and the signal
+service refuses a lagging file). Its ledger is a new `logs/degraded_crypto_refresh.json`
 (writer/source naming as the existing ledgers), read by the Sentinel's
 `research_degraded` check (a new manifest key, s8.5). Exit 0 on a run that
 fetched what it could (degraded items are the alarm), nonzero only on a
@@ -381,8 +393,9 @@ before Switch 2.
 
 ## 7.5 The cost sign-offs (Coen signs each)
 
-**Sign-off 1 (before Switch 1)**, every figure measured on B's code and
-refreshed on D-d4, each row pass/fail against s3's windows:
+**Sign-off 1 (before Switch 1)**, every figure measured on TODAY's code
+(Coen's order: D-d and Switch 1 before B) and refreshed on D-d4, each row
+pass/fail against s3's windows:
 - screen and worker seconds per 1d per-cell spec; projected screen minutes
   and worker drain hours for one crypto generation (12 cells per window x
   the recent combos-per-family distribution; the builder states the basis);
@@ -422,7 +435,6 @@ differently):
   12 assets per generation (Claude's call for Switch 2: a window is the
   window's assets x every active timeframe, because the cell is the unit of
   survival and rotation is a schedule, never a selection);
-- per-timeframe priors from B in force;
 - every other branch that keys on the class NAME "crypto" (builder check
   10-17; the builder re-greps at build time): `composer.validate_family`
   (~810); the crypto brief (`SYSTEM_PROMPT`, ~1209, returned at ~1314),
@@ -508,7 +520,8 @@ times. The builder confirms the order against the verifier's invariants
 (the 2a cutover merged code BEFORE chaining its note for exactly that
 reason) and amends it in the switch plan if the verifier needs otherwise.
 Switch 2 follows the same pattern with the protocol note in place of the
-grid record and no task registration.
+grid record and no task registration, and B's per-timeframe priors in
+force.
 
 **8.7 Rollback.** Revert the switch's MERGE (never half of it). Registered
 strategies and chained notes stay (append-only); a superseding note
@@ -543,14 +556,17 @@ whether the screen prior is per-timeframe (B2).
 
 ## 10b. Open questions for Coen
 
-- **Q1. Order.** Answered "continue": Claude kept the agreed order (s4).
-- **Q2. Admission line.** Answered "continue": Claude chose 365 days of
-  pre-cutoff history, 76 assets (D-d1). Overridable in review; once the
-  grid record is chained it is fixed.
+- Q1 Order and Q2 Admission line: answered by Coen 10-17 (Decisions).
 - (At Switch 2, not now: what a crypto family's parameters mean across
   timeframes; Claude recommends bars as written.)
 
 ## 11. Risks
+
+- Coen's order puts B3 (the catch-up cost fix) AFTER Switch 1, so the 08:20
+  quarantine daily carries a growing per-cell 1d population on today's
+  ~4.7 s/row catch-up cost until B merges. Sign-off 1 projects it against
+  the 08:20 -> 08:45 window; if the projection fails inside B's expected
+  delivery, that comes back to Coen before Switch 1.
 
 - Clustering memory (s7.5) may fail first; the response is Coen's (RAM,
   cadence, or a slower rotation), not a constant change.
