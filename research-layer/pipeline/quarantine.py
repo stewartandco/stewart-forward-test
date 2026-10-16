@@ -77,9 +77,13 @@ from pathlib import Path
 from . import bars as _bars
 from . import cells
 from .chainlock import ChainLock, ChainLockHeld
-from .registry import (Registry, parse_iso_date, DuplicateQuarantineDecision,
+from .registry import (Registry, parse_iso_date, ChainMoved,
+                       DuplicateQuarantineDecision,
                        DuplicateQuarantineSnapshot,
-                       OverlappingQuarantineSupplement)
+                       OverlappingQuarantineSupplement,
+                       validated_quarantine_decision,
+                       validated_quarantine_snapshot)
+from .quarantine_view import QuarantineView
 from .engine import simulate_asset
 from .qcells import (spec_cells, cell_path, split_cell_key, is_intraday_key,
                      complete_days)
@@ -164,6 +168,21 @@ def snapshot_supplements(registry: Registry) -> dict[str, list[dict]]:
         if e["entry_type"] == "quarantine_data_snapshot_supplement":
             out.setdefault(e["payload"]["date"], []).append(e["payload"])
     return out
+
+
+def _rows_of(source) -> list[dict]:
+    """decision_entries from a QuarantineView (the recorder's one read), or
+    from anything with entries() (a Registry; test stubs)."""
+    if isinstance(source, QuarantineView):
+        return source.decision_rows()
+    return decision_entries(source)
+
+
+def _keys_of(source) -> set[tuple[str, str, str]]:
+    """existing_decisions, from a QuarantineView or anything with entries()."""
+    if isinstance(source, QuarantineView):
+        return source.decision_keys()
+    return existing_decisions(source)
 
 
 def merged_bars_coverage(base: dict, sups: list[dict]) -> dict[str, str]:
@@ -584,7 +603,8 @@ def catch_up(dates: list[str], run_date) -> tuple[int, bool]:
     return 0, left == 0
 
 
-def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
+def _owed_dates_for_catch_up(source: "QuarantineView | Registry",
+                             quarantined: list[str],
                              entered: dict[str, str], specs: dict[str, dict],
                              data_dir: Path,
                              report: "DateReport | None" = None) -> list[str]:
@@ -618,7 +638,7 @@ def _owed_dates_for_catch_up(registry: Registry, quarantined: list[str],
         owed_by_sid[sid] = owed
         universe_by_sid[sid] = set(spec_cells(spec))
     return recordable_owed_dates(owed_by_sid, universe_by_sid,
-                                 existing_decisions(registry))
+                                 _keys_of(source))
 
 
 def _truncated(items: list[str]) -> str:
@@ -693,7 +713,7 @@ def _report_completeness(registry_rows: list[dict], spec: dict | None,
               f"{BACKFILL_LAG_DAYS}d of its bar")
 
 
-def review(registry: Registry, quarantined: list[str],
+def review(source: "QuarantineView | Registry", quarantined: list[str],
            entered: dict[str, str], specs: dict[str, dict],
            artifacts_dir: Path, data_dir: Path) -> int:
     """Report progress against the pre-declared minimum. WRITES NOTHING."""
@@ -702,7 +722,7 @@ def review(registry: Registry, quarantined: list[str],
         return 0
 
     rows_by_sid: dict[str, list[dict]] = {}
-    for r in decision_entries(registry):
+    for r in _rows_of(source):
         rows_by_sid.setdefault(r["strategy_id"], []).append(r)
 
     for sid in quarantined:
@@ -745,9 +765,9 @@ class DateReport:
         self.unchecked = False
 
 
-def _record_date(args, registry: Registry, quarantined: list[str],
-                 entered: dict[str, str], specs: dict[str, dict],
-                 report: DateReport) -> int:
+def _record_date(args, registry: Registry, view: QuarantineView,
+                 quarantined: list[str], entered: dict[str, str],
+                 specs: dict[str, dict], report: DateReport) -> int:
     """The --date path: record one trading day for every eligible strategy."""
     if not quarantined:
         print("No strategies in 'quarantine' state.")
@@ -1027,11 +1047,22 @@ def _record_date(args, registry: Registry, quarantined: list[str],
             lock.release()
 
 
-def run_one_date_for_catch_up(base: list[str], date: str,
-                              report: DateReport) -> tuple[int, bool]:
+def run_one_date_for_catch_up(base: list[str], date: str, report: DateReport,
+                              view: QuarantineView | None = None,
+                              registry: Registry | None = None
+                              ) -> tuple[int, bool]:
     one = DateReport()
     try:
-        rc = run(base + ["--date", date], report=one, write_ledger=False)
+        rc = run(base + ["--date", date], report=one, write_ledger=False,
+                 view=view)
+    except ChainMoved:
+        # Spec s3.4: the date fails like any raise, and the shared view is
+        # rebuilt with a fresh read so the dates after it are not stranded
+        # on a snapshot the chain no longer matches.
+        one.unchecked = True
+        if view is not None:
+            view.rebuild(registry)
+        raise
     except BaseException:
         one.unchecked = True            # a raise: this date was not fully checked
         raise
@@ -1158,7 +1189,8 @@ def _split_unsupported(quarantined: list[str], specs: dict
 
 
 def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
-        write_ledger: bool = True) -> int:
+        write_ledger: bool = True,
+        view: QuarantineView | None = None) -> int:
     layer = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path, default=layer / "registry_log.jsonl")
@@ -1201,13 +1233,18 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return 1
 
     registry = Registry(args.registry)
-    states = registry.strategy_states()
-    entered = quarantine_entry_dates(registry)
+    # ONE chain read per run (2026-10-16 fast path s3.1). Catch-up hands the
+    # same view to every date's pass, which moves it over the tail only; a
+    # ChainMoved here fails that date (run_one_date_for_catch_up rebuilds).
+    if view is None:
+        view = QuarantineView.build(registry)
+    else:
+        view.advance(registry)
+    states = view.states()
+    entered = view.entry_dates()
     quarantined = sorted(sid for sid, st in states.items()
                          if st == "quarantine")
-    specs = {e["payload"]["strategy_id"]: e["payload"]
-             for e in registry.entries()
-             if e["entry_type"] == "strategy_registered"}
+    specs = view.specs()
 
     quarantined, intraday_items = _split_unsupported(quarantined, specs)
 
@@ -1220,18 +1257,19 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return 0
 
     if args.review:
-        return review(registry, quarantined, entered, specs,
+        return review(view, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
 
     if args.catch_up:
         report = DateReport()
         report.degraded.extend(intraday_items)
-        dates = _owed_dates_for_catch_up(registry, quarantined, entered,
+        dates = _owed_dates_for_catch_up(view, quarantined, entered,
                                          specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
                 str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
         rc, reached_all = catch_up(
-            dates, lambda d: run_one_date_for_catch_up(base, d, report))
+            dates, lambda d: run_one_date_for_catch_up(
+                base, d, report, view=view, registry=registry))
         if write_ledger:
             # The authoritative pass: it removes recovered items, but only
             # when it reached every owed date (design s3.1, Review Focus 1)
@@ -1253,7 +1291,14 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
     report = report if report is not None else DateReport()
     report.degraded.extend(intraday_items)
     try:
-        return _record_date(args, registry, quarantined, entered, specs, report)
+        rc = _record_date(args, registry, view, quarantined, entered, specs,
+                          report)
+        # Bring the view over what this date just wrote, so the next date of a
+        # catch-up (and its ChainMoved check) starts from the real head. Task 5
+        # rewrites _record_date to advance the view itself; this line is then
+        # a no-op tail read and may go.
+        view.advance(registry)
+        return rc
     finally:
         if write_ledger:
             # --date only ADDS or refreshes: it sees one date, so an item it

@@ -100,3 +100,89 @@ def test_rebuild_replaces_everything_with_a_fresh_read(tmp_path):
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     view.rebuild(reg)
     assert _view_says(view) == _old_readers(reg)
+
+
+from .common import canonical_json
+from .registry import ChainMoved
+from .test_gen3b import decisions, flat_dated_bars, quarantined
+
+
+def _rewrite_last_line(reg):
+    """Rewrite the chain's head entry in place: advance() must see a
+    rewritten head and raise ChainMoved."""
+    raw = reg.log_path.read_bytes().splitlines(keepends=True)
+    last = json.loads(raw[-1])
+    last["ts_utc"] = "2000-01-01T00:00:00Z"
+    ending = b"\r\n" if raw[-1].endswith(b"\r\n") else b"\n"
+    raw[-1] = canonical_json(last).encode("utf-8") + ending
+    reg.log_path.write_bytes(b"".join(raw))
+
+
+def _catch_up(reg, data):
+    return quarantine_run(["--catch-up", "--registry", str(reg.log_path),
+                           "--data-dir", str(data),
+                           "--artifacts-dir", str(reg.log_path.parent / "artifacts")])
+
+
+def test_catch_up_hands_one_view_to_every_date(tmp_path, monkeypatch):
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    seen = []
+    real = quarantine_mod.run_one_date_for_catch_up
+
+    def spy(base, date, report, view=None, registry=None):
+        seen.append(id(view))
+        return real(base, date, report, view=view, registry=registry)
+
+    monkeypatch.setattr(quarantine_mod, "run_one_date_for_catch_up", spy)
+    assert _catch_up(reg, data) == 0
+    assert len(seen) == 4 and len(set(seen)) == 1 and seen[0] != id(None)
+    assert {r["date"] for r in decisions(reg)} == {
+        "2023-01-22", "2023-01-23", "2023-01-24", "2023-01-25"}
+
+
+def test_catch_up_rebuilds_the_view_after_chain_moved(tmp_path, monkeypatch):
+    """Spec s3.4: a date that ends in ChainMoved fails; the view is rebuilt
+    with a fresh read before the next date, so later dates still record."""
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    real = quarantine_mod.run_one_date_for_catch_up
+
+    def rewrite_before_second(base, date, report, view=None, registry=None):
+        if date == "2023-01-23":
+            _rewrite_last_line(reg)
+        return real(base, date, report, view=view, registry=registry)
+
+    monkeypatch.setattr(quarantine_mod, "run_one_date_for_catch_up",
+                        rewrite_before_second)
+    assert _catch_up(reg, data) == 1
+    assert {r["date"] for r in decisions(reg)} == {
+        "2023-01-22", "2023-01-24", "2023-01-25"}
+
+
+def test_a_chain_moved_date_marks_the_report_unchecked(tmp_path, monkeypatch):
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    view = QuarantineView.build(reg)
+    _rewrite_last_line(reg)
+    rep = quarantine_mod.DateReport()
+    base = ["--registry", str(reg.log_path), "--data-dir", str(data)]
+    with pytest.raises(ChainMoved):
+        quarantine_mod.run_one_date_for_catch_up(base, "2023-01-22", rep,
+                                                 view=view, registry=reg)
+    assert rep.unchecked is True
+    assert view.snap == reg.snapshot()        # rebuilt on the rewritten chain
+
+
+def test_catch_up_sees_a_state_change_between_dates(tmp_path, monkeypatch):
+    """Review Focus 2: each date advances the shared view, so a strategy
+    that left quarantine after date 1 is not recorded on date 2."""
+    reg, spec, data = quarantined(tmp_path, bars=flat_dated_bars(n=25))
+    real = quarantine_mod.run_one_date_for_catch_up
+
+    def bury_after_first(base, date, report, view=None, registry=None):
+        if date == "2023-01-23":
+            reg.record_state_change(spec["strategy_id"], "graveyard", "test")
+        return real(base, date, report, view=view, registry=registry)
+
+    monkeypatch.setattr(quarantine_mod, "run_one_date_for_catch_up",
+                        bury_after_first)
+    assert _catch_up(reg, data) == 0
+    assert {r["date"] for r in decisions(reg)} == {"2023-01-22"}
