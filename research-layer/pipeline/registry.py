@@ -674,7 +674,8 @@ class Registry:
                     states, judged = dict(snap.states), set(snap.gauntlet_judged)
                     v61, statted = _tracked(snap)
                 _fold(states, judged, entry, v61, statted)
-                tail.append(entry)
+                if on_entry is not None:
+                    tail.append(entry)
                 head, head_off = entry_hash(entry), start
         if on_entry is not None:
             for entry in tail:
