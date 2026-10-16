@@ -622,10 +622,17 @@ class Registry:
         head = entry_hash(last) if last is not None else GENESIS_HASH
         return _snap(states, judged, head, pos, head_off, v61, statted)
 
-    def advance(self, snap: ChainSnapshot) -> ChainSnapshot:
+    def advance(self, snap: ChainSnapshot,
+                on_entry: Callable[[dict], None] | None = None
+                ) -> ChainSnapshot:
         """`snap` moved forward over whatever was appended since, parsing
         only that tail (plus the head line, re-hashed). Raises ChainMoved on
-        a truncated or rewritten log or a tail that does not link."""
+        a truncated or rewritten log or a tail that does not link.
+
+        `on_entry` (2026-10-16 quarantine fast path s3.2) sees every tail
+        entry in chain order, and only once the WHOLE tail has linked: a
+        ChainMoved delivers nothing, so a caller's view built from it never
+        holds half a tail."""
         try:
             f = self.log_path.open("rb")
         except FileNotFoundError:
@@ -636,6 +643,7 @@ class Registry:
         judged: set[str] | None = None
         v61 = statted = None
         head, head_off = snap.head_hash, snap.head_offset
+        tail: list[dict] = []
         with f:
             size = os.fstat(f.fileno()).st_size
             if size < snap.byte_len:
@@ -666,7 +674,11 @@ class Registry:
                     states, judged = dict(snap.states), set(snap.gauntlet_judged)
                     v61, statted = _tracked(snap)
                 _fold(states, judged, entry, v61, statted)
+                tail.append(entry)
                 head, head_off = entry_hash(entry), start
+        if on_entry is not None:
+            for entry in tail:
+                on_entry(entry)
         if states is None:
             if pos == snap.byte_len:
                 return snap

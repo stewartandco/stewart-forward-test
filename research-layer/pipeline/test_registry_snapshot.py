@@ -428,3 +428,53 @@ def test_screen_batch_refuses_a_duplicate_and_an_oversized_batch(tmp_path):
         reg.record_screen_outcomes_batch(snap, [item, item])
     with pytest.raises(ValueError, match="at most"):
         reg.record_screen_outcomes_batch(snap, [item] * (SCREEN_BATCH_MAX + 1))
+
+
+# ---- advance(on_entry=...) (2026-10-16 quarantine fast path s3.2) ----
+
+def test_advance_hands_the_tail_to_on_entry_in_chain_order(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append("note", {"text": "a"})
+    snap = reg.snapshot()
+    reg.append("note", {"text": "b"})
+    reg.append("note", {"text": "c"})
+    seen = []
+    snap2 = reg.advance(snap, on_entry=seen.append)
+    assert [e["payload"]["text"] for e in seen] == ["b", "c"]
+    assert [e["entry_type"] for e in seen] == ["note", "note"]
+    assert snap2.byte_len == reg.log_path.stat().st_size
+
+
+def test_advance_with_no_tail_calls_on_entry_never(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append("note", {"text": "a"})
+    snap = reg.snapshot()
+    seen = []
+    assert reg.advance(snap, on_entry=seen.append) is snap
+    assert seen == []
+
+
+def test_advance_that_raises_chain_moved_delivers_nothing(tmp_path):
+    """A caller's view must never hold half a tail: the callback runs only
+    once the whole tail has linked."""
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append("note", {"text": "a"})
+    snap = reg.snapshot()
+    reg.append("note", {"text": "b"})
+    # a tail entry that does not link to the head before it
+    with reg.log_path.open("a", encoding="utf-8") as f:
+        f.write('{"entry_type":"note","payload":{"text":"x"},'
+                '"prev_entry_hash":"' + "f" * 64 + '","ts_utc":"2026-01-01T00:00:00Z",'
+                '"version":1}\n')
+    seen = []
+    with pytest.raises(ChainMoved):
+        reg.advance(snap, on_entry=seen.append)
+    assert seen == []
+
+
+def test_advance_without_on_entry_is_unchanged(tmp_path):
+    reg = Registry(tmp_path / "r.jsonl")
+    reg.append("note", {"text": "a"})
+    snap = reg.snapshot()
+    reg.append("note", {"text": "b"})
+    assert reg.advance(snap) == reg.snapshot()
