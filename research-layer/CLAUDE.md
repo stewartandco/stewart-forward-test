@@ -1303,11 +1303,27 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `holder_alive()`): the date defers with exit 0 and the unchanged
   `deferred_lock` line, without simulating; the acquire-time check stays as
   the backstop.
-- **A date is all or nothing (2026-10-16).** A raise in simulation or
-  validation, a `ChainMoved` (an unlocked writer, or a rewritten log:
-  `CHAIN MOVED:` on stderr), or a strategy that left quarantine while the run
-  simulated writes NOTHING for the date; it stays owed and the run exits 1.
-  The old `PARTIAL WRITE` path is gone. In catch-up a `ChainMoved` date
+- **A date is all or nothing for the strategies that record (2026-10-16;
+  per-strategy follow-up approved by Coen the same day).** A `ChainMoved` (an
+  unlocked writer, or a rewritten log: `CHAIN MOVED:` on stderr) or any
+  exception other than `ValueError` in simulation (a code bug) writes NOTHING
+  for the date; it stays owed and the run exits 1. A `ValueError` in ONE
+  strategy's simulation or row validation (`observe_day`'s non-positive equity
+  baseline, missing bar or no zero point; a malformed row) DEFERS only that
+  strategy: it gets no rows and stays owed (catch-up retries it every run),
+  stdout says `<sid>  deferred: simulation failed: <error>`, and a
+  `simulation_failed` item keyed by the strategy reaches
+  `logs/degraded_quarantine.json` (the Sentinel's `research_degraded`: WARN,
+  then FAIL after 3 days); the others record and the run exits 0. If NOTHING
+  records, nothing is already chained for the date and every ready strategy's
+  simulation failed, it is a total stall: `REFUSED: nothing recorded ...` on
+  stderr, exit 1, chain.lock never taken. A strategy that left quarantine
+  while the run simulated (a live-gate move) is SKIPPED, not a failure:
+  `<sid>  skipped: left quarantine (<state>) while this run simulated`, no
+  degraded item, the others record, exit 0. The old `PARTIAL WRITE` path is
+  gone. A deferred strategy's assets still ride in the date's provenance
+  snapshot (the plan covers every ready strategy), so a later restatement of
+  those bars defers its retry as `restated` (rule 2). In catch-up a `ChainMoved` date
   rebuilds the view with a fresh read and the later dates still run; that
   includes a ChainMoved from the advance at the START of a catch-up date
   (outside the lock), which fails that date with a traceback and the date is
