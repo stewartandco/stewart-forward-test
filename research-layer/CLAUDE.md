@@ -29,9 +29,12 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   wrote 0 verdicts each while evaluating 48-120. **The retries rescue only
   SHORT holds** (scanner/inbox card batches and similar). Until 2026-10-08
   the loop's screen stage held chain.lock for hours overnight; a quarantine
-  date holds it for a tail read plus one append since 2026-10-16 (max 0.33 s
-  measured). Before that fast path, holds of minutes per date. Holds that long
-  leave whole runs with `deferred_lock` equal to their evaluated count; the
+  date holds it for TWO tail reads (the re-plan before the append and the
+  read over its own entries after it) plus ONE append since 2026-10-16 (max
+  0.33 s measured on the 2026-10-16 replay). Before that fast path, holds of
+  minutes per date. Holds of minutes or hours (the pre-fast-path quarantine
+  catch-up and the pre-2026-10-08 screen; neither is current behaviour) leave
+  whole runs with `deferred_lock` equal to their evaluated count; the
   results are discarded at the end of the run and the next run re-evaluates
   those candidates. So the retries alone did NOT fix the overnight
   zero-write runs; screen's per-batch holds (next bullet) did. Each retry
@@ -1291,8 +1294,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   2026-10-16 fast path (`docs/2026-10-16-quarantine-fastpath-design.md`) a run
   reads the chain ONCE (`pipeline/quarantine_view.py`, `QuarantineView`) and
   catch-up shares that read across its dates; each date simulates BEFORE
-  taking chain.lock and holds it for a tail read plus one append (measured max
-  hold 0.33 s on the 2026-10-16 replay, against 4 h 27 min for the
+  taking chain.lock and holds it for two tail reads (the re-plan before the
+  append, the read over its own entries after it) plus one append (measured
+  max hold 0.33 s on the 2026-10-16 replay, against 4 h 27 min for the
   2026-10-15 daily, 382 rows). `Registry.advance(snap, on_entry=None)` gained
   the callback that keeps the view current. A chain.lock already held by a
   live holder is probed BEFORE simulation (`ChainLock.info()` plus
@@ -1304,22 +1308,31 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `CHAIN MOVED:` on stderr), or a strategy that left quarantine while the run
   simulated writes NOTHING for the date; it stays owed and the run exits 1.
   The old `PARTIAL WRITE` path is gone. In catch-up a `ChainMoved` date
-  rebuilds the view with a fresh read and the later dates still run. A
-  supplement that lands while the run simulates is ordinary coverage (rule 2
-  if it disagrees), not a refusal. As built: a `ChainMoved` BEFORE the date's
-  single append prints `CHAIN MOVED: ...; nothing written for <date>` and
-  exits 1. A `ChainMoved` from the tail read right AFTER a successful append
-  prints the row lines and summary, then `CHAIN MOVED after the write: the N
-  entries above for <date> WERE chained ...`, and exits 1 (the date IS
-  recorded). A row already on the chain at the run's one read is skipped
-  without comparison, as before; a row that lands while the run simulates is
-  compared (identical: skipped and counted; different:
-  `DuplicateQuarantineDecision`, nothing written). A supplement that
-  disagrees with this run's bars defers the owing strategies, exit 0; it was
-  a REFUSED exit 1 before (behaviour change accepted by Coen 2026-10-16).
+  rebuilds the view with a fresh read and the later dates still run; that
+  includes a ChainMoved from the advance at the START of a catch-up date
+  (outside the lock), which fails that date with a traceback and the date is
+  not attempted. A supplement that lands while the run simulates is ordinary
+  coverage (rule 2 if it disagrees), not a refusal. As built: a `ChainMoved`
+  BEFORE the date's single append prints `CHAIN MOVED: ...; nothing written
+  for <date>` and exits 1. A `ChainMoved` from the tail read right AFTER a
+  successful append prints the row lines and summary, then `CHAIN MOVED after
+  the write for <date>: the N decision row(s) above [plus the date's
+  provenance snapshot/supplement] WERE chained ...`, and exits 1 (the date IS
+  recorded). A row already on the chain at the date's pre-lock read (in
+  catch-up, the shared view after its advance at the start of that date) is
+  skipped without comparison, as before; a row that lands while the run
+  simulates is compared (identical: skipped and counted; different:
+  `DuplicateQuarantineDecision`, nothing written). A supplement that LANDS
+  WHILE THE RUN SIMULATES and disagrees with this run's bars defers the
+  owing strategies, exit 0 (only that mid-run race was refused, exit 1,
+  before; one already on the chain was a rule-2 deferral then too; behaviour
+  change accepted by Coen 2026-10-16).
 - Tools and tests: `tools/quarantine_replay.py` (subcommands `prefix`, `run`,
   `compare`) replays the daily and catch-up on a COPY of the chain cut at a
-  prefix; read-only against the live chain, never scheduled. Tests:
+  prefix; read-only against the live chain, never scheduled (`run` refuses,
+  exit 2, an argv with no `--registry`, one naming the code root's or this
+  layer's `registry_log.jsonl`, and `--fetch-owed` without a scratch
+  `--data-dir`). Tests:
   `test_quarantine_fastpath.py`, `tools/test_quarantine_replay.py`.
 - Backfilled rows stay visible as backfills in `--review` (write time vs bar
   date); catch-up records every owed strategy alike, so it is a schedule,
