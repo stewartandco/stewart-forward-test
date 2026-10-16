@@ -7,7 +7,7 @@ default posture (a generation pins to the snapshot it was bred on, same as
     python -m pipeline.crypto_data fetch --timeframes 1d
     python -m pipeline.crypto_data fetch --timeframes 1d,4h --assets BTCUSDT
 
-The one scheduled caller is `pipeline.crypto_refresh` (task 32), which runs
+The one scheduled caller is `pipeline.crypto_refresh` (task 33), which runs
 daily for the ACTIVE crypto cells and passes `end_ms=` (see
 `last_complete_utc_day_end_ms`) so every CSV ends on the last complete UTC day
 even when a refresh runs late or is re-run in the afternoon.
