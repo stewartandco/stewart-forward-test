@@ -14,11 +14,20 @@
 Nothing from `pipeline` is imported at module level: `run` must load the
 code under test from --code-root, so old and new are each measured as
 themselves. Never scheduled; never pointed at the live chain except as the
-`prefix` source."""
+`prefix` source.
+
+`run` enforces the read-only promise before it imports anything. It refuses
+(exit 2, stderr `refused: ...`, no timing file) when the run argv has no
+--registry (the default is <code-root>/registry_log.jsonl, the live chain
+when the code root is the live layer), when --registry resolves to
+registry_log.jsonl of the code root or of this tool's own layer, or when
+--fetch-owed is given with no --data-dir or one that resolves to the data/
+of either (it would fetch into the live data dir)."""
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -65,10 +74,56 @@ def cmd_prefix(a) -> int:
     return 2
 
 
+def _same_path(x: Path, y: Path) -> bool:
+    """x and y name the same file or directory (case-insensitive on Windows,
+    through links, and whether or not either exists yet)."""
+    if os.path.normcase(x.resolve()) == os.path.normcase(y.resolve()):
+        return True
+    try:
+        return os.path.samefile(x, y)
+    except OSError:
+        return False
+
+
+def _run_argv_refusal(root: Path, argv: list[str]) -> str | None:
+    """Why `run` may not pass this argv to pipeline.quarantine.run, or None.
+    The live chain and the live data dir are the code root's and this tool's
+    own layer's defaults; a run must name copies."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--registry")
+    pre.add_argument("--data-dir")
+    pre.add_argument("--fetch-owed", action="store_true")
+    try:
+        known, _ = pre.parse_known_args(argv)
+    except SystemExit:
+        return "the run argv has an unusable --registry / --data-dir"
+    layers = [root, Path(__file__).resolve().parent.parent]
+    if known.registry is None:
+        return ("the run argv has no --registry, so the recorder would "
+                f"default to {root / 'registry_log.jsonl'}; name a copy")
+    for layer in layers:
+        if _same_path(Path(known.registry), layer / "registry_log.jsonl"):
+            return (f"--registry {known.registry} is the live chain "
+                    f"({layer / 'registry_log.jsonl'}); name a copy")
+    if known.fetch_owed:
+        if known.data_dir is None:
+            return ("--fetch-owed with no --data-dir would fetch into "
+                    f"{root / 'data'}; name a scratch data dir")
+        for layer in layers:
+            if _same_path(Path(known.data_dir), layer / "data"):
+                return (f"--fetch-owed with --data-dir {known.data_dir}, "
+                        f"the live data dir ({layer / 'data'}); name a "
+                        f"scratch data dir")
+    return None
+
+
 def cmd_run(a) -> int:
     root = Path(a.code_root).resolve()
     if not (root / "pipeline" / "quarantine.py").is_file():
         return _refuse(f"no pipeline/quarantine.py under --code-root {root}")
+    why = _run_argv_refusal(root, a.argv)
+    if why is not None:
+        return _refuse(why)
     sys.path.insert(0, str(root))
     from pipeline import chainlock
     from pipeline import quarantine

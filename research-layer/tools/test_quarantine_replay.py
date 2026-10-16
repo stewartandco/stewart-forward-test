@@ -141,7 +141,7 @@ def test_run_refuses_a_code_root_without_pipeline(tmp_path):
 def test_run_reports_an_argparse_exit_as_its_code(tmp_path):
     timing = tmp_path / "t.json"
     r = _tool("run", "--code-root", str(LAYER), "--timing", str(timing), "--",
-              "--bogus-flag")
+              "--registry", str(tmp_path / "copy.jsonl"), "--bogus-flag")
     t = json.loads(timing.read_text())
     assert r.returncode == 2 and t["rc"] == 2
     assert t["error"] is not None and "SystemExit" in t["error"]
@@ -250,3 +250,109 @@ def test_compare_checks_the_run_return_codes(tmp_path):
     r = _tool("compare", str(a), str(b), "--skip", str(n),
               "--timing-a", ta, "--timing-b", str(tmp_path / "gone.json"))
     assert r.returncode == 2 and "does not exist" in r.stderr
+
+
+# ---- `run` is read-only against the live chain (final review item 2) ----
+
+def _stub_code_root(tmp_path):
+    """A code root the tool accepts (it only checks pipeline/quarantine.py
+    before the argv refusal) holding a COPY of a chain and a data dir, so the
+    refusals below can prove their targets are untouched."""
+    root = tmp_path / "coderoot"
+    (root / "pipeline").mkdir(parents=True)
+    (root / "pipeline" / "quarantine.py").write_text("raise SystemExit(99)\n")
+    (root / "data").mkdir()
+    (root / "data" / "BTCUSD.csv").write_text("date,close\n")
+    reg, spec, data = quarantined(tmp_path)
+    (root / "registry_log.jsonl").write_bytes(reg.log_path.read_bytes())
+    return root, reg, data
+
+
+def _snapshot_dir(d):
+    return {p.name: p.read_bytes() for p in sorted(Path(d).iterdir())}
+
+
+def test_run_refuses_an_argv_with_no_registry(tmp_path):
+    root, reg, data = _stub_code_root(tmp_path)
+    before = (root / "registry_log.jsonl").read_bytes()
+    timing = tmp_path / "t.json"
+    r = _tool("run", "--code-root", str(root), "--timing", str(timing), "--",
+              "--date", "2023-01-22", "--data-dir", str(data))
+    assert r.returncode == 2 and "refused: " in r.stderr
+    assert "no --registry" in r.stderr
+    assert not timing.exists()
+    assert (root / "registry_log.jsonl").read_bytes() == before
+
+
+def test_run_refuses_the_code_roots_live_chain_in_either_spelling(tmp_path):
+    root, reg, data = _stub_code_root(tmp_path)
+    live = root / "registry_log.jsonl"
+    before = live.read_bytes()
+    for spelling in (["--registry", str(live)], [f"--registry={live}"],
+                     ["--registry", str(root / "data" / ".." / "registry_log.jsonl")]):
+        timing = tmp_path / "t.json"
+        r = _tool("run", "--code-root", str(root), "--timing", str(timing),
+                  "--", "--date", "2023-01-22", *spelling,
+                  "--data-dir", str(data))
+        assert r.returncode == 2 and "refused: " in r.stderr, spelling
+        assert "live chain" in r.stderr
+        assert not timing.exists()
+        assert live.read_bytes() == before
+
+
+def test_run_refuses_this_tools_own_layer_chain(tmp_path):
+    """--code-root is a scratch tree but --registry names the layer this tool
+    lives in. That file is a live chain in the live tree and may not exist in
+    a worktree; a refusal must not create or change it either way."""
+    root, reg, data = _stub_code_root(tmp_path)
+    layer_chain = LAYER / "registry_log.jsonl"
+    before = layer_chain.read_bytes() if layer_chain.exists() else None
+    timing = tmp_path / "t.json"
+    r = _tool("run", "--code-root", str(root), "--timing", str(timing), "--",
+              "--date", "2023-01-22", "--registry", str(layer_chain),
+              "--data-dir", str(data))
+    assert r.returncode == 2 and "refused: " in r.stderr
+    assert not timing.exists()
+    assert (layer_chain.read_bytes() if layer_chain.exists() else None) == before
+
+
+def test_run_refuses_fetch_owed_without_a_scratch_data_dir(tmp_path):
+    root, reg, data = _stub_code_root(tmp_path)
+    scratch_reg = _copy(reg.log_path, tmp_path / "scratch.jsonl")
+    reg_before = scratch_reg.read_bytes()
+    root_data_before = _snapshot_dir(root / "data")
+    layer_data_before = _snapshot_dir(LAYER / "data")
+    cases = {
+        "missing": [],
+        "code root's data": ["--data-dir", str(root / "data")],
+        "this layer's data": ["--data-dir", str(LAYER / "data")],
+        "= form": [f"--data-dir={root / 'data'}"],
+    }
+    for name, data_args in cases.items():
+        timing = tmp_path / "t.json"
+        r = _tool("run", "--code-root", str(root), "--timing", str(timing),
+                  "--", "--fetch-owed", "--registry", str(scratch_reg),
+                  *data_args)
+        assert r.returncode == 2 and "refused: " in r.stderr, name
+        assert "--fetch-owed" in r.stderr, name
+        assert not timing.exists(), name
+        assert scratch_reg.read_bytes() == reg_before, name
+        assert _snapshot_dir(root / "data") == root_data_before, name
+        assert _snapshot_dir(LAYER / "data") == layer_data_before, name
+
+
+def test_the_run_guard_lets_scratch_paths_through(tmp_path):
+    """The positive side, checked on the guard itself: a fetch-owed run
+    against copies is not refused (it is never executed here: it would fetch)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("quarantine_replay", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    root = tmp_path / "coderoot"
+    scratch = tmp_path / "scratch_data"
+    scratch.mkdir()
+    ok = ["--fetch-owed", "--registry", str(tmp_path / "copy.jsonl"),
+          "--data-dir", str(scratch)]
+    assert mod._run_argv_refusal(root, ok) is None
+    assert mod._run_argv_refusal(root, ["--date", "2023-01-22", "--registry",
+                                        str(tmp_path / "copy.jsonl")]) is None
