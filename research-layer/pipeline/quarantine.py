@@ -101,11 +101,13 @@ MAX_LISTED_GAPS = 12
 # first; the rest wait for the next run. Each date re-simulates every READY
 # strategy (observe_day runs before the `seen` skip), but since the
 # 2026-10-16 fast path it shares the run's one chain read and holds
-# chain.lock only for a tail read plus one append. Steady state owes one or
-# two dates a day (equity lags a day, FRED fx arrives weekly), so 10 bounds a
-# catch-up after an outage to under an hour. A date refused every run keeps
-# its slot (oldest first) -- that needs a human, and the run exits 1 each
-# time.
+# chain.lock only for two tail reads plus one append (well under a second per
+# date). Wall time is dominated by simulation: minutes to tens of minutes per
+# date (the 2026-10-16 replay measured one 490-row date at 2,308 s), so 10
+# dates bound the chain.lock exposure of a catch-up, not its duration.
+# Steady state owes one or two dates a day (equity lags a day, FRED fx
+# arrives weekly). A date refused every run keeps its slot (oldest first) --
+# that needs a human, and the run exits 1 each time.
 MAX_CATCHUP_DATES = 10
 
 CONE_CAVEAT = (
