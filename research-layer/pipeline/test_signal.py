@@ -19,6 +19,7 @@ import pytest
 from pipeline import signal as S
 from pipeline.engine import simulate_asset
 from pipeline.registry import Registry
+from pipeline.screen import load_bars
 
 
 def _bars(closes, start="2026-01-01"):
@@ -226,3 +227,83 @@ def test_nothing_to_serve_writes_nothing(tmp_path):
     assert S.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                   "--out-dir", str(tmp_path / "logs" / "signals")]) == 0
     assert not (tmp_path / "logs").exists()
+
+
+# ---------------- fix round 1: freshness, one read per file ----------------
+
+def _refused(tmp_path, reg, data, capsys):
+    before = _tree(tmp_path)
+    rc = S.run(_argv(tmp_path, reg, data))
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert _tree(tmp_path) == before                         # nothing written, anywhere
+    assert not (tmp_path / "logs").exists()
+    return out
+
+
+def test_a_lagging_asset_refuses_and_writes_nothing(tmp_path, capsys):
+    """I-1: BTCUSD at D, ETHUSD at D-1 -> no targets file (never a fresh
+    bar_end over a stale target), every asset's last date printed."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    _write_csv(data / "ETHUSD_1d.csv", _bars([100.0] * 199))
+    out = _refused(tmp_path, reg, data, capsys)
+    assert "ETHUSD" in out and bars[-1]["date"] in out and bars[-2]["date"] in out
+
+
+def test_an_empty_price_file_refuses_and_writes_nothing(tmp_path, capsys):
+    reg, data, _ = _fixture_layer(tmp_path)
+    _write_csv(data / "ETHUSD_1d.csv", [])                  # header only
+    out = _refused(tmp_path, reg, data, capsys)
+    assert "ETHUSD EMPTY" in out
+
+
+def test_a_missing_price_file_names_the_strategy_and_asset(tmp_path, capsys):
+    """M-2: a clear error, not a traceback; still nonzero, nothing written."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "ETHUSD_1d.csv").unlink()
+    out = _refused(tmp_path, reg, data, capsys)
+    assert "ETHUSD" in out and SPEC["strategy_id"] in out and "live0000000000001" in out
+
+
+def test_the_digest_and_the_bars_come_from_the_same_bytes(tmp_path, monkeypatch):
+    """M-1: the file is replaced between the service's read and any later read;
+    data_digest and the targets must both describe the bytes first read."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    btc = data / "BTCUSD_1d.csv"
+    first = (data / "ETHUSD_1d.csv").read_bytes()           # flat series, same dates
+    real_read = Path.read_bytes
+    calls = []
+
+    def read_once_then_disk(self):
+        if self == btc and not calls:
+            calls.append(self)
+            return first
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_once_then_disk)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    doc = json.loads((tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json")
+                     .read_text(encoding="utf-8"))
+    assert doc["data_digest"]["BTCUSD"] == hashlib.sha256(first).hexdigest()
+    mine = doc["strategies"][SPEC["strategy_id"]]["assets"]["BTCUSD"]
+    assert mine == S.next_bar_position(SPEC, S.parse_daily_csv(first)) == {"side": "flat", "frac": 0.0}
+    assert S.next_bar_position(SPEC, bars)["side"] == "long"   # what the disk bytes would say
+
+
+def test_parse_daily_csv_matches_load_bars(tmp_path):
+    """The service's one-read parser is screen.load_bars' parse (dates cut to
+    the date part, as the quarantine recorder does)."""
+    rows = ["date,open,high,low,close,volume",
+            "2026-01-03,3.0,3.5,2.5,3.25,30",
+            "2026-01-01 00:00:00,1.0,1.5,0.5,1.25,10",
+            "2026-01-02,2.0,2.5,1.5,2.25,20"]
+    crlf = chr(13) + chr(10)
+    raw = (crlf.join(rows) + crlf).encode("utf-8")
+    (tmp_path / "XUSD_1d.csv").write_bytes(raw)
+    ref = load_bars(tmp_path, "XUSD", "9999-12-31")
+    for b in ref:
+        b["date"] = b["date"][:10]
+    got = S.parse_daily_csv(raw)
+    assert got == ref
+    assert [b["date"] for b in got] == ["2026-01-01", "2026-01-02", "2026-01-03"]

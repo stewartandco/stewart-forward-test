@@ -1342,7 +1342,22 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   (open = high = low = close = the last close) and reads the engine's own
   position after it, with periods per year and version derived exactly as
   `quarantine.observe_day` does. An intrabar stop/target on the next bar is
-  by construction not foreseen. Tests: `test_signal.py`.
+  by construction not foreseen. Edge case: the engine checks barriers only
+  after the entry bar, so a position entered at D's open whose stop/target
+  D's close already crossed is predicted FLAT (the synthetic open gaps
+  through the level); the real D+1 could still hold if it gapped back
+  without touching the level. That is not in the parity check's excused
+  class (stop/target exits) and was not observed there (3656 compared,
+  2026-10-16). Tests: `test_signal.py`.
+- **Every served asset must end on bar_end (fix round 1).** Each
+  `data/<asset>_1d.csv` is read ONCE; `data_digest` is the sha256 of exactly
+  the bytes the bars were parsed from (`parse_daily_csv` = `screen.load_bars`'
+  parse, test-pinned). bar_end is the latest last-bar date; if any served
+  asset's file is missing (the error names the asset and every strategy that
+  trades it), empty, or ends earlier, the run prints every asset's last date,
+  writes NOTHING and exits 1 -- never a flat or omitted asset under a fresh
+  bar_end. The executor then holds (its 26 h rule) and the Sentinel sees
+  task 31 fail. Same case `quarantine.observe_day` refuses.
 
 ## Triage escalations -- REMOVED by D44 (2026-09-26)
 - The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone
