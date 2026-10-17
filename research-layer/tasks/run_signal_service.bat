@@ -17,7 +17,8 @@ rem nothing ran.
 rem Exit 0 = targets written (or nothing served on an existing chain). A
 rem strategy whose asset is missing, empty or behind bar_end is listed under
 rem "deferred" in the file and not published; the rest still are.
-rem Exit 2 = REFUSED, nothing written: no strategy can be published (every one
+rem Exit 2 = REFUSED, no targets written (logs\signals\status.json is still
+rem written, exit_code 2): no strategy can be published (every one
 rem deferred); bar_end is not exactly the bar that closed at the start of the
 rem UTC day (stale, or a partial bar dated today or later); a malformed price
 rem CSV row; or the registry file is missing. logs\signal-run.log says which.

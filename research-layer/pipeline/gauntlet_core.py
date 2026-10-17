@@ -227,8 +227,8 @@ def stressed(spec: dict) -> dict:
 
 BENCHMARK_BASIS = {
     "fx": "price returns, carry excluded on both sides",
-    # crypto is DORMANT until SP5 Phase 3 flips CLASSES["crypto"]["benchmark"];
-    # declared now so the flip is a one-line cells.py change later.
+    # crypto: live since Switch 1 (SP5 Phase 3) flipped
+    # CLASSES["crypto"]["benchmark"] to "self" with per-cell routing.
     "crypto": "price returns, staking/funding yield excluded on both sides",
 }
 _DEFAULT_BASIS = "price returns, dividends excluded on both sides"
@@ -364,12 +364,22 @@ def evaluate_gates(is_trades, oos_trades, stress_oos_trades, is_vol: float,
 
 
 def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
-                        perturb: bool) -> dict:
+                        perturb: bool, *, record_benchmark: bool = True) -> dict:
     """One candidate, end to end, from its own bars only: the verdict and
     every per-strategy metric _evaluate_candidate records, minus the group
     ones (plateau_ok, haircut, trials, sibling_group_n, sim_cache,
     trials_alignment). Same formulas, same call order as gauntlet.py's
-    registry pass, so chain parity (tools/gauntlet_parity.py) holds."""
+    registry pass, so chain parity (tools/gauntlet_parity.py) holds.
+
+    record_benchmark (Switch 1 review): True, the default and the only value
+    the gauntlet worker uses, computes the B1 benchmark control exactly as
+    before -- and a multi-asset spec of a benchmark:"self" class still RAISES
+    there, loudly. False skips the control entirely (no key written). It
+    exists for the read-only parity tools (tools/gauntlet_parity.py,
+    tools/daily_parity.py), which re-run REGISTERED specs: every pre-switch
+    crypto strategy (533 at 2026-10-17, all pooled BTCUSD+ETHUSD) was judged
+    while crypto's benchmark was None, so their chained verdicts carry no control and re-judging them must
+    not try to compute one. It changes nothing else in the result."""
     sid = spec["strategy_id"]
     res = run_spec(spec, spec_bars)
     stress_res = run_spec(stressed(spec), spec_bars)
@@ -391,7 +401,8 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     metrics["exit_reasons_is"] = exit_reason_counts(is_t)
     metrics["exit_reasons_oos"] = exit_reason_counts(oos_t)
     metrics["open_at_end"] = bool(res["metrics"]["open_at_end"])
-    br = _benchmark_relative(spec, spec_bars, compound(contributions(oos_t)), cutoff)
+    br = (_benchmark_relative(spec, spec_bars, compound(contributions(oos_t)), cutoff)
+          if record_benchmark else None)
     if br is not None:
         metrics["benchmark_relative"] = br
     train_dates = [d for d, _ in daily_marks(res["equity"]) if _date_le(d, cutoff)]

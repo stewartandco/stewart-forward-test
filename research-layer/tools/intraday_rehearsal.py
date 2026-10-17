@@ -10,7 +10,8 @@ holds a `registry_log.d` (the live tree's segmented layout). Any other path is
 trusted to be a scratch copy.
 
     python -m tools.intraday_rehearsal register --registry COPY \
-        --assets BTCUSDT,ETHUSDT --originals 6 --seed 1 --out twins.json
+        --assets BTCUSDT,ETHUSDT --originals 6 --seed 1 \
+        [--timeframes 1d,1h] --out twins.json
     python -m tools.intraday_rehearsal report --registry COPY \
         --twins twins.json --artifacts-dir ART --out report.md
     python -m tools.intraday_rehearsal quarantine --registry COPY \
@@ -18,7 +19,9 @@ trusted to be a scratch copy.
         [--n 2] --out report.md
 
 `quarantine` (2b-2 design s7) is the recorder's end-to-end proof on the
-COPY: it moves the first --n 1h twins to `quarantine` BY HAND (screened,
+COPY: it moves the first --n twins of the twins file's finest timeframe
+(1h when it has any 1h twin, so a default 1d+1h file is unchanged; 1d for
+a `--timeframes 1d` file, 2b-3 Switch 1) to `quarantine` BY HAND (screened,
 gauntlet, a synthetic gauntlet `pass` with metrics {"rehearsal": true}, then
 quarantine stamped <entered>T00:00:00Z) -- no twin passed the real gauntlet,
 so the transition is made on the copy only and the report says so -- then
@@ -88,7 +91,26 @@ def refuse_live_data_dir(data_dir: Path, what: str) -> None:
     raise LiveChainRefused(2)
 
 
-TIMEFRAMES = ("1d", "1h")
+TIMEFRAMES = ("1d", "1h")          # register's default (--timeframes 1d,1h)
+
+
+def parse_timeframes(text: str) -> tuple[str, ...]:
+    """`--timeframes` value: comma-separated, each a 24x7 timeframe
+    `pipeline.bars` knows, no duplicates, at least one."""
+    from pipeline.bars import BARS_PER_DAY_24X7
+    tfs = tuple(x.strip() for x in text.split(",") if x.strip())
+    bad = [t for t in tfs if t not in BARS_PER_DAY_24X7]
+    if not tfs or bad or len(set(tfs)) != len(tfs):
+        raise argparse.ArgumentTypeError(
+            f"--timeframes {text!r}: want a comma list of distinct "
+            f"{'/'.join(BARS_PER_DAY_24X7)}")
+    return tfs
+
+
+def _tf_order(tfs) -> list[str]:
+    """Timeframes coarsest first (1d before 1h), unknown ones last."""
+    from pipeline.bars import BARS_PER_DAY_24X7
+    return sorted(set(tfs), key=lambda t: (BARS_PER_DAY_24X7.get(t, 10 ** 6), t))
 
 
 def _kinds(spec: dict) -> set[str]:
@@ -147,7 +169,7 @@ def make_twin(orig: dict, asset: str, tf: str) -> dict:
 
 
 def register(registry: Path, assets: list[str], n: int, seed: int,
-             out: Path) -> dict:
+             out: Path, timeframes: tuple[str, ...] = TIMEFRAMES) -> dict:
     refuse_live_chain(registry)
     reg = Registry(registry)
     specs = {e["payload"]["strategy_id"]: e["payload"]
@@ -158,7 +180,7 @@ def register(registry: Path, assets: list[str], n: int, seed: int,
     twins: dict[str, dict] = {}
     for sid in originals:
         for asset in assets:
-            for tf in TIMEFRAMES:
+            for tf in timeframes:
                 two = make_twin(specs[sid], asset, tf)
                 if two["strategy_id"] not in specs:
                     reg.register_strategy(two)
@@ -232,7 +254,7 @@ def render(twins: dict, rows: dict[str, dict]) -> str:
              "| train_sharpe | is edge/trade | oos edge/trade | mc_p05 | p_ruin | twin id |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (orig, asset) in sorted(groups):
-        for tf in TIMEFRAMES:
+        for tf in _tf_order(t["tf"] for t in twins.values()):
             sid = groups[(orig, asset)].get(tf)
             if sid is None:
                 continue
@@ -354,6 +376,15 @@ def _record_rows(registry: Path, sids: list[str]) -> dict[str, list[dict]]:
     return rows
 
 
+def _n_entries(rows: list[dict]) -> int:
+    """Entries across rows: an intraday row carries `entries`; a daily row
+    records at most one event, so an action 'enter_long' / 'enter_short'
+    (quarantine.observe_day) counts one."""
+    return sum(r["entries"] if "entries" in r
+               else (1 if str(r.get("action", "")).startswith("enter") else 0)
+               for r in rows)
+
+
 def _decisions(registry: Path) -> list[dict]:
     return [e["payload"] for e in Registry(registry).entries()
             if e["entry_type"] == "quarantine_decision"]
@@ -378,9 +409,11 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     if not data_dir.is_dir():
         raise SystemExit(f"no scratch data dir at {data_dir}")
     twins = json.loads(Path(twins_path).read_text(encoding="utf-8"))
-    picked = [s for s, t in twins.items() if t["tf"] == "1h"][:n]
+    tfs = _tf_order(t["tf"] for t in twins.values())
+    tf = "1h" if "1h" in tfs else (tfs[-1] if tfs else "1h")
+    picked = [s for s, t in twins.items() if t["tf"] == tf][:n]
     if len(picked) < n:
-        raise SystemExit(f"only {len(picked)} 1h twins in {twins_path}, wanted {n}")
+        raise SystemExit(f"only {len(picked)} {tf} twins in {twins_path}, wanted {n}")
     states = Registry(registry).strategy_states()
     wrong = {s: states.get(s, "unregistered") for s in picked
              if states.get(s) != "proposed"}
@@ -468,9 +501,11 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
         and "partially recorded dates: 0" in review_blocks[s] for s in picked)
     gate_lines = _sid_blocks(gate_text, picked)
     # the gate must READ the record: its days and trades per twin equal the
-    # chained dates and the summed exits, not merely print a line
+    # chained dates and its closed trades (summed exits on intraday rows,
+    # action 'exit' on daily rows: livegate.closed_forward_trades), not
+    # merely print a line
     gate_expect = {s: (len({r["date"] for r in rows[s]}),
-                       sum(r.get("exits", 0) for r in rows[s])) for s in picked}
+                       livegate.closed_forward_trades(rows[s])) for s in picked}
     gate_seen: dict[str, tuple[int, int]] = {}
     for ln in gate_lines:
         m = _GATE_LINE.match(ln)
@@ -491,7 +526,7 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     L = ["# Intraday paper-stage rehearsal (2b-2, design s7)", "",
          f"Status: **{status}**", "",
          f"Chain COPY `{registry}`; scratch data `{data_dir}`; logs beside the copy.", "",
-         f"{len(picked)} 1h twin(s) from `{twins_path}` moved to `quarantine` BY "
+         f"{len(picked)} {tf} twin(s) from `{twins_path}` moved to `quarantine` BY "
          f"HAND on the copy (screened, gauntlet, a synthetic gauntlet `pass` with "
          f"metrics `{json.dumps(SYNTHETIC_METRICS)}` and artifacts hash 64 zeros, "
          f"then quarantine at `{entered}T00:00:00Z`): no twin passed the real "
@@ -519,8 +554,8 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
         L.append(f"| `{sid}` | `{twins[sid]['original']}` | "
                  f"{', '.join(sorted({x['asset'] for x in r})) or '-'} | "
                  f"{len(owed[sid])} | {len(dates)} | "
-                 f"{sum(x.get('entries', 0) for x in r)} | "
-                 f"{sum(x.get('exits', 0) for x in r)} | "
+                 f"{_n_entries(r)} | "
+                 f"{livegate.closed_forward_trades(r)} | "
                  f"{dates[0] if dates else '-'} | {dates[-1] if dates else '-'} | "
                  f"{', '.join(missing[sid]) or 'none'} |")
     L += ["", "Recorded dates per strategy:", ""]
@@ -535,11 +570,11 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
           f"strategy-day(s) chained (every quarantined strategy on the copy)",
           f"- seconds per strategy-day: {per_day} (wall clock including chain "
           f"reads and snapshots, so an upper bound)",
-          f"- 1h only: {len(only_twins)} date(s) on which ONLY the picked 1h "
-          f"twins recorded took {only_secs:.1f}s for {only_rows} 1h "
+          f"- {tf} only: {len(only_twins)} date(s) on which ONLY the picked {tf} "
+          f"twins recorded took {only_secs:.1f}s for {only_rows} {tf} "
           f"strategy-day(s) = "
           + (f"{only_secs / only_rows:.1f}" if only_rows else "n/a")
-          + " seconds per 1h strategy-day (per-date pass time, chain reads "
+          + f" seconds per {tf} strategy-day (per-date pass time, chain reads "
           "included)",
           f"- rows chained by OTHER quarantined strategies on the copy: "
           f"{sum(other_by_date.values())} over {len(other_by_date)} date(s) "
@@ -588,6 +623,8 @@ def main(argv=None) -> int:
     r.add_argument("--assets", required=True)
     r.add_argument("--originals", type=int, default=6)
     r.add_argument("--seed", type=int, default=20261010)
+    r.add_argument("--timeframes", type=parse_timeframes, default=TIMEFRAMES,
+                   help="comma list of twin timeframes (default 1d,1h)")
     r.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("report")
     p.add_argument("--registry", type=Path, required=True)
@@ -606,7 +643,7 @@ def main(argv=None) -> int:
         return quarantine(a.registry, a.data_dir, a.twins, a.entered, a.n, a.out)
     if a.cmd == "register":
         twins = register(a.registry, [x for x in a.assets.split(",") if x],
-                         a.originals, a.seed, a.out)
+                         a.originals, a.seed, a.out, a.timeframes)
         print(f"registered {len(twins)} twins of "
               f"{len({t['original'] for t in twins.values()})} originals -> {a.out}")
         return 0

@@ -179,7 +179,10 @@ def test_live_registry_still_valid():
     assert out.returncode == 0, out.stdout
 
 
-from .composer import validate_family, expand_family, SIBLING_CAP_DEFAULT
+from . import cells
+from .composer import (validate_family, expand_family_for_class,
+                       SIBLING_CAP_DEFAULT)
+from .testing_crypto import active_crypto
 
 
 def good_family(**overrides):
@@ -190,7 +193,7 @@ def good_family(**overrides):
         "family": "trend_scan_family",
         "rationale": "Trend continuation signal, dense-grid threshold sweep, PT/SL risk.",
         "card_ids": ["aaaaaaaaaaaaaaaa"],
-        "assets": ["BTCUSD"],
+        "assets": ["BTCUSDT"],     # a declared crypto cell asset (Switch 1)
         "blocks": [
             {"role": "entry", "type": "trend_scan_dense",
              "params": {"max_lookback": 60, "t_min": 2.0, "direction": "long"}},
@@ -295,7 +298,7 @@ def test_sibling_cap_queues_it_rather_than_rejecting_it():
     assert not [e for e in validate_family(fam, ACCEPTED, 25) if "cap" in e]
 
     from .composer import split_for_cycle
-    specs = expand_family(fam, "run", "m", "2026-08-31T00:00:00Z")
+    specs = expand_fx(fam, "run", "m", "2026-08-31T00:00:00Z", assets=["EUR"])
     assert len(specs) == 75
     this_cycle, queued = split_for_cycle(specs, 25)
     assert len(this_cycle) == 25 and len(queued) == 50
@@ -330,22 +333,43 @@ def test_duplicate_sweep_axis_rejected():
 
 TS = "2026-08-06T12:00:00Z"
 
+# Family MECHANICS (combo expansion, grid snapping, naming, identity) are the
+# same on every class, so these tests drive them through the per-cell expander
+# on fx -- no gate patch, and a known cell count (crypto's active set is 76
+# assets since Switch 1). fam["assets"] is not read on that path
+# (cells.active_cells picks the cells), so good_family()'s crypto ticker is
+# inert here. `assets` narrows the sweep to a subset of fx cells (sweep_cells),
+# the way D6's rotation window does; None = every active fx cell.
+FX_CELLS = cells.active_cells("fx")
+
+
+def expand_fx(fam, run_id, model, created_utc, assets=None):
+    return expand_family_for_class(fam, run_id, model, created_utc, "fx",
+                                   assets=assets)
+
 
 def test_expansion_count_is_axis_product():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
-    assert len(specs) == 9  # 3 t_min x 3 mult
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    assert len(specs) == 9 * len(FX_CELLS)  # 3 t_min x 3 mult, per cell
+    for asset, _tf in FX_CELLS:
+        assert len([s for s in specs if s["universe"]["assets"] == [asset]]) == 9
 
 
 def test_expansion_is_deterministic():
-    a = expand_family(good_family(), "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    a = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    b = expand_fx(good_family(), "run1", "claude-opus-5", TS)
     assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
 
 def test_siblings_share_group_and_vary_swept_params():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    # per-cell expansion gives each cell its own sibling group
+    # ("<family>-<run>:<cell_id>"); siblings are the combos WITHIN one cell
     groups = {s["provenance"]["sibling_group_id"] for s in specs}
-    assert groups == {"trend_scan_family-run1"}
+    assert groups == {f"trend_scan_family-run1:{cells.cell_id(a, tf)}"
+                      for a, tf in FX_CELLS}
+    for g in groups:
+        assert len([s for s in specs if s["provenance"]["sibling_group_id"] == g]) == 9
     t_values = {s["blocks"][0]["params"]["t_min"] for s in specs}
     assert t_values == {2.0, 2.5, 3.0}
     lookbacks = {s["blocks"][0]["params"]["max_lookback"] for s in specs}
@@ -353,19 +377,26 @@ def test_siblings_share_group_and_vary_swept_params():
 
 
 def test_no_sweep_yields_single_spec():
-    specs = expand_family(good_family(sweep=[]), "run1", "claude-opus-5", TS)
-    assert len(specs) == 1
+    specs = expand_fx(good_family(sweep=[]), "run1", "claude-opus-5", TS)
+    assert len(specs) == len(FX_CELLS)      # one combo, one spec per cell
 
 
 def test_expanded_specs_are_schema_valid():
     schema = json.loads((LAYER / "schemas" / "strategy_spec.schema.json").read_text())
     validator = jsonschema.Draft202012Validator(schema)
-    for spec in expand_family(good_family(), "run1", "claude-opus-5", TS):
+    for spec in expand_fx(good_family(), "run1", "claude-opus-5", TS):
+        validator.validate(spec)
+    # and crypto's per-cell shape (narrowed to two cells for a known count)
+    with active_crypto():
+        specs = expand_family_for_class(good_family(), "run1", "claude-opus-5", TS,
+                                        "crypto")
+    assert len(specs) == 9 * 2
+    for spec in specs:
         validator.validate(spec)
 
 
 def test_names_are_unique_and_bounded():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
     names = [s["name"] for s in specs]
     assert len(set(names)) == len(names)
     assert all(len(n) <= 120 for n in names)
@@ -373,24 +404,31 @@ def test_names_are_unique_and_bounded():
 
 def test_long_family_name_truncation_keeps_names_unique():
     fam = good_family(family="zscore_dip_buyer_with_a_very_long_descriptive_family_name_for_realism_and_extra_padding")
-    specs = expand_family(fam, "run1", "claude-opus-5", TS)
+    specs = expand_fx(fam, "run1", "claude-opus-5", TS)
     names = [s["name"] for s in specs]
     assert len(set(names)) == len(names)
     assert all(len(n) <= 120 for n in names)
 
 
 def test_int_and_float_sweep_values_hash_identically():
-    a = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2]}]),
-                      "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}]),
-                      "run1", "claude-opus-5", TS)
+    a = expand_fx(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2]}]),
+                  "run1", "claude-opus-5", TS)
+    b = expand_fx(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}]),
+                  "run1", "claude-opus-5", TS)
     assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
 
 def test_asset_order_does_not_change_identity():
-    a = expand_family(good_family(assets=["BTCUSD", "ETHUSD"]), "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(assets=["ETHUSD", "BTCUSD"]), "run1", "claude-opus-5", TS)
-    assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
+    """The family's own "assets" list (whatever order the model wrote it in)
+    never reaches a spec's identity: since Switch 1 crypto, like every class,
+    takes its cells from the active set, so the proposal's order is inert.
+    (Was the pooled path's sorted-assets pin; the pooled path is gone.)"""
+    with active_crypto():
+        a = expand_family_for_class(good_family(assets=["BTCUSDT", "ETHUSDT"]),
+                                    "run1", "claude-opus-5", TS, "crypto")
+        b = expand_family_for_class(good_family(assets=["ETHUSDT", "BTCUSDT"]),
+                                    "run1", "claude-opus-5", TS, "crypto")
+    assert a and [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
 
 def test_duplicate_values_in_sweep_axis_rejected():
@@ -412,7 +450,21 @@ def seeded_registry(tmp_path):
 
 
 # ---------------- run() paths ----------------
+#
+# These run the default class, crypto, which expands per active cell since
+# Switch 1 (76 assets). They count families and siblings, not cells, so they
+# run on one active cell (BTCUSDT 1d): a family of 9 combos is 9 specs.
 
+@pytest.fixture
+def one_crypto_cell():
+    with active_crypto(("BTCUSDT",)):
+        yield
+
+
+_on_one_crypto_cell = pytest.mark.usefixtures("one_crypto_cell")
+
+
+@_on_one_crypto_cell
 def test_run_dry_run_writes_nothing(tmp_path, capsys):
     path, cid = seeded_registry(tmp_path)
     n_before = sum(1 for _ in Registry(path).entries())
@@ -425,6 +477,7 @@ def test_run_dry_run_writes_nothing(tmp_path, capsys):
     assert "DRY RUN" in outp and "9 sibling" in outp
 
 
+@_on_one_crypto_cell
 def test_run_registers_blocks_then_specs(tmp_path):
     path, cid = seeded_registry(tmp_path)
     rc = composer_run(
@@ -441,6 +494,7 @@ def test_run_registers_blocks_then_specs(tmp_path):
     assert out.returncode == 0, out.stdout
 
 
+@_on_one_crypto_cell
 def test_run_drops_invalid_family_loudly(tmp_path, capsys):
     path, cid = seeded_registry(tmp_path)
     bad = good_family(card_ids=["nope"], family="badfam")
@@ -454,6 +508,7 @@ def test_run_drops_invalid_family_loudly(tmp_path, capsys):
     assert len(Registry(path).strategy_states()) == 9
 
 
+@_on_one_crypto_cell
 def test_run_rejects_duplicate_family_names(tmp_path, capsys):
     path, cid = seeded_registry(tmp_path)
     rc = composer_run(
@@ -474,6 +529,7 @@ def test_run_errors_when_no_accepted_cards(tmp_path):
     assert rc == 1
 
 
+@_on_one_crypto_cell
 def test_run_aborts_on_grammar_conflict(tmp_path, capsys):
     path, cid = seeded_registry(tmp_path)
     reg = Registry(path)
@@ -487,6 +543,7 @@ def test_run_aborts_on_grammar_conflict(tmp_path, capsys):
     assert "GRAMMAR CONFLICT" in capsys.readouterr().out
 
 
+@_on_one_crypto_cell
 def test_run_partial_write_warns(tmp_path, capsys, monkeypatch):
     path, cid = seeded_registry(tmp_path)
     orig = Registry.register_strategy
@@ -516,6 +573,7 @@ def test_verifier_honors_acceptance_revocation(tmp_path):
     assert "not accepted" in out.stdout
 
 
+@_on_one_crypto_cell
 def test_run_max_families_truncation_is_loud(tmp_path, capsys):
     path, cid = seeded_registry(tmp_path)
     fams = [good_family(card_ids=[cid], family=f"fam_{i}") for i in range(3)]
@@ -553,7 +611,8 @@ def test_expand_universe_produces_one_spec_per_cell():
     out = composer.expand_universe(base, cells_mod.phase_cells(1))
     # 100 declared crypto assets x the 4 phase-1 timeframes (was 5 x 4 = 20
     # before SP5 P2-T3 widened the DECLARED grid; declaration only -- what a
-    # generation may sweep is cells.active_cells, still empty for crypto).
+    # generation may sweep is cells.active_cells, 76 assets at 1d since
+    # Switch 1).
     assert len(out) == 400
     assert {(s["universe"]["assets"][0], s["universe"]["timeframe"]) for s in out} \
         == set(cells_mod.phase_cells(1))

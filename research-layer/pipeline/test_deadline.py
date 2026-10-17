@@ -16,7 +16,7 @@ import json
 from . import deadline as dl
 from .gauntlet import run as gauntlet_run
 from .registry import Registry
-from .test_gauntlet import v4_sweep_registry
+from .test_gauntlet import HIT_BARS_CUTOFF, v4_sweep_registry
 from .test_screen import write_data_dir, dated_target_hit_bars
 
 
@@ -101,7 +101,7 @@ def test_gauntlet_defers_everything_when_the_deadline_has_passed(tmp_path):
     assert n >= 3
 
     rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(art),
+                       "--artifacts-dir", str(art), "--cutoff", HIT_BARS_CUTOFF,
                        "--deadline-utc", "2000-01-01T00:00:00Z"])
     assert rc == 0
     reg2 = Registry(reg.log_path)
@@ -116,7 +116,7 @@ def test_gauntlet_defers_everything_when_the_deadline_has_passed(tmp_path):
 
     # Resume: the next cycle, with no deadline, gauntlets all of them.
     rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(art)])
+                       "--artifacts-dir", str(art), "--cutoff", HIT_BARS_CUTOFF])
     assert rc == 0
     reg3 = Registry(reg.log_path)
     verdicts = [e for e in reg3.entries() if e["entry_type"] == "verdict"
@@ -141,7 +141,8 @@ def test_gauntlet_with_a_far_deadline_is_byte_identical_to_no_deadline(tmp_path)
         data = write_data_dir(base, {"BTCUSD": dated_target_hit_bars()})
         n_before = sum(1 for _ in reg.entries())
         rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                           "--artifacts-dir", str(base / "art"), *extra])
+                           "--artifacts-dir", str(base / "art"),
+                           "--cutoff", HIT_BARS_CUTOFF, *extra])
         assert rc == 0
         out = []
         for e in list(Registry(reg.log_path).entries())[n_before:]:   # appended only

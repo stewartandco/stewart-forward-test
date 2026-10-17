@@ -119,3 +119,44 @@ def test_standalone_seed_is_the_strategy_id_mod_2_31(tmp_path):
                                             perturb=False)
     assert out["mc_summary"]["seed"] == int(forced["strategy_id"], 16) % (2 ** 31)
     assert out["mc_summary"]["seed"] == 0x40ffee11
+
+
+# ---- Switch 1: the benchmark control on a legacy pooled crypto spec --------
+
+def _pooled_fixture(tmp_path):
+    """The pre-switch shape: one 2-asset BTCUSD+ETHUSD crypto spec (every
+    pre-switch crypto strategy, 533 at 2026-10-17, looks like this)."""
+    import json
+    _, spec = screening_registry(tmp_path)
+    spec = json.loads(json.dumps(spec))
+    spec["universe"]["assets"] = ["BTCUSD", "ETHUSD"]
+    bars = {("BTCUSD", "1d"): dated_target_hit_bars(),
+            ("ETHUSD", "1d"): dated_target_hit_bars()}
+    return spec, gauntlet_core._spec_bars(bars, spec)
+
+
+def test_the_default_still_raises_on_a_multi_asset_crypto_spec(tmp_path):
+    """The gauntlet worker calls evaluate_standalone with the default, and a
+    multi-asset spec of a benchmark:"self" class must keep failing LOUDLY
+    there (crypto is "self" since Switch 1)."""
+    import pytest
+    spec, sb = _pooled_fixture(tmp_path)
+    with pytest.raises(ValueError, match="exactly one asset per cell"):
+        gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False)
+
+
+def test_record_benchmark_false_skips_only_the_control(tmp_path):
+    """The parity tools' keyword: the pooled spec completes with no control
+    key, and on a single-asset spec the result differs from the default by
+    exactly the benchmark_relative key."""
+    spec, sb = _pooled_fixture(tmp_path)
+    out = gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False,
+                                            record_benchmark=False)
+    assert "benchmark_relative" not in out["metrics"]
+    one, sb1 = _fixture(tmp_path / "one")
+    with_b = gauntlet_core.evaluate_standalone(one, sb1, FIXTURE_CUTOFF, perturb=False)
+    without = gauntlet_core.evaluate_standalone(one, sb1, FIXTURE_CUTOFF, perturb=False,
+                                                record_benchmark=False)
+    assert "benchmark_relative" in with_b["metrics"]
+    with_b["metrics"].pop("benchmark_relative")
+    assert with_b == without

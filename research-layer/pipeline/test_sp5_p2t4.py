@@ -22,6 +22,19 @@ from datetime import date, timedelta
 import pytest
 
 from . import cells, composer, loop, loop_state
+from .testing_crypto import active_crypto
+
+
+@pytest.fixture
+def one_crypto_cell():
+    """The D9/D10 composer.run() tests count siblings, not cells: narrow
+    crypto (76 active assets since Switch 1) to one cell, BTCUSDT 1d, so a
+    family of n combos is n specs, as these counts were written."""
+    with active_crypto(("BTCUSDT",)):
+        yield
+
+
+_on_one_crypto_cell = pytest.mark.usefixtures("one_crypto_cell")
 
 
 # ============================ D6: sweep rotation ============================
@@ -349,6 +362,7 @@ def test_in_run_duplicates_are_never_re_trials():
     assert malformed
 
 
+@_on_one_crypto_cell
 def test_one_run_never_chains_a_composition_twice_even_with_the_window_open(
         tmp_path, monkeypatch):
     """F1 end to end, through composer.run(): the chain-wide invariant.
@@ -524,6 +538,7 @@ def _registered_ids(reg_path):
             if e["entry_type"] == "strategy_registered"]
 
 
+@_on_one_crypto_cell
 def test_over_cap_family_registers_a_window_and_queues_the_rest(tmp_path):
     """THE INVARIANT, end to end: no proposed variation is dropped without
     either a gauntlet verdict or a queue entry.
@@ -549,6 +564,7 @@ def test_over_cap_family_registers_a_window_and_queues_the_rest(tmp_path):
     assert len(set(chained) | set(queued_ids)) == 75
 
 
+@_on_one_crypto_cell
 def test_the_next_cycle_drains_the_queue_before_proposing_anything(tmp_path):
     from .test_composer import seeded_registry
     reg_path, cid = seeded_registry(tmp_path)
@@ -577,6 +593,7 @@ def test_the_next_cycle_drains_the_queue_before_proposing_anything(tmp_path):
     assert loop_state.queue_depth(loop_state.load(state_path), "crypto") == 0
 
 
+@_on_one_crypto_cell
 def test_a_dry_run_never_consumes_the_queue(tmp_path):
     """The loop invokes the composer TWICE per cycle (a --dry-run preflight,
     then the real run). A dry run that drained the queue would leave the real
@@ -598,6 +615,7 @@ def test_a_dry_run_never_consumes_the_queue(tmp_path):
     assert len(_registered_ids(reg_path)) == 25
 
 
+@_on_one_crypto_cell
 def test_a_family_that_fits_the_cap_queues_nothing(tmp_path):
     """The byte-identity half of D10: a family under the cap behaves exactly
     as it did before this change -- fully registered, no queue key written."""
@@ -637,37 +655,23 @@ def test_assets_subset_refuses_an_inactive_asset(tmp_path):
         composer.sweep_cells("fx", ["EUR", "NOTAPAIR"])
 
 
-def test_assets_is_refused_on_the_legacy_pooled_path(tmp_path, capsys):
-    """The refusal is keyed on the ROUTING DISPATCH, not on the class name
-    (F2), so it lifts by itself on the commit that makes a window legal."""
-    from .test_composer import seeded_registry
-    reg_path, cid = seeded_registry(tmp_path)
-    rc = composer.run(["--registry", str(reg_path), "--assets", "BTCUSDT"],
-                      propose_fn=lambda cards: [])
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "legacy pooled path" in out and "expander_for" in out
+# test_assets_is_refused_on_the_legacy_pooled_path was DELETED at Switch 1:
+# the pooled path and its --assets refusal are gone, so there is no refusal
+# left to pin.
 
 
-def test_the_assets_refusal_lifts_when_the_class_leaves_the_pooled_path(
-        tmp_path, monkeypatch):
-    """F2's coupling, from the composer's side: nothing about `--assets`
-    depends on the string "crypto". Switch the dispatch (what Phase 3 does)
-    and the same invocation is accepted."""
+def test_the_composer_accepts_a_crypto_window(tmp_path):
+    """F2's coupling, landed: crypto's composer takes `--assets` because it
+    routes per cell (Switch 1), against the REAL gate and dispatch -- no
+    monkeypatch. One window asset, so the family's 9 combos are 9 specs."""
     from .test_composer import seeded_registry, good_family
-    monkeypatch.setattr(composer, "expander_for",
-                        lambda cls: composer.expand_family_for_class)
-    gate = dict(cells.ACTIVE_CELLS["crypto"])
-    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:3],
-                                    "timeframes": ("1d",)}
-    try:
-        reg_path, cid = seeded_registry(tmp_path)
-        rc = composer.run(["--registry", str(reg_path), "--run-id", "p3",
-                           "--assets", cells.ASSETS[0], "--dry-run"],
-                          propose_fn=lambda cards: [good_family(card_ids=[cid])])
-        assert rc == 0, "the refusal did not lift with the routing dispatch"
-    finally:
-        cells.ACTIVE_CELLS["crypto"] = gate
+    assert composer.expander_for("crypto") is composer.expand_family_for_class
+    reg_path, cid = seeded_registry(tmp_path)
+    rc = composer.run(["--registry", str(reg_path), "--run-id", "p3",
+                       "--assets", cells.ASSETS[0], "--dry-run",
+                       "--loop-state", str(tmp_path / "loop_state.json")],
+                      propose_fn=lambda cards: [good_family(card_ids=[cid])])
+    assert rc == 0
 
 
 # ================= the loop's half of D6 and D10 =================
@@ -692,21 +696,10 @@ def test_loop_passes_no_assets_flag_while_nothing_rotates(tmp_path, monkeypatch)
             f"the loop passed a rotation subset to the composer: {call}")
 
 
-def test_the_cursor_never_advances_when_no_window_was_emitted(tmp_path, monkeypatch):
-    """Observation B: the advance is gated on `rotates`, not on membership.
-
-    Those are different questions. ROTATION_CLASSES membership says the class
-    SHOULD rotate; `rotates` says a window was actually emitted THIS cycle.
-    In a half-landed Phase 3 -- ACTIVE_CELLS["crypto"] populated but
-    expander_for still pooled -- _sweep_window correctly returns rotates=False
-    and the loop passes no --assets, so nothing is swept from a window. A
-    membership-gated advance would nonetheless walk the cursor 12 positions on
-    every completed generation, silently skipping the assets it stepped over:
-    exactly what D6's own comment says must never happen.
-
-    Simulated at the level the defect lives at -- a non-empty active set with
-    the pooled expander still in place -- rather than by stubbing the loop.
-    """
+def _crypto_cycle(tmp_path, monkeypatch):
+    """Run one loop cycle in which CRYPTO is the picked class (a queued
+    sibling is the cheapest way to make it fire, F4); return (layer,
+    FakeRunner, state_path)."""
     from .test_loop import (FakeRunner, _mk_layer, _add_cards,
                             _seed_all_classes_caught_up)
     monkeypatch.setattr(loop, "_live_task_window_s", lambda *a, **k: None)
@@ -717,39 +710,54 @@ def test_the_cursor_never_advances_when_no_window_was_emitted(tmp_path, monkeypa
     _add_cards(reg, 30, status="pending", asset_classes=["crypto"], prefix="p")
     _seed_all_classes_caught_up(layer, layer / "registry_log.jsonl")
     state_path = layer / "logs" / "loop_state.json"
-    # CRYPTO must be the class that fires, or this test proves nothing: an
-    # fx cycle never touches the crypto cursor under EITHER the correct gate
-    # or the membership-only mutant. A queued sibling is the cheapest way to
-    # make crypto the picked class (F4) without inventing a card population.
     st = loop_state.load(state_path)
     loop_state.enqueue_specs(st, "crypto", [{"strategy_id": "q1"}])
     loop_state.save(state_path, st)
+    fr = FakeRunner()
+    assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
+    items = json.loads((layer / "logs" / "pipeline_status.json")
+                       .read_text(encoding="utf-8"))["items"]
+    assert items["outcome"] == "cycle_complete", items
+    assert items["asset_class"] == "crypto", items
+    return layer, fr, state_path
 
-    gate = dict(cells.ACTIVE_CELLS["crypto"])
-    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
-                                    "timeframes": ("1d",)}
-    try:
-        assert composer.expander_for("crypto") is composer.expand_family, (
-            "premise: this test simulates the HALF-landed Phase 3")
-        assert len(cells.active_cells("crypto")) == 20 > loop.ROTATION_SIZE, (
-            "premise: the active set must exceed the window, or "
-            "advance_rotation returns early under both gates and the mutant "
-            "survives for the wrong reason")
-        fr = FakeRunner()
-        assert loop.run(["--once", "--layer", str(layer)], runner=fr) == 0
-        items = json.loads((layer / "logs" / "pipeline_status.json")
-                           .read_text(encoding="utf-8"))["items"]
-        assert items["outcome"] == "cycle_complete", items
-        assert items["asset_class"] == "crypto", items
+
+def test_the_cursor_never_advances_when_no_window_was_emitted(tmp_path, monkeypatch):
+    """Observation B: the advance is gated on `rotates`, not on membership.
+
+    REWRITTEN at Switch 1. The original simulated a half-landed Phase 3
+    (crypto's cells active, expander still pooled), where `rotates` was
+    False for a class with more than ROTATION_SIZE active assets. Switch 1
+    landed both halves in one commit, so that state no longer exists and the
+    premise is dropped. What remains of the rule: a cycle that emits no
+    window -- crypto narrowed to an active set that fits one window -- passes
+    no --assets and writes no cursor. (advance_rotation's own small-set
+    early return would also hold the cursor here, so this pins the outcome,
+    not which of the two guards supplies it.)"""
+    with active_crypto(cells.ASSETS[:5]):
+        _, fr, state_path = _crypto_cycle(tmp_path, monkeypatch)
         assert not any("--assets" in c for c in fr.calls), (
             "premise: no window was emitted this cycle")
         entry = loop_state.load(state_path)["classes"]["crypto"]
         assert "rotation_cursor" not in entry, (
             f"the cursor advanced to {entry.get('rotation_cursor')} on a cycle "
-            f"that emitted no window -- every asset it stepped over is skipped "
-            f"silently, which is the one thing a schedule must never do")
-    finally:
-        cells.ACTIVE_CELLS["crypto"] = gate
+            f"that emitted no window")
+
+
+def test_a_completed_crypto_cycle_emits_the_window_and_advances_the_cursor(
+        tmp_path, monkeypatch):
+    """The landed side, against the REAL 76-asset gate: the crypto cycle's
+    composer calls carry --assets with the first 12 active assets, and the
+    completed cycle moves the cursor exactly one window on."""
+    _, fr, state_path = _crypto_cycle(tmp_path, monkeypatch)
+    window = ",".join(a for a, _ in cells.active_cells("crypto")[:loop.ROTATION_SIZE])
+    composer_calls = [c for c in fr.calls if "pipeline.composer" in c]
+    assert composer_calls, "no composer stage ran"
+    for call in composer_calls:
+        assert "--assets" in call, call
+        assert call[call.index("--assets") + 1] == window, call
+    entry = loop_state.load(state_path)["classes"]["crypto"]
+    assert entry["rotation_cursor"] == loop.ROTATION_SIZE
 
 
 def test_loop_reports_queue_depth_and_does_not_clobber_it(tmp_path, monkeypatch):
@@ -837,6 +845,7 @@ def test_a_dead_queue_entry_is_not_a_trigger(tmp_path):
     assert loop_state.pick_class(state, counts) is None
 
 
+@_on_one_crypto_cell
 def test_a_poison_queued_spec_does_not_wedge_the_class(tmp_path, capsys):
     """F3: a queued spec can outlive the card that justified it.
 

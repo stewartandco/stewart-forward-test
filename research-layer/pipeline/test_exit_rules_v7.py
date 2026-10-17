@@ -365,19 +365,21 @@ def test_v2_signal_exit_never_fires_from_a_time_deadline():
 # that those figures are the engine's own numbers for the same spec on the
 # same bars -- not a second formula.
 
-from .test_gauntlet import gauntlet_registry, chain_gauntlet_note
+from .test_gauntlet import gauntlet_registry, chain_gauntlet_note, HIT_BARS_CUTOFF
 from .test_screen import write_data_dir, dated_target_hit_bars
 
 
 def test_gauntlet_verdict_metrics_record_exit_reasons_is_and_oos(tmp_path):
-    from .gauntlet import run as gauntlet_run, split_trades, DEFAULT_CUTOFF
+    from .gauntlet import run as gauntlet_run, split_trades
 
     reg, spec = gauntlet_registry(tmp_path)
     chain_gauntlet_note(reg)
     bars = dated_target_hit_bars()
     data = write_data_dir(tmp_path, {"BTCUSD": bars})
+    # cutoff inside the fixture calendar: a crypto verdict carries a
+    # benchmark control since Switch 1, which needs a bar after the cutoff
     rc = gauntlet_run(["--registry", str(reg.log_path),
-                       "--data-dir", str(data),
+                       "--data-dir", str(data), "--cutoff", HIT_BARS_CUTOFF,
                        "--artifacts-dir", str(tmp_path / "art")])
     assert rc == 0
 
@@ -395,8 +397,8 @@ def test_gauntlet_verdict_metrics_record_exit_reasons_is_and_oos(tmp_path):
     # the same spec on the same bars through the engine directly: the verdict
     # records the engine's split counts and the engine's open_at_end, exactly
     res = run_spec(spec, {"BTCUSD": bars})
-    is_t, oos_t = split_trades(res["trades"], DEFAULT_CUTOFF)
-    # this fixture trades once, in 2023 (train side): the OOS list is
+    is_t, oos_t = split_trades(res["trades"], HIT_BARS_CUTOFF)
+    # this fixture trades once, entering 2023-01-22 (train side): the OOS list is
     # legitimately empty, and the equality below pins that the verdict
     # recorded {} for it rather than the whole-sample counts
     assert is_t, "fixture must trade"

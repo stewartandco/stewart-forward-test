@@ -338,3 +338,81 @@ def test_quarantine_refuses_the_live_data_dir(tmp_path, monkeypatch, capsys, lay
     assert reg.log_path.read_bytes() == before
     assert list(live_data.iterdir()) == []
     assert calls == [] and not out.exists()
+
+
+# ---- --timeframes (2b-3 Switch 1, Task 8) ----
+
+def test_register_honours_timeframes(tmp_path, capsys):
+    reg, v1, orig = _v2_original(tmp_path)
+    fresh = tmp_path / "fresh.jsonl"                         # same chain, before any twin
+    fresh.write_bytes(reg.log_path.read_bytes())
+    out = tmp_path / "twins.json"
+    rc = ir.main(["register", "--registry", str(reg.log_path),
+                  "--assets", "BTCUSDT,ETHUSDT", "--originals", "1",
+                  "--seed", "1", "--timeframes", "1d", "--out", str(out)])
+    assert rc == 0
+    twins = json.loads(out.read_text())
+    assert {(t["asset"], t["tf"]) for t in twins.values()} == {
+        ("BTCUSDT", "1d"), ("ETHUSDT", "1d")}
+    specs = {e["payload"]["strategy_id"]: e["payload"]
+             for e in Registry(reg.log_path).entries()
+             if e["entry_type"] == "strategy_registered"}
+    assert all(specs[s]["universe"]["timeframe"] == "1d" for s in twins)
+    assert not any(p["universe"].get("timeframe") == "1h" for p in specs.values())
+    # the same 1d twins a default (1d,1h) run makes on a byte copy of the
+    # chain taken before the first register (a second register on the SAME
+    # chain may pick a twin as an original)
+    full = tmp_path / "full.json"
+    assert ir.main(["register", "--registry", str(fresh),
+                    "--assets", "BTCUSDT,ETHUSDT", "--originals", "1",
+                    "--seed", "1", "--out", str(full)]) == 0
+    full_twins = json.loads(full.read_text())
+    assert {s for s, t in full_twins.items() if t["tf"] == "1d"} == set(twins)
+    assert len(full_twins) == 4
+    rep = tmp_path / "report.md"
+    assert ir.main(["report", "--registry", str(reg.log_path), "--twins", str(out),
+                    "--artifacts-dir", str(tmp_path / "art"), "--out", str(rep)]) == 0
+    text = rep.read_text()
+    assert all(s in text for s in twins) and "| 1h |" not in text
+    for bad in ("1d,1d", "2h", ""):
+        with pytest.raises(SystemExit) as exc:
+            ir.main(["register", "--registry", str(reg.log_path),
+                     "--assets", "BTCUSDT", "--timeframes", bad,
+                     "--out", str(tmp_path / "bad.json")])
+        assert exc.value.code == 2
+    assert not (tmp_path / "bad.json").exists()
+
+
+def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
+    from pipeline import crypto_data
+    from pipeline.test_intraday_statistics import _twin_bars
+    from pipeline.test_quarantine_record_intraday import _write
+    reg, twins_path, sid, data, daily, fake_fetch, calls = _hourly_twin_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    twins = json.loads(twins_path.read_text())
+    d1 = {s: t for s, t in twins.items() if t["tf"] == "1d"}
+    (sid1,) = d1
+    only = tmp_path / "twins-1d.json"
+    only.write_text(json.dumps(d1))
+    end = daily[162]["date"]
+    _write(data, "ETHUSD_1d.csv", [b for b in daily if b["date"][:10] <= end])
+    entered = daily[150]["date"]
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(only),
+                  "--entered", entered, "--n", "1", "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert rc == 0, text
+    assert calls == []                                       # nothing to fetch at 1d
+    rows = [e["payload"] for e in Registry(reg.log_path).entries()
+            if e["entry_type"] == "quarantine_decision"]
+    assert {r["strategy_id"] for r in rows} == {sid1}
+    assert sorted(r["date"] for r in rows) == [daily[i]["date"] for i in range(151, 163)]
+    assert all(r["asset"] == "ETHUSD" for r in rows)
+    assert "1 1d twin(s)" in text and "1d only: 12 date(s)" in text
+    exits = sum(1 for r in rows if r["action"] == "exit")   # daily rows: action
+    assert exits > 0                                         # the gate check bites
+    entries = sum(1 for r in rows if r["action"] in ("enter_long", "enter_short"))
+    assert entries > 0                                       # the entries column bites
+    row = next(l for l in text.splitlines() if l.startswith(f"| `{sid1}`"))
+    assert f"| 12 | 12 | {entries} | {exits} | 2022-" in row

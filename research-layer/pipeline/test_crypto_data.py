@@ -122,6 +122,84 @@ def test_skew_margin_boundary_is_exact(tmp_path, monkeypatch):
     assert res["first_date"] == "1970-01-01 00:00:00"
 
 
+def _utc_ms(y, m, d, hh=0, mm=0):
+    return int(datetime(y, m, d, hh, mm, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _oct_klines():
+    """1d klines dated 2026-10-15, 10-16, 10-17 (close = open + DAY - 1)."""
+    return [_kline(_utc_ms(2026, 10, d)) for d in (15, 16, 17)]
+
+
+def test_end_ms_drops_bars_closing_at_or_after_the_cap(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    now_ms = _utc_ms(2026, 10, 17, 10, 0)
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([_oct_klines()]))
+    res = cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=now_ms,
+                          end_ms=cd.last_complete_utc_day_end_ms(now_ms))
+    rows = (tmp_path / "BTCUSDT_1d.csv").read_text().splitlines()[1:]
+    assert [r.split(",")[0] for r in rows] == [
+        "2026-10-15 00:00:00", "2026-10-16 00:00:00"]
+    assert res["last_date"] == "2026-10-16 00:00:00"
+    assert res["rows"] == 2
+
+
+def test_end_ms_caps_even_a_closed_bar(tmp_path, monkeypatch):
+    """A late or re-run refresh (now well past the day's close, so the
+    closed-bar rule alone would admit the 10-17 bar) must still not write a
+    bar dated today UTC. Boundary is exact: close == cap is dropped."""
+    _no_sleep(monkeypatch)
+    now_ms = _utc_ms(2026, 10, 18, 12, 0)    # all three klines are closed
+    end_ms = _utc_ms(2026, 10, 17)
+    just_below = _kline(_utc_ms(2026, 10, 16), close_ms=end_ms - 1)
+    at_cap = _kline(_utc_ms(2026, 10, 17), close_ms=end_ms)
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([[just_below, at_cap]]))
+    res = cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=now_ms, end_ms=end_ms)
+    assert res["rows"] == 1
+    assert res["last_date"] == "2026-10-16 00:00:00"
+
+
+def test_end_ms_none_is_unchanged(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    now_ms = _utc_ms(2026, 10, 17, 10, 0)
+    # the closed-bar rule alone drops only the still-open 10-17 bar
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([_oct_klines()]))
+    res_default = cd.fetch_symbol("BTCUSDT", "1d", tmp_path / "a", now_ms=now_ms)
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([_oct_klines()]))
+    res_none = cd.fetch_symbol("BTCUSDT", "1d", tmp_path / "b", now_ms=now_ms,
+                               end_ms=None)
+    a = (tmp_path / "a" / "BTCUSDT_1d.csv").read_bytes()
+    b = (tmp_path / "b" / "BTCUSDT_1d.csv").read_bytes()
+    assert a == b
+    assert res_default == res_none
+    assert res_none["last_date"] == "2026-10-16 00:00:00"
+    # and with the clock past 10-17's close, None keeps the 10-17 bar
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([_oct_klines()]))
+    late = cd.fetch_symbol("BTCUSDT", "1d", tmp_path / "c",
+                           now_ms=_utc_ms(2026, 10, 18, 12, 0), end_ms=None)
+    assert late["last_date"] == "2026-10-17 00:00:00"
+
+
+def test_end_ms_does_not_change_pagination(tmp_path, monkeypatch):
+    """The cap only filters rows: a full page whose bars are all past the cap
+    still advances from the RAW batch, and a short batch still stops."""
+    _no_sleep(monkeypatch)
+    pager = FakePager([_page(0, 1000), _page(1000 * DAY, 3)])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    res = cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS,
+                          end_ms=500 * DAY)
+    assert len(pager.urls) == 2
+    assert _start_time(pager.urls[1]) == 999 * DAY + 1
+    assert res["rows"] == 500            # bars closing before 500*DAY: opens 0..499
+
+
+def test_last_complete_utc_day_end_ms():
+    assert (cd.last_complete_utc_day_end_ms(_utc_ms(2026, 10, 17, 0, 1))
+            == _utc_ms(2026, 10, 17))
+    assert (cd.last_complete_utc_day_end_ms(_utc_ms(2026, 10, 16, 23, 59))
+            == _utc_ms(2026, 10, 16))
+
+
 def test_rate_limited_sleeps_retry_after_then_succeeds(tmp_path, monkeypatch):
     sleeps = _no_sleep(monkeypatch)
     calls = {"n": 0}
@@ -460,3 +538,126 @@ def test_main_rate_limit_exhaustion_aborts_whole_run(tmp_path, monkeypatch, caps
     assert not (tmp_path / "CCCUSDT_1d.csv").exists()
     # the abort itself respected the final back-off
     assert 0.01 in sleeps
+
+
+# ------------------------------------------------- validate before the replace
+
+_HEAD = "date,open,high,low,close,volume\n"
+
+
+def _good(day, c="1.5", v="10.0"):
+    return f"{day} 00:00:00,1.0,2.0,0.5,{c},{v}"
+
+
+def _row(**over):
+    row = {"date": "2025-01-01 00:00:00", "open": "1.0", "high": "2.0",
+           "low": "0.5", "close": "1.5", "volume": "10.0"}
+    row.update(over)
+    return row
+
+
+@pytest.mark.parametrize("body, why", [
+    # same UTC day twice (time part differs): the signal service refuses it
+    ([_good("2025-01-01"), "2025-01-01 12:00:00,1.0,2.0,0.5,1.5,10.0"], "duplicate"),
+    # a non-positive close
+    ([_good("2025-01-01"), _good("2025-01-02", c="0.0")], "close"),
+    # an out-of-order row (the sorted() before the write used to hide it)
+    ([_good("2025-01-02"), _good("2025-01-01")], "increasing"),
+    # a long row: _read_existing used to drop the extra field silently
+    ([_good("2025-01-01"), _good("2025-01-02") + ",9"], "long"),
+])
+def test_a_malformed_merge_is_refused_and_the_file_is_untouched(
+        tmp_path, monkeypatch, body, why):
+    _no_sleep(monkeypatch)
+    path = tmp_path / "BTCUSDT_1d.csv"
+    path.write_text(_HEAD + "\n".join(body) + "\n", encoding="utf-8", newline="")
+    before = path.read_bytes()
+    last = cd._date_to_ms(body[-1].split(",")[0][:19])
+    monkeypatch.setattr(cd, "_http_get_json",
+                        FakePager([[_kline(last + 5 * DAY)]]))
+    with pytest.raises(cd.MalformedData) as ei:
+        cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS)
+    assert isinstance(ei.value, ValueError)
+    assert "BTCUSDT_1d.csv" in str(ei.value)
+    assert "row 2" in str(ei.value)
+    assert why in str(ei.value)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_malformed_new_bar_is_refused_and_the_file_is_untouched(tmp_path, monkeypatch):
+    # the exchange hands back a zero open: the NEW rows are validated too
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([_page(0, 2)]))
+    cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS)
+    path = tmp_path / "BTCUSDT_1d.csv"
+    before = path.read_bytes()
+    monkeypatch.setattr(cd, "_http_get_json",
+                        FakePager([[_kline(2 * DAY, o=0.0)]]))
+    with pytest.raises(cd.MalformedData, match="row 3"):
+        cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_a_clean_merge_still_writes(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    path = tmp_path / "BTCUSDT_1d.csv"
+    path.write_text(_HEAD + _good("1970-01-01") + "\n" + _good("1970-01-02") + "\n",
+                    encoding="utf-8", newline="")
+    monkeypatch.setattr(cd, "_http_get_json", FakePager([[_kline(2 * DAY), _kline(3 * DAY)]]))
+    res = cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS)
+    lines = path.read_text().splitlines()
+    assert [ln.split(",")[0] for ln in lines[1:]] == [
+        "1970-01-01 00:00:00", "1970-01-02 00:00:00",
+        "1970-01-03 00:00:00", "1970-01-04 00:00:00"]
+    assert res["rows"] == 4
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_validate_rows_accepts_zero_volume():
+    cd.validate_rows([_row(volume="0.0")], "1d", "X_1d.csv")
+    cd.validate_rows([_row(volume=0)], "1d", "X_1d.csv")
+
+
+def test_validate_rows_accepts_an_empty_list():
+    cd.validate_rows([], "1d", "X_1d.csv")
+
+
+@pytest.mark.parametrize("bad", [
+    {"open": "0.0"}, {"high": "-1"}, {"low": "0"}, {"close": "-0.5"},
+    {"open": "nan"}, {"high": "inf"}, {"low": "-inf"}, {"close": "abc"},
+    {"close": ""}, {"volume": "-1"}, {"volume": "nan"}, {"volume": "inf"},
+    {"date": "2025-01-01"}, {"date": "2025-1-1 0:0:0"},
+    {"date": "2025-13-01 00:00:00"}, {"date": "2025-02-30 00:00:00"},
+    {"date": "2025-01-01T00:00:00"}, {"date": ""},
+])
+def test_validate_rows_refuses_a_bad_field(bad):
+    with pytest.raises(cd.MalformedData, match=r"X_1d\.csv: row 1"):
+        cd.validate_rows([_row(**bad)], "1d", "X_1d.csv")
+
+
+def test_validate_rows_refuses_a_short_or_long_row():
+    short = _row()
+    del short["volume"]
+    with pytest.raises(cd.MalformedData, match="row 1"):
+        cd.validate_rows([short], "1d", "X_1d.csv")
+    with pytest.raises(cd.MalformedData, match="row 1"):
+        cd.validate_rows([_row(volume=None)], "1d", "X_1d.csv")
+    with pytest.raises(cd.MalformedData, match="row 1"):
+        cd.validate_rows([_row(extra="9")], "1d", "X_1d.csv")
+
+
+def test_validate_rows_dates_must_strictly_increase():
+    a, b = _row(date="2025-01-02 00:00:00"), _row(date="2025-01-01 00:00:00")
+    with pytest.raises(cd.MalformedData, match="row 2"):
+        cd.validate_rows([a, b], "1d", "X_1d.csv")
+    with pytest.raises(cd.MalformedData, match="row 2"):
+        cd.validate_rows([a, dict(a)], "4h", "X_4h.csv")
+
+
+def test_validate_rows_one_day_one_bar_for_1d_only():
+    a, b = _row(date="2025-01-01 00:00:00"), _row(date="2025-01-01 12:00:00")
+    with pytest.raises(cd.MalformedData, match="row 2.*duplicate day 2025-01-01"):
+        cd.validate_rows([a, b], "1d", "X_1d.csv")
+    cd.validate_rows([a, b], "4h", "X_4h.csv")       # intraday: distinct stamps are fine

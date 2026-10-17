@@ -28,6 +28,17 @@ from pipeline.screen import load_cell_data                           # noqa: E40
 from pipeline.gauntlet_core import (                                 # noqa: E402
     evaluate_standalone, _spec_bars, truncate_bars)
 
+
+def legacy_pooled_crypto(spec: dict) -> bool:
+    """A pre-Switch-1 pooled crypto spec (the 2-asset BTCUSD+ETHUSD book).
+    Its chained verdict was judged while crypto's benchmark was None, so it
+    carries no benchmark control, and since Switch 1 (crypto benchmark
+    "self") computing one would raise "needs exactly one asset per cell".
+    Parity re-judges it without the control."""
+    uni = spec["universe"]
+    return uni.get("asset_class", "crypto") == "crypto" and len(uni["assets"]) != 1
+
+
 PROTOCOL = "gauntlet-protocol-v6"
 GATE_KEYS = ("is_edge_per_trade", "oos_edge_per_trade", "edge_decay_pct",
              "mc_p05_equity", "p_ruin", "cost_stress_net_pnl", "train_sharpe",
@@ -111,7 +122,8 @@ def main(argv=None) -> int:
         bars, _hashes, now_end = load_cell_data(a.data_dir, cell_list, "9999-12-31")
         bars = truncate_bars(bars, cfg["data_end"])
         new = evaluate_standalone(spec, _spec_bars(bars, spec), cfg["cutoff"],
-                                  perturb=False)
+                                  perturb=False,
+                                  record_benchmark=not legacy_pooled_crypto(spec))
         reason = burial.get(sid)
         old_base_pass = chained_base_pass(old, reason)
         chained = (old["verdict"] if old["verdict"] == "pass"

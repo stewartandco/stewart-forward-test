@@ -68,11 +68,12 @@ SWEEPABLE_TYPES = {("entry", "channel_breakout_dense"),
                    ("exit", "ma_crossunder"), ("exit", "channel_exit"),
                    ("exit", "zscore_revert"), ("exit", "tstat_decay"),
                    ("exit", "regime_flip")}
-ALLOWED_ASSETS = ("BTCUSD", "ETHUSD")
-UNIVERSE_BASE = {"asset_class": "crypto", "timeframe": "1d", "session": "24x7"}
-COST_MODEL = {"commission_per_side": 0.001, "slippage_ticks": 0.0005}
-# ^ both are FRACTIONS of notional (10 bps + 5 bps); the field name
-#   slippage_ticks is inherited from spec schema v1 — see design doc.
+# Switch 1 (SP5 Phase 3, build 2b-3): the legacy pooled crypto universe
+# (ALLOWED_ASSETS BTCUSD/ETHUSD, UNIVERSE_BASE, COST_MODEL) and its expander
+# are gone. Every class, crypto included, takes its universe, session and
+# cost model from cells.CLASSES and expands per ACTIVE cell. Cost-model
+# fields are FRACTIONS of notional; the name slippage_ticks is inherited
+# from spec schema v1 (see design doc).
 
 # spec s4 (D2): a declared table of which card asset_class TAGS are eligible
 # input for a cell class's family proposals -- data, not inference. Crypto's
@@ -788,16 +789,16 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     below are unchanged.
 
     asset_class (real-fx-generation finding, task 6b follow-up): which
-    class's declared assets fam["assets"] is checked against. Defaults to
-    "crypto" so every existing caller -- none of which passes this
-    argument -- keeps checking against ALLOWED_ASSETS exactly as before
-    (crypto specs use the legacy BTCUSD/ETHUSD names, never the cells.py
-    …USDT grid, so "crypto" is never resolved through cells.CLASSES here).
-    A non-crypto class checks against cells.CLASSES[asset_class]["assets"]
-    instead and names the class in the error, because the first real fx
-    generation dropped all 5 proposed families on this exact check still
-    enforcing BTCUSD/ETHUSD against a model that had correctly been told
-    (via proposal_schema_for) to propose fx tickers.
+    class's declared assets fam["assets"] is checked against: every class,
+    crypto included since Switch 1, checks cells.CLASSES[asset_class]
+    ["assets"] and names the class in the error. Defaults to "crypto" for
+    the callers that predate the argument. (The first real fx generation
+    dropped all 5 proposed families on this check while it still enforced
+    the legacy BTCUSD/ETHUSD list against a model correctly told, via
+    proposal_schema_for, to propose fx tickers. Crypto read that legacy
+    list until Switch 1 deleted it; BTCUSD/ETHUSD are not declared crypto
+    cell assets, so a family naming them is now refused like any other
+    undeclared ticker.)
     """
     errors = []
     if not re.fullmatch(r"[a-z0-9_]+", fam.get("family", "")):
@@ -807,13 +808,10 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     for cid in fam.get("card_ids", []):
         if cid not in accepted_ids:
             errors.append(f"card {cid} not accepted (or unknown)")
-    allowed = ALLOWED_ASSETS if asset_class == "crypto" else cells.CLASSES[asset_class]["assets"]
+    allowed = cells.CLASSES[asset_class]["assets"]
     if not fam.get("assets") or not set(fam["assets"]) <= set(allowed):
-        if asset_class == "crypto":
-            errors.append(f"assets {fam.get('assets')} must be a non-empty subset of {list(allowed)}")
-        else:
-            errors.append(f"assets {fam.get('assets')} must be a non-empty subset of "
-                          f"{asset_class} assets {list(allowed)}")
+        errors.append(f"assets {fam.get('assets')} must be a non-empty subset of "
+                      f"{asset_class} assets {list(allowed)}")
 
     blocks = fam.get("blocks", [])
     roles = [b.get("role") for b in blocks]
@@ -913,12 +911,22 @@ def validate_family(fam: dict, accepted_ids: set[str], sibling_cap: int,
     return errors
 
 
+def _short_asset(asset: str) -> str:
+    """The asset as it appears in a spec name: a trailing "USDT" (the
+    declared crypto grid's Binance quote, Switch 1) is stripped first, then
+    the legacy "USD" rule applies, so SOLUSDT names as SOL and the pooled
+    book's BTCUSD as BTC. Tradfi tickers carry neither and pass unchanged."""
+    if asset.endswith("USDT"):
+        asset = asset[:-4]
+    return asset.replace("USD", "")
+
+
 def _build_name(assets: list[str], family: str, blocks: list[dict],
-                timeframe: str = UNIVERSE_BASE["timeframe"]) -> str:
-    # timeframe defaults to the crypto grid's "1d" so the crypto call site
-    # (expand_family) is untouched; the non-crypto path (expand_family_for_
-    # class) passes its own class timeframe explicitly (spec s4).
-    bits = ["+".join(a.replace("USD", "") for a in assets),
+                timeframe: str) -> str:
+    # timeframe is the cell's own (expand_family_for_class passes it per
+    # cell, spec s4); the pooled crypto caller that relied on a "1d" default
+    # went with Switch 1.
+    bits = ["+".join(_short_asset(a) for a in assets),
             timeframe, family]
     for b in blocks:
         for p, v in sorted(b["params"].items()):
@@ -941,45 +949,6 @@ def _snap_to_grid(blocks: list[dict]) -> None:
             grid = schema.get(p, {}).get("grid")
             if grid:
                 b["params"][p] = next(g for g in grid if g == v)
-
-
-def expand_family(fam: dict, run_id: str, model: str, created_utc: str) -> list[dict]:
-    """Cartesian expansion of sweep axes, in declaration order. Deterministic:
-    same family + run_id + timestamp -> same strategy_ids."""
-    assets = sorted(fam["assets"])
-    axes = fam.get("sweep", [])
-    combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
-    specs = []
-    for combo in combos:
-        blocks = copy.deepcopy(fam["blocks"])
-        for ax, val in zip(axes, combo):
-            blocks[ax["block"]]["params"][ax["param"]] = val
-        _snap_to_grid(blocks)
-        spec = {
-            "strategy_id": None,
-            "version": SPEC_VERSION,
-            "created_utc": created_utc,
-            "name": _build_name(assets, fam["family"], blocks),
-            "family": fam["family"],
-            "universe": {"assets": assets, **UNIVERSE_BASE},
-            "blocks": blocks,
-            "provenance": {
-                "card_ids": sorted(fam["card_ids"]),
-                "parent_strategy_id": None,
-                "sibling_group_id": f"{fam['family']}-{run_id}",
-                "generation": 0,
-            },
-            "generator": {
-                "agent": "composer",
-                "model": model,
-                "pipeline_version": PIPELINE_VERSION,
-                "run_id": run_id,
-            },
-            "cost_model": dict(COST_MODEL),
-        }
-        spec["strategy_id"] = content_id(spec, "strategy_id")
-        specs.append(spec)
-    return specs
 
 
 def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
@@ -1012,36 +981,37 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
                             asset_class: str,
                             proxy_card_ids: frozenset[str] = frozenset(),
                             assets=None) -> list[dict]:
-    """Non-crypto counterpart of expand_family (spec s4/s10.7-8).
+    """THE family expander, for every class (spec s4/s10.7-8; crypto since
+    Switch 1, SP5 Phase 3, which deleted the pooled expand_family).
 
-    The family's blocks and sweep axes expand exactly like the crypto path
-    (same combo loop, same _snap_to_grid), but the universe/cost_model come
-    from cells.CLASSES[asset_class] rather than UNIVERSE_BASE/COST_MODEL, and
-    every combo explodes further into one spec PER CELL of that class via
-    the existing expand_universe: a cell is one asset at the class's declared
-    timeframe, the same unit-of-survival contract cells.py declares for
-    crypto (a strategy that only works on one fx pair must not be excluded).
-    expand_universe already carries the base spec's asset_class/session onto
-    every cell spec untouched, so the base universe built here just needs to
-    be correct once. Deterministic: same family + run_id + timestamp -> same
-    strategy_ids, exactly like expand_family.
+    The family's blocks and sweep axes expand as a cartesian product in
+    declaration order (_snap_to_grid on each combo); the universe/session/
+    cost_model come from cells.CLASSES[asset_class], and every combo
+    explodes further into one spec PER ACTIVE CELL of that class via
+    expand_universe: a cell is one asset at one timeframe, the
+    unit-of-survival contract cells.py declares (a strategy that only works
+    on one fx pair, or one crypto asset, must not be excluded).
+    expand_universe carries the base spec's asset_class/session onto every
+    cell spec and sets each cell's own asset and timeframe, so the base
+    universe built here just needs to be correct once. Deterministic: same
+    family + run_id + timestamp -> same strategy_ids.
 
     fam["assets"] is NOT used for cell selection here (that comes from
-    cells.active_cells(asset_class)): validate_family now checks it against
+    cells.active_cells(asset_class)): validate_family checks it against
     THIS class's own declared assets (real-fx-generation finding, task 6b
-    follow-up), rather than the crypto-only ALLOWED_ASSETS list it used to
-    be pinned against regardless of asset_class -- so the field is a real,
-    class-checked value on this path. It is still not a cell-selecting one:
-    per-cell expansion below is exhaustive over cells.active_cells(asset_class)
-    regardless of which of the class's assets the family named, so the
+    follow-up), so the field is a real, class-checked value on this path.
+    It is still not a cell-selecting one: per-cell expansion below is
+    exhaustive over cells.active_cells(asset_class) (narrowed only by
+    `assets`, the rotation window) regardless of which of the class's
+    assets the family named, so the
     model's chosen subset is validated and then discarded here. DECLARED vs
     ACTIVE (SP5 D4): cells.class_cells is the class's whole declared grid,
     which admits data/import work; cells.active_cells is the subset the
     ACTIVE_CELLS gate permits a generation to SWEEP, because sweeping a cell
     moves the trial denominator. The four tradfi classes gate "all", so
-    active == declared for them today; crypto's gate is empty until Coen's
-    Phase 3 activation commit, and expansion here follows the gate, never
-    the declaration.
+    active == declared for them; crypto's gate is 76 of its 100 declared
+    assets at 1d of its six declared timeframes (Switch 1), and expansion
+    here follows the gate, never the declaration.
 
     proxy_card_ids (Coen, 2026-08-25: proxy routing is recorded on the
     REGISTRATION, not only on the run-level drift record): the full set of
@@ -1063,7 +1033,13 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     de-duplication (test-pinned).
     """
     cls_spec = cells.CLASSES[asset_class]
-    timeframe = cls_spec["timeframes"][0]
+    # The base universe's timeframe is the first ACTIVE timeframe (crypto
+    # declares "15m" first but activates only "1d"); expand_universe then
+    # sets each cell's own. Falls back to the declared first only for an
+    # empty gate, which sweeps no cell anyway. Tradfi gates "all", so this is
+    # the declared first there, byte-identical to before Switch 1.
+    active = cells.active_cells(asset_class)
+    timeframe = active[0][1] if active else cls_spec["timeframes"][0]
     axes = fam.get("sweep", [])
     combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
     fam_proxy_card_ids = sorted(set(fam["card_ids"]) & proxy_card_ids)
@@ -1115,29 +1091,35 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
 
 def expander_for(asset_class: str):
     """The family-expansion callable for one class - the ROUTING DECISION,
-    lifted out of run() so it can be observed rather than only executed.
+    lifted out of run() so it can be observed rather than only executed
+    (P2-T3 rider).
 
-    Pure refactor (P2-T3 rider): run() used to inline
-    `if args.asset_class == "crypto": expand_family(...) else
-    expand_family_for_class(...)`. Behaviour is byte-identical; the branch
-    simply has a name now.
-
-    crypto is the special case: it still takes the LEGACY POOLED path
-    (expand_family + UNIVERSE_BASE + ALLOWED_ASSETS), which builds one
-    multi-asset BTCUSD/ETHUSD spec per sweep combo, while every other class
-    takes the per-cell path (expand_family_for_class, one single-asset spec
-    per ACTIVE cell). SP5 Phase 3's activation commit deletes the crypto
-    branch here and flips CLASSES["crypto"]["benchmark"] to "self" in the
-    SAME commit - a benchmark:"self" class needs exactly one asset per cell,
-    which only the per-cell path provides. That coupling is what
-    test_gauntlet_classes.py's
-    test_crypto_benchmark_and_the_legacy_pooled_path_flip_together reads this
-    function for; making the dispatch observable is the whole point of it
-    being a function.
+    Every class takes the per-cell path (expand_family_for_class, one
+    single-asset spec per ACTIVE cell). crypto was the special case until
+    Switch 1 (SP5 Phase 3): it took the legacy POOLED path (expand_family +
+    UNIVERSE_BASE + ALLOWED_ASSETS, one 2-asset BTCUSD+ETHUSD spec per sweep
+    combo). That commit deleted the crypto branch here and flipped
+    CLASSES["crypto"]["benchmark"] to "self" together -- a benchmark:"self"
+    class needs exactly one asset per cell, which only the per-cell path
+    provides. The function stays, with one answer, because it is the
+    routing seam tests read: test_switch1.py::
+    test_crypto_routes_per_cell_and_benchmarks_itself pins this dispatch
+    and the benchmark field as one fact.
     """
-    return expand_family if asset_class == "crypto" else expand_family_for_class
+    return expand_family_for_class
 
 
+def _active_assets(asset_class: str) -> list[str]:
+    """A class's ACTIVE assets, deduplicated, in cells' declaration order
+    (one entry per asset however many of its timeframes are active)."""
+    return list(dict.fromkeys(a for a, _ in cells.active_cells(asset_class)))
+
+
+# The proposer's structured-output schema. Its shape is shared by every
+# class; only the "assets" enum is class-specific, and proposal_schema_for
+# fills it from that class's ACTIVE assets. The enum held here is crypto's
+# (the 76 assets Switch 1 activated), so this module constant is exactly
+# what proposal_schema_for("crypto") builds.
 PROPOSAL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1151,7 +1133,7 @@ PROPOSAL_SCHEMA = {
                     "regime_hypothesis": {"type": "string"},
                     "card_ids": {"type": "array", "items": {"type": "string"}},
                     "assets": {"type": "array",
-                               "items": {"enum": list(ALLOWED_ASSETS)}},
+                               "items": {"enum": _active_assets("crypto")}},
                     "blocks": {
                         "type": "array",
                         "items": {
@@ -1206,10 +1188,59 @@ PROPOSAL_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """\
+def _crypto_system_prompt() -> str:
+    """Switch 1's crypto brief (SP5 Phase 3): the equity_etf pattern -- the
+    ACTIVE universe by name and count, how it is swept, its honesty limits
+    and its cost model, all read from cells -- followed by the measured
+    generation history, kept VERBATIM and introduced as what it is: the
+    history of the pooled BTCUSD+ETHUSD book every earlier crypto generation
+    proposed (test_switch1.py pins the block byte for byte against the
+    pre-switch brief). The shared Rules bullets, D15 EXITS included, are the
+    pre-switch crypto bullets unchanged; only "implementable from daily
+    OHLCV alone" moved up into the universe section, as in the other
+    classes' briefs. No financing line: crypto declares no short financing.
+    DRAFT pending Coen's approval of the exact text (build 2b-3, Task 9).
+    """
+    cls_spec = cells.CLASSES["crypto"]
+    active = _active_assets("crypto")
+    assets = ", ".join(active)
+    n_assets = len(active)
+    cost = cls_spec["cost_model"]
+    commission = f"{cost['commission_per_side']:.5f}"
+    slippage = f"{cost['slippage_ticks']:.5f}"
+    return f"""\
 You are the Composer agent in Stewart & Co.'s research pipeline. You design
-candidate trading strategies for crypto daily bars (BTCUSD, ETHUSD) as
-compositions of typed blocks, grounded in accepted research cards.
+candidate trading strategies for the crypto universe ({n_assets} Binance USDT
+spot pairs on daily OHLCV bars: {assets}) as compositions of typed blocks,
+grounded in accepted research cards.
+
+The crypto universe, stated plainly because how it is swept and what its data
+can see shape what a sound family can honestly claim:
+- Each family is swept per cell: every asset in the generation's window is
+  its own strategy and its own counted trial. A generation sweeps a rotating
+  window of these assets, never one pooled book, so a family is judged asset
+  by asset.
+- The universe is the {n_assets} of today's top-100 crypto assets by market
+  cap that were listed by 2022-12-31 (at least 365 days of history before the
+  2023-12-31 train/test cutoff), each backtested to its listing date: winners
+  picked after the race. Coins that died or fell out of the top 100 are not
+  represented, so a family must not read this history as evidence about how
+  a random coin behaves; forward quarantine, not this backtest, is the
+  honest arbiter.
+- Returns are price returns, staking/funding yield excluded: a family whose
+  thesis depends on collecting staking rewards or perpetual funding will not
+  show that income here.
+- Each bar is a REAL daily OHLC bar on crypto's 24x7 calendar (every day,
+  weekends included): range-based block types are eligible here, and none
+  are excluded for this class.
+- The declared cost model charges {commission} commission per side plus
+  {slippage} slippage per side.
+- Strategies must be implementable from daily OHLCV alone.
+
+The history below is that of the pooled BTCUSD+ETHUSD book, the single
+two-asset strategy shape every crypto generation before per-cell sweeping
+proposed, so it reports what that book did, not what any one asset in this
+universe did.
 
 What happened so far, as measured, not as opinion:
 
@@ -1274,17 +1305,19 @@ Rules:
   never produce a survivor and will be rejected.
 - Prefer ONE or TWO well-motivated axes at FIVE contiguous values over several
   axes at three: five values leave three eligible candidates, three leave one.
-- Strategies must be implementable from daily OHLCV alone.
 - Propose fewer, better-grounded families over many weak ones. If the cards
   support only two good families, propose two."""
+
+
+CRYPTO_SYSTEM_PROMPT = _crypto_system_prompt()
 
 
 def system_prompt_for(asset_class: str) -> str:
     """The Composer's mission-statement + history brief for one class.
 
-    "crypto" returns SYSTEM_PROMPT verbatim (identity, not reconstruction),
-    so the crypto call site's exact bytes are never touched by this function
-    existing.
+    "crypto" returns CRYPTO_SYSTEM_PROMPT by identity (built once at import
+    by _crypto_system_prompt, Switch 1): the active universe, its sweep and
+    honesty limits, then the pooled book's measured history verbatim.
 
     T4's review (task 6b, spec s10.7 pre-activation rider) found the live
     model still reasoned against "crypto daily bars (BTCUSD, ETHUSD)" and the
@@ -1312,7 +1345,7 @@ def system_prompt_for(asset_class: str) -> str:
     roll-yield honesty limit to name (unlike a futures-based metals product).
     """
     if asset_class == "crypto":
-        return SYSTEM_PROMPT
+        return CRYPTO_SYSTEM_PROMPT
     if asset_class == "equity_etf":
         return _equity_etf_system_prompt()
     if asset_class == "bond_etf":
@@ -1645,33 +1678,28 @@ Rules:
 def proposal_schema_for(asset_class: str) -> dict:
     """The structured-output schema for one class's proposer call.
 
-    "crypto" returns PROPOSAL_SCHEMA verbatim (identity, not reconstruction,
-    task 6b), so the crypto call site's exact schema object is never touched
-    by this function existing.
-
-    A non-crypto class only swaps the "assets" enum, deep-copied off
-    PROPOSAL_SCHEMA rather than hand-duplicating the families/blocks/sweep
-    structure, and pulls the enum from cells.CLASSES[asset_class]["assets"]
-    (never a second hardcoded copy of the asset list).
+    Every class, crypto included since Switch 1, gets PROPOSAL_SCHEMA's
+    shape deep-copied with the "assets" enum set to that class's ACTIVE
+    assets (cells.active_cells, deduplicated, declaration order) -- never a
+    second hardcoded copy of the asset list. For the four tradfi classes the
+    gate is "all", so active == declared and the enum is byte-identical to
+    the CLASSES list it read before; for crypto it is the 76 activated
+    assets, not the 100 declared, so the model is never offered a ticker no
+    generation may sweep. The crypto result equals the PROPOSAL_SCHEMA
+    constant (built from the same gate at import) but is a fresh object, so
+    a test that narrows ACTIVE_CELLS sees the narrowed enum.
 
     The enum still is not cell-selecting, consistent with T4's documented
-    friction (spec s10.7): validate_family now checks fam["assets"] against
-    this same per-class list (real-fx-generation finding, task 6b follow-up)
-    so the model's proposal is genuinely validated, but expand_family_for_
-    class still ignores fam["assets"] entirely when building specs, sourcing
-    the real per-cell assets from cells.active_cells(asset_class) instead.
-    The model may propose any subset of the class's declared assets here;
-    per-cell expansion overrides it regardless of what was proposed. Note
-    those are two different lists (SP5 D4): this enum is the DECLARED asset
-    list (CLASSES), while expansion sweeps only the cells the ACTIVE_CELLS
-    gate activates -- so a declared-but-not-yet-active asset can legally be
-    proposed here and still contribute no cell.
+    friction (spec s10.7): validate_family checks fam["assets"] against the
+    class's DECLARED assets (real-fx-generation finding, task 6b follow-up)
+    so the model's proposal is genuinely validated, but
+    expand_family_for_class ignores fam["assets"] when building specs,
+    sourcing the real per-cell assets from cells.active_cells(asset_class)
+    (narrowed only by a rotation window) instead.
     """
-    if asset_class == "crypto":
-        return PROPOSAL_SCHEMA
     schema = copy.deepcopy(PROPOSAL_SCHEMA)
-    assets = list(cells.CLASSES[asset_class]["assets"])
-    schema["properties"]["families"]["items"]["properties"]["assets"]["items"]["enum"] = assets
+    assets_items = schema["properties"]["families"]["items"]["properties"]["assets"]["items"]
+    assets_items["enum"] = _active_assets(asset_class)
     return schema
 
 
@@ -2155,31 +2183,9 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
                          "test-isolation reason as --data-dir")
     args = ap.parse_args(argv)
 
-    # --assets is a view onto the ACTIVE CELL set, and the legacy POOLED path
-    # has none: its universe comes from ALLOWED_ASSETS + UNIVERSE_BASE, not
-    # from cells.active_cells. Refuse rather than accept an argument that
-    # would be silently ignored.
-    #
-    # Keyed on the REAL ROUTING DISPATCH, not on the literal string "crypto"
-    # (P2-T4 review F2). The two are the same fact today, but only the
-    # dispatch stays correct through Phase 3: that commit switches
-    # expander_for("crypto") to the per-cell path, and on the same commit this
-    # refusal must stop firing -- because pipeline/loop.py starts emitting a
-    # rotation window for crypto at exactly that moment. Written against the
-    # class name instead, Phase 3 would have produced a guaranteed nonzero
-    # composer exit on every crypto fire (stage_failed, Sentinel FAIL, three
-    # times a day) until someone noticed. Same convention the P2-T3 rider
-    # established for the benchmark pin: read the dispatch, never a proxy
-    # for it.
-    if args.assets and expander_for(args.asset_class) is expand_family:
-        print(f"--assets has no meaning on the legacy pooled path that class "
-              f"{args.asset_class!r} still routes through "
-              f"(composer.expander_for({args.asset_class!r}) is expand_family, "
-              f"whose universe is ALLOWED_ASSETS/UNIVERSE_BASE, not active "
-              f"cells). It becomes meaningful when that class moves to "
-              f"expand_family_for_class -- for crypto, SP5 Phase 3's "
-              f"activation commit.")
-        return 1
+    # --assets is a view onto the ACTIVE CELL set, honoured for every class
+    # (the legacy pooled crypto path that had to refuse it went with Switch
+    # 1); sweep_cells refuses a name outside the active set, below.
     sweep_assets = ([a.strip() for a in args.assets.split(",") if a.strip()]
                     if args.assets else None)
 
@@ -2203,8 +2209,7 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # expands to at most cap x per_combo specs and is therefore never split.
     # Only families that TODAY are refused outright are affected.
     try:
-        specs_per_combo = (1 if args.asset_class == "crypto"
-                           else max(1, len(sweep_cells(args.asset_class, sweep_assets))))
+        specs_per_combo = max(1, len(sweep_cells(args.asset_class, sweep_assets)))
     except ValueError as exc:
         print(f"  {exc}")
         return 1
@@ -2304,16 +2309,12 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
             continue
         seen_names.add(name)
         # The routing decision itself lives in expander_for() so it can be
-        # observed by a test, not just executed here (P2-T3 rider); the two
-        # expanders take different arguments, so the call still forks.
-        expander = expander_for(args.asset_class)
-        if expander is expand_family:
-            specs = expander(fam, args.run_id, args.model, created_utc)
-        else:
-            specs = expander(
-                fam, args.run_id, args.model, created_utc, args.asset_class,
-                proxy_card_ids=frozenset(proxy_routed_card_ids or ()),
-                assets=sweep_assets)
+        # observed by a test, not just executed here (P2-T3 rider); since
+        # Switch 1 it has one answer for every class.
+        specs = expander_for(args.asset_class)(
+            fam, args.run_id, args.model, created_utc, args.asset_class,
+            proxy_card_ids=frozenset(proxy_routed_card_ids or ()),
+            assets=sweep_assets)
         kept_specs, drop_notes, malformed = screen_siblings(
             specs, known_fps, run_fps, retrial_ok=retrial_ok)
         if malformed:
@@ -2342,9 +2343,10 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         for note in drop_notes:
             print(f"    - {note}")
         if not kept_specs:
-            # expand_family always yields at least one combo, so an empty
-            # kept_specs here is always a genuine all-collide, never a
-            # vacuous family reported as one.
+            # the expander yields one spec per combo per swept cell, and the
+            # cap computation above already resolved a non-empty cell set for
+            # every class with an active cell, so an empty kept_specs here is
+            # a genuine all-collide, never a vacuous family reported as one.
             dropped += 1
             print(f"  DROPPED family {name}: every sibling already registered"
                   + (" or duplicated in this run" if n_dupe else ""))

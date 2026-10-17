@@ -303,6 +303,16 @@ def gauntlet_registry(tmp_path):
     return reg, spec
 
 
+# Switch 1 (SP5 Phase 3) flipped crypto's benchmark to "self", so a crypto
+# gauntlet verdict now computes a same-OOS-window buy-and-hold control and
+# _benchmark_relative REFUSES a cell with no bar after the cutoff. The
+# dated_target_hit_bars() fixture spans 2023-01-01..2023-01-23, all before
+# the default cutoff (2023-12-31). Gauntlet runs over it pass this cutoff
+# instead: the one trade still enters IS (fill 2023-01-22, the split is by
+# entry date), and the 2023-01-23 bar is the OOS window the control reads.
+HIT_BARS_CUTOFF = "2023-01-22"
+
+
 def chain_gauntlet_note(reg):
     reg.append("note", {"text": f"{G_PROTOCOL}: test anchor"})
 
@@ -331,7 +341,7 @@ def test_gauntlet_dry_run_writes_nothing(tmp_path, capsys):
     data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
     n_before = sum(1 for _ in reg.entries())
     rc = gauntlet_run(["--registry", str(reg.log_path),
-                       "--data-dir", str(data), "--dry-run"])
+                       "--data-dir", str(data), "--cutoff", HIT_BARS_CUTOFF, "--dry-run"])
     assert rc == 0
     assert sum(1 for _ in reg.entries()) == n_before
     assert "DRY RUN" in capsys.readouterr().out
@@ -354,7 +364,7 @@ def test_gauntlet_full_run_chains_and_verifies(tmp_path):
     data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
     art = tmp_path / "art"
     rc = gauntlet_run(["--registry", str(reg.log_path),
-                       "--data-dir", str(data),
+                       "--data-dir", str(data), "--cutoff", HIT_BARS_CUTOFF,
                        "--artifacts-dir", str(art)])
     assert rc == 0
     states = reg.strategy_states()

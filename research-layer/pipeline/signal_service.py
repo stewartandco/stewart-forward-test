@@ -25,12 +25,34 @@ exactly the bar that closed at the start of the UTC day (`--as-of` - 1 day;
 data never rewrites an old targets file and exits 0; newer = a bar dated the
 run day or later, i.e. a still-open (partial) bar, which data_fetch never
 writes, so it is bad data. A registry file that does not exist refuses too
-(Registry.snapshot would read it as an empty chain: "nothing written", exit
-0). A malformed CSV row (short row, BOM-prefixed or incomplete header,
+(Registry.snapshot would read it as an empty chain: "no targets written", exit
+0; status.json is written either way). A malformed CSV row (short row, BOM-prefixed or incomplete header,
 non-numeric or non-finite price, a date that is not YYYY-MM-DD, undecodable
 bytes) refuses the run naming the file and row (minors item 3). Exit codes:
 0 written (or nothing served on an existing chain), REFUSED_EXIT = 2 for every
 refusal, 1 = an unhandled crash (Python's own).
+
+STATUS (2b-3 Task 14, the Sentinel channel): every run that gets past argument
+parsing writes logs/signals/status.json ({written_utc, bar_end (or null),
+exit_code, published, deferred {sid: reason}, deferred_since {sid: first-seen
+UTC date}}), atomically (the same .tmp + os.replace retry as the targets),
+after the targets publish and on every exit 0 / exit 2 path. The Ops Sentinel
+reads it: a missing file, one older than 20 h (the 08:45 write is about 0.5 h
+old at the 09:15 digest, so older means today's fire wrote nothing), or
+exit_code 2 FAILs; a sid deferred on its 2nd calendar day (the first counts)
+WARNs. deferred_since is carried over from the previous
+status for a sid still deferred and dropped for one no longer deferred (its
+dates are the --as-of UTC date of the run that first saw the deferral); an
+unreadable previous status counts as empty (WARNING printed). A run that
+REFUSED before the deferral step (stale or partial bar_end, malformed CSV,
+missing registry) could not compute deferrals, so it carries the previous
+status's `deferred` and `deferred_since` forward unchanged and sets
+"deferrals_not_computed": true (false on every run that computed them), so a
+refusal day never resets a sid's clock. An unhandled crash (exit 1) writes no
+status, so the staleness FAILs. A status write that fails (a reader holding
+status.json past the retries, a full disk) prints "WARNING: could not write
+status.json" and never changes the exit code; the Sentinel's 20 h staleness
+FAIL is the backstop.
 
 RETENTION (minors item 4): after a publish, targets-<date>.json files beyond
 the newest KEEP_TARGETS by the date in the name are deleted (never the file
@@ -74,6 +96,7 @@ REPLACE_SLEEP_S = 0.25
 KEEP_TARGETS = 30         # targets files kept after a publish (newest by bar_end)
 COLUMNS = ("date", "open", "high", "low", "close", "volume")
 _TARGETS_NAME = re.compile(r"^targets-(\d{4}-\d{2}-\d{2})\.json$")
+STATUS_NAME = "status.json"
 
 
 def _synthetic_next(bars: list[dict]) -> dict:
@@ -241,6 +264,81 @@ def _publish(tmp: Path, path: Path) -> None:
             time.sleep(REPLACE_SLEEP_S)
 
 
+def _previous_since(status_path: Path) -> dict:
+    """The previous status's deferred_since {sid: ISO date}; {} when there is
+    no previous status. An unreadable one (bad bytes or JSON, not an object,
+    deferred_since not an object) is treated as empty with a WARNING line."""
+    try:
+        raw = status_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"WARNING: previous {status_path} unreadable ({exc}); deferred_since restarts")
+        return {}
+    try:
+        prev = json.loads(raw)
+        since = prev.get("deferred_since", {}) if isinstance(prev, dict) else None
+        if not isinstance(since, dict):
+            raise ValueError("not an object with an object deferred_since")
+    except ValueError as exc:
+        print(f"WARNING: previous {status_path} malformed ({exc}); deferred_since restarts")
+        return {}
+    out = {}
+    for sid, day in since.items():
+        try:
+            if not isinstance(day, str) or not _DATE.fullmatch(day):
+                raise ValueError(day)
+            dt.date.fromisoformat(day)
+        except ValueError:
+            continue                         # an unreadable date restarts that sid's clock
+        out[sid] = day
+    return out
+
+
+def _previous_deferred(status_path: Path) -> dict:
+    """The previous status's `deferred` {sid: reason}; {} when absent or not
+    an object (the WARNING for an unreadable file comes from _previous_since)."""
+    try:
+        prev = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    deferred = prev.get("deferred") if isinstance(prev, dict) else None
+    return dict(deferred) if isinstance(deferred, dict) else {}
+
+
+def write_status(out_dir: Path, as_of: dt.date, bar_end, exit_code: int, published: int,
+                 deferred: dict, computed: bool = True) -> None:
+    """Write out_dir/status.json atomically (the targets publish's .tmp +
+    os.replace retry). deferred_since: a sid still deferred keeps the previous
+    status's first-seen date, a new one gets the run's UTC day (`as_of`), a
+    sid no longer deferred is dropped. computed=False (the run refused before
+    the deferral step): `deferred` and `deferred_since` are the PREVIOUS
+    status's, unchanged, and "deferrals_not_computed" is true (false when
+    computed)."""
+    path = out_dir / STATUS_NAME
+    prev = _previous_since(path)
+    if computed:
+        since = {sid: prev.get(sid, as_of.isoformat()) for sid in sorted(deferred)}
+    else:
+        deferred = _previous_deferred(path)
+        since = dict(sorted(prev.items()))
+    doc = {"written_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "bar_end": bar_end, "exit_code": exit_code, "published": published,
+           "deferred": dict(sorted(deferred.items())), "deferred_since": since,
+           "deferrals_not_computed": not computed}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+        _publish(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass                              # never mask the error that got us here
+
+
 def _spec_sha(spec: dict) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -255,9 +353,19 @@ def run(argv=None) -> int:
                     help="UTC date of the run (default: today UTC); bar_end must be >= this - 1 day")
     a = ap.parse_args(argv)
     as_of = a.as_of or _utc_today()
+
+    def finish(rc, bar_end=None, published=0, deferred=None, computed=True):
+        # a failed status write must never change the exit code (a good publish
+        # stays 0, a refusal stays 2); the Sentinel's staleness FAIL is the backstop
+        try:
+            write_status(a.out_dir, as_of, bar_end, rc, published, deferred or {}, computed)
+        except Exception as exc:
+            print(f"WARNING: could not write {STATUS_NAME}: {exc!r}")
+        return rc
+
     if not a.registry.is_file():
-        print(f"REFUSED (nothing written): no registry file {a.registry}")
-        return REFUSED_EXIT
+        print(f"REFUSED (no targets written): no registry file {a.registry}")
+        return finish(REFUSED_EXIT, computed=False)
     specs, max_dd = {}, {}
 
     def on_entry(e):
@@ -273,9 +381,10 @@ def run(argv=None) -> int:
     snap = Registry(a.registry).snapshot(on_entry=on_entry)
     served = {sid: spec for sid, spec in specs.items() if snap.states.get(sid) in STATES}
     if not served:
-        print("no crypto strategies in quarantine/live; nothing written")
-        return 0
+        print("no crypto strategies in quarantine/live; no targets written")
+        return finish(0)
     wanted = {x for spec in served.values() for x in spec["universe"]["assets"]}
+    bar_end = None
     try:
         bar_end, bars_by, digest, problems, last = load_assets(a.data_dir, wanted)
         detail = ", ".join(f"{x} {last[x] or 'EMPTY'}" if x in last else f"{x} MISSING"
@@ -284,8 +393,8 @@ def run(argv=None) -> int:
             raise DataRefused(f"no served asset has a bar (last bar dates: {detail})")
         check_fresh(bar_end, as_of)
     except DataRefused as exc:
-        print(f"REFUSED (nothing written): {exc}")
-        return REFUSED_EXIT
+        print(f"REFUSED (no targets written): {exc}")
+        return finish(REFUSED_EXIT, bar_end, computed=False)
     # minors item 1: per-strategy deferral -- every asset on bar_end, or none
     deferred = {}
     for sid, spec in served.items():
@@ -294,11 +403,11 @@ def run(argv=None) -> int:
             deferred[sid] = "; ".join(bad)
     publish = {sid: spec for sid, spec in served.items() if sid not in deferred}
     if not publish:
-        print(f"REFUSED (nothing written): no strategy can be published on bar_end "
+        print(f"REFUSED (no targets written): no strategy can be published on bar_end "
               f"{bar_end} (last bar dates: {detail})")
         for sid in sorted(deferred):
             print(f"  deferred {sid}: {deferred[sid]}")
-        return REFUSED_EXIT
+        return finish(REFUSED_EXIT, bar_end, 0, deferred)
     out = {}
     for sid, spec in publish.items():
         assets = {x: next_bar_position(spec, bars_by[x]) for x in spec["universe"]["assets"]}
@@ -321,7 +430,7 @@ def run(argv=None) -> int:
     for sid in sorted(deferred):
         print(f"  deferred {sid}: {deferred[sid]}")
     prune_targets(a.out_dir, path)
-    return 0
+    return finish(0, bar_end, len(out), deferred)
 
 
 if __name__ == "__main__":
