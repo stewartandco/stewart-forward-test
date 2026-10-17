@@ -23,7 +23,8 @@ Usage:
     python -m pipeline.quarantine --catch-up
         records every OWED date through the --date path, oldest first, at
         most MAX_CATCHUP_DATES per run (a date where every owing strategy was
-        deferred, for a restated asset or a failed simulation, uses no slot). The daily ends with it (2026-09-28):
+        deferred, for a restated asset or a failed simulation, uses no slot).
+        The daily ends with it (2026-09-28):
         a deferred class or a missed day is filled on the next run, for EVERY
         owed strategy alike, so backfill is a schedule, never a selection.
 
@@ -81,8 +82,8 @@ Graduation is NOT automatic. `--review` reports and writes nothing.
 from __future__ import annotations
 
 import sys
-import math
 import json
+import math
 import time
 import hashlib
 import argparse
@@ -114,16 +115,25 @@ class SimulationDataError(ValueError):
     exception is a code bug and fails the date loudly."""
 
 
-def _require_finite_closes(bars: list[dict], label: str, date: str) -> None:
-    """A non-finite close (a literal "nan"/"inf" in a price file) is bad
-    DATA: it defers this strategy. Left alone it would poison the equity
-    curve and surface at validated_quarantine_decision as a plain ValueError,
-    which fails (and halts) the whole date."""
+PRICE_FIELDS = ("open", "high", "low", "close")
+
+
+def _require_finite_prices(bars: list[dict], label: str, date: str) -> None:
+    """A non-finite open/high/low/close (a literal "nan"/"inf" in a price
+    file) is bad DATA: it defers this strategy. Left alone it is WRONG, not
+    loud: a NaN high or low silently fails the engine's stop comparisons
+    (the stop never fires) and turns ATR NaN (entries are silently skipped),
+    while a NaN close poisons the equity curve. A field a bar does not carry
+    (absent or None) is skipped; only a present, numeric, non-finite value
+    raises. screen.load_bars always parses all four."""
     for b in bars:
-        if not math.isfinite(b["close"]):
-            raise SimulationDataError(
-                f"{label}: non-finite close {b['close']!r} on {b['date']}, "
-                f"so the book for {date} cannot be simulated")
+        for field_ in PRICE_FIELDS:
+            v = b.get(field_)
+            if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and not math.isfinite(v)):
+                raise SimulationDataError(
+                    f"{label}: non-finite {field_} {v!r} on {b['date']}, "
+                    f"so the book for {date} cannot be simulated")
 
 
 # a row chained more than this many days after its own bar is a backfill, not
@@ -488,7 +498,7 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
     session, tf = universe.get("session"), universe["timeframe"]
     if not bars or bars[-1]["date"][:10] != date:
         raise SimulationDataError(f"no {key} bar for {date}")
-    _require_finite_closes(bars, key, date)
+    _require_finite_prices(bars, key, date)
     book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
                           _bars.bars_per_year(session, tf),
                           version=spec.get("version", 1),
@@ -522,7 +532,7 @@ def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
             continue
         if not bars or bars[-1]["date"] != date:
             raise SimulationDataError(f"no {asset} bar for {date}")
-        _require_finite_closes(bars, asset, date)
+        _require_finite_prices(bars, asset, date)
         # Spec s10.11 (T3 review): mirror run_spec's periods_per_year
         # derivation here too. Without it, an fx spec reaching quarantine
         # would forward-run on /365 financing and sqrt(365) vol sizing --
@@ -885,7 +895,9 @@ class DateReport:
     degraded ledger (isolation design s6.1)."""
 
     def __init__(self) -> None:
-        self.deferred_only = False      # nothing appended; every owing strategy was deferred (restated or simulation failed, rule 2 + 2026-10-17)
+        # nothing appended; every owing strategy was deferred (restated or
+        # simulation failed: rule 2 + 2026-10-17)
+        self.deferred_only = False
         self.degraded: list[dict] = []  # {"source", "key", "reason"}
         # the run returned before checking provenance (a deferred_lock skip,
         # or a raise), so its silence is not recovery: the catch-up must not

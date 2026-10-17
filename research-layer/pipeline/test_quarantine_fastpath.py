@@ -1089,29 +1089,51 @@ def test_a_permanently_failing_strategy_does_not_starve_catch_up(
     assert run_verifier(reg.log_path).returncode == 0
 
 
-def test_a_nan_close_defers_that_strategy_and_the_other_records(
-        tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("field_,row", [
+    ("close", "2023-01-10,100.0,100.0,100.0,nan,1.0"),
+    ("high", "2023-01-10,100.0,nan,100.0,100.0,1.0"),
+    ("low", "2023-01-10,100.0,100.0,nan,100.0,1.0"),
+    ("open", "2023-01-10,nan,100.0,100.0,100.0,1.0"),
+])
+def test_a_nan_price_defers_that_strategy_and_the_other_records(
+        tmp_path, monkeypatch, capsys, field_, row):
     """A literal "nan" in ONE strategy's price file is bad data: it defers
-    THAT strategy (a SimulationDataError from the finite-close guard), not
-    the date. Without the guard the NaN reaches validated_quarantine_decision
-    as a plain ValueError and halts the whole date. B (ETHUSD) records
-    nothing and gets a `simulation_failed` item; A (BTCUSD) records."""
+    THAT strategy (a SimulationDataError from the finite-price guard), not
+    the date. Without the guard nothing fails in this fixture: both
+    strategies simply record (for a NaN high/low the engine's stop
+    comparisons and ATR silently go wrong, so the row would be wrong, not
+    loud). B (ETHUSD) records nothing and gets a `simulation_failed` item
+    naming the field; A (BTCUSD) records."""
     reg, a, b, data = _flat_pair(tmp_path)
-    restate(data, "ETHUSD", "2023-01-10",
-            "2023-01-10,100.0,100.0,100.0,nan,1.0")
+    restate(data, "ETHUSD", "2023-01-10", row)
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     out = capsys.readouterr()
     assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
     assert (f"{b['strategy_id']}  deferred: simulation failed: ETHUSD: "
-            f"non-finite close") in out.out
+            f"non-finite {field_} nan on 2023-01-10") in out.out
     assert "PARTIAL WRITE" not in out.err
     items = ledger(reg)["items"]
     assert [(i["source"], i["key"]) for i in items] == [
         ("simulation_failed", b["strategy_id"])]
-    assert "non-finite close" in items[0]["reason"]
+    assert f"non-finite {field_} nan" in items[0]["reason"]
     assert run_verifier(reg.log_path).returncode == 0
-    # the guard is the raise site itself (no monkeypatch)
-    with pytest.raises(SimulationDataError, match="non-finite close"):
-        quarantine_mod._require_finite_closes(
-            [{"date": "2023-01-01", "close": float("inf")}], "X", "2023-01-02")
+
+
+def test_the_finite_price_guard_itself():
+    """The raise site, no monkeypatch: a non-finite value in any price field
+    raises naming the field; finite bars and a close-only bar (open/high/low
+    absent or None, however a loader represents a missing field) pass."""
+    guard = quarantine_mod._require_finite_prices
+    for field_ in ("open", "high", "low", "close"):
+        bar = {"date": "2023-01-01", "open": 1.0, "high": 1.0, "low": 1.0,
+               "close": 1.0}
+        bar[field_] = float("inf")
+        with pytest.raises(SimulationDataError,
+                           match=f"non-finite {field_} inf on 2023-01-01"):
+            guard([bar], "X", "2023-01-02")
+    guard([{"date": "d", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}],
+          "X", "2023-01-02")
+    guard([{"date": "d", "close": 1.0}], "X", "2023-01-02")             # absent
+    guard([{"date": "d", "open": None, "high": None, "low": None,
+            "close": 1.0}], "X", "2023-01-02")                          # None
