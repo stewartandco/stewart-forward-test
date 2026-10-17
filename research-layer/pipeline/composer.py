@@ -1220,11 +1220,13 @@ can see shape what a sound family can honestly claim:
   its own strategy and its own counted trial. A generation sweeps a rotating
   window of these assets, never one pooled book, so a family is judged asset
   by asset.
-- The universe is today's top-100 crypto assets by market cap, backtested to
-  each pair's listing date: winners picked after the race. Coins that died
-  or fell out of the top 100 are not represented, so a family must not read
-  this history as evidence about how a random coin behaves; forward
-  quarantine, not this backtest, is the honest arbiter.
+- The universe is the {n_assets} of today's top-100 crypto assets by market
+  cap that were listed by 2022-12-31 (at least 365 days of history before the
+  2023-12-31 train/test cutoff), each backtested to its listing date: winners
+  picked after the race. Coins that died or fell out of the top 100 are not
+  represented, so a family must not read this history as evidence about how
+  a random coin behaves; forward quarantine, not this backtest, is the
+  honest arbiter.
 - Returns are price returns, staking/funding yield excluded: a family whose
   thesis depends on collecting staking rewards or perpetual funding will not
   show that income here.

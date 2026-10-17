@@ -342,7 +342,11 @@ def test_fx_specs_validate_against_schema(tmp_path):
 # test_switch1.py), and the schema's assets enum moved from the deleted
 # ALLOWED_ASSETS (BTCUSD/ETHUSD) to the 76 active crypto assets. The brief
 # text is a DRAFT pending Coen; re-pin when he approves it.
-CRYPTO_SYSTEM_PROMPT_SHA256 = "68cb3af8656f2a5378d94a6721110056d97242630efa8061dd378aa121d72bb6"
+# Re-pinned again in the Switch 1 review fix ("fix(research-layer): Switch 1
+# review: parity tools skip the control on pooled specs; brief names the
+# admission line"): the universe bullet now says the 76 of today's top-100
+# listed by 2022-12-31, not "today's top-100".
+CRYPTO_SYSTEM_PROMPT_SHA256 = "fa92f5086a0a3e3755656a0578099a9203a1bdd561d1f6183de2eed907c1cbb5"
 CRYPTO_PROPOSAL_SCHEMA_SHA256 = "725c7b936492af190be6ada4104aa92b4d0a6109378e2827af096da9a40a83b9"
 
 

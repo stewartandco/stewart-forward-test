@@ -18,6 +18,7 @@ from pipeline import cells, gauntlet, simcache                        # noqa: E4
 from pipeline.engine import ENGINE_REV, run_spec                     # noqa: E402
 from pipeline.gauntlet_core import (_spec_bars, daily_returns_with_dates,  # noqa: E402
                                     evaluate_standalone)
+import inspect                                                      # noqa: E402
 from pipeline.plateau import annualized_sharpe                       # noqa: E402
 from pipeline.registry import Registry                               # noqa: E402
 from pipeline.screen import DEFAULT_CUTOFF, load_cell_data           # noqa: E402
@@ -69,6 +70,26 @@ def select(specs: dict, n: int, seed: int) -> list[str]:
     return sorted(out)
 
 
+def legacy_pooled_crypto(spec: dict) -> bool:
+    """A pre-Switch-1 pooled crypto spec (the 2-asset BTCUSD+ETHUSD book):
+    judged while crypto's benchmark was None, so no control; since Switch 1
+    computing one raises ("needs exactly one asset per cell")."""
+    uni = spec["universe"]
+    return uni.get("asset_class", "crypto") == "crypto" and len(uni["assets"]) != 1
+
+
+def _standalone_kwargs(spec: dict) -> dict:
+    """record_benchmark=False for a legacy pooled crypto spec, passed ONLY
+    when this code's evaluate_standalone has the keyword: the tool also runs
+    against pre-Switch-1 code for an A/B (see the module docstring), where
+    the keyword does not exist and crypto's benchmark is None anyway, so the
+    two sides produce the same metrics for these specs."""
+    if (legacy_pooled_crypto(spec) and "record_benchmark"
+            in inspect.signature(evaluate_standalone).parameters):
+        return {"record_benchmark": False}
+    return {}
+
+
 def fingerprint(spec: dict, data_dir: Path, cutoff: str) -> dict:
     tf = spec["universe"].get("timeframe", "1d")
     cell_list = sorted({(a, tf) for a in spec["universe"]["assets"]})
@@ -77,7 +98,8 @@ def fingerprint(spec: dict, data_dir: Path, cutoff: str) -> dict:
     res = run_spec(spec, full)
     bars_train, _, _ = load_cell_data(data_dir, cell_list, cutoff)
     tres = run_spec(spec, _spec_bars(bars_train, spec))
-    ev = evaluate_standalone(spec, full, cutoff, perturb=False)
+    ev = evaluate_standalone(spec, full, cutoff, perturb=False,
+                             **_standalone_kwargs(spec))
     shas = {a: hashes[cells.cell_id(a, tf)] for a in spec["universe"]["assets"]}
     rp = gauntlet._resolved_periods(spec) if hasattr(gauntlet, "_resolved_periods") else resolved(spec)
     return {
