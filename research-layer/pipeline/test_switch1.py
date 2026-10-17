@@ -302,3 +302,84 @@ def test_tradfi_expansion_is_byte_identical(asset_class):
     assert len(specs) == want["n_specs"]
     assert [s["strategy_id"] for s in specs] == want["strategy_ids"]
     assert hashlib.sha256(canon.encode("utf-8")).hexdigest() == want["sha256"]
+
+
+# ---------------- the grid record note ----------------
+
+GRID_NOTE = Path(__file__).resolve().parent.parent / "docs" / "notes" / "crypto-grid-record-v1.md"
+
+# First daily bar of the 24 excluded assets (live data, 2026-10-17), as stated
+# in the note.
+EXCLUDED_FIRST_BAR = {
+    "ARB": "2023-03-23", "BONK": "2023-12-15", "ENA": "2024-04-02",
+    "ETHFI": "2024-03-18", "FLOKI": "2023-05-05", "GAS": "2023-03-17",
+    "GLM": "2023-03-17", "JTO": "2023-12-07", "JUP": "2024-01-31",
+    "ORDI": "2023-11-07", "PENDLE": "2023-07-03", "PEPE": "2023-05-05",
+    "PROM": "2023-03-17", "PYTH": "2024-02-02", "RENDER": "2024-07-26",
+    "SEI": "2023-08-15", "STRK": "2024-02-20", "SUI": "2023-05-03",
+    "TAO": "2024-04-11", "TIA": "2023-10-31", "WIF": "2024-03-05",
+    "WLD": "2023-07-24", "ZK": "2024-06-17", "ZRO": "2024-06-20",
+}
+
+
+def _note_line(text: str, label: str) -> str:
+    """The text after `label` on the one line that starts with it."""
+    hits = [ln for ln in text.split("\n") if ln.startswith(label)]
+    assert len(hits) == 1, f"expected exactly one line starting {label!r}, got {len(hits)}"
+    return hits[0][len(label):]
+
+
+def test_the_grid_record_matches_the_gate():
+    """docs/notes/crypto-grid-record-v1.md states the Switch 1 gate exactly.
+
+    The note is prose, but four of its lines are machine-parseable, each one
+    line starting with a fixed label:
+
+      Phase 1 cells (active from this entry): timeframe 1d on assets: A, B, ...
+      Phase 2 cells (inactive until their own Coen-gated commit): timeframes
+          1h, 4h, 12h on the same assets
+      Phase 3 cells (inactive until their own Coen-gated commit): timeframes
+          15m, 30m on the same assets
+      Excluded assets (24, not swept): TICKER first bar YYYY-MM-DD, ...
+
+    (each phase line is a single line in the file; the wrap above is only
+    this docstring's). Assets are comma-separated tickers in manifest order;
+    timeframes are comma-separated.
+    """
+    raw = GRID_NOTE.read_bytes()
+    assert b"\r" not in raw, "the note must be LF (the chain-note guard refuses CR)"
+    text = raw.decode("utf-8")
+    assert text.startswith("crypto-grid-record-v1: ")
+    assert not text.startswith("#"), "no markdown heading: the first line is the prefix"
+
+    # phase 1: the assets are the active assets, in order, and the timeframe is 1d
+    p1 = _note_line(text, "Phase 1 cells (active from this entry): timeframe ")
+    tf, assets_txt = p1.split(" on assets: ")
+    assert (tf,) == cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1d",)
+    assets = tuple(a.strip() for a in assets_txt.rstrip(".").split(","))
+    assert len(assets) == 76
+    assert assets == cells.ACTIVE_CELLS["crypto"]["assets"] == ADMITTED
+
+    # phases 2 and 3: later timeframes on the same assets, nothing else
+    p2 = _note_line(text, "Phase 2 cells (inactive until their own Coen-gated commit): timeframes ")
+    assert p2.rstrip(".") == "1h, 4h, 12h on the same assets"
+    p3 = _note_line(text, "Phase 3 cells (inactive until their own Coen-gated commit): timeframes ")
+    assert p3.rstrip(".") == "15m, 30m on the same assets"
+
+    # the excluded set is exactly the declared-but-not-admitted assets, each with its first bar
+    ex = _note_line(text, "Excluded assets (24, not swept): ")
+    got = {}
+    for part in ex.rstrip(".").split(","):
+        ticker, date = part.strip().split(" first bar ")
+        got[ticker] = date
+    assert {f"{t}USDT" for t in got} == set(cells.ASSETS) - set(ADMITTED)
+    assert got == EXCLUDED_FIRST_BAR
+    assert all(d > "2022-12-31" for d in got.values())          # every one fails the admission line
+    assert {t for t, d in got.items() if d.startswith("2024")} == {
+        "ENA", "ETHFI", "JUP", "PYTH", "RENDER", "STRK", "TAO", "WIF", "ZK", "ZRO"}
+    assert min(got.values()) == "2023-03-17" and "2023-12-15" in got.values()
+
+    # the statements the note must make
+    for needle in ("2023-12-31", "365 days", "fixed by this note", "RETIRED",
+                   "BTCUSD", "ETHUSD", "counted trial", "arithmetic", "never evidence of edge"):
+        assert needle in text, needle
