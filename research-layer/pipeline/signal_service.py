@@ -32,6 +32,17 @@ bytes) refuses the run naming the file and row (minors item 3). Exit codes:
 0 written (or nothing served on an existing chain), REFUSED_EXIT = 2 for every
 refusal, 1 = an unhandled crash (Python's own).
 
+STATUS (2b-3 Task 14, the Sentinel channel): every run that gets past argument
+parsing writes logs/signals/status.json ({written_utc, bar_end (or null),
+exit_code, published, deferred {sid: reason}, deferred_since {sid: first-seen
+UTC date}}), atomically (the same .tmp + os.replace retry as the targets),
+after the targets publish and on every exit 0 / exit 2 path. The Ops Sentinel
+reads it: a missing or >26 h old file, or exit_code 2, FAILs; a sid deferred
+2+ calendar days WARNs. deferred_since is carried over from the previous
+status for a sid still deferred and dropped for one no longer deferred; an
+unreadable previous status counts as empty (WARNING printed). An unhandled
+crash (exit 1) writes no status, so the staleness FAILs.
+
 RETENTION (minors item 4): after a publish, targets-<date>.json files beyond
 the newest KEEP_TARGETS by the date in the name are deleted (never the file
 just written; a name without a date is left alone; a file that cannot be
@@ -74,6 +85,7 @@ REPLACE_SLEEP_S = 0.25
 KEEP_TARGETS = 30         # targets files kept after a publish (newest by bar_end)
 COLUMNS = ("date", "open", "high", "low", "close", "volume")
 _TARGETS_NAME = re.compile(r"^targets-(\d{4}-\d{2}-\d{2})\.json$")
+STATUS_NAME = "status.json"
 
 
 def _synthetic_next(bars: list[dict]) -> dict:
@@ -241,6 +253,59 @@ def _publish(tmp: Path, path: Path) -> None:
             time.sleep(REPLACE_SLEEP_S)
 
 
+def _previous_since(status_path: Path) -> dict:
+    """The previous status's deferred_since {sid: ISO date}; {} when there is
+    no previous status. An unreadable one (bad bytes or JSON, not an object,
+    deferred_since not an object) is treated as empty with a WARNING line."""
+    try:
+        raw = status_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"WARNING: previous {status_path} unreadable ({exc}); deferred_since restarts")
+        return {}
+    try:
+        prev = json.loads(raw)
+        since = prev.get("deferred_since", {}) if isinstance(prev, dict) else None
+        if not isinstance(since, dict):
+            raise ValueError("not an object with an object deferred_since")
+    except ValueError as exc:
+        print(f"WARNING: previous {status_path} malformed ({exc}); deferred_since restarts")
+        return {}
+    out = {}
+    for sid, day in since.items():
+        try:
+            if not isinstance(day, str) or not _DATE.fullmatch(day):
+                raise ValueError(day)
+            dt.date.fromisoformat(day)
+        except ValueError:
+            continue                         # an unreadable date restarts that sid's clock
+        out[sid] = day
+    return out
+
+
+def write_status(out_dir: Path, as_of: dt.date, bar_end, exit_code: int, published: int,
+                 deferred: dict) -> None:
+    """Write out_dir/status.json atomically (the targets publish's .tmp +
+    os.replace retry). deferred_since: a sid still deferred keeps the previous
+    status's first-seen date, a new one gets the run's UTC day (`as_of`), a
+    sid no longer deferred is dropped."""
+    path = out_dir / STATUS_NAME
+    prev = _previous_since(path)
+    since = {sid: prev.get(sid, as_of.isoformat()) for sid in sorted(deferred)}
+    doc = {"written_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "bar_end": bar_end, "exit_code": exit_code, "published": published,
+           "deferred": dict(sorted(deferred.items())), "deferred_since": since}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+        _publish(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def _spec_sha(spec: dict) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -255,9 +320,14 @@ def run(argv=None) -> int:
                     help="UTC date of the run (default: today UTC); bar_end must be >= this - 1 day")
     a = ap.parse_args(argv)
     as_of = a.as_of or _utc_today()
+
+    def finish(rc, bar_end=None, published=0, deferred=None):
+        write_status(a.out_dir, as_of, bar_end, rc, published, deferred or {})
+        return rc
+
     if not a.registry.is_file():
         print(f"REFUSED (nothing written): no registry file {a.registry}")
-        return REFUSED_EXIT
+        return finish(REFUSED_EXIT)
     specs, max_dd = {}, {}
 
     def on_entry(e):
@@ -274,8 +344,9 @@ def run(argv=None) -> int:
     served = {sid: spec for sid, spec in specs.items() if snap.states.get(sid) in STATES}
     if not served:
         print("no crypto strategies in quarantine/live; nothing written")
-        return 0
+        return finish(0)
     wanted = {x for spec in served.values() for x in spec["universe"]["assets"]}
+    bar_end = None
     try:
         bar_end, bars_by, digest, problems, last = load_assets(a.data_dir, wanted)
         detail = ", ".join(f"{x} {last[x] or 'EMPTY'}" if x in last else f"{x} MISSING"
@@ -285,7 +356,7 @@ def run(argv=None) -> int:
         check_fresh(bar_end, as_of)
     except DataRefused as exc:
         print(f"REFUSED (nothing written): {exc}")
-        return REFUSED_EXIT
+        return finish(REFUSED_EXIT, bar_end)
     # minors item 1: per-strategy deferral -- every asset on bar_end, or none
     deferred = {}
     for sid, spec in served.items():
@@ -298,7 +369,7 @@ def run(argv=None) -> int:
               f"{bar_end} (last bar dates: {detail})")
         for sid in sorted(deferred):
             print(f"  deferred {sid}: {deferred[sid]}")
-        return REFUSED_EXIT
+        return finish(REFUSED_EXIT, bar_end, 0, deferred)
     out = {}
     for sid, spec in publish.items():
         assets = {x: next_bar_position(spec, bars_by[x]) for x in spec["universe"]["assets"]}
@@ -321,7 +392,7 @@ def run(argv=None) -> int:
     for sid in sorted(deferred):
         print(f"  deferred {sid}: {deferred[sid]}")
     prune_targets(a.out_dir, path)
-    return 0
+    return finish(0, bar_end, len(out), deferred)
 
 
 if __name__ == "__main__":

@@ -1472,8 +1472,8 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   with the same rules before it replaces a file (2b-3 plan 1 Task 13). The
   refresh's end cap (last complete UTC day) is what puts the USDT files on
   the same `bar_end` as the 08:20 BTCUSD/ETHUSD. The Sentinel channel for
-  deferrals (warning below) is 2b-3 plan 1 Task 14, a Switch 1 merge
-  precondition.
+  deferrals is `logs/signals/status.json` (bullet below; 2b-3 plan 1 Task 14,
+  a Switch 1 merge precondition).
 - **A malformed price CSV refuses the whole run (minors item 3 + review
   follow-up).** A header without every column (a BOM-prefixed `date`
   included), a short row, a row LONGER than the header (csv.DictReader files
@@ -1484,16 +1484,32 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   first row), or bytes that are not UTF-8 raise `DataRefused` naming the file
   and the row (the physical line, header = row 1): exit 2, nothing written,
   never a traceback.
-- **⚠ Deferrals alone exit 0 and have NO Sentinel channel yet.** A run that
-  publishes some strategies and defers others prints the deferrals to
-  `logs/signal-run.log` and lists them under `deferred` in the targets file,
-  but the task result is 0 and nothing the Ops Sentinel reads carries them
-  (no degraded-ledger item, no status file), so a strategy deferred day after
-  day is silent. Harmless TODAY only because every served strategy trades
-  BTCUSD+ETHUSD, so any deferral defers everything and exits 2. **Before any
-  strategy whose universe is not BTCUSD+ETHUSD is served, add a Sentinel
-  channel for deferrals** (e.g. a `logs/degraded_*.json` item read by
-  `research_degraded`, the quarantine pattern).
+- **Deferrals reach the Ops Sentinel through `logs/signals/status.json`
+  (2b-3 plan 1 Task 14).** Deferrals alone still exit 0 (the task result is
+  green), so the status file is their channel. EVERY run that gets past
+  argument parsing writes it, atomically (`status.json.tmp` + `os.replace`
+  with the targets publish's PermissionError retry), after the targets
+  publish: `{written_utc, bar_end (null when none was determined),
+  exit_code (0 or 2), published (strategies in the targets file), deferred
+  {sid: reason} (as computed; {} on a refusal that never got that far),
+  deferred_since {sid: first-seen UTC date}}`. `deferred_since` keeps the
+  previous status's date for a sid still deferred, gives a newly deferred
+  sid the run's UTC day (`--as-of`), and drops a sid no longer deferred (it
+  also restarts at an unreadable date for one sid). A missing previous
+  status is silent; a malformed one (bad bytes/JSON, not an object,
+  `deferred_since` not an object) counts as empty and prints a `WARNING`
+  line, so every clock restarts. Refusals write it too (`exit_code` 2); a
+  crash (exit 1) writes NOTHING, so staleness is the signal. It lives beside
+  the targets files but is not matched by the executor's `targets-*.json`
+  glob or by retention. **Sentinel side** (sc-ops-sentinel,
+  `sentinel/checks/signal_status.py`, manifest block `signal_status`
+  `{path, max_age_hours: 26, warn_after_days: 2}`): FAIL when the file is
+  missing, unreadable, older than 26 h by `written_utc`, or `exit_code` is 2;
+  WARN for any sid whose `deferred_since` is 2+ calendar days before the
+  `written_utc` date; OK otherwise. **Merge order:** the Sentinel branch must
+  merge only AFTER the first signal-service run on this code has written
+  `status.json`, else the check FAILs "missing" (same ordering as the
+  `crypto_refresh` ledger).
 - **Retention (minors item 4).** After a successful publish,
   `targets-<YYYY-MM-DD>.json` files beyond the newest `KEEP_TARGETS` (30) by
   the date in the name are deleted. Never the file just written (even if a
@@ -1501,8 +1517,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `.json.tmp` are never touched; a file that cannot be deleted (a reader holds
   it) is printed (`could not prune ...`) and skipped. A refusal prunes nothing.
 - **Exit codes (M8):** 0 written (or nothing served; deferrals alone are
-  still 0, see the Sentinel warning above); **2 = REFUSED** (no strategy publishable, stale or partial
-  bar_end, a malformed CSV row, missing registry), nothing written; 1 = an
+  still 0, carried to the Sentinel by `status.json`, see above); **2 = REFUSED** (no strategy publishable, stale or partial
+  bar_end, a malformed CSV row, missing registry), no targets file written
+  (only `status.json`, `exit_code` 2); 1 = an
   unhandled crash (Python's own); 4 = the wrapper could not open its run log;
   124 / 125 = the task guard ended the run (wall / the task's cmd.exe
   stopped). The publish's `os.replace` is retried up to 8 times (0.25 s
