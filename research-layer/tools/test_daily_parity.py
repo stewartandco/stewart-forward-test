@@ -141,3 +141,32 @@ def test_fingerprint_changes_with_bar_change():
 
         # They should be different because the bar changed
         assert run_full_1 != run_full_2, "Fingerprint should change when a bar changes"
+
+
+def test_fingerprint_completes_for_a_legacy_pooled_crypto_spec(tmp_path):
+    """Switch 1: crypto's benchmark is "self", which raises for a 2-asset
+    spec. daily_parity re-runs registered pooled BTCUSD+ETHUSD specs, so it
+    must fingerprint them without the control (they were judged without one
+    and the pre-switch code computes none), not record an error that the
+    compare step then reports as a parity break. Real engine, real files."""
+    import pytest
+    from pipeline import gauntlet_core
+    from pipeline.test_screen import (write_data_dir, dated_target_hit_bars,
+                                      breakout_spec_blocks, COST)
+    spec = {"strategy_id": "cd" * 8, "version": 1,
+            "universe": {"assets": ["BTCUSD", "ETHUSD"], "asset_class": "crypto",
+                         "timeframe": "1d", "session": "24x7"},
+            "blocks": breakout_spec_blocks(), "cost_model": dict(COST)}
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars(),
+                                     "ETHUSD": dated_target_hit_bars()})
+    fp = dp.fingerprint(spec, data, "2023-01-21")
+    assert {"run_full", "standalone", "passed", "reason"} <= set(fp)
+    assert dp._standalone_kwargs(spec) == {"record_benchmark": False}
+    # premise: without the keyword the same spec raises
+    sb = gauntlet_core._spec_bars({("BTCUSD", "1d"): dated_target_hit_bars(),
+                                   ("ETHUSD", "1d"): dated_target_hit_bars()}, spec)
+    with pytest.raises(ValueError, match="exactly one asset per cell"):
+        gauntlet_core.evaluate_standalone(spec, sb, "2023-01-21", perturb=False)
+    # a single-asset spec keeps the default (its control is computed)
+    one = dict(spec, universe=dict(spec["universe"], assets=["BTCUSD"]))
+    assert dp._standalone_kwargs(one) == {}

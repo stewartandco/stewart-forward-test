@@ -10,7 +10,7 @@ import pytest
 from . import gauntlet_worker as gw
 from .chainlock import ChainLock, ChainLockHeld
 from .common import content_id
-from .test_gauntlet import gauntlet_registry, run_verifier
+from .test_gauntlet import HIT_BARS_CUTOFF, gauntlet_registry, run_verifier
 from .test_screen import write_data_dir, dated_target_hit_bars
 
 V61 = "gauntlet-protocol-v6.1: test anchor"
@@ -48,10 +48,13 @@ def _setup(tmp_path, note=True):
 
 
 def _run(reg, data, tmp_path, *extra):
+    # --cutoff inside the fixture calendar: crypto's verdicts carry a
+    # benchmark control since Switch 1, which needs a bar after the cutoff
+    # (see test_gauntlet.HIT_BARS_CUTOFF).
     return gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--artifacts-dir", str(tmp_path / "art"),
                    "--logs-dir", str(tmp_path / "logs"), "--no-perturb",
-                   "--max-workers", "1", *extra])
+                   "--max-workers", "1", "--cutoff", HIT_BARS_CUTOFF, *extra])
 
 
 def _status(tmp_path):
@@ -249,7 +252,7 @@ def test_the_pool_path_judges_and_chains_every_candidate(tmp_path, monkeypatch):
     rc = gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                  "--artifacts-dir", str(tmp_path / "art"),
                  "--logs-dir", str(tmp_path / "logs"), "--no-perturb",
-                 "--max-workers", "2"])
+                 "--max-workers", "2", "--cutoff", HIT_BARS_CUTOFF])
     assert rc == 0
     assert made == [2]
     writes = _gauntlet_writes(reg)
@@ -696,7 +699,8 @@ def test_the_pool_path_keeps_and_retries_a_held_write(tmp_path, monkeypatch):
     try:
         rc = gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                      "--artifacts-dir", str(tmp_path / "art"),
-                     "--logs-dir", str(logs), "--no-perturb", "--max-workers", "2"])
+                     "--logs-dir", str(logs), "--no-perturb", "--max-workers", "2",
+                     "--cutoff", HIT_BARS_CUTOFF])
     finally:
         other.release()
     assert rc == 0

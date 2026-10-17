@@ -8,8 +8,9 @@ from pipeline import cells
 
 def test_the_grid_is_one_hundred_assets_by_six_timeframes():
     """SP5 P2-T3: the declared crypto grid is the pinned 100-asset universe.
-    DECLARED, not active - ACTIVE_CELLS["crypto"] is still empty, so none of
-    these 600 cells is in any trial denominator yet."""
+    A declaration, not an activation: since Switch 1 only the 76 cells in
+    ACTIVE_CELLS["crypto"] (76 assets at 1d) enter a trial denominator; the
+    other 524 are declared and unswept."""
     assert len(cells.ASSETS) == 100
     assert len(cells.TIMEFRAMES) == 6
     assert len(cells.all_cells()) == 600
@@ -125,17 +126,16 @@ def test_crypto_assets_are_the_pinned_universe_manifest():
         a["binance_symbol"] for a in man["admitted"]]
 
 
-def test_crypto_declares_a_cost_model_and_defers_its_benchmark():
-    """The cost_model half of the design's s4 migration lands here; the
-    benchmark half does NOT. Flipping benchmark to "self" while the legacy
-    pooled path still builds 2-asset BTCUSD+ETHUSD specs makes every crypto
-    verdict raise in gauntlet._benchmark_relative, so it rides with the
-    Phase 3 routing change instead (design s4/s7 corrected accordingly).
-    The both-or-neither coupling is pinned in test_gauntlet_classes.py."""
+def test_crypto_declares_a_cost_model_and_benchmarks_itself():
+    """The cost_model half of the design's s4 migration landed at P2-T3; the
+    benchmark half rode with the Phase 3 routing change (Switch 1), because
+    a "self" control needs exactly one asset per cell and the legacy pooled
+    path built 2-asset BTCUSD+ETHUSD specs. The landed coupling is pinned in
+    test_switch1.py::test_crypto_routes_per_cell_and_benchmarks_itself."""
     spec = cells.CLASSES["crypto"]
     assert spec["cost_model"] == {"commission_per_side": 0.001,
                                   "slippage_ticks": 0.0005}
-    assert spec["benchmark"] is None
+    assert spec["benchmark"] == "self"
 
 
 def test_crypto_declared_grid_is_100_assets_by_6_timeframes():
@@ -144,10 +144,13 @@ def test_crypto_declared_grid_is_100_assets_by_6_timeframes():
     assert len(cells.class_cells("crypto")) == 600
 
 
-def test_crypto_active_set_is_empty_until_activation():
-    # Phase 2 declares; Phase 3 (Coen's own commit) activates. The empty
-    # active set is what keeps the legacy pooled path serving crypto.
-    assert cells.active_cells("crypto") == []
+def test_crypto_active_set_is_76_assets_at_1d_since_switch1():
+    # Phase 2 declared; Switch 1 (SP5 Phase 3, Coen's own commit) activated
+    # 76 of the 100 declared assets at 1d (the exact literal is pinned in
+    # test_switch1.py).
+    active = cells.active_cells("crypto")
+    assert len(active) == 76
+    assert {tf for _, tf in active} == {"1d"}
 
 
 def test_active_cells_is_a_subset_of_the_declared_grid():
@@ -158,9 +161,10 @@ def test_active_cells_is_a_subset_of_the_declared_grid():
 def test_a_partial_gate_restricts_BOTH_axes(monkeypatch):
     # P2-T1 rider R1: every other test on this gate uses "all"/"all" or
     # crypto's empty tuple, so a timeframes-BLIND active_cells() passed the
-    # whole file. Phase 3 activates 95 assets x 1d out of a 6-timeframe
-    # declared grid: a blind gate would sweep 570 cells, a 6x denominator
-    # blowout shipped green. This is the only test that would catch it.
+    # whole file. Phase 3 (Switch 1) activated 76 assets x 1d out of a
+    # 6-timeframe declared grid: a blind gate would sweep 456 cells, a 6x
+    # denominator blowout shipped green. This test catches it on a crafted
+    # gate (test_switch1.py pins the real one cell by cell).
     monkeypatch.setitem(cells.ACTIVE_CELLS, "crypto",
                         {"assets": ("BTCUSDT", "ETHUSDT"), "timeframes": ("1h",)})
     assert cells.active_cells("crypto") == [("BTCUSDT", "1h"), ("ETHUSDT", "1h")]
@@ -346,13 +350,10 @@ def test_benchmark_declared_per_class():
     # (docs/2026-08-28-market-data-universe-design.md s7, Coen 2026-08-28):
     # every single-name class declares "self" -- fx flipped under SP5 because
     # a recorded-not-gated control is strictly more information than none.
-    # crypto alone still declares None (no key is ever written on its
-    # verdicts). P2-T3 declared its 100-asset grid and its cost_model but
-    # DEFERRED this flip: the legacy pooled path still serves crypto, and a
-    # "self" control needs exactly one asset per cell. It flips at Phase 3,
-    # coupled to the routing change -- see cells.py's crypto comment block
-    # and test_gauntlet_classes.py's coupling pin.
-    assert cells.CLASSES["crypto"]["benchmark"] is None
+    # crypto flipped last, at Switch 1 (SP5 Phase 3), coupled to the routing
+    # change that made its specs one asset per cell -- see cells.py's crypto
+    # comment block and test_switch1.py's coupling pin.
+    assert cells.CLASSES["crypto"]["benchmark"] == "self"
     assert cells.CLASSES["fx"]["benchmark"] == "self"
     assert cells.CLASSES["equity_etf"]["benchmark"] == "self"
     assert cells.CLASSES["bond_etf"]["benchmark"] == "self"

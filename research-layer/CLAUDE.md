@@ -187,8 +187,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `gauntlet_core.daily_returns_with_dates`,
   `gauntlet.daily_returns_from_curve`, `window_vol` (over `daily_bars`),
   `train_dates` for the walk-forward, `regime_by_date` on `daily_bars`
-  of BTC (`[:10]` keys), and `engine.run_spec`'s `max_dd` metric (the
-  screen's recorded max drawdown). The simcache key uses
+  of the regime asset (`BTCUSD` if the spec's bars hold it, else the first
+  asset sorted -- a per-cell spec, tradfi or crypto since Switch 1, is bucketed
+  by its OWN asset, no BTC lookup; recorded, never gated; `[:10]` keys), and
+  `engine.run_spec`'s `max_dd` metric (the screen's recorded max drawdown).
+  The simcache key uses
   `gauntlet._resolved_periods(spec)`. `ENGINE_REV` stays "e2" (a 1d
   strategy's results are bit-identical, so no cached sim is invalidated).
   Trade-based gates (edge per trade, edge decay, MC p05, ruin, cost stress)
@@ -290,24 +293,28 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   fetch into its scratch data dir. Both `register` and `quarantine`
   REFUSE the live chain, and `quarantine` also refuses the live data dir
   (exit 2, nothing written).
-- **The intraday path is dormant:** `cells.ACTIVE_CELLS["crypto"]` is empty
-  until 2b-3, so no scheduled task registers an intraday strategy.
-- **2b-3 hazards (cost these before activating):** `vol_percentile` in
+- **The intraday path is dormant (crypto is ACTIVE at 1d only since Switch 1,
+  2026-10-17):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets x `("1d",)`;
+  the five intraday timeframes stay declared and unswept until Switch 2 (a
+  later plan, its own cost sign-off and Coen gate), so no scheduled task
+  registers an intraday strategy.
+- **Switch 2 hazards (cost these before activating intraday; Switch 1 is 1d
+  only):** `vol_percentile` in
   `gate_mask` is O(n x 365 x bars_per_day), about 940 s per 1h
   vol_percentile candidate under perturbation, and
   `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) is far too low for 1h, so the
   cycle budget would be misjudged. Artifact storage: screen writes the
   per-bar `equity.csv` into each bundle, and bundles are committed to the
   PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
-  tens of KB for 1d, so grid scale means tens of GB. Two explicit 2b-3
+  tens of KB for 1d, so grid scale means tens of GB. Two explicit Switch 2
   gates: `gauntlet_stats` has never run end to end on an intraday spec,
   and `tools/intraday_rehearsal.pick_originals`' selection rules (the
   vol_target/vol_percentile picks, one per family) are untested (only
-  its crypto/1d filter is); both must be exercised in 2b-3's activation
+  its crypto/1d filter is); both must be exercised in Switch 2's activation
   rehearsal before any intraday verdict is chained.
-- **The protocol note is a DRAFT and is NOT chained until 2b-3:**
+- **The protocol note is a DRAFT and is NOT chained until Switch 2:**
   `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
-  approves the exact text; it is chained VERBATIM at 2b-3 activation,
+  approves the exact text; it is chained VERBATIM at Switch 2 activation,
   before the first intraday verdict (the v6.1-amendment pattern). Since
   2b-2 it has a second paragraph, "Quarantine and the live gate" (the
   cell key, entries/exits, the completeness rule, the live gate's sum of
@@ -418,8 +425,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
   failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
   (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance. Staleness is now
-  SYMMETRIC: crypto's BTCUSD/ETHUSD come from the 08:20 QuarantineDaily, so if THAT stalls, crypto
-  goes stale against fresh tradfi. Since 2026-10-08 that no longer parks every fire: a fire of a tradfi
+  SYMMETRIC: crypto's legacy BTCUSD/ETHUSD come from the 08:20 QuarantineDaily and its 76 USDT cells from
+  the 08:02 33_CryptoGridRefresh (Switch 1; both end on the last complete UTC day), so if EITHER stalls,
+  crypto goes stale against fresh tradfi. Since 2026-10-08 that no longer parks every fire: a fire of a tradfi
   class runs with `stale_other_cells` / WARN, while a fire of the stale class itself (crypto, with
   BTCUSD and ETHUSD stopped together, is stale against the rest) parks at `stale_data` (zero spend,
   Sentinel FAIL) -- read `data_end_by_class` and the `stale_*` items in the status to see which class. The preflight covers only cells that already carry a registered spec: a class with no
@@ -846,26 +854,46 @@ of it.
   the Phase 2 sweep freeze. Rotation is a SCHEDULE, never a selection --
   every active cell is swept with equal frequency and N accounting is
   untouched. The loop passes `--assets` only when the window differs from the
-  full active list, so today's composer argv is byte-identical to pre-D6.
-  Nothing rotates today (crypto's active set is empty).
-- **D6 second gate -- BOTH sides read the routing dispatch, never the class
-  name.** `--assets` is a view onto active cells, and the legacy POOLED
-  expander has none, so `composer.run` refuses it. Both `loop._sweep_window`
-  and that refusal test `expander_for(cls) is expand_family`, so rotation
-  switches on in the SAME commit that makes a window legal. Keyed on the
-  string "crypto" instead, SP5 Phase 3 would have emitted a window into a
-  composer guaranteed to exit 1 -- `stage_failed` and a Sentinel FAIL on
-  every crypto fire, three times a day. `test_phase2_freeze.py` simulates
-  both a half-landed and a fully-landed Phase 3, so a coupling error fails at
-  test time rather than in production.
-- **Before SP5 Phase 3 activates the crypto USDT grid (Ruling 41): exclude late-starting cells
-  upstream.** Cells whose first bar is after `screen.DEFAULT_CUTOFF` (2023-12-31) must be excluded in
-  the ACTIVE_CELLS admission or the composer. Ten live cells start in 2024: ENA, ETHFI, JUP, PYTH,
-  RENDER, STRK, TAO, WIF, ZK, ZRO (the ">= 730 days of history" admission rule in cells.py admits
-  them all). Otherwise new specs on them are screened in-cycle with zero train bars and buried, or,
-  if left `proposed` (a screen deadline deferral does this), they park EVERY fire of every class at
-  `stale_data` (the freshness preflight blocks a late-starting cell a proposed spec names; a
-  re-fetch cannot fix it).
+  full active list, so the four tradfi classes' composer argv is
+  byte-identical to pre-D6.
+- **Crypto rotates since Switch 1 (2026-10-17): 76 assets, 12 per window, the
+  window WRAPS.** `loop_state.rotation_window` reads `items[(cursor + i) % n]`
+  and `advance_rotation` sets `cursor = (cursor + 12) % 76`, so EVERY window is
+  exactly 12 wide (never a short last one) and the cursor advances 12 per
+  completed cycle. All 76 are reached in 7 windows: windows 1-6 are
+  ADMITTED[0:12] .. ADMITTED[60:72]; after 6 advances the cursor is 72 and the
+  7th window is ADMITTED[72:] + ADMITTED[:8] (the last 4 assets, then the first
+  8 again). The next pass therefore starts 8 assets on (cursor 8), and the
+  schedule closes after 19 windows (19 x 12 = 3 x 76): each asset is swept
+  exactly 3 times per 19 completed cycles. (The Switch 1 plan's wording "7
+  windows, the last 4 wide" was wrong; the code and `test_switch1.py` are the
+  record.) A parked or failed cycle leaves the cursor where it was.
+- **The D6 "second gate" is GONE (Switch 1).** It read the routing dispatch
+  (`expander_for(cls) is expand_family`) in both `loop._sweep_window` and the
+  composer's `--assets` refusal, because the legacy POOLED crypto expander had
+  no active cells and could not accept a window. Switch 1 deleted that path
+  (`composer.expand_family`, `ALLOWED_ASSETS`, `UNIVERSE_BASE`, `COST_MODEL`)
+  and the refusal in the commit that activated crypto, so every class's
+  composer accepts a window and rotation is gated ONLY by `ROTATION_CLASSES`.
+  The advance in `_run_locked_cycle` is keyed on `rotates` (a window was
+  emitted), not on class membership. Pinned by `test_switch1.py` and
+  `test_phase2_freeze.py`.
+- **Ruling 41 -- DONE at Switch 1: the admission line is 365 days (Coen,
+  2026-10-17).** An active crypto cell needs at least 365 days of history
+  before `screen.DEFAULT_CUTOFF` (2023-12-31), i.e. first bar on or before
+  2022-12-31. 76 of the 100 declared assets pass; the 24 excluded stay
+  declared but unswept: ENA ETHFI JUP PYTH RENDER STRK TAO WIF ZK ZRO (first
+  bar 2024) and GAS GLM PROM ARB SUI FLOKI PEPE PENDLE WLD SEI TIA ORDI JTO
+  BONK (first bar 2023-03-17..2023-12-15). (The older ">= 730 days" rule in
+  cells.py admitted all of them and is superseded.) Why it matters: a spec on
+  a late-starting cell is screened with zero train bars and buried, or, if left
+  `proposed` (a screen deadline deferral does this), parks EVERY fire of every
+  class at `stale_data` (a re-fetch cannot fix it). Enforced three ways: the
+  `ACTIVE_CELLS["crypto"]` literal (import-time check: a subset of the
+  declared assets in declaration order), `crypto_refresh.admission_problems`
+  (item `crypto_admission` in the refresh ledger if a cell's first bar slips
+  past the floor, or its file is missing/empty), and the crypto-grid-record-v1
+  note.
 - **`docs/2026-08-28-market-data-universe-design.md` s5 is STALE in this
   worktree** on the rotation rule (as is s4 on crypto's benchmark and s7b on
   the resurrection chaining). Trust the code, `docs/notes/family-openness-v1.md`
@@ -1303,11 +1331,32 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `holder_alive()`): the date defers with exit 0 and the unchanged
   `deferred_lock` line, without simulating; the acquire-time check stays as
   the backstop.
-- **A date is all or nothing (2026-10-16).** A raise in simulation or
-  validation, a `ChainMoved` (an unlocked writer, or a rewritten log:
-  `CHAIN MOVED:` on stderr), or a strategy that left quarantine while the run
-  simulated writes NOTHING for the date; it stays owed and the run exits 1.
-  The old `PARTIAL WRITE` path is gone. In catch-up a `ChainMoved` date
+- **A date is all or nothing for the strategies that record (2026-10-16;
+  per-strategy follow-up approved by Coen the same day).** A `ChainMoved` (an
+  unlocked writer, or a rewritten log: `CHAIN MOVED:` on stderr) or any
+  exception other than `ValueError` in simulation (a code bug) writes NOTHING
+  for the date; it stays owed and the run exits 1. A `ValueError` in ONE
+  strategy's simulation or row validation (`observe_day`'s non-positive equity
+  baseline, missing bar or no zero point; a malformed row) DEFERS only that
+  strategy: it gets no rows and stays owed (catch-up retries it every run),
+  stdout says `<sid>  deferred: simulation failed: <error>`, and a
+  `simulation_failed` item keyed by the strategy reaches
+  `logs/degraded_quarantine.json` (the Sentinel's `research_degraded`: WARN,
+  then FAIL after 3 days); the others record and the run exits 0. If NOTHING
+  records, nothing is already chained for the date and every ready strategy's
+  simulation failed, it is a total stall: `REFUSED: nothing recorded ...` on
+  stderr, exit 1, chain.lock never taken. A strategy that left quarantine
+  while the run simulated (a live-gate move) is SKIPPED, not a failure:
+  `<sid>  skipped: left quarantine (<state>) while this run simulated`, no
+  degraded item, the others record, exit 0. The old `PARTIAL WRITE` path is
+  gone. The date's provenance plan under the lock covers only the strategies
+  that will record (ready minus the simulation failures and the strategies
+  that left quarantine, digests filtered to their cells): such a strategy's
+  assets are NOT in the date's snapshot, so its retry records with a
+  `quarantine_data_snapshot_supplement` instead of being pinned `restated` by
+  a later bar correction. A date where no decision row is queued (every owing
+  strategy left quarantine or failed simulation) appends NOTHING, not even provenance: provenance vouches for
+  rows. In catch-up a `ChainMoved` date
   rebuilds the view with a fresh read and the later dates still run; that
   includes a ChainMoved from the advance at the START of a catch-up date
   (outside the lock), which fails that date with a traceback and the date is
@@ -1384,11 +1433,12 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `\Morpheus\31_SignalService`, daily 08:45, after the 08:20 quarantine
   daily) writes `logs/signals/targets-<bar_end>.json` for every crypto 1d
   strategy in state `quarantine` or `live`: `{bar_end, engine_rev,
-  data_digest {asset: sha256 of data/<asset>_1d.csv}, written_utc,
-  strategies {sid: {spec_sha, max_dd (the screened verdict's, or null),
-  assets {asset: {side long|short|flat, frac}}}}}`. The trading-systems
-  executor reads exactly this shape; change it only together with the
-  executor.
+  data_digest {asset: sha256 of data/<asset>_1d.csv, for the assets the
+  published strategies trade}, written_utc, strategies {sid: {spec_sha, max_dd
+  (the screened verdict's, or null), assets {asset: {side long|short|flat,
+  frac}}}}, deferred {sid: reason}}` (`deferred` is always present, `{}` when
+  nothing is deferred; the executor ignores it). The trading-systems executor
+  reads exactly this shape; change it only together with the executor.
 - **READ-ONLY.** One `Registry.snapshot()` read (complete lines only), never
   an append, never `logs/chain.lock`, never data/, never git. The file is
   published by `os.replace` from a `.json.tmp`, so the executor never reads a
@@ -1406,29 +1456,124 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   without touching the level. That is not in the parity check's excused
   class (stop/target exits) and was not observed there (3656 compared,
   2026-10-16). Tests: `test_signal_service.py`.
-- **Every served asset must end on bar_end (fix round 1).** Each
+- **Freshness is per strategy (fix round 1; minors item 1, 2026-10-16).** Each
   `data/<asset>_1d.csv` is read ONCE; `data_digest` is the sha256 of exactly
   the bytes the bars were parsed from (`parse_daily_csv` = `screen.load_bars`'
-  parse, test-pinned). bar_end is the latest last-bar date; if any served
-  asset's file is missing (the error names the asset and every strategy that
-  trades it), empty, or ends earlier, the run prints every asset's last date,
-  writes NOTHING and exits 2 -- never a flat or omitted asset under a fresh
-  bar_end. The executor then holds (its 26 h rule) and the Sentinel sees
-  task 31 fail. Same case `quarantine.observe_day` refuses.
-- **Nothing fresh is a refusal too (fix wave, I2).** bar_end must be at least
-  the daily bar that closed at the start of the run's UTC day (`--as-of` - 1
-  day; `--as-of YYYY-MM-DD` defaults to the UTC date today and exists for
-  tests). Uniformly stale data (every asset on the same OLD bar) therefore
-  refuses instead of rewriting an old targets file and exiting 0. A missing
-  registry file refuses too: `Registry.snapshot` reads a missing file as an
-  empty chain, which used to print "nothing written" and exit 0. An existing
-  chain with nothing in quarantine/live still exits 0.
-- **Exit codes (M8):** 0 written (or nothing served); **2 = REFUSED** (lagging,
-  missing or empty asset file; stale bar_end; missing registry), nothing
-  written; 1 = an unhandled crash (Python's own); 4 = the wrapper could not
-  open its run log. The publish's `os.replace` is retried up to 8 times
-  (0.25 s apart) on PermissionError, which Windows raises while a reader
-  holds the target open, then raises (exit 1).
+  parse, test-pinned). bar_end is the latest last-bar date across every
+  served asset. A strategy is published only if EVERY asset it trades has a
+  price file, is non-empty and ends on bar_end; any other strategy is
+  DEFERRED: listed under `deferred` with the reason (`<asset>: no price file
+  ...`, `<asset> EMPTY`, `<asset> behind: last bar D, bar_end E`), printed,
+  and absent from `strategies` -- never a flat or omitted asset under a fresh
+  bar_end. The executor (`bot/execution/runner.py`) reads a strategy absent
+  from a fresh file exactly like a stale signal: it holds that edge's last
+  valid contribution <= 26 h from its bar's close ("signal stale, holding"),
+  then flat ("signal stale"). When NO strategy can be published the run
+  prints every asset's last date and every deferral, writes NOTHING and
+  exits 2, and the Sentinel sees task 31 fail. **Today every served strategy
+  trades BTCUSD+ETHUSD, so one lagging asset still refuses the whole run**
+  (test-pinned).
+- **bar_end must be EXACTLY the bar that closed at the start of the run's UTC
+  day (fix wave I2; minors item 2).** `--as-of` - 1 day; `--as-of YYYY-MM-DD`
+  defaults to the UTC date today and exists for tests. OLDER = stale:
+  uniformly stale data (every asset on the same old bar) refuses instead of
+  rewriting an old targets file and exiting 0. NEWER = a bar dated the run
+  day or later, i.e. a still-open (partial) bar; `data_fetch` drops the open
+  kline, so that is bad data and refuses (`partial:`). A missing registry
+  file refuses too: `Registry.snapshot` reads a missing file as an empty
+  chain, which used to print "nothing written" and exit 0. An existing chain
+  with nothing in quarantine/live still exits 0.
+- **Per-cell USDT strategies are served (Switch 1).** A crypto 1d strategy in
+  quarantine/live is now a ONE-asset book on a USDT cell (`BTCUSDT`, file
+  `data/BTCUSDT_1d.csv`, written by 33_CryptoGridRefresh); the pre-switch
+  pooled BTCUSD+ETHUSD books are served as before. With per-strategy
+  deferral (above), one lagging USDT file defers only the strategies that
+  trade it; the rest publish. A MALFORMED CSV still refuses the whole run,
+  which is why `crypto_data.fetch_symbol` validates the whole merged CSV
+  with the same rules before it replaces a file (2b-3 plan 1 Task 13). The
+  refresh's end cap (last complete UTC day) is what puts the USDT files on
+  the same `bar_end` as the 08:20 BTCUSD/ETHUSD. The Sentinel channel for
+  deferrals is `logs/signals/status.json` (bullet below; 2b-3 plan 1 Task 14,
+  a Switch 1 merge precondition).
+- **A malformed price CSV refuses the whole run (minors item 3 + review
+  follow-up).** A header without every column (a BOM-prefixed `date`
+  included), a short row, a row LONGER than the header (csv.DictReader files
+  the extras under the `None` key), a non-numeric or non-finite price, a
+  non-positive open/high/low/close (volume may be 0), a date that is not
+  `YYYY-MM-DD` (Python 3.11+ `fromisoformat` alone would take `20260102`), a
+  second row for the same day (time part ignored; the message names the
+  first row), or bytes that are not UTF-8 raise `DataRefused` naming the file
+  and the row (the physical line, header = row 1): exit 2, nothing written,
+  never a traceback.
+- **Deferrals reach the Ops Sentinel through `logs/signals/status.json`
+  (2b-3 plan 1 Task 14).** Deferrals alone still exit 0 (the task result is
+  green), so the status file is their channel. EVERY run that gets past
+  argument parsing writes it, atomically (`status.json.tmp` + `os.replace`
+  with the targets publish's PermissionError retry), after the targets
+  publish: `{written_utc, bar_end (null when none was determined),
+  exit_code (0 or 2), published (strategies in the targets file), deferred
+  {sid: reason} (as computed; {} on a refusal that never got that far),
+  deferred_since {sid: first-seen UTC date}}`. `deferred_since` keeps the
+  previous status's date for a sid still deferred, gives a newly deferred
+  sid the run's UTC day (the `--as-of` date, default today UTC: the
+  `deferred_since` dates are `--as-of` dates, not `written_utc` dates), and
+  drops a sid no longer deferred (it also restarts at an unreadable date for
+  one sid). A missing previous
+  status is silent; a malformed one (bad bytes/JSON, not an object,
+  `deferred_since` not an object) counts as empty and prints a `WARNING`
+  line, so every clock restarts. Refusals write it too (`exit_code` 2). A
+  refusal BEFORE the deferral step (stale or partial `bar_end`, malformed
+  CSV, missing registry) cannot compute deferrals, so it carries the previous
+  status's `deferred` and `deferred_since` forward unchanged and sets
+  `"deferrals_not_computed": true` (the key is `false` on every run that
+  computed them, including an exit 2 for "nothing publishable"); a refusal
+  day therefore never resets a sid's clock, and the next normal run
+  recomputes and drops recovered sids. A status write that FAILS (a reader
+  holding `status.json` past the retries, a full disk) prints `WARNING:
+  could not write status.json: ...` and leaves the exit code alone (a good
+  publish stays 0, a refusal stays 2); the Sentinel's 20 h staleness FAIL is
+  the backstop. A crash (exit 1) writes NOTHING, so staleness is the
+  signal. It lives beside
+  the targets files but is not matched by the executor's `targets-*.json`
+  glob or by retention. **Sentinel side** (sc-ops-sentinel,
+  `sentinel/checks/signal_status.py`, manifest block `signal_status`
+  `{path, max_age_hours: 20, warn_after_days: 2}`): FAIL when the file is
+  missing, unreadable, older than 20 h by `written_utc`, or `exit_code` is not
+  0 (2 = refused). 20, not 26: the 08:45 write is about 0.5 h old at the
+  09:15 digest and yesterday's is 24.5 h old, so 26 h would pass a day on
+  which the service wrote nothing (31_SignalService is only `observing`, its
+  exit code is not read); a hand Sentinel run before 08:45 FAILs on
+  yesterday's status, expected. WARN for any sid deferred on its 2nd
+  calendar day or later (the first day counts: `(written_utc date -
+  deferred_since).days + 1 >= 2`, so first deferred on D and still deferred
+  on D+1 WARNs at the D+1 run); OK otherwise. **Merge order:** the Sentinel branch must
+  merge only AFTER the first signal-service run on this code has written
+  `status.json`, else the check FAILs "missing" (same ordering as the
+  `crypto_refresh` ledger).
+- **Retention (minors item 4).** After a successful publish,
+  `targets-<YYYY-MM-DD>.json` files beyond the newest `KEEP_TARGETS` (30) by
+  the date in the name are deleted. Never the file just written (even if a
+  re-run for an older day left newer names); a name without a date and the
+  `.json.tmp` are never touched; a file that cannot be deleted (a reader holds
+  it) is printed (`could not prune ...`) and skipped. A refusal prunes nothing.
+- **Exit codes (M8):** 0 written (or nothing served; deferrals alone are
+  still 0, carried to the Sentinel by `status.json`, see above); **2 = REFUSED** (no strategy publishable, stale or partial
+  bar_end, a malformed CSV row, missing registry), no targets file written
+  (only `status.json`, `exit_code` 2); 1 = an
+  unhandled crash (Python's own); 4 = the wrapper could not open its run log;
+  124 / 125 = the task guard ended the run (wall / the task's cmd.exe
+  stopped). The publish's `os.replace` is retried up to 8 times (0.25 s
+  apart) on PermissionError, which Windows raises while a reader holds the
+  target open, then raises (exit 1).
+- **The wrapper runs under the task guard (minors item 5).**
+  `tasks/run_signal_service.bat` re-runs itself under `python -m
+  pipeline.taskguard --wall-s 1500 --log ...` (`RL_TASKGUARD=1` marks the
+  inner copy; the run_gauntlet_worker.bat pattern), so an overrun is ended
+  with its python and the run log handle is released for the next fire. No
+  `--lock`/`--release-lock`/`--git-dir`: the service takes no lock and runs
+  no git, so nothing delays the kill, which lands inside the task's PT30M.
+  Any other exit code passes through unchanged. CRLF, `%PY%` by absolute
+  path, no git (test-pinned).
 - **The module is `signal_service.py`, NEVER `signal.py` (fix wave, C1).**
   A script run BY PATH puts its own directory first on sys.path, and
   trading-systems' `run_executor.bat` runs `pipeline\taskguard.py` by path:
@@ -1437,6 +1582,119 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `pipeline/*.py` may share a name with a stdlib module
   (`sys.stdlib_module_names`); `test_signal_service.py` pins it and runs
   `taskguard.py --help` by path.
+
+## Crypto grid refresh (33_CryptoGridRefresh, Switch 1, 2026-10-17)
+- `python -m pipeline.crypto_refresh` (wrapper `tasks/run_crypto_refresh.bat`,
+  task `\Morpheus\33_CryptoGridRefresh`; number 33 because 30/31 are build 4a's
+  and 32 is build 5's), daily **08:02 Perth**, `ExecutionTimeLimit` PT15M, NO
+  StartWhenAvailable, no retry by design. Registered on MERGE DAY (Task 12 of
+  the plan, Coen-gated), not before. The Sentinel will watch its ledger (label
+  `crypto_refresh`, 30 h proposed, pending Coen) and list 33 as "observing";
+  that lands at merge (sc-ops-sentinel `feat/crypto-refresh-ledger`).
+- **What it fetches:** every cell of `cells.active_cells("crypto")` (76 USDT
+  assets at 1d), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
+  it only APPENDS, never repairs or trims rows. **End cap:** every fetch is
+  capped at 00:00 UTC of today's UTC date (`crypto_data.
+  last_complete_utc_day_end_ms`), so no bar dated "today UTC" is ever written,
+  however late or hand-run. Why: the loop preflight's same-day rule needs all
+  of crypto's cells (these plus the legacy BTCUSD/ETHUSD that `data_fetch`
+  refreshes at 08:20) to end on one day, and the signal service serves every
+  asset on a single `bar_end`.
+- **Timing:** Binance's 1d bar closes 00:00 UTC = 08:00 Perth. Pass 1 is not
+  deadline-gated (only the hard stop below gates it); retry passes
+  (max 2) never START at or after `--deadline-local` (default 08:15 Perth,
+  UTC+8), so the run is over before the **08:20** quarantine daily (which reads
+  the same 1d files) and the 08:45 signal service. The wrapper's task guard is
+  `--wall-s 780 --grace-s 30` inside the PT15M limit: change them together.
+- **Hard stop (final review I1):** the guard holds no lock, so no grace
+  applies: it KILLS the run at 08:15:00, and a killed run writes neither the
+  ledger nor the manifest (yesterday's ledger, still under the Sentinel's
+  30 h, would read all clear on exactly the morning every cell timed out:
+  ~96 s per cell, 3 tries x 30 s + backoff). So the wrapper passes
+  `--deadline-local 08:11 --stop-local 08:12`: no retry starts at or after
+  08:11, and NO attempt, pass 1 included, at or after 08:12. Every cell not
+  yet fetched (and not already failed) gets a `crypto_refresh_failed` item
+  `skipped: past the stop time 08:12; not fetched this run`, the ledger and
+  the manifest (completed cells) are still written, exit 0; the worst single
+  attempt plus the ledger write lands well before the 08:15 wall.
+  `--stop-local` defaults to none, so `python -m pipeline.crypto_refresh` by
+  hand stays ungated; a hand run of the WRAPPER after 08:12 fetches nothing
+  and marks every cell skipped.
+- **Ban / rate limit:** `BinanceBanned` (418) or ANY `RateLimited` that reaches
+  the module (fetch_symbol has already retried a 429) stops the run AT ONCE with
+  no sleep: that cell gets a `crypto_refresh_failed` item and every cell not yet
+  completed gets one with reason `skipped: ...`.
+- **Ledger `logs/degraded_crypto_refresh.json`, writer `crypto_refresh`:** items
+  are `crypto_refresh_failed` (key = the cell) and `crypto_admission` (first
+  bar after 2022-12-31, or CSV missing/empty). Written with `remove_unseen=True`
+  (a recovered item leaves; an empty run still refreshes `ts_utc` so the
+  Sentinel sees a live writer). The items ARE the alarm.
+- **Exit codes:** 0 = the run completed, stopped on a ban or stopped at the
+  hard stop (failed/skipped cells are ledger items, not a non-zero exit: a
+  retry would hit Binance again); 2 = `--data-dir` missing, nothing written;
+  1 = crash; 4 = the wrapper could not open its run log
+  (`logs\crypto-refresh-run.log`); 124/125 = the task guard's wall / the outer
+  cmd died.
+- **Touches:** the cell CSVs (gitignored `data/*.csv`), the ledger, and
+  `data/crypto_snapshot_manifest.json` (key-wise merge, COMPLETED cells only).
+  Never the chain, git or `chain.lock`. `crypto_snapshot_manifest.json` is a
+  TRACKED file the task rewrites and never commits, so it shows as modified on
+  the shared working tree exactly like `tradfi_snapshot_manifest.json`: that is
+  expected; never `git checkout --` it from another session.
+
+## Switch 1 (2b-3 plan 1, 2026-10-17): crypto goes per-cell at 1d
+- Design: `docs/2026-10-17-crypto-grid-activation-design.md`. Switch 1 is SP5
+  Phase 3 as planned (the trial-denominator event): `ACTIVE_CELLS["crypto"]` =
+  76 USDT assets x `("1d",)`; crypto routes per cell through
+  `expand_family_for_class` with `benchmark: "self"` (flipped in the SAME commit,
+  see the cells.py comment block for why neither half is safe alone); the
+  composer's pooled path (`expand_family`, `ALLOWED_ASSETS`, `UNIVERSE_BASE`,
+  `COST_MODEL`) is DELETED and `cells.CLASSES["crypto"]["cost_model"]` is the
+  one source (10 bps commission + 5 bps slippage per side). Switch 2
+  (intraday) is a later plan.
+- **The pooled path is retired.** Every pre-switch crypto strategy (533 at
+  2026-10-17: 431 graveyard, 102 quarantine) is a pooled `[BTCUSD, ETHUSD]`
+  spec; they stay on the chain and re-simulate forever; nothing about them is
+  re-judged. A pooled spec that still needs the GAUNTLET after the switch RAISES
+  there (`_benchmark_relative` wants exactly one asset per cell), which is why
+  merge day gates on the preflight below. The two parity tools
+  (`tools/daily_parity.py`, `tools/gauntlet_parity.py`) call
+  `evaluate_standalone(record_benchmark=False)` for a legacy pooled crypto spec
+  only, so they can re-run registered pooled specs; the hand-run
+  `pipeline.gauntlet` registry pass would still raise on a pooled spec in
+  `gauntlet` state (hand runs already need Coen's say-so).
+  Every other 1d result (tradfi expansion, every registered spec's
+  re-simulation, every quarantine row) is byte-identical across the switch.
+- **Per-cycle cap counts cells for every class** (`specs_per_combo =
+  max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips
+  `USDT`, so strategy names read `BTC`, not `BTCUSDT`.
+- **Known limit: a retired or delisted pair has no exit in code.** Once a dead
+  USDT cell has registered strategies, its file stops growing, so the loop's
+  freshness preflight parks every crypto fire at `stale_data`, and
+  `gauntlet_stats` refuses `cells_not_comparable` REGISTRY-WIDE, for all
+  classes (`pipeline/gauntlet_stats.py` ~682-691), once the vintage passes the
+  cell's last bar. Nothing reads a retirement note: the grid record's
+  "RETIRED by a new note" is policy, not code. Tradfi has the same latent
+  exposure (a delisted ETF or a dead FX series). Plan 3 owns an excluded-cells
+  mechanism (`comparable_cells`, the preflight and the stats honouring retired
+  cells).
+- **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
+  1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
+     <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy
+     pooled crypto spec still proposed / screened / in `gauntlet` or waiting in
+     the crypto sibling queue (exit 1), and refuses missing paths (exit 2).
+  2. The grid record (`docs/notes/crypto-grid-record-v1.md`, DRAFT until Coen
+     approves the exact text; LF bytes enforced by a narrow `.gitattributes` rule)
+     is chained with `python -m tools.grid_switch chain-note --registry <live
+     registry> --note docs/notes/crypto-grid-record-v1.md --prefix
+     "crypto-grid-record-v1:"` BEFORE the first per-cell crypto verdict. It refuses
+     (exit 2, nothing written) a CR byte, a wrong prefix, a prefix already on the
+     chain (re-checked under chain.lock) and ANY existing `logs/chain.lock`; it
+     appends once under chain.lock, runs verify_registry and exits 0 only on
+     VALID. `--dry-run` runs the guards and writes nothing.
+  3. Register `33_CryptoGridRefresh` the same day (section above).
+  4. `CRYPTO_SYSTEM_PROMPT` (composer) is a DRAFT pending Coen; the plan itself
+     makes no composer or triage model call (zero metered spend).
 
 ## Triage escalations -- REMOVED by D44 (2026-09-26)
 - The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone

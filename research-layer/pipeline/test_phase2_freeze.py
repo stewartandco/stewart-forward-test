@@ -1,4 +1,4 @@
-"""SP5 Phase 2 FREEZE PROOF: the declaration changed nothing that runs.
+"""SP5 Phase 2 FREEZE PROOF, rewritten at the activation it was guarding.
 
 Phase 2 did two things and only two things. It DECLARED a 100-asset crypto
 grid (600 cells, cells.ASSETS x cells.TIMEFRAMES), and it built a cell-level
@@ -9,37 +9,35 @@ Neither is a decision to search. Sweeping a cell moves the trial denominator
 denominator is Coen's own reviewed commit -- Phase 3's activation commit --
 never a side effect of widening a tuple in cells.py.
 
-This module is the pin on that claim. Every test here asserts that what runs
-TODAY is byte-for-byte what ran before Phase 2: crypto still on the legacy
-pooled path, the four tradfi classes still sweeping their whole declared
-grids, and not one of the 600 declared crypto cells reaching a generation.
+REWRITTEN DELIBERATELY by that commit (Switch 1, SP5 Phase 3, build 2b-3
+Task 5), as this docstring always said it would be -- not relaxed to make a
+red suite green. What it pinned for crypto ("still pooled, zero cells
+active, rotation inert") was the state BEFORE the denominator event, and its
+subject (the pooled path, the dormant grid, a half-landed Phase 3) no longer
+exists. What still holds, and is pinned here:
 
-A FAILURE HERE MEANS THE FREEZE BROKE. These tests are not a description of
-current behaviour to be updated when behaviour changes; they are the guard
-that says behaviour must not change until the activation commit. When Phase 3
-lands, these tests are REWRITTEN DELIBERATELY as part of that commit, with
-Coen's review on the denominator move -- not quietly relaxed to make a red
-suite green.
+* the four tradfi classes still sweep their whole declared grids, through the
+  per-cell expander, untouched by D6 rotation (their expansion is also pinned
+  byte for byte against the pre-switch code in test_switch1.py);
+* crypto's DECLARATION is still 600 cells, all import-safe, of which exactly
+  76 (at 1d) are ACTIVE;
+* crypto rotates now, against the real gate and the real dispatch.
+
+The activated state itself (the 76-asset literal, the routing + benchmark
+pair, the deleted legacy constants, the brief) is pinned in test_switch1.py.
 
 Run: python -m pytest pipeline/test_phase2_freeze.py -q
 """
-# GAP CLOSED (P2-T4, 2026-08-31): sweep rotation (design D6) is built, and
-# section 7 below is the freeze proof the gap notice promised -- the rotation
-# window changes NOTHING for any live class today, both where the active set
-# is empty (crypto) and where it is smaller than the window (the four tradfi
-# classes).
 from __future__ import annotations
 
 from . import cells
 from . import composer
 from . import loop
-from . import loop_state
 
 # Family fixtures, reused rather than reinvented: each class's own composer
 # test module already carries the minimal valid family for that class, and a
 # freeze proof that invented its own would be proving a shape nothing else
 # uses.
-from .test_composer import good_family                    # crypto (pooled)
 from .test_composer_fx import fx_family
 from .test_composer_equity import equity_family
 from .test_composer_2b import bond_family, metal_family
@@ -53,6 +51,8 @@ TRADFI_FAMILIES = {"fx": fx_family, "equity_etf": equity_family,
 _RUN_ID = "p2freeze"
 _MODEL = "claude-opus-5"
 _CREATED = "2026-08-29T00:00:00Z"
+
+N_ACTIVE_CRYPTO = 76
 
 
 def _expand(asset_class: str) -> list[dict]:
@@ -68,32 +68,7 @@ def _expand(asset_class: str) -> list[dict]:
     return expander(fam, _RUN_ID, _MODEL, _CREATED, asset_class)
 
 
-# ---------------- 1. crypto is still on the legacy pooled path ----------------
-
-def test_crypto_still_routes_to_the_legacy_pooled_expander():
-    """The declaration did not move crypto off expand_family.
-
-    Phase 2 widened CLASSES["crypto"]["assets"] from 5 tickers to 100 and
-    declared its cost_model where every other class declares one. It did NOT
-    touch the router: crypto still gets expand_family (one multi-asset
-    BTCUSD+ETHUSD pooled spec per sweep combo), not expand_family_for_class
-    (one single-asset spec per active cell). Phase 3's activation commit is
-    what deletes that branch.
-
-    The paired invariant is asserted with it because the two are one fact,
-    not two: benchmark:"self" needs exactly one asset per cell, which only
-    the per-cell path provides, so `benchmark` MUST still be None for as
-    long as the pooled route holds.
-    """
-    assert composer.expander_for("crypto") is composer.expand_family, (
-        "SP5 freeze broken: crypto has left the legacy pooled path outside "
-        "Coen's Phase 3 activation commit")
-    assert cells.CLASSES["crypto"]["benchmark"] is None, (
-        "crypto is still pooled (multi-asset specs) but its benchmark left "
-        "None -- every crypto verdict now raises in _benchmark_relative")
-
-
-# ---------------- 2. tradfi expansion is the declared grid, unchanged ----------------
+# ---------------- 1. tradfi expansion is the declared grid, unchanged ----------------
 
 def test_tradfi_active_set_is_still_the_whole_declared_grid():
     """The gate is a no-op for the four classes that were already sweeping.
@@ -101,7 +76,7 @@ def test_tradfi_active_set_is_still_the_whole_declared_grid():
     ACTIVE_CELLS gates each tradfi class at "all"/"all", so active_cells must
     return class_cells EXACTLY -- same cells, same ORDER. Order is part of
     the declaration in cells.py (all_cells' fixed order so manifests diff
-    cleanly, and D6's rotation cursor will read this list), so list equality
+    cleanly, and D6's rotation cursor reads this list), so list equality
     is the right assertion, not set equality: a reordering is a behaviour
     change even when the membership matches.
     """
@@ -118,12 +93,12 @@ def test_tradfi_still_routes_to_the_per_cell_expander():
             f"{cls} left the per-cell expansion path")
 
 
-# ---------------- 3. nothing sweeps a cell outside its active set ----------------
+# ---------------- 2. nothing sweeps a cell outside its active set ----------------
 
 def test_no_tradfi_class_expands_a_cell_outside_its_active_set():
     """Expand each class's real family and check every spec it produced.
 
-    This is the behavioural half of test 2: it is not enough that
+    This is the behavioural half of test 1: it is not enough that
     active_cells() returns the right list, the expander has to actually
     follow it. Every produced spec is one cell, so its (asset, timeframe)
     must be a member of active_cells(cls) -- and the class must produce at
@@ -144,139 +119,60 @@ def test_no_tradfi_class_expands_a_cell_outside_its_active_set():
                 f"{cls}: swept {cell!r}, which is not in its active set")
 
 
-def test_crypto_expands_the_legacy_universe_not_the_declared_grid():
-    """Crypto's counterpart: it must sweep the OLD pooled universe.
+# ---------------- 3. the crypto declaration vs the crypto activation ----------------
 
-    The declared grid is 100 USDT pairs on six timeframes. The pooled path
-    knows nothing about it -- its specs come from composer.ALLOWED_ASSETS
-    (BTCUSD/ETHUSD, tickers that are not declared crypto cell assets at all)
-    on UNIVERSE_BASE's single "1d" timeframe. That is the pre-SP5 behaviour,
-    and it is what must still be true.
-    """
-    fam = good_family(assets=["BTCUSD", "ETHUSD"])
-    specs = composer.expander_for("crypto")(fam, _RUN_ID, _MODEL, _CREATED)
-    assert specs, "crypto expanded to zero specs -- vacuous freeze proof"
-    allowed = set(composer.ALLOWED_ASSETS)
-    for spec in specs:
-        uni = spec["universe"]
-        assert set(uni["assets"]) <= allowed, (
-            f"crypto spec names {uni['assets']!r}, outside the legacy pooled "
-            f"universe {composer.ALLOWED_ASSETS!r}")
-        assert uni["timeframe"] == "1d", (
-            f"crypto spec carries timeframe {uni['timeframe']!r}; the pooled "
-            f"path is 1d-only (UNIVERSE_BASE)")
-
-
-# ---------------- 4. declared-but-inactive crypto cells never reach a generation ----------------
-
-def test_crypto_declares_600_cells_and_activates_none():
+def test_crypto_declares_600_cells_and_activates_76():
     """The whole point of the gate, stated as one number pair.
 
     600 cells DECLARED (100 assets x 6 timeframes) -- which is what admits
-    data/import/snapshot work against them. ZERO cells ACTIVE -- which is
-    what a generation is permitted to sweep. Phase 3 is the commit that
-    changes the second number, and it is Coen's.
+    data/import/snapshot work against them. 76 cells ACTIVE (Switch 1: the
+    assets with a first daily bar on or before 2022-12-31, at 1d) -- which
+    is what a generation is permitted to sweep. A change to the second number
+    is Coen's own reviewed commit (Switch 2 grows the timeframes).
     """
     assert len(cells.class_cells("crypto")) == 600, (
         "the declared crypto grid is no longer 100 assets x 6 timeframes")
-    assert cells.active_cells("crypto") == [], (
-        "SP5 freeze broken: crypto cells are ACTIVE outside Coen's Phase 3 "
-        "activation commit -- the trial denominator has moved")
+    active = cells.active_cells("crypto")
+    assert len(active) == N_ACTIVE_CRYPTO, (
+        "crypto's ACTIVE cell count moved outside a reviewed activation commit "
+        "-- the trial denominator has moved")
+    assert {tf for _, tf in active} == {"1d"}
+    assert set(active) <= set(cells.class_cells("crypto"))
 
 
-def test_no_declared_crypto_ticker_reaches_a_generated_spec():
-    """No spec off the crypto path names any of the 100 declared tickers.
-
-    Assertion 4a says the gate is empty; this says the empty gate is
-    actually load-bearing on the path crypto really runs. The declared grid
-    is all *USDT pairs and the pooled universe is *USD, so disjointness is
-    checkable directly rather than by ticker-shape guessing.
-    """
-    declared = set(cells.ASSETS)
-    assert all(t.endswith("USDT") for t in declared), (
-        "the declared crypto universe is no longer all-USDT; this test's "
-        "disjointness check assumed it was")
-    fam = good_family(assets=["BTCUSD", "ETHUSD"])
-    specs = composer.expander_for("crypto")(fam, _RUN_ID, _MODEL, _CREATED)
-    assert specs
-    for spec in specs:
-        named = set(spec["universe"]["assets"])
-        assert not (named & declared), (
-            f"a crypto spec names declared-but-inactive cell assets "
-            f"{sorted(named & declared)!r} -- the declaration is being swept")
-
-
-# ---------------- 5. declared cells are import-safe but unswept ----------------
-
-def test_declared_crypto_cells_validate_while_none_are_active():
+def test_declared_crypto_cells_validate_and_only_the_gated_ones_are_active():
     """The distinction the entire gate exists for, in one test.
 
     validate_cell is the DECLARATION check: it must accept all 600 cells,
     because declaring them is exactly what makes fetching, snapshotting and
-    importing their data legal. active_cells is the ACTIVATION check: it is
-    empty, because sweeping them is what moves the denominator. Both at once
-    is the state Phase 2 is supposed to be in -- data work admitted, search
-    not.
+    importing their data legal. active_cells is the ACTIVATION check: 76 of
+    them, because sweeping is what moves the denominator. The other 524
+    validate and are never swept.
     """
     declared = cells.class_cells("crypto")
     assert len(declared) == 600
     for asset, timeframe in declared:
         assert cells.validate_cell(asset, timeframe) == (asset, timeframe)
         assert cells.validate_cell(asset, timeframe, "crypto") == (asset, timeframe)
-    assert cells.active_cells("crypto") == [], (
-        "declared cells validate AND are active -- the gate has collapsed "
-        "into the declaration and Phase 2's whole distinction is gone")
+    active = cells.active_cells("crypto")
+    assert len(active) == N_ACTIVE_CRYPTO < len(declared), (
+        "the gate has collapsed into the declaration and Phase 2's whole "
+        "distinction is gone")
 
 
-# ---------------- 6. Phase 3 is a coupled change ----------------
+# ---------------- 4. D6 sweep rotation ----------------
 
-def test_phase3_benchmark_and_routing_stay_coupled():
-    """One assertion, referencing the existing pin rather than re-deriving it.
+def test_crypto_rotates_over_its_active_set():
+    """crypto: the one rotating class, now with 76 active assets.
 
-    test_gauntlet_classes.py carries the BEHAVIOURAL half of this coupling
-    (test_crypto_benchmark_and_the_legacy_pooled_path_flip_together: it reads
-    the same dispatch and then proves it on a real spec off that path, and
-    both directions were mutation-tested at the P2-T3 rider). Importing that
-    test here is itself part of the pin -- if the coupling test is deleted or
-    renamed, this test raises ImportError and names it, so the behavioural
-    half cannot quietly disappear behind a green freeze proof.
-
-    What is asserted here is only the freeze-relevant statement: the two
-    halves are in the SAME state today, so Phase 3 has to move both in one
-    commit. Half-landing fails differently in each direction: benchmark
-    alone makes every crypto verdict raise (loud); routing alone leaves
-    benchmark None so no control is written at all, and absence is this
-    codebase's declared signal for "not applicable" (silent).
-    """
-    from .test_gauntlet_classes import (
-        test_crypto_benchmark_and_the_legacy_pooled_path_flip_together as _coupling_pin)
-    assert callable(_coupling_pin)
-
-    assert ((cells.CLASSES["crypto"]["benchmark"] is None)
-            == (composer.expander_for("crypto") is composer.expand_family)), (
-        "crypto's benchmark declaration and its composer routing have "
-        "half-flipped: they are one commit (SP5 Phase 3), never two")
-
-
-# ---------------- 7. D6 sweep rotation is machinery, not behaviour ----------------
-
-def test_rotation_is_inert_over_an_empty_active_set():
-    """crypto: rotating over zero active cells rotates nothing.
-
-    The window is empty, it EQUALS the (empty) active set -- which is what
-    makes the loop pass no --assets at all -- and no rotation_cursor is
-    written into loop_state.json for a class that swept nothing.
-    """
-    assert cells.active_cells("crypto") == [], (
-        "this test's premise is gone: crypto has active cells")
+    The window is ROTATION_SIZE of the active assets, in declared order, and
+    `rotates` is True, which is what makes the loop pass --assets."""
     state = {"classes": {}}
     window, rotates = loop._sweep_window(state, "crypto")
-    assert window == []
-    assert rotates is False, (
-        "the loop would pass --assets for crypto, which is still on the "
-        "legacy pooled path where --assets has no meaning")
-    loop_state.advance_rotation(state, "crypto", 0, loop.ROTATION_SIZE)
-    assert state["classes"].get("crypto", {}).get("rotation_cursor") is None
+    active_assets = [a for a, _ in cells.active_cells("crypto")]
+    assert rotates is True
+    assert window == active_assets[:loop.ROTATION_SIZE]
+    assert len(active_assets) > loop.ROTATION_SIZE
 
 
 def test_rotation_is_inert_for_every_tradfi_class():
@@ -313,76 +209,26 @@ def test_rotation_is_inert_for_every_tradfi_class():
         "inference argument above needs re-checking against the new numbers")
 
 
-def test_a_half_landed_phase3_does_not_emit_a_window_into_a_refusing_composer():
-    """P2-T4 review F2: ACTIVE_CELLS filled, expander NOT switched.
+def test_the_landed_phase3_rotates_and_the_composer_accepts_the_window():
+    """BOTH halves moved, as Phase 3 required in one commit -- now against
+    the REAL gate and the REAL dispatch (no monkeypatch: what this test used
+    to simulate is what runs).
 
-    This is the dangerous half-landing for D6, and it is dangerous at RUNTIME
-    rather than at import: the cells gate is what rotation reads, the routing
-    dispatch is what makes `--assets` legal, and they live in different files.
-    Emitting a window into the pooled composer is a guaranteed nonzero exit,
-    which the loop maps to stage_failed -- a Sentinel FAIL on every crypto
-    fire, three times a day, until a human notices.
-
-    So `rotates` must stay False for as long as crypto is pooled, no matter
-    what ACTIVE_CELLS says. The loud failure for a half-landed Phase 3 is the
-    NEXT test, at test time, where it belongs.
+    Rotation is on, and the window is exactly ROTATION_SIZE of the activated
+    assets, in declared order. `composer.sweep_cells` resolves the window to
+    CELLS without consulting `expander_for`, so the third assertion proves the
+    emitted window addresses real active cells and nothing outside them; that
+    the composer accepts the flag end to end is
+    test_switch1.py::test_the_crypto_cap_counts_cells (a real composer.run
+    with a 12-asset --assets window, rc 0).
     """
-    gate = dict(cells.ACTIVE_CELLS["crypto"])
-    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
-                                    "timeframes": ("1d",)}
-    try:
-        assert len(cells.active_cells("crypto")) == 20, "premise check"
-        assert composer.expander_for("crypto") is composer.expand_family, (
-            "premise check: this test simulates the HALF-landed case")
-        window, rotates = loop._sweep_window({"classes": {}}, "crypto")
-        assert rotates is False, (
-            "a half-landed Phase 3 (cells activated, expander still pooled) "
-            "emits --assets into a composer that refuses it: stage_failed on "
-            "every crypto fire")
-    finally:
-        cells.ACTIVE_CELLS["crypto"] = gate
-
-
-def test_a_fully_landed_phase3_rotates_and_the_composer_accepts_the_window(
-        monkeypatch):
-    """The other side: BOTH halves moved, as Phase 3 requires in one commit.
-
-    Rotation must switch on, and the window must be exactly ROTATION_SIZE of
-    the activated assets, in declared order.
-
-    The third assertion is narrower than it looks and is described accurately
-    here (re-review nit): `composer.sweep_cells` resolves a window to CELLS
-    and never consults `expander_for`, so what it proves is that the emitted
-    window addresses real active cells and nothing outside them -- not that
-    the composer would accept the flag. The composer-side half of F2's
-    coupling (that the `--assets` refusal lifts with the routing dispatch) is
-    covered directly by
-    test_sp5_p2t4.py::test_the_assets_refusal_lifts_when_the_class_leaves_the_pooled_path.
-    """
-    gate = dict(cells.ACTIVE_CELLS["crypto"])
-    cells.ACTIVE_CELLS["crypto"] = {"assets": cells.ASSETS[:20],
-                                    "timeframes": ("1d",)}
-    monkeypatch.setattr(composer, "expander_for",
-                        lambda cls: composer.expand_family_for_class)
-    monkeypatch.setattr(loop, "expander_for", composer.expander_for)
-    try:
-        window, rotates = loop._sweep_window({"classes": {}}, "crypto")
-        assert rotates is True, (
-            "a fully-landed Phase 3 did not switch rotation on -- the 100-asset "
-            "universe would be swept whole every generation, which is the cost "
-            "problem D6 exists to solve")
-        assert window == list(cells.ASSETS[:12])
-        # the window resolves to real ACTIVE cells and nothing outside them
-        assert composer.sweep_cells("crypto", window) == [(a, "1d") for a in window]
-    finally:
-        cells.ACTIVE_CELLS["crypto"] = gate
-
-
-def test_no_live_class_rotates_today():
-    """One line for the whole claim: the only rotating class has no active
-    cells, so not one live generation is scheduled differently today."""
-    assert loop.ROTATION_CLASSES == ("crypto",)
-    for cls in cells.LIVE_CLASSES:
-        state = {"classes": {}}
-        _, rotates = loop._sweep_window(state, cls)
-        assert rotates is False, f"{cls} rotates -- Phase 2's sweep freeze is broken"
+    assert composer.expander_for("crypto") is composer.expand_family_for_class
+    window, rotates = loop._sweep_window({"classes": {}}, "crypto")
+    assert rotates is True, (
+        "the landed Phase 3 did not switch rotation on -- the 76-asset "
+        "universe would be swept whole every generation, which is the cost "
+        "problem D6 exists to solve")
+    active_assets = [a for a, _ in cells.active_cells("crypto")]
+    assert window == active_assets[:12]
+    # the window resolves to real ACTIVE cells and nothing outside them
+    assert composer.sweep_cells("crypto", window) == [(a, "1d") for a in window]

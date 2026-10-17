@@ -184,8 +184,9 @@ def test_the_service_never_writes_the_chain(tmp_path, capsys):
     assert hashlib.sha256(reg.log_path.read_bytes()).hexdigest() == chain_sha
     after = _tree(tmp_path)
     out_name = f"logs/signals/targets-{bars[-1]['date']}.json"
-    assert set(after) - set(before) == {out_name}         # no lock file, no tmp, nothing else
-    assert {k: v for k, v in after.items() if k != out_name} == before
+    status_name = "logs/signals/status.json"              # 2b-3 Task 14: the Sentinel channel
+    assert set(after) - set(before) == {out_name, status_name}   # no lock file, no tmp, nothing else
+    assert {k: v for k, v in after.items() if k not in (out_name, status_name)} == before
 
     doc = json.loads((tmp_path / out_name).read_text(encoding="utf-8"))
     assert doc["bar_end"] == bars[-1]["date"]
@@ -204,6 +205,7 @@ def test_the_service_never_writes_the_chain(tmp_path, capsys):
     assert mine["assets"]["BTCUSD"] == S.next_bar_position(SPEC, bars)
     assert mine["assets"]["BTCUSD"]["side"] == "long"
     assert mine["assets"]["ETHUSD"] == {"side": "flat", "frac": 0.0}
+    assert doc["deferred"] == {}                              # minors item 1: always present
 
 
 def test_a_failed_write_leaves_the_previous_targets_file_whole(tmp_path, monkeypatch):
@@ -226,35 +228,44 @@ def test_a_failed_write_leaves_the_previous_targets_file_whole(tmp_path, monkeyp
     assert json.loads(out.read_text(encoding="utf-8")) == {"previous": True}
 
 
-def test_nothing_to_serve_writes_nothing(tmp_path):
+def test_nothing_to_serve_writes_no_targets(tmp_path):
     reg = Registry(tmp_path / "registry_log.jsonl")
     reg.append("strategy_registered", SPEC)                  # proposed only
     data = tmp_path / "data"
     data.mkdir()
     assert S.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                   "--out-dir", str(tmp_path / "logs" / "signals")]) == 0
-    assert not (tmp_path / "logs").exists()
+    assert sorted(p.name for p in (tmp_path / "logs").rglob("*") if p.is_file()) == ["status.json"]
 
 
 # ---------------- fix round 1: freshness, one read per file ----------------
 
 def _refused(tmp_path, reg, data, capsys, as_of=None):
     before = _tree(tmp_path)
+    before.pop("logs/signals/status.json", None)             # a repeat call has the last one
     rc = S.run(_argv(tmp_path, reg, data, as_of))
     out = capsys.readouterr().out
     assert rc == S.REFUSED_EXIT == 2                         # M8: a refusal is 2, a crash 1
-    assert _tree(tmp_path) == before                         # nothing written, anywhere
-    assert not (tmp_path / "logs").exists()
+    # nothing written, anywhere, but the Sentinel's status.json (Task 14)
+    after = _tree(tmp_path)
+    assert after.pop("logs/signals/status.json")
+    assert after == before
+    assert json.loads((tmp_path / "logs" / "signals" / "status.json")
+                      .read_text(encoding="utf-8"))["exit_code"] == 2
     return out
 
 
 def test_a_lagging_asset_refuses_and_writes_nothing(tmp_path, capsys):
     """I-1: BTCUSD at D, ETHUSD at D-1 -> no targets file (never a fresh
-    bar_end over a stale target), every asset's last date printed."""
+    bar_end over a stale target), every asset's last date printed. Minors
+    item 1 pin: every served strategy today trades BTCUSD+ETHUSD, so one
+    lagging asset defers ALL of them and nothing is publishable -> exit 2."""
     reg, data, bars = _fixture_layer(tmp_path)
     _write_csv(data / "ETHUSD_1d.csv", _bars([100.0] * 199))
     out = _refused(tmp_path, reg, data, capsys)
     assert "ETHUSD" in out and bars[-1]["date"] in out and bars[-2]["date"] in out
+    assert "no strategy can be published" in out
+    assert SPEC["strategy_id"] in out and "live0000000000001" in out
 
 
 def test_an_empty_price_file_refuses_and_writes_nothing(tmp_path, capsys):
@@ -369,12 +380,21 @@ def test_uniformly_stale_data_refuses_and_writes_nothing(tmp_path, capsys):
 
 
 def test_the_bar_that_closed_at_the_start_of_the_day_is_fresh(tmp_path):
-    """I2 boundary: as_of = bar_end + 1 day publishes; as_of = bar_end too."""
+    """I2 boundary: as_of = bar_end + 1 day publishes (and only that day, minors item 2)."""
     reg, data, bars = _fixture_layer(tmp_path)
     last = dt.date.fromisoformat(bars[-1]["date"])
-    for days in (1, 0):
-        assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=days)).isoformat())) == 0
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=1)).isoformat())) == 0
     assert (tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json").exists()
+
+
+def test_a_bar_dated_the_run_day_refuses_and_writes_nothing(tmp_path, capsys):
+    """Minors item 2: bar_end > as_of - 1 day is today's still-open bar (or
+    later). data_fetch drops the open kline, so this is bad data: refuse."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    for days in (0, -3):
+        out = _refused(tmp_path, reg, data, capsys, as_of=(last + dt.timedelta(days=days)).isoformat())
+        assert "partial" in out and bars[-1]["date"] in out
 
 
 def test_as_of_defaults_to_the_utc_date(tmp_path, monkeypatch):
@@ -384,7 +404,7 @@ def test_as_of_defaults_to_the_utc_date(tmp_path, monkeypatch):
             "--out-dir", str(tmp_path / "logs" / "signals")]
     monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=2))
     assert S.run(argv) == 2
-    assert not (tmp_path / "logs").exists()
+    assert sorted(p.name for p in (tmp_path / "logs" / "signals").iterdir()) == ["status.json"]
     monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=1))
     assert S.run(argv) == 0
 
@@ -402,7 +422,9 @@ def test_a_missing_registry_refuses_and_writes_nothing(tmp_path, capsys):
                 "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"])
     assert rc == 2
     assert "no registry file" in capsys.readouterr().out
-    assert _tree(tmp_path) == before and not (tmp_path / "logs").exists()
+    after = _tree(tmp_path)
+    assert after.pop("logs/signals/status.json")             # Task 14: the status is written
+    assert after == before
 
 
 def test_the_module_exits_2_on_a_refusal(tmp_path):
@@ -414,7 +436,8 @@ def test_the_module_exits_2_on_a_refusal(tmp_path):
                        cwd=str(PIPELINE.parent), env=env, capture_output=True, text=True,
                        timeout=120)
     assert r.returncode == 2, r.stdout + r.stderr
-    assert "REFUSED" in r.stdout and not (tmp_path / "out").exists()
+    assert "REFUSED" in r.stdout
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["status.json"]   # no targets
 
 
 def _replace_failing(n, calls):
@@ -437,11 +460,11 @@ def test_publish_retries_a_held_target(tmp_path, monkeypatch):
     monkeypatch.setattr(S.time, "sleep", sleeps.append)
     assert S.run(_argv(tmp_path, reg, data)) == 0
     monkeypatch.undo()
-    assert len(calls) == S.REPLACE_RETRIES + 1 == 9
+    assert len(calls) == S.REPLACE_RETRIES + 1 + 1 == 10     # 9 for the targets, 1 for status.json
     assert sleeps == [S.REPLACE_SLEEP_S] * 8 and 0 < S.REPLACE_SLEEP_S <= 1
     out = tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json"
     assert json.loads(out.read_text(encoding="utf-8"))["bar_end"] == bars[-1]["date"]
-    assert sorted(p.name for p in out.parent.iterdir()) == [out.name]
+    assert sorted(p.name for p in out.parent.iterdir()) == ["status.json", out.name]
 
 
 def test_publish_gives_up_after_the_retries(tmp_path, monkeypatch):
@@ -460,3 +483,620 @@ def test_publish_gives_up_after_the_retries(tmp_path, monkeypatch):
     assert len(calls) == S.REPLACE_RETRIES + 1
     assert json.loads(out.read_text(encoding="utf-8")) == {"previous": True}
     assert sorted(p.name for p in out.parent.iterdir()) == [out.name]
+
+
+# ---------------- minors item 1: per-strategy deferral ---------------------
+
+BTC_ONLY = "btc0000000000001"
+
+
+def _with_btc_only(tmp_path):
+    """_fixture_layer plus a third served (quarantined) strategy that trades
+    BTCUSD alone, so one lagging ETHUSD leaves something publishable."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    reg.append("strategy_registered", _variant(BTC_ONLY, assets=["BTCUSD"]))
+    _walk(reg, BTC_ONLY, "quarantine")
+    return reg, data, bars
+
+
+def _lag_eth(data):
+    _write_csv(data / "ETHUSD_1d.csv", _bars([100.0] * 199))
+
+
+def _empty_eth(data):
+    _write_csv(data / "ETHUSD_1d.csv", [])
+
+
+def _drop_eth(data):
+    (data / "ETHUSD_1d.csv").unlink()
+
+
+@pytest.mark.parametrize("break_eth,why", [
+    (_lag_eth, "ETHUSD behind"), (_empty_eth, "ETHUSD EMPTY"), (_drop_eth, "no price file"),
+])
+def test_a_strategy_whose_asset_lags_is_deferred_the_rest_publish(tmp_path, capsys, break_eth, why):
+    """Minors item 1: a strategy is published only if EVERY asset it trades
+    is present, non-empty and ends on bar_end; the others are listed under
+    `deferred` with the reason and are absent from `strategies` (the executor
+    reads an absent strategy in a fresh file as "signal stale, holding")."""
+    reg, data, bars = _with_btc_only(tmp_path)
+    break_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    out = capsys.readouterr().out
+    doc = json.loads((tmp_path / "logs" / "signals" / f"targets-{bars[-1]['date']}.json")
+                     .read_text(encoding="utf-8"))
+    assert doc["bar_end"] == bars[-1]["date"]
+    assert set(doc["strategies"]) == {BTC_ONLY}
+    assert doc["strategies"][BTC_ONLY]["assets"] == {"BTCUSD": S.next_bar_position(SPEC, bars)}
+    assert set(doc["deferred"]) == {SPEC["strategy_id"], "live0000000000001"}
+    assert all(why in r for r in doc["deferred"].values()), doc["deferred"]
+    # the digest describes exactly the bytes the published targets came from
+    assert doc["data_digest"] == {
+        "BTCUSD": hashlib.sha256((data / "BTCUSD_1d.csv").read_bytes()).hexdigest()}
+    assert f"deferred {SPEC['strategy_id']}" in out and why in out
+
+
+def test_bar_end_is_the_latest_last_date_even_when_that_asset_defers_everything(tmp_path, capsys):
+    """bar_end stays the max last date across served assets: ETHUSD one bar
+    AHEAD makes BTCUSD the laggard, so the BTCUSD-only strategy defers too and
+    nothing is publishable -> exit 2."""
+    reg, data, bars = _with_btc_only(tmp_path)
+    ahead = _bars([100.0] * 201)
+    _write_csv(data / "ETHUSD_1d.csv", ahead)
+    out = _refused(tmp_path, reg, data, capsys, as_of=_next(ahead))
+    assert "no strategy can be published" in out and f"bar_end {ahead[-1]['date']}" in out
+    assert BTC_ONLY in out and "BTCUSD behind" in out
+
+
+def test_no_served_asset_with_a_bar_refuses(tmp_path, capsys):
+    """Every served price file missing (or empty): there is no bar_end at all."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "BTCUSD_1d.csv").unlink()
+    _write_csv(data / "ETHUSD_1d.csv", [])
+    out = _refused(tmp_path, reg, data, capsys)
+    assert "no served asset has a bar" in out and "BTCUSD MISSING" in out and "ETHUSD EMPTY" in out
+
+
+# ---------------- minors item 3: a malformed CSV row refuses ---------------
+
+GOOD_HEAD = "date,open,high,low,close,volume"
+
+
+@pytest.mark.parametrize("lines,row", [
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1"], 3),                 # short row
+    (["\ufeff" + GOOD_HEAD, "2026-01-01,1,1,1,1,1"], 1),                          # BOM header
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,abc,1,1,1"], 3),           # non-numeric
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "", "2026-01-03,1,1,1,nan,1"], 4),       # non-finite
+    ([GOOD_HEAD, "2026-13-01,1,1,1,1,1"], 2),                                     # not a date
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "20260102,1,1,1,1,1"], 3),               # basic ISO form
+])
+def test_a_malformed_csv_row_refuses_naming_the_file_and_row(tmp_path, capsys, lines, row):
+    """Minors item 3: DataRefused naming the file and the row, exit 2, nothing
+    written -- never a traceback (exit 1)."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "ETHUSD_1d.csv").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    out = _refused(tmp_path, reg, data, capsys)
+    assert "ETHUSD_1d.csv" in out and f"row {row}" in out, out
+
+
+@pytest.mark.parametrize("lines,row,why", [
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,1,1,9"], 3, "long row"),
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,1,1",
+      "2026-01-01 00:00:00,1,1,1,1,1"], 4, "duplicate date 2026-01-01 (first on row 2)"),
+    ([GOOD_HEAD, "2026-01-01,1,1,1,1,1", "2026-01-02,1,1,1,0,1"], 3, "close '0' is not positive"),
+    ([GOOD_HEAD, "2026-01-01,1,1,-1,1,1"], 2, "low '-1' is not positive"),
+])
+def test_a_long_duplicate_or_non_positive_row_refuses(tmp_path, capsys, lines, row, why):
+    """Review follow-up: a row longer than the header (DictReader's None key),
+    a second row for the same day, or a non-positive open/high/low/close
+    refuses the run naming the file and the physical row."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "ETHUSD_1d.csv").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    out = _refused(tmp_path, reg, data, capsys)
+    assert f"ETHUSD_1d.csv: row {row}: {why}" in out, out
+
+
+def test_a_zero_volume_bar_still_parses():
+    """Volume may be 0 (a quiet bar); only the prices must be positive."""
+    raw = (GOOD_HEAD + "\n2026-01-01,1,1,1,1,0\n").encode("utf-8")
+    assert S.parse_daily_csv(raw, "X_1d.csv")[0]["volume"] == 0.0
+
+
+def test_parse_daily_csv_refuses_undecodable_bytes():
+    with pytest.raises(S.DataRefused, match="X_1d.csv"):
+        S.parse_daily_csv(b"date,open\n\xff\xfe\n", "X_1d.csv")
+
+
+# ---------------- minors item 4: prune old targets files -------------------
+
+def _old_targets(out_dir: Path, start: dt.date, n: int) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for i in range(n):
+        p = out_dir / f"targets-{(start + dt.timedelta(days=i)).isoformat()}.json"
+        p.write_text("{}", encoding="utf-8")
+        paths.append(p)
+    return paths
+
+
+def test_publish_prunes_targets_beyond_the_newest_30(tmp_path, capsys):
+    """Minors item 4: after a publish only the newest KEEP_TARGETS files by the
+    bar_end in the name stay; a name without a date is not touched."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    out_dir = tmp_path / "logs" / "signals"
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    old = _old_targets(out_dir, last - dt.timedelta(days=33), 33)    # ends the day before
+    other = out_dir / "targets-notes.json"
+    other.write_text("{}", encoding="utf-8")
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert S.KEEP_TARGETS == 30
+    kept = sorted(p.name for p in out_dir.glob("targets-*.json") if p != other)
+    want = sorted([p.name for p in old[-29:]] + [f"targets-{bars[-1]['date']}.json"])
+    assert kept == want
+    assert other.exists()
+    assert "pruned 4" in capsys.readouterr().out
+
+
+def test_prune_never_removes_the_file_just_written(tmp_path):
+    """Leftover files dated AFTER this bar_end (a re-run for an older day) are
+    newer by name; the just-written file is kept anyway."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    out_dir = tmp_path / "logs" / "signals"
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    later = _old_targets(out_dir, last + dt.timedelta(days=1), 31)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert (out_dir / f"targets-{bars[-1]['date']}.json").exists()
+    assert not later[0].exists() and all(p.exists() for p in later[1:])
+
+
+def test_prune_logs_and_skips_a_file_it_cannot_delete(tmp_path, monkeypatch, capsys):
+    reg, data, bars = _fixture_layer(tmp_path)
+    out_dir = tmp_path / "logs" / "signals"
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    old = _old_targets(out_dir, last - dt.timedelta(days=32), 32)    # 33 with the new one
+    held = old[0]
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self == held:
+            raise PermissionError(13, "in use by another process")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    assert held.exists() and not old[1].exists() and not old[2].exists()
+    assert all(p.exists() for p in old[3:])
+    out = capsys.readouterr().out
+    assert f"could not prune {held.name}" in out
+
+
+def test_a_refusal_prunes_nothing(tmp_path):
+    reg, data, bars = _fixture_layer(tmp_path)
+    out_dir = tmp_path / "logs" / "signals"
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    old = _old_targets(out_dir, last - dt.timedelta(days=40), 35)
+    _lag_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    assert all(p.exists() for p in old)
+
+
+# ---------------- minors item 5: the wrapper runs under the task guard -----
+
+TASKS = PIPELINE.parent / "tasks"
+WRAPPER = TASKS / "run_signal_service.bat"
+LIVE_LAYER = r"E:\Users\Coen\Claude\stewart-forward-test\research-layer"
+
+
+def test_the_wrapper_is_crlf_guarded_and_gitless():
+    raw = WRAPPER.read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n") > 0                # CRLF throughout
+    text = raw.decode("ascii")
+    lines = [ln for ln in text.splitlines() if not ln.lower().startswith("rem")]
+    body = "\n".join(lines)
+    assert r"set PY=C:\Users\Coen\AppData\Local\Python\bin\python.exe" in body
+    assert 'if "%RL_TASKGUARD%"=="1" goto :guarded' in body
+    guard = [ln for ln in lines if "pipeline.taskguard" in ln]
+    assert len(guard) == 1 and guard[0].startswith('"%PY%" -m pipeline.taskguard --wall-s 1500 ')
+    assert guard[0].rstrip().endswith('-- cmd /d /c "%~f0"')
+    assert lines[lines.index(guard[0]) + 1].strip() == "exit /b %ERRORLEVEL%"
+    assert '"%PY%" -m pipeline.signal_service' in body
+    assert "git" not in body.lower()
+    assert " python " not in f" {body} "                                  # never bare python
+
+
+def _wrapper_scratch(tmp_path, stub: str) -> tuple[Path, Path]:
+    layer = tmp_path / "layer"
+    pkg = layer / "pipeline"
+    pkg.mkdir(parents=True)
+    (layer / "tasks").mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "taskguard.py").write_bytes((PIPELINE / "taskguard.py").read_bytes())
+    (pkg / "signal_service.py").write_text(stub, encoding="utf-8")
+    text = WRAPPER.read_bytes().decode("ascii")
+    assert text.count(LIVE_LAYER) == 1
+    bat = layer / "tasks" / WRAPPER.name
+    bat.write_bytes(text.replace(LIVE_LAYER, str(layer)).encode("ascii"))
+    return layer, bat
+
+
+def _bat_env():
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env.pop("RL_TASKGUARD", None)
+    return env
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the .bat under cmd.exe")
+def test_the_wrapper_passes_the_services_exit_code_through_the_guard(tmp_path):
+    stub = "import os\nprint('stub', os.environ.get('RL_TASKGUARD'))\nraise SystemExit(2)\n"
+    layer, bat = _wrapper_scratch(tmp_path, stub)
+    r = subprocess.run(["cmd", "/c", str(bat)], env=_bat_env(), capture_output=True, text=True,
+                       timeout=120)
+    assert r.returncode == 2, r.stdout + r.stderr
+    log = (layer / "logs" / "signal-run.log").read_text(encoding="utf-8")
+    assert "stub 1" in log                                   # ran as the guard's inner copy
+    assert log.splitlines()[-1].strip().endswith("exit 2 ====")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the .bat under cmd.exe")
+def test_the_wall_ends_an_overrunning_service_and_the_next_fire_logs(tmp_path):
+    """An overrun is killed at the wall (exit 124, its grandchild too) and its
+    log handle is released: the next fire opens the log and runs."""
+    import re
+    from .test_taskguard import _alive, _kill, _wait_dead
+    sleeper = (
+        "import os, subprocess, sys, time\n"
+        f"d = {str(tmp_path)!r}\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        "open(os.path.join(d, 'grandchild.pid'), 'w').write(str(g.pid))\n"
+        "time.sleep(300)\n")
+    layer, bat = _wrapper_scratch(tmp_path, sleeper)
+    text, n = re.subn(r"--wall-s 1500 ", "--wall-s 4 ", bat.read_bytes().decode("ascii"))
+    assert n == 1
+    bat.write_bytes(text.encode("ascii"))
+    r = subprocess.run(["cmd", "/c", str(bat)], env=_bat_env(), timeout=120)
+    g = int((tmp_path / "grandchild.pid").read_text())
+    try:
+        assert r.returncode == 124
+        assert _wait_dead(g)
+    finally:
+        if _alive(g):
+            _kill(g)
+    log = layer / "logs" / "signal-run.log"
+    assert "taskguard: wall 4s reached" in log.read_text(encoding="utf-8").splitlines()[-1]
+    (layer / "pipeline" / "signal_service.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    r = subprocess.run(["cmd", "/c", str(bat)], env=_bat_env(), timeout=120)
+    assert r.returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines()[-1].strip().endswith("exit 0 ====")
+
+
+# ---------------- 2b-3 Task 14: logs/signals/status.json (the Sentinel channel) ----------
+
+def _status(tmp_path) -> dict:
+    return json.loads((tmp_path / "logs" / "signals" / "status.json").read_text(encoding="utf-8"))
+
+
+def _seed_status(tmp_path, body) -> Path:
+    p = tmp_path / "logs" / "signals" / "status.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(body, bytes):
+        p.write_bytes(body)
+    else:
+        p.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    return p
+
+
+def _run_day(bars):
+    """The --as-of the fixture's last bar is fresh on (the default _argv day)."""
+    return _next(bars)
+
+
+def test_status_is_written_on_a_clean_publish(tmp_path):
+    reg, data, bars = _fixture_layer(tmp_path)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    st = _status(tmp_path)
+    assert set(st) == {"written_utc", "bar_end", "exit_code", "published", "deferred",
+                       "deferred_since", "deferrals_not_computed"}
+    assert st["deferrals_not_computed"] is False
+    dt.datetime.strptime(st["written_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    assert (st["bar_end"], st["exit_code"], st["published"]) == (bars[-1]["date"], 0, 2)
+    assert st["deferred"] == {} and st["deferred_since"] == {}
+
+
+def test_status_lists_a_deferral_and_dates_it_to_the_run_day(tmp_path):
+    reg, data, bars = _with_btc_only(tmp_path)
+    _lag_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 0           # deferrals alone still exit 0
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (0, 1, bars[-1]["date"])
+    assert set(st["deferred"]) == {SPEC["strategy_id"], "live0000000000001"}
+    assert all("ETHUSD behind" in r for r in st["deferred"].values())
+    day = _run_day(bars)
+    assert st["deferred_since"] == {SPEC["strategy_id"]: day, "live0000000000001": day}
+    # the status's deferred is exactly the targets file's
+    targets = json.loads((tmp_path / "logs" / "signals"
+                          / f"targets-{bars[-1]['date']}.json").read_text(encoding="utf-8"))
+    assert st["deferred"] == targets["deferred"]
+
+
+def test_status_is_written_on_an_exit_2_with_the_deferrals_as_computed(tmp_path):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _lag_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (2, 0, bars[-1]["date"])
+    assert set(st["deferred"]) == {SPEC["strategy_id"], "live0000000000001"}
+    assert set(st["deferred_since"]) == set(st["deferred"])
+    assert not list((tmp_path / "logs" / "signals").glob("targets-*.json"))   # no targets
+
+
+@pytest.mark.parametrize("as_of_days", [2, 0])           # stale, partial
+def test_status_is_written_on_a_stale_or_partial_refusal(tmp_path, as_of_days):
+    reg, data, bars = _fixture_layer(tmp_path)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=as_of_days)).isoformat())) == 2
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (2, 0, bars[-1]["date"])
+    assert st["deferred"] == {} and st["deferred_since"] == {}      # no previous status
+    assert st["deferrals_not_computed"] is True
+
+
+def test_status_is_written_on_a_malformed_csv_with_a_null_bar_end(tmp_path):
+    reg, data, _ = _fixture_layer(tmp_path)
+    (data / "ETHUSD_1d.csv").write_bytes(b"date,open\n2026-01-01,abc\n")
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (2, 0, None)
+
+
+def test_status_is_written_on_a_missing_registry(tmp_path):
+    _, data, _ = _fixture_layer(tmp_path)
+    assert S.run(["--registry", str(tmp_path / "nope.jsonl"), "--data-dir", str(data),
+                  "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"]) == 2
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (2, 0, None)
+
+
+def test_status_is_written_when_nothing_is_served(tmp_path):
+    reg = Registry(tmp_path / "registry_log.jsonl")
+    reg.append("strategy_registered", SPEC)                  # proposed only
+    data = tmp_path / "data"
+    data.mkdir()
+    assert S.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                  "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"]) == 0
+    st = _status(tmp_path)
+    assert (st["exit_code"], st["published"], st["bar_end"]) == (0, 0, None)
+    assert st["deferred"] == {} and st["deferred_since"] == {}
+    assert not list((tmp_path / "logs" / "signals").glob("targets-*.json"))
+
+
+def test_deferred_since_is_carried_for_a_sid_still_deferred_and_dropped_otherwise(tmp_path):
+    reg, data, bars = _with_btc_only(tmp_path)
+    _lag_eth(data)
+    day = _run_day(bars)
+    _seed_status(tmp_path, {
+        "written_utc": "2026-01-01T00:45:00Z", "bar_end": "2025-12-31", "exit_code": 0,
+        "published": 1, "deferred": {},
+        "deferred_since": {SPEC["strategy_id"]: "2026-01-01",    # still deferred: carried
+                           BTC_ONLY: "2026-01-01",               # published now: dropped
+                           "gone0000000000001": "2026-01-01"}})  # no longer served: dropped
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert _status(tmp_path)["deferred_since"] == {
+        SPEC["strategy_id"]: "2026-01-01",                       # the first-seen date survives
+        "live0000000000001": day}                                # newly deferred: today
+
+
+def test_a_clean_publish_clears_deferred_since(tmp_path):
+    """A clean publish after a deferral run clears deferred_since: the next
+    deferral of the same sid starts a fresh clock."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, {"written_utc": "2026-01-01T00:45:00Z", "bar_end": "x", "exit_code": 0,
+                            "published": 0, "deferred": {SPEC["strategy_id"]: "r"},
+                            "deferred_since": {SPEC["strategy_id"]: "2026-01-01"}})
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert _status(tmp_path)["deferred_since"] == {}
+
+
+@pytest.mark.parametrize("body", [
+    "{not json", "[]", '"x"', json.dumps({"deferred_since": ["a"]}),
+    json.dumps({"deferred_since": "2026-01-01"}), b"\xff\xfe\x00",
+])
+def test_a_malformed_previous_status_is_treated_as_empty_with_a_warning(tmp_path, capsys, body):
+    reg, data, bars = _with_btc_only(tmp_path)
+    _lag_eth(data)
+    _seed_status(tmp_path, body)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "status.json" in out
+    day = _run_day(bars)
+    assert _status(tmp_path)["deferred_since"] == {SPEC["strategy_id"]: day,
+                                                   "live0000000000001": day}
+
+
+def test_a_missing_previous_status_is_silent(tmp_path, capsys):
+    reg, data, _ = _fixture_layer(tmp_path)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_an_unreadable_date_for_one_sid_restarts_only_that_sid(tmp_path):
+    reg, data, bars = _with_btc_only(tmp_path)
+    _lag_eth(data)
+    _seed_status(tmp_path, {"deferred_since": {SPEC["strategy_id"]: "2026-01-01",
+                                               "live0000000000001": "garbage"}})
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    assert _status(tmp_path)["deferred_since"] == {SPEC["strategy_id"]: "2026-01-01",
+                                                   "live0000000000001": _run_day(bars)}
+
+
+def test_status_is_published_atomically_with_the_same_retry(tmp_path, monkeypatch):
+    """The status replace retries a held target exactly as the targets publish
+    does, and leaves no .tmp behind."""
+    reg, data, bars = _fixture_layer(tmp_path)
+    real = os.replace
+    calls = []
+
+    def fake(src, dst):
+        calls.append(Path(dst).name)
+        if Path(dst).name == "status.json" and calls.count("status.json") <= 3:
+            raise PermissionError(13, "in use by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(S.os, "replace", fake)
+    monkeypatch.setattr(S.time, "sleep", lambda s: None)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    assert calls.count("status.json") == 4
+    assert sorted(p.name for p in (tmp_path / "logs" / "signals").iterdir()) == [
+        "status.json", f"targets-{bars[-1]['date']}.json"]
+
+
+def test_a_crash_writes_no_status_and_leaves_the_previous_one(tmp_path, monkeypatch):
+    reg, data, _ = _fixture_layer(tmp_path)
+    prev = _seed_status(tmp_path, {"written_utc": "2026-01-01T00:45:00Z", "bar_end": "2025-12-31",
+                                   "exit_code": 0, "published": 2, "deferred": {},
+                                   "deferred_since": {}})
+    before = prev.read_bytes()
+
+    def boom(*a, **k):
+        raise RuntimeError("engine blew up")
+
+    monkeypatch.setattr(S, "next_bar_position", boom)
+    with pytest.raises(RuntimeError):
+        S.run(_argv(tmp_path, reg, data))
+    monkeypatch.undo()
+    assert prev.read_bytes() == before
+    assert sorted(p.name for p in prev.parent.iterdir()) == ["status.json"]
+
+
+def test_prune_never_touches_status_json(tmp_path):
+    """prune_targets alone (run() rewrites status.json after it, so a run
+    would not show this): status.json survives byte-identical while the old
+    targets files beyond the newest KEEP_TARGETS go."""
+    out_dir = tmp_path / "logs" / "signals"
+    old = _old_targets(out_dir, dt.date(2026, 1, 1), 40)
+    status = _seed_status(tmp_path, {"deferred_since": {"abc": "2026-01-01"}})
+    before = status.read_bytes()
+    written = old[-1]
+    S.prune_targets(out_dir, written)
+    assert status.read_bytes() == before
+    assert sorted(p.name for p in out_dir.glob("targets-*.json")) == sorted(
+        p.name for p in old[-S.KEEP_TARGETS:])
+    assert not old[0].exists()
+
+
+# ---------------- round 2: a failed status write, carry-forward on a refusal ----------
+
+def _status_replace_always_fails(monkeypatch):
+    real = os.replace
+
+    def fake(src, dst):
+        if Path(dst).name == "status.json":
+            raise PermissionError(13, "status.json held by the sentinel")
+        return real(src, dst)
+
+    monkeypatch.setattr(S.os, "replace", fake)
+    monkeypatch.setattr(S.time, "sleep", lambda s_: None)
+
+
+def test_a_failed_status_write_does_not_turn_a_good_publish_into_exit_1(tmp_path, monkeypatch, capsys):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _status_replace_always_fails(monkeypatch)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    out = capsys.readouterr().out
+    assert "WARNING: could not write status.json" in out and "held by the sentinel" in out
+    sig = tmp_path / "logs" / "signals"
+    assert (sig / f"targets-{bars[-1]['date']}.json").exists()            # the product is whole
+    assert sorted(p.name for p in sig.iterdir()) == [f"targets-{bars[-1]['date']}.json"]  # no .tmp
+
+
+def test_a_failed_status_write_does_not_turn_a_refusal_into_exit_1(tmp_path, monkeypatch, capsys):
+    reg, data, _ = _fixture_layer(tmp_path)
+    _lag_eth(data)
+    _status_replace_always_fails(monkeypatch)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    monkeypatch.undo()
+    assert "WARNING: could not write status.json" in capsys.readouterr().out
+
+
+def test_any_status_write_error_is_a_warning_not_a_crash(tmp_path, monkeypatch, capsys):
+    """Disk full / anything else, not only the PermissionError."""
+    reg, data, _ = _fixture_layer(tmp_path)
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(S, "write_status", full)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    assert "WARNING: could not write status.json" in capsys.readouterr().out
+
+
+def test_a_tmp_that_cannot_be_deleted_does_not_mask_the_write_error(tmp_path, monkeypatch):
+    out_dir = tmp_path / "logs" / "signals"
+    _status_replace_always_fails(monkeypatch)
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "status.json.tmp":
+            raise PermissionError(13, "tmp locked by an antivirus scan")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(PermissionError, match="held by the sentinel"):    # not the unlink error
+        S.write_status(out_dir, dt.date(2026, 1, 2), "2026-01-01", 0, 1, {})
+
+
+PREV = {"written_utc": "2026-01-01T00:45:00Z", "bar_end": "2025-12-31", "exit_code": 0,
+        "published": 1, "deferred": {"abc0000000000001": "ETHUSD behind: last bar 2025-12-30"},
+        "deferred_since": {"abc0000000000001": "2026-01-01"}, "deferrals_not_computed": False}
+
+
+@pytest.mark.parametrize("as_of_days", [2, 0])           # stale, partial
+def test_a_refusal_before_the_deferral_step_carries_the_previous_clocks(tmp_path, as_of_days):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=as_of_days)).isoformat())) == 2
+    st = _status(tmp_path)
+    assert st["deferred"] == PREV["deferred"] and st["deferred_since"] == PREV["deferred_since"]
+    assert st["deferrals_not_computed"] is True and st["exit_code"] == 2
+
+
+def test_a_malformed_csv_or_missing_registry_refusal_also_carries_them(tmp_path):
+    reg, data, _ = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    (data / "ETHUSD_1d.csv").write_bytes(b"date,open\n2026-01-01,abc\n")
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert (st["deferred"], st["deferred_since"]) == (PREV["deferred"], PREV["deferred_since"])
+    assert st["deferrals_not_computed"] is True
+    assert S.run(["--registry", str(tmp_path / "nope.jsonl"), "--data-dir", str(data),
+                  "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"]) == 2
+    st = _status(tmp_path)
+    assert (st["deferred"], st["deferred_since"]) == (PREV["deferred"], PREV["deferred_since"])
+
+
+def test_a_refusal_that_computed_deferrals_recomputes_them(tmp_path):
+    """exit 2 because nothing is publishable: the deferrals ARE computed, so
+    the previous (stale) sid is dropped and the flag is false."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    _lag_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert "abc0000000000001" not in st["deferred"] and st["deferrals_not_computed"] is False
+    assert set(st["deferred"]) == {SPEC["strategy_id"], "live0000000000001"}
+
+
+def test_a_later_normal_run_recomputes_and_drops_recovered_sids(tmp_path):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=2)).isoformat())) == 2
+    assert _status(tmp_path)["deferred_since"] == PREV["deferred_since"]    # carried over the refusal
+    assert S.run(_argv(tmp_path, reg, data)) == 0                           # data is fine again
+    st = _status(tmp_path)
+    assert st["deferred"] == {} and st["deferred_since"] == {}               # the recovered sid is gone
+    assert st["deferrals_not_computed"] is False

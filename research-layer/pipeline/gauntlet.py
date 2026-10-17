@@ -402,8 +402,8 @@ def check_aligned(returns_by_id: dict[str, list[float]]) -> None:
 
 BENCHMARK_BASIS = {
     "fx": "price returns, carry excluded on both sides",
-    # crypto is DORMANT until SP5 Phase 3 flips CLASSES["crypto"]["benchmark"];
-    # declared now so the flip is a one-line cells.py change later.
+    # crypto: live since Switch 1 (SP5 Phase 3) flipped
+    # CLASSES["crypto"]["benchmark"] to "self" with per-cell routing.
     "crypto": "price returns, staking/funding yield excluded on both sides",
 }
 _DEFAULT_BASIS = "price returns, dividends excluded on both sides"

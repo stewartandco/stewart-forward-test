@@ -159,9 +159,10 @@ import copy
 
 from .registry import Registry
 from .composer import (composition_fingerprint, registered_fingerprints,
-                       validate_family, expand_family, run as composer_run)
+                       validate_family, expand_family_for_class,
+                       run as composer_run)
 from .blocks import BLOCK_TYPES, block_type_payload
-from .test_composer import good_family, ACCEPTED
+from .test_composer import good_family, ACCEPTED, expand_fx
 from .test_pipeline import make_card
 
 TS = "2026-08-15T00:00:00Z"
@@ -170,24 +171,27 @@ TS = "2026-08-15T00:00:00Z"
 # ---------------- composition fingerprint ----------------
 
 def test_fingerprint_ignores_identity_fields():
-    a = expand_family(good_family(sweep=[]), "runA", "modelA", TS)[0]
-    b = expand_family(good_family(sweep=[]), "runB", "modelB",
-                      "2027-01-01T00:00:00Z")[0]
+    a = expand_fx(good_family(sweep=[]), "runA", "modelA", TS, assets=["EUR"])[0]
+    b = expand_fx(good_family(sweep=[]), "runB", "modelB",
+                  "2027-01-01T00:00:00Z", assets=["EUR"])[0]
     assert a["strategy_id"] != b["strategy_id"]      # content-addressed differ
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_ignores_block_and_asset_order():
-    a = expand_family(good_family(sweep=[], assets=["BTCUSD", "ETHUSD"]),
-                      "r", "m", TS)[0]
+    # a per-cell spec carries one asset, so widen its universe by hand: the
+    # fingerprint's order-insensitivity is a property of composition_fingerprint,
+    # not of any expander
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
+    a["universe"]["assets"] = ["EUR", "GBP"]
     b = copy.deepcopy(a)
     b["blocks"] = list(reversed(b["blocks"]))
-    b["universe"]["assets"] = ["ETHUSD", "BTCUSD"]
+    b["universe"]["assets"] = ["GBP", "EUR"]
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_changes_with_any_param():
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["blocks"][0]["params"]["t_min"] = 2.5
     assert composition_fingerprint(a) != composition_fingerprint(b)
@@ -196,14 +200,14 @@ def test_fingerprint_changes_with_any_param():
 def test_fingerprint_snaps_params_defensively():
     # an unsnapped int must not fingerprint differently from its float grid
     # value — the guard cannot depend on callers having run _snap_to_grid
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["blocks"][0]["params"]["t_min"] = 2      # grid value is 2.0
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_distinguishes_universe_fields():
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["universe"]["asset_class"] = "futures"
     assert composition_fingerprint(a) != composition_fingerprint(b)
@@ -216,8 +220,8 @@ def test_registered_fingerprints_maps_to_ids(tmp_path):
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
-    spec = expand_family(good_family(sweep=[], card_ids=[card["card_id"]]),
-                         "r", "m", TS)[0]
+    spec = expand_fx(good_family(sweep=[], card_ids=[card["card_id"]]),
+                     "r", "m", TS, assets=["EUR"])[0]
     reg.register_strategy(spec)
     fps = registered_fingerprints(reg)
     assert fps[composition_fingerprint(spec)] == spec["strategy_id"]
@@ -235,26 +239,43 @@ def test_family_with_both_regime_gates_rejected():
     assert any("regime_ma and regime_ma_short" in e for e in errs)
 
 
-from .composer import PROPOSAL_SCHEMA, SYSTEM_PROMPT
+from .composer import PROPOSAL_SCHEMA, CRYPTO_SYSTEM_PROMPT
 from .test_composer import register_grammar
+from .testing_crypto import active_crypto
+
+
+@pytest.fixture
+def one_crypto_cell():
+    """Rule 7 is about compositions, not about how many cells a family
+    spans: narrow crypto to one active cell (BTCUSDT 1d) so a family of n
+    combos is n specs and the counts below read as before Switch 1."""
+    with active_crypto(("BTCUSDT",)):
+        yield
 
 
 def seeded_registry_with_spec(tmp_path):
     """Registry with grammar, an accepted card, and one registered strategy
-    built from good_family. Returns (registry, card_id, registered_spec)."""
+    built from good_family through the crypto per-cell expander (call it
+    under one_crypto_cell). Returns (registry, card_id, registered_spec)."""
     reg = Registry(tmp_path / "reg.jsonl")
     register_grammar(reg)
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
-    spec = expand_family(good_family(sweep=[], card_ids=[card["card_id"]]),
-                         "seed-run", "m", TS)[0]
+    specs = expand_family_for_class(good_family(sweep=[], card_ids=[card["card_id"]]),
+                                    "seed-run", "m", TS, "crypto")
+    assert len(specs) == 1, "seeded_registry_with_spec needs one_crypto_cell"
+    spec = specs[0]
     reg.register_strategy(spec)
     return reg, card["card_id"], spec
 
 
 # ---------------- rule 7: no resurrection ----------------
 
+_on_one_crypto_cell = pytest.mark.usefixtures("one_crypto_cell")
+
+
+@_on_one_crypto_cell
 def test_run_drops_family_reproposing_registered_composition(tmp_path, capsys):
     reg, cid, spec = seeded_registry_with_spec(tmp_path)
     rc = composer_run(
@@ -266,6 +287,7 @@ def test_run_drops_family_reproposing_registered_composition(tmp_path, capsys):
     assert spec["strategy_id"] in out
 
 
+@_on_one_crypto_cell
 def test_run_drops_within_run_duplicate_composition(tmp_path, capsys):
     reg, cid, _ = seeded_registry_with_spec(tmp_path)
     fam_a = good_family(sweep=[], card_ids=[cid], family="fam_a")
@@ -280,6 +302,7 @@ def test_run_drops_within_run_duplicate_composition(tmp_path, capsys):
     assert "fam_a" in out and "DROPPED family fam_b" in out
 
 
+@_on_one_crypto_cell
 def test_run_allows_genuinely_new_composition(tmp_path, capsys):
     reg, cid, _ = seeded_registry_with_spec(tmp_path)
     fam = good_family(sweep=[], card_ids=[cid], family="fresh")
@@ -293,6 +316,7 @@ def test_run_allows_genuinely_new_composition(tmp_path, capsys):
     assert "1 families kept" in out
 
 
+@_on_one_crypto_cell
 def test_run_drops_family_with_duplicate_sibling_compositions(tmp_path, capsys):
     reg, cid, _ = seeded_registry_with_spec(tmp_path)
     fam = good_family(card_ids=[cid], family="mirrored")
@@ -323,9 +347,9 @@ def test_proposal_schema_requires_regime_hypothesis():
 
 
 def test_system_prompt_states_gen1_failure_and_new_types():
-    assert "trend_scan_ds" in SYSTEM_PROMPT
-    assert "regime_ma_short" in SYSTEM_PROMPT
-    assert "long-biased" in SYSTEM_PROMPT
+    assert "trend_scan_ds" in CRYPTO_SYSTEM_PROMPT
+    assert "regime_ma_short" in CRYPTO_SYSTEM_PROMPT
+    assert "long-biased" in CRYPTO_SYSTEM_PROMPT
 
 
 from .gauntlet import (PROTOCOL as G_PROTOCOL, window_vol, evaluate_spec,
@@ -432,6 +456,7 @@ def test_diagnostic_has_no_write_path():
         assert forbidden not in src, f"diagnostic must not write: {forbidden}"
 
 
+@_on_one_crypto_cell
 def test_diagnostic_runs_and_reports(tmp_path, capsys):
     import subprocess, sys
     reg, cid, spec = seeded_registry_with_spec(tmp_path)
@@ -445,7 +470,8 @@ def test_diagnostic_runs_and_reports(tmp_path, capsys):
                        {"edge_decay_pct": -60.0}, "0" * 64)
     reg.record_state_change(spec["strategy_id"], "graveyard", "edge_decay")
     from .test_screen import write_data_dir, dated_target_hit_bars
-    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    # the seeded spec is a per-cell BTCUSDT 1d spec since Switch 1
+    data = write_data_dir(tmp_path, {"BTCUSDT": dated_target_hit_bars()})
     n_before = sum(1 for _ in reg.entries())
     out = subprocess.run(
         [sys.executable, str(DIAG), "--registry", str(reg.log_path),
