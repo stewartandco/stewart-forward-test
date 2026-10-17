@@ -1412,11 +1412,12 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `\Morpheus\31_SignalService`, daily 08:45, after the 08:20 quarantine
   daily) writes `logs/signals/targets-<bar_end>.json` for every crypto 1d
   strategy in state `quarantine` or `live`: `{bar_end, engine_rev,
-  data_digest {asset: sha256 of data/<asset>_1d.csv}, written_utc,
-  strategies {sid: {spec_sha, max_dd (the screened verdict's, or null),
-  assets {asset: {side long|short|flat, frac}}}}}`. The trading-systems
-  executor reads exactly this shape; change it only together with the
-  executor.
+  data_digest {asset: sha256 of data/<asset>_1d.csv, for the assets the
+  published strategies trade}, written_utc, strategies {sid: {spec_sha, max_dd
+  (the screened verdict's, or null), assets {asset: {side long|short|flat,
+  frac}}}}, deferred {sid: reason}}` (`deferred` is always present, `{}` when
+  nothing is deferred; the executor ignores it). The trading-systems executor
+  reads exactly this shape; change it only together with the executor.
 - **READ-ONLY.** One `Registry.snapshot()` read (complete lines only), never
   an append, never `logs/chain.lock`, never data/, never git. The file is
   published by `os.replace` from a `.json.tmp`, so the executor never reads a
@@ -1434,38 +1435,88 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   without touching the level. That is not in the parity check's excused
   class (stop/target exits) and was not observed there (3656 compared,
   2026-10-16). Tests: `test_signal_service.py`.
-- **Every served asset must end on bar_end (fix round 1).** Each
+- **Freshness is per strategy (fix round 1; minors item 1, 2026-10-16).** Each
   `data/<asset>_1d.csv` is read ONCE; `data_digest` is the sha256 of exactly
   the bytes the bars were parsed from (`parse_daily_csv` = `screen.load_bars`'
-  parse, test-pinned). bar_end is the latest last-bar date; if any served
-  asset's file is missing (the error names the asset and every strategy that
-  trades it), empty, or ends earlier, the run prints every asset's last date,
-  writes NOTHING and exits 2 -- never a flat or omitted asset under a fresh
-  bar_end. The executor then holds (its 26 h rule) and the Sentinel sees
-  task 31 fail. Same case `quarantine.observe_day` refuses.
+  parse, test-pinned). bar_end is the latest last-bar date across every
+  served asset. A strategy is published only if EVERY asset it trades has a
+  price file, is non-empty and ends on bar_end; any other strategy is
+  DEFERRED: listed under `deferred` with the reason (`<asset>: no price file
+  ...`, `<asset> EMPTY`, `<asset> behind: last bar D, bar_end E`), printed,
+  and absent from `strategies` -- never a flat or omitted asset under a fresh
+  bar_end. The executor (`bot/execution/runner.py`) reads a strategy absent
+  from a fresh file exactly like a stale signal: it holds that edge's last
+  valid contribution <= 26 h from its bar's close ("signal stale, holding"),
+  then flat ("signal stale"). When NO strategy can be published the run
+  prints every asset's last date and every deferral, writes NOTHING and
+  exits 2, and the Sentinel sees task 31 fail. **Today every served strategy
+  trades BTCUSD+ETHUSD, so one lagging asset still refuses the whole run**
+  (test-pinned).
+- **bar_end must be EXACTLY the bar that closed at the start of the run's UTC
+  day (fix wave I2; minors item 2).** `--as-of` - 1 day; `--as-of YYYY-MM-DD`
+  defaults to the UTC date today and exists for tests. OLDER = stale:
+  uniformly stale data (every asset on the same old bar) refuses instead of
+  rewriting an old targets file and exiting 0. NEWER = a bar dated the run
+  day or later, i.e. a still-open (partial) bar; `data_fetch` drops the open
+  kline, so that is bad data and refuses (`partial:`). A missing registry
+  file refuses too: `Registry.snapshot` reads a missing file as an empty
+  chain, which used to print "nothing written" and exit 0. An existing chain
+  with nothing in quarantine/live still exits 0.
 - **Per-cell USDT strategies are served (Switch 1).** A crypto 1d strategy in
   quarantine/live is now a ONE-asset book on a USDT cell (`BTCUSDT`, file
   `data/BTCUSDT_1d.csv`, written by 33_CryptoGridRefresh); the pre-switch
-  pooled BTCUSD+ETHUSD books are served as before. **One lagging USDT file
-  stops ALL targets**, not just its strategies': the bar_end rule above spans
-  every served asset. Only assets some quarantine/live strategy trades count,
-  so a dead cell nobody trades is loud in the refresh ledger and invisible
-  here. The refresh's end cap (last complete UTC day) is what puts the USDT
-  files on the same `bar_end` as the 08:20 BTCUSD/ETHUSD.
-- **Nothing fresh is a refusal too (fix wave, I2).** bar_end must be at least
-  the daily bar that closed at the start of the run's UTC day (`--as-of` - 1
-  day; `--as-of YYYY-MM-DD` defaults to the UTC date today and exists for
-  tests). Uniformly stale data (every asset on the same OLD bar) therefore
-  refuses instead of rewriting an old targets file and exiting 0. A missing
-  registry file refuses too: `Registry.snapshot` reads a missing file as an
-  empty chain, which used to print "nothing written" and exit 0. An existing
-  chain with nothing in quarantine/live still exits 0.
-- **Exit codes (M8):** 0 written (or nothing served); **2 = REFUSED** (lagging,
-  missing or empty asset file; stale bar_end; missing registry), nothing
-  written; 1 = an unhandled crash (Python's own); 4 = the wrapper could not
-  open its run log. The publish's `os.replace` is retried up to 8 times
-  (0.25 s apart) on PermissionError, which Windows raises while a reader
-  holds the target open, then raises (exit 1).
+  pooled BTCUSD+ETHUSD books are served as before. With per-strategy
+  deferral (above), one lagging USDT file defers only the strategies that
+  trade it; the rest publish. A MALFORMED CSV still refuses the whole run,
+  which is why `crypto_data.fetch_symbol` validates the whole merged CSV
+  with the same rules before it replaces a file (2b-3 plan 1 Task 13). The
+  refresh's end cap (last complete UTC day) is what puts the USDT files on
+  the same `bar_end` as the 08:20 BTCUSD/ETHUSD. The Sentinel channel for
+  deferrals (warning below) is 2b-3 plan 1 Task 14, a Switch 1 merge
+  precondition.
+- **A malformed price CSV refuses the whole run (minors item 3 + review
+  follow-up).** A header without every column (a BOM-prefixed `date`
+  included), a short row, a row LONGER than the header (csv.DictReader files
+  the extras under the `None` key), a non-numeric or non-finite price, a
+  non-positive open/high/low/close (volume may be 0), a date that is not
+  `YYYY-MM-DD` (Python 3.11+ `fromisoformat` alone would take `20260102`), a
+  second row for the same day (time part ignored; the message names the
+  first row), or bytes that are not UTF-8 raise `DataRefused` naming the file
+  and the row (the physical line, header = row 1): exit 2, nothing written,
+  never a traceback.
+- **⚠ Deferrals alone exit 0 and have NO Sentinel channel yet.** A run that
+  publishes some strategies and defers others prints the deferrals to
+  `logs/signal-run.log` and lists them under `deferred` in the targets file,
+  but the task result is 0 and nothing the Ops Sentinel reads carries them
+  (no degraded-ledger item, no status file), so a strategy deferred day after
+  day is silent. Harmless TODAY only because every served strategy trades
+  BTCUSD+ETHUSD, so any deferral defers everything and exits 2. **Before any
+  strategy whose universe is not BTCUSD+ETHUSD is served, add a Sentinel
+  channel for deferrals** (e.g. a `logs/degraded_*.json` item read by
+  `research_degraded`, the quarantine pattern).
+- **Retention (minors item 4).** After a successful publish,
+  `targets-<YYYY-MM-DD>.json` files beyond the newest `KEEP_TARGETS` (30) by
+  the date in the name are deleted. Never the file just written (even if a
+  re-run for an older day left newer names); a name without a date and the
+  `.json.tmp` are never touched; a file that cannot be deleted (a reader holds
+  it) is printed (`could not prune ...`) and skipped. A refusal prunes nothing.
+- **Exit codes (M8):** 0 written (or nothing served; deferrals alone are
+  still 0, see the Sentinel warning above); **2 = REFUSED** (no strategy publishable, stale or partial
+  bar_end, a malformed CSV row, missing registry), nothing written; 1 = an
+  unhandled crash (Python's own); 4 = the wrapper could not open its run log;
+  124 / 125 = the task guard ended the run (wall / the task's cmd.exe
+  stopped). The publish's `os.replace` is retried up to 8 times (0.25 s
+  apart) on PermissionError, which Windows raises while a reader holds the
+  target open, then raises (exit 1).
+- **The wrapper runs under the task guard (minors item 5).**
+  `tasks/run_signal_service.bat` re-runs itself under `python -m
+  pipeline.taskguard --wall-s 1500 --log ...` (`RL_TASKGUARD=1` marks the
+  inner copy; the run_gauntlet_worker.bat pattern), so an overrun is ended
+  with its python and the run log handle is released for the next fire. No
+  `--lock`/`--release-lock`/`--git-dir`: the service takes no lock and runs
+  no git, so nothing delays the kill, which lands inside the task's PT30M.
+  Any other exit code passes through unchanged. CRLF, `%PY%` by absolute
+  path, no git (test-pinned).
 - **The module is `signal_service.py`, NEVER `signal.py` (fix wave, C1).**
   A script run BY PATH puts its own directory first on sys.path, and
   trading-systems' `run_executor.bat` runs `pipeline\taskguard.py` by path:
