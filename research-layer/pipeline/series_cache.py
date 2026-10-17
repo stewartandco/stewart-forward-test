@@ -68,12 +68,22 @@ and the run goes on with the in-memory entry (the PBO cache precedent in
 gauntlet_stats.py). `read_only=True` never writes (the signal service's
 contract) but still extends in memory.
 
+PRUNE (`prune`, ledger ruling, design s3.3 "size bounded and prunable"): the
+quarantine recorder calls it ONCE per process run, on the cache it builds,
+before the first date is simulated. It removes `*.tmp` files older than an hour
+(a writer killed between write and `os.replace`), entries stored under another
+ENGINE_REV (unreachable, never served) and files `_load` would call corrupt
+(`_parse_blob`, the one parse; `_load` treats those as a MISS and the next write
+heals them). It does nothing on a read-only cache or an absent directory and
+never raises (a per-file error leaves that file alone).
+
 IMPORT DIRECTION: this module takes ENGINE_REV from the engine; `engine.py`
 imports SeriesCache only lazily, inside `simulate_asset` (and under
 TYPE_CHECKING for annotations), so there is no import cycle (Task 2).
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import os
@@ -134,6 +144,46 @@ def _checksum(inputs_b: bytes, values: array, none_prefix: int) -> str:
     h.update(values.tobytes())
     h.update(int(none_prefix).to_bytes(8, "little", signed=True))
     return h.hexdigest()
+
+
+def _parse_blob(blob: bytes) -> tuple[str, _Entry] | None:
+    """(stored key repr, entry) when `blob` is a well-formed entry, else None
+    for ANY doubt: a parse error, a missing field, a wrong dtype/shape, a
+    length inconsistency or a checksum mismatch. The one parse behind both
+    `_load` (a None is a miss) and `prune` (a None is a corrupt file)."""
+    try:
+        with np.load(io.BytesIO(blob), allow_pickle=False) as z:
+            inputs = z["inputs"]
+            values = z["values"]
+            none_prefix = int(z["none_prefix"])
+            stored_key = str(z["key"])
+            expected = str(z["sha256"])
+        f8 = np.dtype("<f8")
+        if inputs.dtype != f8 or values.dtype != f8                 or inputs.ndim != 1 or values.ndim != 1:
+            return None
+        n = int(inputs.shape[0])
+        if n == 0 or none_prefix < 0 or none_prefix + int(values.shape[0]) != n:
+            return None
+        inputs_b = inputs.tobytes()
+        vals = array("d")
+        vals.frombytes(values.tobytes())
+        if _checksum(inputs_b, vals, none_prefix) != expected:
+            return None
+        return stored_key, _Entry(n, inputs_b, none_prefix, vals)
+    except Exception:                   # any parse error is a miss, never a raise
+        return None
+
+
+def _stored_rev(key_repr: str):
+    """ENGINE_REV out of a stored key's repr `(kind, params, rev, cell)`, or
+    None when the repr is not a 4-tuple literal (then the file is corrupt)."""
+    try:
+        key = ast.literal_eval(key_repr)
+    except Exception:
+        return None
+    if not isinstance(key, tuple) or len(key) != 4:
+        return None
+    return key[2]
 
 
 class SeriesCache:
@@ -208,6 +258,59 @@ class SeriesCache:
             out.extend(entry.values[: n - p].tolist())
         return out
 
+
+    # ---------------------------------------------------------------- prune
+
+    def prune(self, *, now: float | None = None,
+              tmp_max_age_s: float = 3600.0) -> dict:
+        """Housekeeping (ledger ruling, design s3.3 "size bounded and
+        prunable"). Under the cache directory it deletes
+          (a) `*.tmp` files older than `tmp_max_age_s` by mtime: leftovers of
+              a writer killed between its write and `os.replace`. A younger
+              one may belong to a live writer and is never touched;
+          (b) entry files (`*.npz`) stored under a different ENGINE_REV than
+              the current one (read at call time): a bumped revision makes
+              them unreachable, never served;
+          (c) entry files that cannot be parsed as an entry. `_load` treats
+              the same file as a MISS and the next write heals it by
+              replacement; prune removes it sooner. Same parse (`_parse_blob`).
+        Returns {"tmp_removed", "stale_rev_removed", "corrupt_removed",
+        "kept"}. A no-op returning zeros on a read-only cache or an absent
+        directory. A per-file error (vanished, sharing violation, unreadable
+        right now) is swallowed and that file is left alone; prune never
+        raises."""
+        out = {"tmp_removed": 0, "stale_rev_removed": 0, "corrupt_removed": 0,
+               "kept": 0}
+        if self.read_only or self.directory is None:
+            return out
+        try:
+            names = sorted(os.listdir(self.directory))
+        except Exception:
+            return out
+        t_now = time.time() if now is None else now
+        for name in names:
+            path = self.directory / name
+            try:
+                if name.endswith(".tmp"):
+                    if t_now - path.stat().st_mtime > tmp_max_age_s:
+                        path.unlink()
+                        out["tmp_removed"] += 1
+                elif name.endswith(".npz"):
+                    blob = path.read_bytes()
+                    parsed = _parse_blob(blob)
+                    if parsed is None:
+                        reason = "corrupt_removed"
+                    elif _stored_rev(parsed[0]) != ENGINE_REV:
+                        reason = "stale_rev_removed"
+                    else:
+                        out["kept"] += 1
+                        continue
+                    path.unlink()
+                    out[reason] += 1
+            except Exception:           # vanished, sharing violation, ...
+                continue
+        return out
+
     # ----------------------------------------------------------------- disk
 
     def _path(self, key: tuple) -> Path:
@@ -217,42 +320,24 @@ class SeriesCache:
     def _load(self, key: tuple) -> _Entry | None:
         """The stored entry, or None for ANY doubt (absent, unreadable,
         inconsistent): the caller then recomputes."""
-        path = self._path(key)
-        blob = None
+        blob = self._read_blob(self._path(key))
+        if blob is None:
+            return None
+        parsed = _parse_blob(blob)
+        if parsed is None or parsed[0] != repr(key):
+            return None
+        return parsed[1]
+
+    @staticmethod
+    def _read_blob(path: Path) -> bytes | None:
         for attempt in range(_READ_TRIES):
             try:
-                blob = path.read_bytes()
-                break
+                return path.read_bytes()
             except PermissionError:     # a writer is mid-replace (Windows)
                 time.sleep(_REPLACE_PAUSE_S)
             except OSError:
                 return None
-        if blob is None:
-            return None
-        try:
-            with np.load(io.BytesIO(blob), allow_pickle=False) as z:
-                inputs = z["inputs"]
-                values = z["values"]
-                none_prefix = int(z["none_prefix"])
-                stored_key = str(z["key"])
-                expected = str(z["sha256"])
-            if stored_key != repr(key):
-                return None
-            f8 = np.dtype("<f8")
-            if inputs.dtype != f8 or values.dtype != f8 \
-                    or inputs.ndim != 1 or values.ndim != 1:
-                return None
-            n = int(inputs.shape[0])
-            if n == 0 or none_prefix < 0 or none_prefix + int(values.shape[0]) != n:
-                return None
-            inputs_b = inputs.tobytes()
-            vals = array("d")
-            vals.frombytes(values.tobytes())
-            if _checksum(inputs_b, vals, none_prefix) != expected:
-                return None
-            return _Entry(n, inputs_b, none_prefix, vals)
-        except Exception:               # any parse error is a miss, never a raise
-            return None
+        return None
 
     def _store(self, key: tuple, entry: _Entry) -> None:
         global _write_warned

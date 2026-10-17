@@ -133,6 +133,17 @@ def _series_cache(registry_path: Path) -> SeriesCache:
     cache = _SERIES_CACHES.get(key)
     if cache is None:
         cache = _SERIES_CACHES[key] = SeriesCache(directory)
+        # Housekeeping, ONCE per process run (the cache is built once, before
+        # the first date is simulated, and catch-up's later dates reuse it):
+        # drop dead writers' temp files and entries under an old ENGINE_REV.
+        # Never raises; says something only when it removed something.
+        removed = cache.prune()
+        if any(removed[k] for k in ("tmp_removed", "stale_rev_removed",
+                                    "corrupt_removed")):
+            print(f"seriescache: pruned {removed['tmp_removed']} tmp, "
+                  f"{removed['stale_rev_removed']} stale-rev, "
+                  f"{removed['corrupt_removed']} corrupt "
+                  f"({removed['kept']} kept)", flush=True)
     return cache
 
 

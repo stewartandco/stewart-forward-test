@@ -86,11 +86,14 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import cells
 from .engine import ENGINE_REV, simulate_asset
 from .registry import Registry
-from .series_cache import CACHE_DIRNAME, SeriesCache
+
+if TYPE_CHECKING:       # series_cache imports numpy, which this module did not
+    from .series_cache import SeriesCache   # load before the engine-perf branch
 
 STATES = {"quarantine", "live"}
 REFUSED_EXIT = 2          # every refusal; an unhandled crash exits 1
@@ -423,6 +426,7 @@ def run(argv=None) -> int:
     out = {}
     # engine perf s3.3: READ-ONLY (read_only=True never writes, not even the
     # directory), so the service's contract is unchanged
+    from .series_cache import CACHE_DIRNAME, SeriesCache   # lazy: pulls in numpy
     series_cache = SeriesCache(a.registry.parent / CACHE_DIRNAME, read_only=True)
     for sid, spec in publish.items():
         assets = {x: next_bar_position(spec, bars_by[x], series_cache=series_cache, cell=x)

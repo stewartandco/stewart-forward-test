@@ -1146,6 +1146,7 @@ class _FrozenNow(dt.datetime):
 
 def test_signal_service_never_writes_the_cache(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    from pipeline import series_cache as series_cache_module
     from pipeline.series_cache import CACHE_DIRNAME, SeriesCache
     # written_utc is the one field two runs would differ on
     monkeypatch.setattr(S, "dt", SimpleNamespace(
@@ -1158,7 +1159,8 @@ def test_signal_service_never_writes_the_cache(tmp_path, monkeypatch):
             super().__init__(*a, **k)
             made.append(self)
 
-    monkeypatch.setattr(S, "SeriesCache", Spy)
+    # run() imports the cache lazily, so the name is patched where it lives
+    monkeypatch.setattr(series_cache_module, "SeriesCache", Spy)
     reg_c, data_c, bars = _trend_layer(tmp_path / "cached")
     reg_n, data_n, _ = _trend_layer(tmp_path / "uncached")
     # prefilled as the quarantine recorder leaves it: the real bars, no
@@ -1197,3 +1199,17 @@ def test_signal_service_never_writes_the_cache(tmp_path, monkeypatch):
     assert set(doc["strategies"]) == {TREND_SPEC["strategy_id"]}
     assert doc["strategies"][TREND_SPEC["strategy_id"]]["assets"]["BTCUSD"] == \
         S.next_bar_position(TREND_SPEC, served)
+
+
+def test_importing_the_signal_service_does_not_load_the_series_cache():
+    """The service did not import numpy before the engine-perf branch; the
+    cache (which does) is imported inside run(), so importing the module still
+    loads neither. Nothing else it imports pulls numpy, so both are asserted."""
+    layer = Path(__file__).resolve().parent.parent
+    code = ("import pipeline.signal_service, sys; "
+            "print('numpy' in sys.modules, "
+            "'pipeline.series_cache' in sys.modules)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=layer,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["False", "False"], r.stdout + r.stderr

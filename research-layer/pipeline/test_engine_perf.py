@@ -148,6 +148,30 @@ def test_trend_scan_entries_identical_with_and_without_the_series(etype, directi
     assert any(s != 0 for s in ref[0])          # the fixture actually signals
 
 
+@pytest.mark.parametrize("etype", ["trend_scan", "trend_scan_dense"])
+def test_equal_abs_tstats_across_windows_tie_to_the_first_window(
+        etype, monkeypatch):
+    """max(key=abs) ties to the FIRST window in ascending order, on the direct
+    path and on the series path alike. Real data almost never ties, so the
+    t-stat is faked: window 20 reads +2.5, every longer window -2.5 (equal
+    |t|, opposite sign), and the sign decides long vs short."""
+    monkeypatch.setattr(engine, "trend_tstat",
+                        lambda w: 2.5 if len(w) == 20 else -2.5)
+    bars = walk_bars(150)
+    closes = [b["close"] for b in bars]
+    params = {"max_lookback": 60, "t_min": 2.0}
+    if etype != "trend_scan":
+        params["direction"] = "both"
+    block = {"role": "entry", "type": etype, "params": params}
+    ref = entry_signals(block, bars)
+    cache = SeriesCache()
+    new = entry_signals(block, bars,
+                        tstat=lambda w: trend_tstat_series(closes, w, cache, None))
+    assert new == ref
+    sig = ref[0]
+    assert sig[59:] == [1] * (len(bars) - 59)      # +2.5 (window 20) wins every bar
+
+
 # ---------------------------------------------------------------- exits
 
 @pytest.mark.parametrize("entry_lookback,exit_lookback", [(60, 60), (120, 60), (60, 90)])

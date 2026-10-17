@@ -452,3 +452,143 @@ def test_concurrent_writers_never_tear_a_read(tmp_path):
     leftovers = [p.name for p in (tmp_path / CACHE_DIRNAME).iterdir()
                  if ".tmp" in p.name]
     assert leftovers == []
+
+
+# ------------------------------------------------------------------ prune
+# Ledger ruling (spec s3.3 "size bounded and prunable"): SeriesCache.prune.
+
+def _prune_dir(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    d.mkdir()
+    return d
+
+
+def _age(path, seconds_ago, now):
+    os.utime(path, (now - seconds_ago, now - seconds_ago))
+
+
+def test_prune_removes_an_old_tmp_and_keeps_a_young_one(tmp_path):
+    d = _prune_dir(tmp_path)
+    now = 1_000_000.0
+    old, young = d / "aa.npz.1.deadbeef.tmp", d / "bb.npz.2.cafef00d.tmp"
+    old.write_bytes(b"x")
+    young.write_bytes(b"y")
+    _age(old, 3601.0, now)
+    _age(young, 3599.0, now)
+    out = SeriesCache(d).prune(now=now)
+    assert out == {"tmp_removed": 1, "stale_rev_removed": 0,
+                   "corrupt_removed": 0, "kept": 0}
+    assert not old.exists() and young.exists()     # a live writer's, untouched
+    # the age limit is a parameter
+    out2 = SeriesCache(d).prune(now=now, tmp_max_age_s=10.0)
+    assert out2["tmp_removed"] == 1 and not young.exists()
+
+
+def test_prune_removes_a_stale_rev_entry_and_keeps_the_current_one(
+        tmp_path, monkeypatch):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), inputs, params=(10,))
+    (old_file,) = list(d.iterdir())
+    monkeypatch.undo()
+    get(SeriesCache(d), inputs, params=(20,))
+    assert len(list(d.iterdir())) == 2
+
+    out = SeriesCache(d).prune()
+    assert out == {"tmp_removed": 0, "stale_rev_removed": 1,
+                   "corrupt_removed": 0, "kept": 1}
+    assert not old_file.exists() and len(list(d.iterdir())) == 1
+    # the survivor is still served, from disk, without a recompute
+    fresh = SeriesCache(d)
+    served, spy = get(fresh, inputs, params=(20,))
+    assert spy.calls == [] and fresh.stats["hits"] == 1
+    assert same(served, cold(inputs))
+
+
+def test_prune_removes_a_corrupt_file_like_load_treats_it_as_a_miss(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    get(SeriesCache(d), inputs, params=(10,))
+    get(SeriesCache(d), inputs, params=(20,))
+    files = sorted(d.iterdir())
+    files[0].write_bytes(b"not an npz at all")
+    blob = files[1].read_bytes()
+    out = SeriesCache(d).prune()
+    assert out == {"tmp_removed": 0, "stale_rev_removed": 0,
+                   "corrupt_removed": 1, "kept": 1}
+    assert not files[0].exists() and files[1].read_bytes() == blob
+    # A truncated npz and a bit-flipped one (bad checksum) are corrupt too.
+    keep = files[1].name
+    get(SeriesCache(d), inputs, params=(30,))
+    get(SeriesCache(d), inputs, params=(40,))
+    trunc, flipped = [p for p in sorted(d.iterdir()) if p.name != keep]
+    trunc.write_bytes(trunc.read_bytes()[:40])
+    with np.load(flipped) as z:
+        fields = {k: z[k] for k in z.files}
+    v = fields["values"].copy()
+    v[3] = v[3] + 1.0
+    fields["values"] = v
+    with open(flipped, "wb") as fh:
+        np.savez(fh, **fields)
+    out = SeriesCache(d).prune()
+    assert out["corrupt_removed"] == 2 and out["kept"] == 1
+    assert [p.name for p in d.iterdir()] == [keep]
+
+
+def test_prune_on_a_read_only_cache_touches_nothing(tmp_path, monkeypatch):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), inputs)                  # stale once the rev is back
+    monkeypatch.undo()
+    old_tmp = d / "zz.npz.1.deadbeef.tmp"
+    old_tmp.write_bytes(b"x")
+    (d / "junk.npz").write_bytes(b"junk")
+    _age(old_tmp, 10_000.0, 1_000_000.0)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime) for p in d.iterdir()}
+    out = SeriesCache(d, read_only=True).prune(now=1_000_000.0)
+    assert out == {"tmp_removed": 0, "stale_rev_removed": 0,
+                   "corrupt_removed": 0, "kept": 0}
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime)
+            for p in d.iterdir()} == before
+
+
+def test_prune_on_a_missing_or_absent_directory_returns_zeros(tmp_path):
+    zeros = {"tmp_removed": 0, "stale_rev_removed": 0, "corrupt_removed": 0,
+             "kept": 0}
+    ghost = tmp_path / "ghost"
+    assert SeriesCache(ghost).prune() == zeros
+    assert not ghost.exists()                    # prune never creates it
+    assert SeriesCache().prune() == zeros        # memory-only cache
+
+
+def test_prune_swallows_a_per_file_error_and_keeps_going(tmp_path, monkeypatch):
+    d = _prune_dir(tmp_path)
+    now = 1_000_000.0
+    stuck, gone = d / "a.npz.1.aaaaaaaa.tmp", d / "b.npz.2.bbbbbbbb.tmp"
+    for p in (stuck, gone):
+        p.write_bytes(b"x")
+        _age(p, 10_000.0, now)
+    real_unlink = type(stuck).unlink
+
+    def unlink(self, *a, **k):
+        if self.name == stuck.name:
+            raise PermissionError("sharing violation")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(type(stuck), "unlink", unlink)
+    out = SeriesCache(d).prune(now=now)          # must not raise
+    assert out["tmp_removed"] == 1               # only the one that went
+    assert stuck.exists() and not gone.exists()
+    # A file that vanishes between the listing and the stat is not an error.
+    monkeypatch.undo()
+    real_stat = type(stuck).stat
+
+    def stat(self, *a, **k):
+        if self.name == stuck.name:
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(type(stuck), "stat", stat)
+    assert SeriesCache(d).prune(now=now)["tmp_removed"] == 0

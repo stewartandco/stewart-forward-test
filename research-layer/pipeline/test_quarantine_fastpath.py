@@ -848,6 +848,7 @@ def test_a_repeated_cell_in_one_universe_chains_one_row(tmp_path):
 # (docs/2026-10-17-engine-perf-design.md s3.3: the quarantine recorder is a
 # writer; a cache may only skip work, never change a recorded number)
 
+import os
 import shutil
 import subprocess
 import sys
@@ -1053,6 +1054,49 @@ def test_catch_up_records_every_date_through_one_cache(
     rows = sorted(decisions(reg), key=lambda r: r["date"])
     assert [r["date"] for r in rows] == [b["date"] for b in bars[-4:]]
     assert rows[0]["action"] == "enter_long"
+
+
+def test_the_recorder_prunes_the_cache_once_per_run_before_the_first_date(
+        tmp_path, monkeypatch, fresh_series_caches, capsys):
+    """Ledger ruling (s3.3 "prunable"): ONE prune per process run, on the
+    cache the recorder builds, before any date is simulated -- even across a
+    multi-date catch-up -- and a line printed only when something went."""
+    from .series_cache import SeriesCache
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    cache_dir = reg.log_path.parent / CACHE_DIRNAME
+    cache_dir.mkdir()
+    leftover = cache_dir / "ab.npz.1.deadbeef.tmp"
+    leftover.write_bytes(b"x")
+    os.utime(leftover, (1.0, 1.0))                  # a killed writer, long ago
+    events = []
+    real_prune, real_observe = SeriesCache.prune, quarantine_mod.observe_day
+
+    def prune_spy(self, **kw):
+        events.append("prune")
+        return real_prune(self, **kw)
+
+    def observe_spy(*a, **kw):
+        events.append("observe")
+        return real_observe(*a, **kw)
+
+    monkeypatch.setattr(SeriesCache, "prune", prune_spy)
+    monkeypatch.setattr(quarantine_mod, "observe_day", observe_spy)
+    assert _catch_up(reg, data) == 0
+    assert events.count("observe") == 4 and events.count("prune") == 1
+    assert events[0] == "prune"                     # before the first date
+    assert not leftover.exists()
+    out = capsys.readouterr().out
+    assert out.count("seriescache: pruned") == 1
+    assert "1 tmp" in out
+
+
+def test_the_recorder_prints_nothing_when_a_prune_removes_nothing(
+        tmp_path, fresh_series_caches, capsys):
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    assert _catch_up(reg, data) == 0
+    assert "seriescache: pruned" not in capsys.readouterr().out
 
 
 def test_an_intraday_cell_is_cached_under_its_cell_key(monkeypatch):
