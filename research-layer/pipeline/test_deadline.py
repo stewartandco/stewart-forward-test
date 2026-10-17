@@ -77,6 +77,39 @@ def test_reserve_is_held_back(monkeypatch):
     assert b.fits(11, rate_s=20.0) is False         # 220 + 100  > 300
 
 
+# ---- engine perf Task 5: a rate per key (the gauntlet worker keys by timeframe)
+
+def _budget_300s(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(dl, "_wall_now_utc",
+                        lambda: dl._parse_iso("2026-09-03T12:00:00Z"))
+    return clock, dl.DeadlineBudget("2026-09-03T12:05:00Z", clock=clock)
+
+
+def test_rates_are_kept_per_key(monkeypatch):
+    clock, b = _budget_300s(monkeypatch)
+    b.record(10, elapsed_s=100.0, key="1d")                # 1d: 10 s each
+    assert b.rate_s(480.0, key="1d") == 10.0
+    # the 1h rate is still its prior: a 1d chunk says nothing about 1h
+    assert b.rate_s(480.0, key="1h") == 480.0
+    b.record(2, elapsed_s=1000.0, key="1h")                # 1h: 500 s each
+    assert b.rate_s(480.0, key="1h") == 500.0
+    assert b.rate_s(480.0, key="1d") == 10.0               # and not the other way
+    b.record(2, elapsed_s=200.0, key="1h")                 # accumulates per key
+    assert b.rate_s(480.0, key="1h") == 300.0
+
+
+def test_no_key_is_todays_single_bucket(monkeypatch):
+    clock, b = _budget_300s(monkeypatch)
+    b.record(10, elapsed_s=100.0)
+    assert b.rate_s(prior_s=20.0) == 10.0
+    assert b.rate_s(prior_s=20.0, key=None) == 10.0
+    # a keyed bucket is a different bucket from the unkeyed one
+    assert b.rate_s(20.0, key="1d") == 20.0
+    b.record(0, elapsed_s=50.0)                            # n <= 0 is ignored
+    assert b.rate_s(20.0) == 10.0
+
+
 # ---------------- gauntlet end to end --------------------------------------
 
 def _chain(reg):

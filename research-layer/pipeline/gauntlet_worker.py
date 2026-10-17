@@ -33,7 +33,7 @@ from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
                             write_gauntlet_artifacts, _spec_bars,
-                            GAUNTLET_PRIOR_S_PER_CANDIDATE,
+                            GAUNTLET_PRIOR_S_PER_CANDIDATE, prior_s_for,
                             GAUNTLET_CHUNK_PER_WORKER, worker_count,
                             available_commit_mb, worker_env)
 from .series_cache import CACHE_DIRNAME, SeriesCache
@@ -79,6 +79,27 @@ def _run_started(now: datetime) -> datetime:
 def _cells(spec: dict) -> list[tuple[str, str]]:
     tf = spec["universe"].get("timeframe", "1d")
     return sorted({(a, tf) for a in spec["universe"]["assets"]})
+
+
+def _candidate_tf(spec: dict) -> str:
+    return spec["universe"].get("timeframe", "1d")
+
+
+def _tf_chunks(todo: list, chunk_size: int) -> list[tuple[int, str, list]]:
+    """(start index in todo, timeframe, chunk) in todo's order. A chunk never
+    mixes timeframes: a run of one timeframe is cut every `chunk_size`, and a
+    change of timeframe cuts it too, so a chunk may be short at a boundary.
+    Nothing is reordered (todo is already cheapest first)."""
+    out: list[tuple[int, str, list]] = []
+    i = 0
+    while i < len(todo):
+        tf = _candidate_tf(todo[i])
+        end = i + 1
+        while end < len(todo) and end - i < chunk_size and _candidate_tf(todo[end]) == tf:
+            end += 1
+        out.append((i, tf, todo[i:end]))
+        i = end
+    return out
 
 
 def cost_key(spec: dict, row_counts: dict) -> tuple:
@@ -481,9 +502,10 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{sid}  ERROR: no verdict written; stays queued", flush=True)
             status["errored"] += 1
 
-        for start in range(0, len(todo), chunk_size):
-            chunk = todo[start:start + chunk_size]
-            if not budget.fits(len(chunk), budget.rate_s(PRIOR_S_PER_CANDIDATE)):
+        for start, tf, chunk in _tf_chunks(todo, chunk_size):
+            # the rate is measured, and the prior assumed, per timeframe
+            if not budget.fits(len(chunk),
+                               budget.rate_s(prior_s_for(tf), key=tf)):
                 status["deferred_deadline"] += len(todo) - start
                 break
             t0 = time.time()
@@ -515,7 +537,7 @@ def run(argv: list[str] | None = None) -> int:
                 # measured rate: conservative for the deadline.)
                 retry_pending()
             finally:
-                budget.record(len(chunk), time.time() - t0)
+                budget.record(len(chunk), time.time() - t0, key=tf)
 
         final_drain()
         for item in pending:

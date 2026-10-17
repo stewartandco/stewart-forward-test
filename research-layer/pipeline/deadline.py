@@ -55,8 +55,9 @@ class DeadlineBudget:
         self._clock = clock
         self.reserve_s = float(reserve_s)
         self.deadline_utc = deadline_utc
-        self._done_n = 0
-        self._done_s = 0.0
+        # (items done, seconds spent) per key. key=None is the single bucket
+        # every stage had before the gauntlet worker kept a rate per timeframe.
+        self._done: dict[object, tuple[int, float]] = {}
         if deadline_utc is None:
             self._deadline_mono: float | None = None
         else:
@@ -72,11 +73,14 @@ class DeadlineBudget:
             return None
         return self._deadline_mono - self._clock()
 
-    def rate_s(self, prior_s: float) -> float:
-        """Measured seconds per item, or the prior before anything ran."""
-        if self._done_n <= 0:
+    def rate_s(self, prior_s: float, key=None) -> float:
+        """Measured seconds per item under `key`, or the prior before
+        anything under that key ran. A rate measured for one key never
+        answers for another: a 1d chunk says nothing about a 1h one."""
+        n, s = self._done.get(key, (0, 0.0))
+        if n <= 0:
             return float(prior_s)
-        return self._done_s / self._done_n
+        return s / n
 
     def fits(self, n: int, rate_s: float) -> bool:
         """True if n more items at rate_s each, plus the reserve, end before
@@ -86,10 +90,10 @@ class DeadlineBudget:
             return True
         return n * float(rate_s) + self.reserve_s <= rem
 
-    def record(self, n: int, elapsed_s: float) -> None:
+    def record(self, n: int, elapsed_s: float, key=None) -> None:
         if n > 0:
-            self._done_n += int(n)
-            self._done_s += float(elapsed_s)
+            done_n, done_s = self._done.get(key, (0, 0.0))
+            self._done[key] = (done_n + int(n), done_s + float(elapsed_s))
 
 
 def result_path(registry_path: Path, stage: str) -> Path:

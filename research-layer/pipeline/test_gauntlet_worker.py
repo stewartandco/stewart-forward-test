@@ -907,3 +907,69 @@ def test_evaluate_standalone_is_identical_with_no_a_cold_and_a_warm_cache(tmp_pa
     assert off["oos_trades"] and off["metrics"]["exit_reasons_is"]   # not vacuous
     assert _canon(cold) == _canon(off)
     assert _canon(warm) == _canon(off)
+
+
+# ---- engine perf Task 5: a per-timeframe deadline budget and prior ----
+
+def test_prior_for_unmeasured_tf_scales_from_1h_and_is_floored(monkeypatch):
+    p = gauntlet_core.PRIOR_S_BY_TF
+    assert p["1d"] == gauntlet_core.GAUNTLET_PRIOR_S_PER_CANDIDATE == 20.0
+    assert gauntlet_core.prior_s_for("1d") == 20.0
+    assert gauntlet_core.prior_s_for("1h") == p["1h"]          # a measured entry
+    assert gauntlet_core.prior_s_for("15m") == 4 * p["1h"]     # 96 / 24
+    assert gauntlet_core.prior_s_for("30m") == 2 * p["1h"]
+    assert gauntlet_core.prior_s_for("4h") == p["1h"] / 4
+    assert gauntlet_core.prior_s_for("12h") == p["1h"] / 12
+    # the floor: a 1h prior this small would put 12h under the 1d prior
+    monkeypatch.setitem(p, "1h", 100.0)
+    assert gauntlet_core.prior_s_for("12h") == 20.0            # 100/12 floored
+    assert gauntlet_core.prior_s_for("4h") == 25.0
+    # an unknown timeframe falls back to the 1d prior, never raises
+    assert gauntlet_core.prior_s_for("7m") == 20.0
+
+
+def _tf_spec(sid, tf):
+    return {"strategy_id": sid, "universe": {"assets": ["X"], "timeframe": tf}}
+
+
+def test_tf_chunks_split_at_timeframe_changes_and_keep_order():
+    todo = [_tf_spec(f"d{i}", "1d") for i in range(5)] +            [_tf_spec(f"h{i}", "1h") for i in range(3)] + [_tf_spec("d5", "1d")]
+    out = gw._tf_chunks(todo, 4)
+    assert [(start, tf, [s["strategy_id"] for s in c]) for start, tf, c in out] == [
+        (0, "1d", ["d0", "d1", "d2", "d3"]), (4, "1d", ["d4"]),
+        (5, "1h", ["h0", "h1", "h2"]), (8, "1d", ["d5"])]
+    assert [s["strategy_id"] for _, _, c in out for s in c] ==         [s["strategy_id"] for s in todo]                      # never reordered
+    # a spec with no timeframe key is 1d
+    assert gw._candidate_tf({"universe": {"assets": ["X"]}}) == "1d"
+    assert gw._tf_chunks([], 4) == []
+
+
+def test_worker_never_mixes_timeframes_in_a_chunk(tmp_path, monkeypatch):
+    """The cheaper candidate (B) is told to be a 1h one, A stays 1d: each
+    chunk is judged at ITS timeframe's prior, the first 1h chunk at the 1h
+    prior. (One worker means chunks of one; the split itself is pinned by
+    test_tf_chunks_split_at_timeframe_changes_and_keep_order.)"""
+    reg, a, b, data = _two_candidates(tmp_path)
+    sb = b["strategy_id"]
+    asked = []
+
+    class Spy(gw._deadline.DeadlineBudget):
+        def rate_s(self, prior_s, key=None):
+            rate = super().rate_s(prior_s, key=key)
+            asked.append((key, rate))
+            return rate
+
+        def record(self, n, elapsed_s, key=None):
+            asked.append(("record", key))
+            return super().record(n, elapsed_s, key=key)
+
+    monkeypatch.setattr(gw._deadline, "DeadlineBudget", Spy)
+    monkeypatch.setattr(gw, "_candidate_tf",
+                        lambda spec: "1h" if spec["strategy_id"] == sb else "1d")
+    assert _run(reg, data, tmp_path) == 0
+    # B is cheapest first, so the 1h chunk comes first, at the 1h prior; the
+    # 1d chunk after it is still at the 1d prior (no 1d rate measured yet)
+    assert asked[0] == ("1h", gauntlet_core.prior_s_for("1h"))
+    assert asked[1] == ("record", "1h")
+    assert asked[2] == ("1d", gauntlet_core.prior_s_for("1d"))
+    assert asked[3] == ("record", "1d")

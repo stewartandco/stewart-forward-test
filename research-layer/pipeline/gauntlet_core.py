@@ -23,7 +23,7 @@ from .plateau import annualized_sharpe, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
-from .bars import daily_marks, daily_bars
+from .bars import daily_marks, daily_bars, bars_per_day, IntradayUnsupported
 
 if TYPE_CHECKING:                       # annotation only; the worker opens it
     from .series_cache import SeriesCache
@@ -447,6 +447,36 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
 # chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
 # fx cycle's observed wall per candidate (~150 min / 499), rounded up.
 GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
+# The prior per timeframe (engine perf Task 5). A 1h candidate simulates 24x
+# the bars of a 1d one, so one flat 20 s prior would let the first 1h chunk
+# through a deadline it cannot meet. The worker keeps the MEASURED rate per
+# timeframe too (DeadlineBudget key=tf); this is only the answer before the
+# first chunk of that timeframe has run. "1d" is the legacy prior above and
+# GAUNTLET_PRIOR_S_PER_CANDIDATE stays its alias, so gauntlet.py is unchanged.
+PRIOR_S_BY_TF = {
+    "1d": GAUNTLET_PRIOR_S_PER_CANDIDATE,
+    # PROVISIONAL: 24 bars per day x the 1d prior. Task 7 replaces it with a
+    # measured 1h gauntlet wall per candidate.
+    "1h": GAUNTLET_PRIOR_S_PER_CANDIDATE * 24,
+}
+
+
+def prior_s_for(tf: str) -> float:
+    """Seconds per candidate to assume before a chunk of `tf` has run: a
+    measured entry if PRIOR_S_BY_TF has one, else the 1h prior scaled by bars
+    per day (15m = 4x the 1h prior, 12h = 1/12), never below the 1d prior."""
+    floor = PRIOR_S_BY_TF["1d"]
+    if tf in PRIOR_S_BY_TF:
+        return float(PRIOR_S_BY_TF[tf])
+    try:
+        # intraday is 24x7-only, so any other session cannot get here; the
+        # session argument only selects the 24x7 table
+        bpd = bars_per_day("24x7", tf)
+    except IntradayUnsupported:
+        # an unknown timeframe: fall back to the 1d prior rather than crash
+        # the budget (such a spec is refused at registration since 2b-3)
+        return float(floor)
+    return max(float(floor), PRIOR_S_BY_TF["1h"] * bpd / 24)
 GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
 # Memory envelope for the worker pool (2026-09-03 incident: a worker died
 # with "OpenBLAS error: Memory allocation still failed after 10 retries" and
