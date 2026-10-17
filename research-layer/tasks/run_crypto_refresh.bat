@@ -13,7 +13,8 @@ rem --hard-lock, --release-lock or --git-dir.
 rem %PY% is the interpreter by ABSOLUTE path, never bare python (WindowsApps
 rem alias; research-layer CLAUDE.md, Task guard).
 rem Exit codes (the exit code is ALWAYS the python step's, never a later step):
-rem  0   = the run completed (or stopped on a Binance ban / rate limit):
+rem  0   = the run completed (or stopped on a Binance ban / rate limit, or at
+rem        the 08:12 hard stop):
 rem        failed or skipped cells are items in logs\degraded_crypto_refresh.json
 rem        for the Sentinel, not a non-zero exit (a retry would hit Binance again).
 rem  1   = an unhandled crash (Python's own exit code; traceback in the log).
@@ -36,13 +37,24 @@ rem itself under the guard (RL_TASKGUARD=1 marks the inner copy); the guard
 rem ends the whole tree at its wall (exit 124) and otherwise returns the inner
 rem wrapper's exit code unchanged. Wall 780 s from the task's start + grace
 rem 30 s = 810 s, inside the XML's ExecutionTimeLimit PT15M (900 s): change
-rem the two together. The python step's own retries stop at 08:15 local.
+rem the two together.
+rem DEADLINE AND HARD STOP (pipeline\crypto_refresh.py docstring). The guard
+rem holds no lock, so no grace applies: it kills the run at 08:15:00, and a
+rem killed run writes neither the ledger nor the manifest (yesterday's ledger,
+rem under the Sentinel's 30 h, would read all clear on the morning every cell
+rem timed out, ~96 s per cell). So: no retry starts at or after 08:11
+rem (--deadline-local) and NO attempt, pass 1 included, at or after 08:12
+rem (--stop-local); unfetched cells become "skipped: past the stop time" items
+rem and the ledger is written well before the 08:15 wall. These flags are
+rem for the 08:02 fire only: a hand run of THIS wrapper after 08:12 fetches
+rem nothing and marks every cell skipped; hand-run `python -m
+rem pipeline.crypto_refresh` (no --stop-local) instead.
 if "%RL_TASKGUARD%"=="1" goto :guarded
 "%PY%" -m pipeline.taskguard --wall-s 780 --grace-s 30 --log "%LOG%" -- cmd /d /c "%~f0"
 exit /b %ERRORLEVEL%
 :guarded
 echo ==== %DATE% %TIME% crypto_refresh ==== >> "%LOG%" 2>nul || goto :log_locked
-"%PY%" -m pipeline.crypto_refresh >> "%LOG%" 2>&1
+"%PY%" -m pipeline.crypto_refresh --deadline-local 08:11 --stop-local 08:12 >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
 echo ==== %DATE% %TIME% exit %RC% ==== >> "%LOG%"
 endlocal & exit /b %RC%

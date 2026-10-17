@@ -77,6 +77,11 @@ def test_crypto_refresh_wrapper_uses_an_absolute_interpreter_and_the_guard():
                 if re.search(r"--(lock|hard-lock|release-lock|git-dir)\b", ln)]
     assert not [ln for ln in code if re.search(r"(?i)\bgit\b", ln)]
     assert "pipeline.crypto_refresh" in text
+    # the deadline and the hard stop land the ledger write before the guard's
+    # 08:15:00 wall (08:02 + 780 s; no lock, so no grace): final review I1
+    runs = [ln for ln in code if "pipeline.crypto_refresh" in ln]
+    assert runs == ['"%PY%" -m pipeline.crypto_refresh --deadline-local 08:11 '
+                    '--stop-local 08:12 >> "%LOG%" 2>&1']
     # exit tests are exact, never `if errorlevel` (>= 1)
     assert not re.search(r"(?i)if\s+(not\s+)?errorlevel", text)
 

@@ -337,3 +337,91 @@ def test_deadline_local_is_today_in_utc_plus_8(tmp_path, monkeypatch):
     monkeypatch.setattr(cr, "refresh", spy)
     _main(tmp_path, monkeypatch, Fake(tmp_path / "data"), extra=["--deadline-local", "08:15"])
     assert seen["deadline_ms"] == END_MS + 15 * MIN
+
+
+# ---- the hard stop (--stop-local; final review I1) --------------------------
+
+def test_a_stop_mid_pass_one_skips_the_rest_and_still_writes_ledger_and_manifest(
+        tmp_path, monkeypatch):
+    # A timeout morning: every attempt takes 4 minutes. The guard would kill a
+    # run that is still fetching at 08:15 before any ledger write; with
+    # --stop-local 08:12 no attempt starts at or after 08:12, the rest are
+    # named as skipped, and the ledger and manifest are written, exit 0.
+    D = "DDDUSDT"
+    _gate(monkeypatch, [A, B, C, D])
+    (tmp_path / "data").mkdir()
+    now = {"ms": NOW_MS}                           # 08:02 Perth
+
+    def tick(symbol):
+        now["ms"] += 4 * MIN
+
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom")]}, on_call=tick)
+    real = cr.refresh
+    monkeypatch.setattr(cr, "refresh",
+                        lambda *a, **kw: real(*a, clock=lambda: now["ms"], **kw))
+    assert _main(tmp_path, monkeypatch, fake,
+                 extra=["--deadline-local", "08:11", "--stop-local", "08:12"]) == 0
+    # A 08:02, B 08:06 (fails), C 08:10; D would start at 08:14: not started,
+    # and B is not retried either
+    assert fake.symbols() == [A, B, C]
+    items = {i["key"]: i for i in _ledger(tmp_path / "logs")["items"]
+             if i["source"] == cr.FETCH_SOURCE}
+    assert set(items) == {B, D}
+    assert "boom" in items[B]["reason"]
+    assert items[D]["reason"] == "skipped: past the stop time 08:12; not fetched this run"
+    assert set(_manifest(tmp_path / "data")) == {f"{A}_1d", f"{C}_1d"}
+
+
+def test_no_attempt_starts_exactly_at_the_stop(tmp_path):
+    # ">= stop": the boundary instant is already past it, pass 1 included.
+    stop = NOW_MS + 10 * MIN
+    fake = Fake(tmp_path / "data")
+    out = _run(tmp_path, fake, [A, B], stop_ms=stop, clock=lambda: stop)
+    assert fake.calls == []
+    assert [i["key"] for i in out["items"]] == [A, B]
+    assert all(i["reason"].startswith("skipped: past the stop time 08:12")
+               for i in out["items"])
+    assert out["fetched"] == {}
+
+
+def test_an_attempt_starts_one_ms_before_the_stop(tmp_path):
+    stop = NOW_MS + 10 * MIN
+    fake = Fake(tmp_path / "data")
+    out = _run(tmp_path, fake, [A, B], stop_ms=stop, clock=lambda: stop - 1)
+    assert fake.symbols() == [A, B] and out["items"] == []
+
+
+def test_a_stop_in_a_retry_pass_keeps_the_failure_items(tmp_path):
+    # Pass 1 ends at the stop: the failed cell keeps its own failure (it was
+    # tried), it is not relabelled skipped, and nothing is retried.
+    now = {"ms": NOW_MS}
+    stop = NOW_MS + 10 * MIN
+    fake = Fake(tmp_path / "data", {A: [urllib.error.URLError("a-boom"), None]},
+                on_call=lambda s: now.update(ms=now["ms"] + 5 * MIN))
+    out = _run(tmp_path, fake, [A, B], stop_ms=stop, clock=lambda: now["ms"])
+    assert fake.symbols() == [A, B]
+    assert [(i["key"], "a-boom" in i["reason"]) for i in out["items"]] == [(A, True)]
+
+
+def test_no_stop_leaves_pass_one_ungated(tmp_path):
+    # stop_ms None (the default, every hand run): a clock far past any stop
+    # still attempts every cell in pass 1.
+    fake = Fake(tmp_path / "data")
+    out = _run(tmp_path, fake, [A, B, C], clock=lambda: NOW_MS + 24 * 60 * MIN)
+    assert fake.symbols() == [A, B, C] and out["items"] == []
+
+
+def test_stop_local_is_today_in_utc_plus_8_and_defaults_to_none(tmp_path, monkeypatch):
+    seen = []
+    real = cr.refresh
+
+    def spy(*a, **kw):
+        seen.append(kw.get("stop_ms", "absent"))
+        return real(*a, **kw)
+
+    _gate(monkeypatch, [A])
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(cr, "refresh", spy)
+    _main(tmp_path, monkeypatch, Fake(tmp_path / "data"))
+    _main(tmp_path, monkeypatch, Fake(tmp_path / "data"), extra=["--stop-local", "08:12"])
+    assert seen == [None, END_MS + 12 * MIN]       # 08:12 Perth = 00:12Z

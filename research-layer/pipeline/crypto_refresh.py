@@ -22,8 +22,21 @@ THE DEADLINE. A failed cell (any exception other than a ban / hard rate
 limit) is retried after the pass, at most `MAX_RETRY_PASSES` more passes, and
 no RETRY attempt starts at or after `--deadline-local` (default 08:15 Perth),
 so the run is over well before the 08:20 quarantine daily. The first pass is
-not gated: a late or hand run still refreshes every cell. A cell still failed
-at the end keeps a `crypto_refresh_failed` item.
+not gated by the deadline: a late or hand run still refreshes every cell. A
+cell still failed at the end keeps a `crypto_refresh_failed` item.
+
+THE HARD STOP. `--stop-local HH:MM` (default: none, so a hand run stays
+ungated) is a stop for EVERY attempt, pass 1 included: no attempt starts at
+or after it. Every cell not yet fetched and not already failed gets a
+`skipped: past the stop time HH:MM; not fetched this run` item (a failed cell
+keeps its own failure item); the ledger and the manifest (completed cells)
+are still written and the exit is 0. Why: the scheduled wrapper's task guard
+kills the run at 08:15:00 (no lock held, so no grace), and a killed run
+writes neither the ledger nor the manifest, leaving yesterday's ledger (still
+under the Sentinel's 30 h) reading all clear on exactly the morning every
+cell timed out (~96 s per cell: 3 tries x 30 s + backoff). The wrapper
+passes `--deadline-local 08:11 --stop-local 08:12`, so the worst single
+attempt plus the ledger write lands well before that wall.
 
 BAN / RATE LIMIT. `BinanceBanned` (418) or ANY `RateLimited` that reaches
 this module (429; fetch_symbol has already retried it, sleeping up to 120 s
@@ -37,10 +50,10 @@ written with `degraded.record(..., remove_unseen=True)`: a recovered item
 leaves, and an empty run still refreshes `ts_utc` so the Sentinel sees a live
 writer.
 
-EXIT CODES. 0 whenever the run completed or stopped on a ban (the ledger items
-are the alarm; a non-zero exit would only invite a retry that hits Binance
-again); 2 when `--data-dir` does not exist (nothing written); 1 on a crash
-(the exception propagates).
+EXIT CODES. 0 whenever the run completed, stopped on a ban, or stopped at the
+hard stop (the ledger items are the alarm; a non-zero exit would only invite
+a retry that hits Binance again); 2 when `--data-dir` does not exist
+(nothing written); 1 on a crash (the exception propagates).
 """
 from __future__ import annotations
 
@@ -110,13 +123,14 @@ def admission_problems(data_dir: Path, cell_list: list[tuple[str, str]]) -> list
 
 def refresh(data_dir: Path, cell_list: list[tuple[str, str]], *, now_ms: int,
             deadline_ms: int | None, fetch=fetch_symbol, sleep=time.sleep,
-            clock=None) -> dict:
+            clock=None, stop_ms: int | None = None) -> dict:
     """Top up every cell in `cell_list`. Returns `{"fetched": {manifest_key:
     result}, "items": [fetch ledger items], "aborted": str | None}`.
 
     `fetched` is keyed `{asset}_{tf}`, the key crypto_data's manifest uses.
-    `clock()` returns epoch ms and is compared with `deadline_ms` before each
-    RETRY attempt; the default is `now_ms` plus real elapsed time."""
+    `clock()` returns epoch ms and is compared with `stop_ms` before EVERY
+    attempt and with `deadline_ms` before each RETRY attempt; the default is
+    `now_ms` plus real elapsed time. `stop_ms` None = no hard stop."""
     data_dir = Path(data_dir)
     if clock is None:
         t0 = time.monotonic()
@@ -137,6 +151,11 @@ def refresh(data_dir: Path, cell_list: list[tuple[str, str]], *, now_ms: int,
         failed[cell] = f"fetch of {asset} {tf} failed: {exc!r}"
         print(f"crypto_refresh: {names[cell]} FAILED: {exc!r}")
 
+    stop_why = None
+    if stop_ms is not None:
+        stop_hhmm = datetime.fromtimestamp(stop_ms / 1000, tz=PERTH).strftime("%H:%M")
+        stop_why = f"skipped: past the stop time {stop_hhmm}; not fetched this run"
+
     pending = list(cell_list)
     try:
         for pass_no in range(1 + MAX_RETRY_PASSES):
@@ -145,6 +164,16 @@ def refresh(data_dir: Path, cell_list: list[tuple[str, str]], *, now_ms: int,
             retry_pass = pass_no > 0
             still_failed: list[tuple[str, str]] = []
             for n, cell in enumerate(pending):
+                if stop_ms is not None and clock() >= stop_ms:
+                    # the hard stop: no attempt of any pass; owe every cell
+                    # not fetched (a failed cell keeps its failure item)
+                    print(f"crypto_refresh: past the stop time {stop_hhmm}; "
+                          f"no further attempts")
+                    for rest in cell_list:
+                        if names[rest] not in fetched and rest not in failed:
+                            skipped[rest] = stop_why
+                    pending = []
+                    break
                 if retry_pass and deadline_ms is not None and clock() >= deadline_ms:
                     print("crypto_refresh: past the deadline; no further retries")
                     pending = []
@@ -234,6 +263,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--logs-dir", type=Path, default=layer / "logs")
     ap.add_argument("--deadline-local", default=DEFAULT_DEADLINE_LOCAL,
                     help="HH:MM today in UTC+8: no retry attempt starts after it")
+    ap.add_argument("--stop-local", default=None,
+                    help="HH:MM today in UTC+8: no attempt of any pass starts at "
+                         "or after it (default: no hard stop)")
     ap.add_argument("--now", default=None, help="ISO8601 override (tests)")
     args = ap.parse_args(argv)
 
@@ -245,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
 
     now_ms = _parse_now(args.now)
     deadline_ms = _deadline_ms(args.deadline_local, now_ms)
+    stop_ms = (None if args.stop_local is None
+               else _deadline_ms(args.stop_local, now_ms))
     ledger = Path(args.logs_dir) / LEDGER
     cell_list = cells.active_cells("crypto")
     if not cell_list:
@@ -253,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     out = refresh(data_dir, cell_list, now_ms=now_ms, deadline_ms=deadline_ms,
-                  fetch=fetch_symbol, sleep=time.sleep)
+                  fetch=fetch_symbol, sleep=time.sleep, stop_ms=stop_ms)
     items = out["items"] + admission_problems(data_dir, cell_list)
     degraded.record(ledger, WRITER, items, remove_unseen=True)
     if out["aborted"]:
