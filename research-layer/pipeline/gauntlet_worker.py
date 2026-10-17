@@ -36,6 +36,7 @@ from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
                             GAUNTLET_PRIOR_S_PER_CANDIDATE,
                             GAUNTLET_CHUNK_PER_WORKER, worker_count,
                             available_commit_mb, worker_env)
+from .series_cache import CACHE_DIRNAME, SeriesCache
 
 LAYER = Path(__file__).resolve().parent.parent
 PRIOR_S_PER_CANDIDATE = GAUNTLET_PRIOR_S_PER_CANDIDATE
@@ -183,11 +184,31 @@ def repair_orphans(registry: Registry, logs_dir: Path) -> int:
     return _repair(registry, logs_dir, snap, view)[0]
 
 
+# Engine perf (docs/2026-10-17-engine-perf-design.md s3.3): the worker is a
+# series-cache WRITER. A pool's processes are new per chunk, so only the disk
+# cache shares indicator series across candidates on one cell; each process
+# opens the payload's directory ONCE (keyed by the directory) and hands it to
+# every run_spec of every candidate it judges. The cache only skips work:
+# verdicts are bit-identical with it, without it, cold or warm.
+_SERIES_CACHES: dict[str, SeriesCache] = {}
+
+
+def _series_cache(directory: str | None) -> SeriesCache | None:
+    if directory is None:               # a payload from before the cache: none
+        return None
+    cache = _SERIES_CACHES.get(directory)
+    if cache is None:
+        cache = _SERIES_CACHES[directory] = SeriesCache(Path(directory))
+    return cache
+
+
 def _evaluate_payload(payload: dict) -> dict:
     """One candidate's standalone battery. Module-level and plain-data in,
     plain-data out, so it is the only thing a spawned pool worker runs."""
     return evaluate_standalone(payload["spec"], payload["spec_bars"],
-                               payload["cutoff"], payload["perturb"])
+                               payload["cutoff"], payload["perturb"],
+                               series_cache=_series_cache(
+                                   payload.get("series_cache_dir")))
 
 
 def _record_bundle(logs_dir: Path, repo_root: Path, bundle: Path) -> None:
@@ -318,6 +339,10 @@ def run(argv: list[str] | None = None) -> int:
         print(f"gauntlet_worker: {len(todo)} queued, {max_workers} worker(s), "
               f"deadline in {a.deadline_minutes:g} min", flush=True)
 
+        # gitignored beside simcache/ (the registry's directory is the layer
+        # in production; a test's tmp registry keeps its cache in tmp)
+        series_cache_dir = str(a.registry.parent / CACHE_DIRNAME)
+
         def prepare(spec: dict) -> dict | None:
             """Load the candidate's own cells. None = deferred or errored
             (already counted); a dict = the payload plus its provenance."""
@@ -339,7 +364,8 @@ def run(argv: list[str] | None = None) -> int:
                 status["deferred_not_comparable"] += 1
                 return None
             return {"payload": {"spec": spec, "spec_bars": _spec_bars(bars, spec),
-                                "cutoff": a.cutoff, "perturb": a.perturb},
+                                "cutoff": a.cutoff, "perturb": a.perturb,
+                                "series_cache_dir": series_cache_dir},
                     "hashes": hashes, "data_end": data_end}
 
         def write(item: dict) -> str:

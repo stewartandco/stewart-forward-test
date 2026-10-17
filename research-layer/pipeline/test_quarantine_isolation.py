@@ -78,7 +78,8 @@ def test_a_fully_recorded_strategy_is_not_resimulated(tmp_path, capsys, monkeypa
     calls = []
     real = quarantine_mod.observe_day
     monkeypatch.setattr(quarantine_mod, "observe_day",
-                        lambda spec, *x: calls.append(spec["strategy_id"]) or real(spec, *x))
+                        lambda spec, *x, **k: calls.append(spec["strategy_id"])
+                        or real(spec, *x, **k))
     extend_ethusd(data)
     capsys.readouterr()
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0

@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import cells
 from .engine import run_spec, exit_reason_counts
@@ -23,6 +24,9 @@ from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
 from .bars import daily_marks, daily_bars
+
+if TYPE_CHECKING:                       # annotation only; the worker opens it
+    from .series_cache import SeriesCache
 
 PROTOCOL_V61 = "gauntlet-protocol-v6.1"
 DECAY_MIN_PCT = -25.0
@@ -364,7 +368,8 @@ def evaluate_gates(is_trades, oos_trades, stress_oos_trades, is_vol: float,
 
 
 def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
-                        perturb: bool, *, record_benchmark: bool = True) -> dict:
+                        perturb: bool, *, record_benchmark: bool = True,
+                        series_cache: SeriesCache | None = None) -> dict:
     """One candidate, end to end, from its own bars only: the verdict and
     every per-strategy metric _evaluate_candidate records, minus the group
     ones (plateau_ok, haircut, trials, sibling_group_n, sim_cache,
@@ -379,10 +384,17 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     tools/daily_parity.py), which re-run REGISTERED specs: every pre-switch
     crypto strategy (533 at 2026-10-17, all pooled BTCUSD+ETHUSD) was judged
     while crypto's benchmark was None, so their chained verdicts carry no control and re-judging them must
-    not try to compute one. It changes nothing else in the result."""
+    not try to compute one. It changes nothing else in the result.
+
+    series_cache (engine perf s3.3): ONE cache handed to EVERY run_spec here
+    (base, stressed, each perturbation), so a variant that changes only a
+    cost or a threshold recomputes no indicator series, and the gauntlet
+    worker's disk cache carries them across candidates on one cell. None =
+    each run_spec makes its own private memory-only cache, as before.
+    Bit-identical either way."""
     sid = spec["strategy_id"]
-    res = run_spec(spec, spec_bars)
-    stress_res = run_spec(stressed(spec), spec_bars)
+    res = run_spec(spec, spec_bars, series_cache=series_cache)
+    stress_res = run_spec(stressed(spec), spec_bars, series_cache=series_cache)
     is_t, oos_t = split_trades(res["trades"], cutoff)
     _, stress_oos = split_trades(stress_res["trades"], cutoff)
     assets = spec["universe"]["assets"]
@@ -413,7 +425,7 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
         window="train")
     if perturb:
         def _score(pspec):
-            r = run_spec(pspec, spec_bars)
+            r = run_spec(pspec, spec_bars, series_cache=series_cache)
             return annualized_sharpe([(d, v) for d, v in r["equity"]
                                       if _date_le(d, cutoff)])
         metrics["perturbation"] = sensitivity(spec, train_sharpe, _score,

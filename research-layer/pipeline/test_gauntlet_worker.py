@@ -795,3 +795,115 @@ def test_run_started_ignores_unusable_stamps(monkeypatch):
     assert gw._run_started(now) == good              # naive = UTC
     monkeypatch.delenv(STARTED_ENV)
     assert gw._run_started(now) == now
+
+
+# ---- engine perf Task 4: the worker writes the series cache ----
+# (docs/2026-10-17-engine-perf-design.md s3.3: a pool's processes are new per
+# chunk, so only the disk cache shares series across candidates on one cell)
+
+from datetime import date as _date, timedelta as _timedelta
+
+from . import gauntlet_core
+from .series_cache import CACHE_DIRNAME, SeriesCache
+
+
+def _dense_trend_spec():
+    """A version-2 dense trend spec with a vol-percentile filter: every
+    one-step perturbation re-runs run_spec, and all three cached kinds are
+    touched (trend_tstat, realized_ann_vol, vol_pctile)."""
+    return {"strategy_id": "0123456789abcdef", "version": 2,
+            "universe": {"assets": ["BTCUSD"], "asset_class": "crypto",
+                         "timeframe": "1d", "session": "24x7"},
+            "blocks": [
+                {"role": "entry", "type": "trend_scan_dense",
+                 "params": {"max_lookback": 60, "t_min": 2.0, "direction": "both"}},
+                {"role": "filter", "type": "vol_percentile_dense",
+                 "params": {"lookback": 90, "max_pctile": 1.0}},
+                {"role": "stop", "type": "atr_stop_dense",
+                 "params": {"atr_len": 14, "mult": 3.0}},
+                {"role": "exit", "type": "tstat_decay",
+                 "params": {"max_lookback": 60, "t_exit": 0.5}},
+                {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}],
+            "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005}}
+
+
+def _dense_trend_bars(n=700):
+    from .test_engine_perf import walk_bars
+    d0 = _date(2022, 1, 1)
+    return {"BTCUSD": [dict(b, date=(d0 + _timedelta(days=i)).isoformat())
+                       for i, b in enumerate(walk_bars(n))]}
+
+
+def test_worker_payload_carries_the_cache_dir_and_perturbations_share_it(
+        tmp_path, monkeypatch):
+    # the worker: every payload names <registry dir>/seriescache, and
+    # _evaluate_payload opens it ONCE per process
+    reg, spec, data = _setup(tmp_path)
+    monkeypatch.setattr(gw, "_SERIES_CACHES", {})
+    payloads, handed = [], []
+    real_eval = gw.evaluate_standalone
+
+    def spy(spec, spec_bars, cutoff, perturb, *, series_cache=None):
+        handed.append(series_cache)
+        return real_eval(spec, spec_bars, cutoff, perturb,
+                         series_cache=series_cache)
+
+    real_payload = gw._evaluate_payload
+
+    def spy_payload(payload):
+        payloads.append(payload)
+        return real_payload(payload)
+
+    monkeypatch.setattr(gw, "evaluate_standalone", spy)
+    monkeypatch.setattr(gw, "_evaluate_payload", spy_payload)
+    assert _run(reg, data, tmp_path) == 0
+    want = reg.log_path.parent / CACHE_DIRNAME
+    assert [p["series_cache_dir"] for p in payloads] == [str(want)]
+    assert isinstance(handed[0], SeriesCache) and not handed[0].read_only
+    assert handed[0].directory == want
+    assert real_payload(dict(payloads[0])) is not None
+    assert handed[1] is handed[0]                  # once per process, per dir
+
+    # evaluate_standalone: base, stressed and EVERY perturbation get the cache
+    seen = []
+    real_run_spec = gauntlet_core.run_spec
+
+    def spy_run_spec(spec, bars_by_asset, *, series_cache=None):
+        seen.append(series_cache)
+        return real_run_spec(spec, bars_by_asset, series_cache=series_cache)
+
+    monkeypatch.setattr(gauntlet_core, "run_spec", spy_run_spec)
+    cache = SeriesCache(tmp_path / "sc")
+    out = gauntlet_core.evaluate_standalone(
+        _dense_trend_spec(), _dense_trend_bars(), "2023-06-30", True,
+        series_cache=cache)
+    n_pert = out["metrics"]["perturbation"]["n_perturbations"]
+    assert n_pert > 0
+    assert len(seen) == 2 + n_pert and all(s is cache for s in seen)
+
+
+def _canon(obj):
+    import struct
+    if isinstance(obj, float):
+        return ("f", struct.pack("<d", obj))
+    if isinstance(obj, dict):
+        return {k: _canon(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_canon(v) for v in obj)
+    return obj
+
+
+def test_evaluate_standalone_is_identical_with_no_a_cold_and_a_warm_cache(tmp_path):
+    spec, bars = _dense_trend_spec(), _dense_trend_bars()
+    off = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True)
+    cold_cache = SeriesCache(tmp_path / "sc")
+    cold = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True,
+                                             series_cache=cold_cache)
+    assert cold_cache.stats["misses"] > 0
+    warm_cache = SeriesCache(tmp_path / "sc")      # a new process: disk only
+    warm = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True,
+                                             series_cache=warm_cache)
+    assert warm_cache.stats["misses"] == 0 and warm_cache.stats["hits"] > 0
+    assert off["oos_trades"] and off["metrics"]["exit_reasons_is"]   # not vacuous
+    assert _canon(cold) == _canon(off)
+    assert _canon(warm) == _canon(off)
