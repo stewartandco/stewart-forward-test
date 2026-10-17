@@ -68,8 +68,9 @@ and the run goes on with the in-memory entry (the PBO cache precedent in
 gauntlet_stats.py). `read_only=True` never writes (the signal service's
 contract) but still extends in memory.
 
-NOT HERE (later tasks): `engine.py` does not import this module, so there is
-no import cycle; it takes ENGINE_REV from the engine one way only.
+IMPORT DIRECTION: this module takes ENGINE_REV from the engine; `engine.py`
+imports SeriesCache only lazily, inside `simulate_asset` (and under
+TYPE_CHECKING for annotations), so there is no import cycle (Task 2).
 """
 from __future__ import annotations
 
