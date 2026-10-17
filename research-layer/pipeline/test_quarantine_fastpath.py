@@ -550,8 +550,13 @@ def test_a_strategy_leaving_quarantine_mid_run_is_skipped_and_the_others_record(
     out = capsys.readouterr()
     sids = {r["strategy_id"] for r in decisions(reg)}
     assert sids == {spec["strategy_id"]} and decisions(reg)
-    assert (f"{two['strategy_id']}  skipped: left quarantine (graveyard) "
-            f"while this run simulated") in out.out
+    skip = (f"{two['strategy_id']}  skipped: left quarantine (graveyard) "
+            f"while this run simulated")
+    assert out.out.count(skip) == 1                 # printed once, not twice
+    # provenance vouches only for the strategy that recorded: `two` (BTC+ETH)
+    # left, so ETHUSD is not in the date's snapshot
+    assert set(snapshots(reg)[0]["bars_sha256"]) == {"BTCUSD"}
+    assert set(snapshots(reg)[0]["data_sha256"]) == {"BTCUSD"}
     assert not (ledger(reg) or {"items": []})["items"]
     assert run_verifier(reg.log_path).returncode == 0
 

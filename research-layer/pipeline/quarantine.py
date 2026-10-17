@@ -1034,8 +1034,19 @@ def _record_date(args, registry: Registry, view: QuarantineView,
             # strategy whose simulation failed queues no row, so its cells
             # stay out of the date's snapshot (else a later bar correction
             # would pin its retry as `restated` for ever; on retry its
-            # cells go in as a supplement). Coen 2026-10-16, fix round 1.
-            survivors = [sid for sid in ready if sid not in sim_failed]
+            # cells go in as a supplement). The same holds for a strategy
+            # that LEFT quarantine while the run simulated: its rows are
+            # dropped, so the snapshot must not vouch for its cells either.
+            # Coen 2026-10-16, fix rounds 1-2.
+            states = view.states()
+            left: set[str] = set()
+            for sid in ready:
+                if sid not in sim_failed and states.get(sid) != "quarantine":
+                    left.add(sid)
+                    print(f"{sid}  skipped: left quarantine "
+                          f"({states.get(sid)}) while this run simulated")
+            survivors = [sid for sid in ready
+                         if sid not in sim_failed and sid not in left]
             cells = {a for sid in survivors for a in spec_cells(specs[sid])}
             plan = _plan_provenance(
                 view, args.date, survivors, specs,
@@ -1062,10 +1073,8 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                     print(f"\n0 decision(s) chained, {n_present} already "
                           f"present; every owing strategy deferred (restated).")
                     return 0
-            # a strategy whose simulation failed above WAS simulated: it is
-            # not "became recordable without being simulated" (the `late`
-            # refusal) and queues no rows (Coen 2026-10-16)
-            plan.ready = [sid for sid in plan.ready if sid not in sim_failed]
+            # plan.ready is a subset of `survivors`, so a strategy whose
+            # simulation failed (or that left quarantine) is never `late`
             late = [sid for sid in plan.ready if sid not in rows_by_sid]
             if late:
                 report.unchecked = True
@@ -1074,10 +1083,8 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                       f"without being simulated; nothing written -- re-run "
                       f"the date.", file=sys.stderr)
                 return 1
-            states = view.states()
             chained = view.decision_keys()
             batch: set[tuple[str, str, str]] = set()
-            left: set[str] = set()
             items = [plan.write] if plan.write else []
             for sid in plan.ready:
                 for row in rows_by_sid[sid]:
