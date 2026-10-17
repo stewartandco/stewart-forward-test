@@ -1556,8 +1556,8 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   Every other 1d result (tradfi expansion, every registered spec's
   re-simulation, every quarantine row) is byte-identical across the switch.
 - **Per-cycle cap counts cells for every class** (`specs_per_combo =
-  max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips `USDT`, so
-  strategy names read `BTC`, not `BTCUSDT`.
+  max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips
+  `USDT`, so strategy names read `BTC`, not `BTCUSDT`.
 - **Known limit: a retired or delisted pair has no exit in code.** Once a dead
   USDT cell has registered strategies, its file stops growing, so the loop's
   freshness preflight parks every crypto fire at `stale_data`, and
