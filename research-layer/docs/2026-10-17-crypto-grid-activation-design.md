@@ -308,7 +308,7 @@ CLAUDE.md says so), so no new git committer is added.
 
 **D-d3. The refresh script and wrapper** (registered at Switch 1, s8.5;
 not in D). One run fetches closed bars incrementally for every active cell
-(90 at Switch 1; the intraday cells join at Switch 2 with no code change,
+(76 at Switch 1; the intraday cells join at Switch 2 with no code change,
 because it reads `cells.active_cells("crypto")`), cell-isolated: a failed
 cell is a degraded item and the others continue; a Binance 418 stops the
 run at once and marks the rest (2b-2's rule). It runs D-d1's check on every
