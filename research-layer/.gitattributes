@@ -1,2 +1,4 @@
 data/*.csv text eol=lf
 artifacts/** text eol=lf
+# the grid record note is chained verbatim from its LF bytes by tools/grid_switch chain-note, which refuses CR; core.autocrlf is on
+docs/notes/crypto-grid-record-v1.md text eol=lf
