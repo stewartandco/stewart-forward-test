@@ -378,9 +378,11 @@ def _record_rows(registry: Path, sids: list[str]) -> dict[str, list[dict]]:
 
 def _n_entries(rows: list[dict]) -> int:
     """Entries across rows: an intraday row carries `entries`; a daily row
-    records at most one event, so action 'enter' counts one."""
+    records at most one event, so an action 'enter_long' / 'enter_short'
+    (quarantine.observe_day) counts one."""
     return sum(r["entries"] if "entries" in r
-               else (1 if r.get("action") == "enter" else 0) for r in rows)
+               else (1 if str(r.get("action", "")).startswith("enter") else 0)
+               for r in rows)
 
 
 def _decisions(registry: Path) -> list[dict]:

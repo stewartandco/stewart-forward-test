@@ -344,6 +344,8 @@ def test_quarantine_refuses_the_live_data_dir(tmp_path, monkeypatch, capsys, lay
 
 def test_register_honours_timeframes(tmp_path, capsys):
     reg, v1, orig = _v2_original(tmp_path)
+    fresh = tmp_path / "fresh.jsonl"                         # same chain, before any twin
+    fresh.write_bytes(reg.log_path.read_bytes())
     out = tmp_path / "twins.json"
     rc = ir.main(["register", "--registry", str(reg.log_path),
                   "--assets", "BTCUSDT,ETHUSDT", "--originals", "1",
@@ -357,12 +359,11 @@ def test_register_honours_timeframes(tmp_path, capsys):
              if e["entry_type"] == "strategy_registered"}
     assert all(specs[s]["universe"]["timeframe"] == "1d" for s in twins)
     assert not any(p["universe"].get("timeframe") == "1h" for p in specs.values())
-    # the same 1d twins a default (1d,1h) run makes on a fresh chain (a
-    # second register on the SAME chain may pick a twin as an original)
-    reg2, _, orig2 = _v2_original(tmp_path / "fresh")
-    assert orig2["strategy_id"] == orig["strategy_id"]
+    # the same 1d twins a default (1d,1h) run makes on a byte copy of the
+    # chain taken before the first register (a second register on the SAME
+    # chain may pick a twin as an original)
     full = tmp_path / "full.json"
-    assert ir.main(["register", "--registry", str(reg2.log_path),
+    assert ir.main(["register", "--registry", str(fresh),
                     "--assets", "BTCUSDT,ETHUSDT", "--originals", "1",
                     "--seed", "1", "--out", str(full)]) == 0
     full_twins = json.loads(full.read_text())
@@ -411,5 +412,7 @@ def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
     assert "1 1d twin(s)" in text and "1d only: 12 date(s)" in text
     exits = sum(1 for r in rows if r["action"] == "exit")   # daily rows: action
     assert exits > 0                                         # the gate check bites
+    entries = sum(1 for r in rows if r["action"] in ("enter_long", "enter_short"))
+    assert entries > 0                                       # the entries column bites
     row = next(l for l in text.splitlines() if l.startswith(f"| `{sid1}`"))
-    assert f"| {exits} | 2022-" in row
+    assert f"| 12 | 12 | {entries} | {exits} | 2022-" in row
