@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from bisect import bisect_left, bisect_right, insort
 from typing import TYPE_CHECKING, Callable
 
 from . import bars as _bars
@@ -149,6 +150,85 @@ def percentile_rank(values: list[float], i: int, window: int) -> float | None:
     return sum(1 for v in win if v <= values[i]) / len(win)
 
 
+def vol_percentile_series(vol: list[float | None], window: int, *,
+                          start: int = 0, stop: int | None = None) -> list[float | None]:
+    """Engine perf (docs/2026-10-17-engine-perf-design.md s3.2): element k is
+    exactly `percentile_rank(vol, start + k, window)` for bars [start, stop),
+    without rescanning the window per bar. The trailing window's values are
+    kept sorted, so `bisect_right` gives the same integer count of
+    `v <= vol[i]` that percentile_rank's sum does, divided by `window` (=
+    len(win) whenever a value is returned): the same int / int -> the same
+    float. Same None rule: a window reaching before bar 0 or holding any None
+    -> None. A window holding a NaN falls back to percentile_rank for that
+    bar (a NaN breaks the sorted order; Review Focus 2). +/-inf order under
+    bisect exactly as under `<=`. Bar i reads vol[:i+1] only, so a [start,
+    stop) slice equals the full pass's (the series cache's extend)."""
+    stop = len(vol) if stop is None else stop
+    if window < 1:                      # percentile_rank's own behaviour (it raises)
+        return [percentile_rank(vol, i, window) for i in range(start, stop)]
+    # bar start-1's window: the loop adds vol[i] and drops vol[i - window]
+    head = vol[max(start - window, 0):start]
+    nones = sum(1 for v in head if v is None)
+    nans = sum(1 for v in head if v is not None and v != v)
+    win = sorted(v for v in head if v is not None and v == v)
+    out: list[float | None] = []
+    for i in range(start, stop):
+        v = vol[i]
+        if v is None:
+            nones += 1
+        elif v != v:
+            nans += 1
+        else:
+            insort(win, v)
+        j = i - window                  # the value leaving the window
+        if j >= 0:
+            u = vol[j]
+            if u is None:
+                nones -= 1
+            elif u != u:
+                nans -= 1
+            else:
+                del win[bisect_left(win, u)]
+        if j + 1 < 0 or nones:
+            out.append(None)
+        elif nans:
+            out.append(percentile_rank(vol, i, window))
+        else:
+            out.append(bisect_right(win, v) / window)
+    return out
+
+
+# The gate's realized vol has always been `realized_ann_vol(closes, lookback)`:
+# its default periods_per_year in every session and timeframe. Kept, and named
+# in the cache key.
+GATE_VOL_PERIODS_PER_YEAR = 365
+
+
+def gate_vol_series(closes: list[float], lookback: int, cache: SeriesCache,
+                    cell: str | None) -> list[float | None]:
+    """Engine perf s3.3: the vol_percentile gate's realized vol, element for
+    element `realized_ann_vol(closes, lookback)` (the gate's call, unchanged),
+    through the series cache. Bar i reads returns i-lookback+1..i only, so
+    the tail [start, stop) is computed by the same function on closes from
+    start - lookback: the same returns in the same order, the same floats."""
+    def compute(start: int, stop: int) -> list:
+        a = max(start - max(lookback, 0), 0)
+        return realized_ann_vol(closes[a:stop], lookback)[start - a:]
+    return cache.get("realized_ann_vol", (lookback, GATE_VOL_PERIODS_PER_YEAR), cell,
+                     array("d", closes), compute)
+
+
+def vol_percentile_gate_series(closes: list[float], lookback: int, window: int,
+                               cache: SeriesCache, cell: str | None) -> list[float | None]:
+    """The gate's percentile series, element for element
+    `percentile_rank(realized_ann_vol(closes, lookback), i, window)`, through
+    the series cache. A hit never touches the vol series."""
+    def compute(start: int, stop: int) -> list:
+        vol = gate_vol_series(closes, lookback, cache, cell)
+        return vol_percentile_series(vol, window, start=start, stop=stop)
+    return cache.get("vol_pctile", (lookback, window), cell, array("d", closes), compute)
+
+
 # ---------------- entry signals + gates ------------------------------------
 
 def entry_signals(block: dict, bars: list[dict], *,
@@ -238,12 +318,23 @@ def entry_signals(block: dict, bars: list[dict], *,
     return sig, state
 
 
-def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1) -> list[bool]:
+def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1, *,
+              series_cache: SeriesCache | None = None, cell: str | None = None,
+              _reference: bool = False) -> list[bool]:
     """AND of all regime/filter blocks; False during any gate's warmup.
 
     The vol_percentile window is one year of DAILY bars scaled by
     `bars_per_day` (365 * bars_per_day; Ruling R2), never bars-per-year, so a
     1d strategy keeps 365 in every session (fx included).
+
+    Engine perf (docs/2026-10-17-engine-perf-design.md s3.2-3.3): the
+    vol_percentile series comes from vol_percentile_gate_series through
+    `series_cache` keyed by `cell` (None = memory-only); with
+    `series_cache=None` a private memory-only SeriesCache is made, and only
+    when a vol_percentile gate exists. Bit-identical either way.
+    `_reference` is TEST-ONLY: True forces the direct path (realized_ann_vol
+    plus percentile_rank per bar), the reference the tests compare against.
+    Never pass it in production code.
     """
     closes = [b["close"] for b in bars]
     n = len(bars)
@@ -260,10 +351,20 @@ def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1) -> lis
             for i in range(n):
                 if ma[i] is None or closes[i] >= ma[i]:
                     mask[i] = False
-        elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
+        elif g["type"] in ("vol_percentile", "vol_percentile_dense") and _reference:
             vol = realized_ann_vol(closes, p["lookback"])
             for i in range(n):
                 r = percentile_rank(vol, i, 365 * bars_per_day)
+                if r is None or r > p["max_pctile"]:
+                    mask[i] = False
+        elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
+            if series_cache is None:
+                from .series_cache import SeriesCache   # deferred: it imports ENGINE_REV
+                series_cache = SeriesCache()
+            pct = vol_percentile_gate_series(closes, p["lookback"], 365 * bars_per_day,
+                                             series_cache, cell)
+            for i in range(n):
+                r = pct[i]
                 if r is None or r > p["max_pctile"]:
                     mask[i] = False
         else:
@@ -445,10 +546,12 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
     entry and every tstat_decay exit, through `series_cache` keyed by `cell`
     (qcells.cell_key; None = memory-only). With `series_cache=None` a private
     memory-only SeriesCache serves this call alone. Results are bit-identical
-    either way: the cache only skips recomputing a value.
+    either way: the cache only skips recomputing a value. The same cache and
+    cell serve gate_mask's vol_percentile series (s3.2-3.3).
     `_reference` is TEST-ONLY: True forces the direct trend_tstat path
-    (`tstat=None`) in entry_signals and signal_exit, the reference the tests
-    compare against. Never pass it in production code.
+    (`tstat=None`) in entry_signals and signal_exit, and gate_mask's direct
+    vol_percentile path, the reference the tests compare against. Never pass
+    it in production code.
 
     `version` is the spec's registration version (D15 exit rules v7):
       * 1 (default, and every spec without the key) -- the legacy path, kept
@@ -522,7 +625,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
     tstat_fn = None if _reference else tstat
 
     sig, state = entry_signals(entry, bars, tstat=tstat_fn)
-    mask = gate_mask(gates, bars, bars_per_day) if gates else [True] * len(bars)
+    mask = (gate_mask(gates, bars, bars_per_day, series_cache=series_cache, cell=cell,
+                      _reference=_reference) if gates else [True] * len(bars))
     atr_series = {}
     for s in stops:
         if s["type"] in ("atr_stop", "atr_stop_dense"):
