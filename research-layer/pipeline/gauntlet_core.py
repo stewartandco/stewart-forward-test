@@ -376,9 +376,9 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     before -- and a multi-asset spec of a benchmark:"self" class still RAISES
     there, loudly. False skips the control entirely (no key written). It
     exists for the read-only parity tools (tools/gauntlet_parity.py,
-    tools/daily_parity.py), which re-run REGISTERED specs: the ~155 pre-switch
-    pooled BTCUSD+ETHUSD crypto specs were judged while crypto's benchmark was
-    None, so their chained verdicts carry no control and re-judging them must
+    tools/daily_parity.py), which re-run REGISTERED specs: every pre-switch
+    crypto strategy (533 at 2026-10-17, all pooled BTCUSD+ETHUSD) was judged
+    while crypto's benchmark was None, so their chained verdicts carry no control and re-judging them must
     not try to compute one. It changes nothing else in the result."""
     sid = spec["strategy_id"]
     res = run_spec(spec, spec_bars)

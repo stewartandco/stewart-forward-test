@@ -194,9 +194,9 @@ CLASSES = {
     # s4); the per-cell expander reads it from here. No short financing is
     # declared for crypto, so none is charged.
     # benchmark is "self" FROM SWITCH 1. It stayed None through Phase 2 on
-    # purpose: the legacy pooled path emitted MULTI-asset specs (all 155
-    # pre-switch crypto strategies on the chain are the 2-asset
-    # BTCUSD+ETHUSD book), and gauntlet._benchmark_relative REQUIRES exactly
+    # purpose: the legacy pooled path emitted MULTI-asset specs (every
+    # pre-switch crypto strategy on the chain, 533 at 2026-10-17, is the
+    # 2-asset BTCUSD+ETHUSD book), and gauntlet._benchmark_relative REQUIRES exactly
     # one asset per cell for a benchmark:"self" class ("benchmark-relative
     # control needs exactly one asset per cell"). The flip and the routing
     # change (crypto through expand_family_for_class, the crypto branch in

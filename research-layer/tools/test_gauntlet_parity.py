@@ -50,8 +50,8 @@ def test_the_family_kill_flag_alone_is_not_a_base_pass():
 
 def test_a_legacy_pooled_crypto_verdict_reruns_without_error(tmp_path):
     """Switch 1 made crypto's benchmark "self", which RAISES for a 2-asset
-    spec; the ~155 registered pooled BTCUSD+ETHUSD specs were judged with no
-    control, so parity must re-judge them without one (record_benchmark
+    spec; every pre-switch crypto strategy (533 at 2026-10-17, all pooled
+    BTCUSD+ETHUSD) was judged with no control, so parity must re-judge them without one (record_benchmark
     False) -- end to end through main(), not a crash on the first one."""
     import json
     from pipeline.test_screen import write_data_dir, dated_target_hit_bars

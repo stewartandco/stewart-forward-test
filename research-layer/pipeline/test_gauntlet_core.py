@@ -124,8 +124,8 @@ def test_standalone_seed_is_the_strategy_id_mod_2_31(tmp_path):
 # ---- Switch 1: the benchmark control on a legacy pooled crypto spec --------
 
 def _pooled_fixture(tmp_path):
-    """The pre-switch shape: one 2-asset BTCUSD+ETHUSD crypto spec (all ~155
-    registered pooled specs look like this)."""
+    """The pre-switch shape: one 2-asset BTCUSD+ETHUSD crypto spec (every
+    pre-switch crypto strategy, 533 at 2026-10-17, looks like this)."""
     import json
     _, spec = screening_registry(tmp_path)
     spec = json.loads(json.dumps(spec))

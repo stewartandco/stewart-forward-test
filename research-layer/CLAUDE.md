@@ -189,8 +189,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `train_dates` for the walk-forward, `regime_by_date` on `daily_bars`
   of the regime asset (`BTCUSD` if the spec's bars hold it, else the first
   asset sorted -- a per-cell spec, tradfi or crypto since Switch 1, is bucketed
-  by its OWN asset, no BTC lookup; recorded, never gated; `[:10]` keys), and `engine.run_spec`'s `max_dd` metric (the
-  screen's recorded max drawdown). The simcache key uses
+  by its OWN asset, no BTC lookup; recorded, never gated; `[:10]` keys), and
+  `engine.run_spec`'s `max_dd` metric (the screen's recorded max drawdown).
+  The simcache key uses
   `gauntlet._resolved_periods(spec)`. `ENGINE_REV` stays "e2" (a 1d
   strategy's results are bit-identical, so no cached sim is invalidated).
   Trade-based gates (edge per trade, edge decay, MC p05, ruin, cost stress)
@@ -1479,8 +1480,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   task `\Morpheus\33_CryptoGridRefresh`; number 33 because 30/31 are build 4a's
   and 32 is build 5's), daily **08:02 Perth**, `ExecutionTimeLimit` PT15M, NO
   StartWhenAvailable, no retry by design. Registered on MERGE DAY (Task 12 of
-  the plan, Coen-gated), not before. The Sentinel watches its ledger (label
-  `crypto_refresh`, 30 h) and lists 33 as "observing".
+  the plan, Coen-gated), not before. The Sentinel will watch its ledger (label
+  `crypto_refresh`, 30 h proposed, pending Coen) and list 33 as "observing";
+  that lands at merge (sc-ops-sentinel `feat/crypto-refresh-ledger`).
 - **What it fetches:** every cell of `cells.active_cells("crypto")` (76 USDT
   assets at 1d), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
   it only APPENDS, never repairs or trims rows. **End cap:** every fetch is
@@ -1490,12 +1492,26 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   of crypto's cells (these plus the legacy BTCUSD/ETHUSD that `data_fetch`
   refreshes at 08:20) to end on one day, and the signal service serves every
   asset on a single `bar_end`.
-- **Timing:** Binance's 1d bar closes 00:00 UTC = 08:00 Perth. Pass 1 always
-  runs in full (a late or hand run still refreshes every cell); retry passes
-  (max 2) never START after `--deadline-local` (default 08:15 Perth, UTC+8), so
-  the run is over before the **08:20** quarantine daily (which reads the same
-  1d files) and the 08:45 signal service. The wrapper's task guard is
+- **Timing:** Binance's 1d bar closes 00:00 UTC = 08:00 Perth. Pass 1 is not
+  deadline-gated (only the hard stop below gates it); retry passes
+  (max 2) never START at or after `--deadline-local` (default 08:15 Perth,
+  UTC+8), so the run is over before the **08:20** quarantine daily (which reads
+  the same 1d files) and the 08:45 signal service. The wrapper's task guard is
   `--wall-s 780 --grace-s 30` inside the PT15M limit: change them together.
+- **Hard stop (final review I1):** the guard holds no lock, so no grace
+  applies: it KILLS the run at 08:15:00, and a killed run writes neither the
+  ledger nor the manifest (yesterday's ledger, still under the Sentinel's
+  30 h, would read all clear on exactly the morning every cell timed out:
+  ~96 s per cell, 3 tries x 30 s + backoff). So the wrapper passes
+  `--deadline-local 08:11 --stop-local 08:12`: no retry starts at or after
+  08:11, and NO attempt, pass 1 included, at or after 08:12. Every cell not
+  yet fetched (and not already failed) gets a `crypto_refresh_failed` item
+  `skipped: past the stop time 08:12; not fetched this run`, the ledger and
+  the manifest (completed cells) are still written, exit 0; the worst single
+  attempt plus the ledger write lands well before the 08:15 wall.
+  `--stop-local` defaults to none, so `python -m pipeline.crypto_refresh` by
+  hand stays ungated; a hand run of the WRAPPER after 08:12 fetches nothing
+  and marks every cell skipped.
 - **Ban / rate limit:** `BinanceBanned` (418) or ANY `RateLimited` that reaches
   the module (fetch_symbol has already retried a 429) stops the run AT ONCE with
   no sleep: that cell gets a `crypto_refresh_failed` item and every cell not yet
@@ -1505,9 +1521,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   bar after 2022-12-31, or CSV missing/empty). Written with `remove_unseen=True`
   (a recovered item leaves; an empty run still refreshes `ts_utc` so the
   Sentinel sees a live writer). The items ARE the alarm.
-- **Exit codes:** 0 = the run completed or stopped on a ban (failed/skipped
-  cells are ledger items, not a non-zero exit: a retry would hit Binance
-  again); 2 = `--data-dir` missing, nothing written; 1 = crash; 4 = the wrapper
+- **Exit codes:** 0 = the run completed, stopped on a ban or stopped at the
+  hard stop (failed/skipped cells are ledger items, not a non-zero exit: a
+  retry would hit Binance again); 2 = `--data-dir` missing, nothing written; 1 = crash; 4 = the wrapper
   could not open its run log (`logs\crypto-refresh-run.log`); 124/125 = the task
   guard's wall / the outer cmd died.
 - **Touches:** the cell CSVs (gitignored `data/*.csv`), the ledger, and
@@ -1527,20 +1543,31 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `COST_MODEL`) is DELETED and `cells.CLASSES["crypto"]["cost_model"]` is the
   one source (10 bps commission + 5 bps slippage per side). Switch 2
   (intraday) is a later plan.
-- **The pooled path is retired.** The ~155 pre-switch pooled BTCUSD+ETHUSD
-  strategies stay on the chain and re-simulate forever; nothing about them is
+- **The pooled path is retired.** Every pre-switch crypto strategy (533 at
+  2026-10-17: 431 graveyard, 102 quarantine) is a pooled `[BTCUSD, ETHUSD]`
+  spec; they stay on the chain and re-simulate forever; nothing about them is
   re-judged. A pooled spec that still needs the GAUNTLET after the switch RAISES
   there (`_benchmark_relative` wants exactly one asset per cell), which is why
   merge day gates on the preflight below. The two parity tools
   (`tools/daily_parity.py`, `tools/gauntlet_parity.py`) call
-  `evaluate_standalone(record_benchmark=False)` so they can re-run registered
-  pooled specs; the hand-run `pipeline.gauntlet` registry pass would still raise
+  `evaluate_standalone(record_benchmark=False)` for a legacy pooled crypto spec
+  only, so they can re-run registered pooled specs; the hand-run `pipeline.gauntlet` registry pass would still raise
   on a pooled spec in `gauntlet` state (hand runs already need Coen's say-so).
   Every other 1d result (tradfi expansion, every registered spec's
   re-simulation, every quarantine row) is byte-identical across the switch.
 - **Per-cycle cap counts cells for every class** (`specs_per_combo =
-  len(sweep_cells(...))`, never 1 for crypto). `_short_asset` strips `USDT`, so
+  max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips `USDT`, so
   strategy names read `BTC`, not `BTCUSDT`.
+- **Known limit: a retired or delisted pair has no exit in code.** Once a dead
+  USDT cell has registered strategies, its file stops growing, so the loop's
+  freshness preflight parks every crypto fire at `stale_data`, and
+  `gauntlet_stats` refuses `cells_not_comparable` REGISTRY-WIDE, for all
+  classes (`pipeline/gauntlet_stats.py` ~682-691), once the vintage passes the
+  cell's last bar. Nothing reads a retirement note: the grid record's
+  "RETIRED by a new note" is policy, not code. Tradfi has the same latent
+  exposure (a delisted ETF or a dead FX series). Plan 3 owns an excluded-cells
+  mechanism (`comparable_cells`, the preflight and the stats honouring retired
+  cells).
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy

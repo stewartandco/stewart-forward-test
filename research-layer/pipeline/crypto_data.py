@@ -186,7 +186,10 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
     would be re-requested forever.
 
     The write is atomic (`.tmp` + os.replace): a failure mid-write leaves the
-    original file untouched and no `.tmp` masquerading as data.
+    original file untouched and no `.tmp` masquerading as data. On Windows
+    os.replace raises PermissionError while a reader (e.g. a worker fire)
+    holds the CSV open; crypto_refresh records that as a cell failure and
+    retries it.
 
     RAM profile: the whole merged series is held in memory and written once
     at the end -- there is no intra-cell checkpoint. An intraday backfill
