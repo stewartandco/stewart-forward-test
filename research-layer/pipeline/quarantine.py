@@ -61,10 +61,15 @@ Conventions:
     nobody got around to running. The day is owed and covered the same way as
     any other missed day -- an explicit `--date` backfill once the lock is
     free, and `--review` lists it among the dates never recorded.
-  * A date is recorded all or nothing (2026-10-16 fast path): every row is
-    simulated and validated before chain.lock is taken, and the date's
-    provenance plus rows go to the chain in ONE append. A failure before
-    that append writes nothing; the date stays owed and the run exits 1.
+  * A date is recorded all or nothing for the strategies that record
+    (2026-10-16 fast path): every row is simulated and validated before
+    chain.lock is taken, and the date's provenance plus rows go to the chain
+    in ONE append. A failure before that append writes nothing and the run
+    exits 1 -- except a ValueError in ONE strategy's simulation (observe_day's
+    data-shaped raises, or a malformed row), which defers only that strategy
+    (Coen 2026-10-16): a `simulation_failed` degraded item, WARN then FAIL
+    after 3 days, and it stays owed. A strategy that left quarantine while the
+    run simulated is skipped. Any other exception still fails the date.
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -948,9 +953,12 @@ def _record_date(args, registry: Registry, view: QuarantineView,
     # lock happens before it -- the date's digests, a provenance plan from
     # the run's one read (so a strategy deferred for a restated asset is
     # never simulated), and EVERY row's simulation and validation. A raise
-    # here writes nothing and the date stays owed: a date is all or nothing
-    # (s3.6). The lock is then held for a tail read plus ONE append.
+    # here writes nothing and the date stays owed (s3.6); the one exception is
+    # a ValueError in a single strategy's simulation, which defers THAT
+    # strategy only (Coen 2026-10-16, below). The lock is then held for a tail
+    # read plus ONE append.
     rows_by_sid: dict[str, list[dict]] = {}
+    sim_failed: dict[str, str] = {}
     lock = None
     if ready:
         logs_dir = args.registry.parent / "logs"
@@ -970,9 +978,42 @@ def _record_date(args, registry: Registry, view: QuarantineView,
         # a refusal simulates nothing; the plan under the lock refuses again
         # (ruling R7)
         for sid in ([] if pre.refusal else pre.ready):
-            rows_by_sid[sid] = [
-                validated_quarantine_decision(row) for row in
-                observe_day(specs[sid], bars_by_asset, args.date, entered[sid])]
+            # Coen 2026-10-16: a data-shaped failure in ONE strategy's
+            # simulation (observe_day's non-positive equity baseline, missing
+            # bar or no zero point; validated_quarantine_decision's malformed
+            # row -- all ValueError) must not hold back the others' rows, as
+            # one strategy's missing bar or restated asset already does not
+            # (isolation addendum rules 2-3). The strategy gets no rows, is
+            # reported (stdout + a `simulation_failed` degraded item: WARN,
+            # FAIL after 3 days) and stays owed, so catch-up retries it every
+            # run. ValueError ONLY: any other exception is a code bug and
+            # still fails the whole date, loudly, with nothing written.
+            try:
+                rows_by_sid[sid] = [
+                    validated_quarantine_decision(row) for row in
+                    observe_day(specs[sid], bars_by_asset, args.date,
+                                entered[sid])]
+            except ValueError as exc:
+                sim_failed[sid] = str(exc)
+                print(f"{sid}  deferred: simulation failed: {exc}")
+                report.degraded.append({"source": "simulation_failed",
+                                        "key": sid,
+                                        "reason": f"{args.date}: {exc}"})
+        if (sim_failed and n_present == 0
+                and all(sid in sim_failed for sid in ready)):
+            # The total-stall rule (above) for the simulation: it runs after
+            # that check, so a day where NOTHING can record because every
+            # ready strategy's simulation failed is refused here, before the
+            # lock is taken (nothing to append). Same reading as the
+            # missing-bar refusal: a date whose other strategies are already
+            # chained (n_present > 0) is a lagging strategy, not a dead
+            # pipeline, and falls through to the summary, exit 0.
+            print(f"REFUSED: nothing recorded for {args.date} -- every "
+                  f"ready strategy's simulation failed "
+                  f"({'; '.join(f'{sid}: {sim_failed[sid]}' for sid in ready)})"
+                  f". The data behind them is malformed; the strategies stay "
+                  f"owed and the next run retries them.", file=sys.stderr)
+            return 1
 
     if ready:
         try:
@@ -989,8 +1030,28 @@ def _record_date(args, registry: Registry, view: QuarantineView,
             # The same decision against what is on the chain NOW: another
             # writer may have chained this date's provenance or rows while
             # we simulated.
-            plan = _plan_provenance(view, args.date, ready, specs,
-                                    bars_digests, data_digests)
+            # The plan vouches for the strategies that will RECORD: a
+            # strategy whose simulation failed queues no row, so its cells
+            # stay out of the date's snapshot (else a later bar correction
+            # would pin its retry as `restated` for ever; on retry its
+            # cells go in as a supplement). The same holds for a strategy
+            # that LEFT quarantine while the run simulated: its rows are
+            # dropped, so the snapshot must not vouch for its cells either.
+            # Coen 2026-10-16, fix rounds 1-2.
+            states = view.states()
+            left: set[str] = set()
+            for sid in ready:
+                if sid not in sim_failed and states.get(sid) != "quarantine":
+                    left.add(sid)
+                    print(f"{sid}  skipped: left quarantine "
+                          f"({states.get(sid)}) while this run simulated")
+            survivors = [sid for sid in ready
+                         if sid not in sim_failed and sid not in left]
+            cells = {a for sid in survivors for a in spec_cells(specs[sid])}
+            plan = _plan_provenance(
+                view, args.date, survivors, specs,
+                {a: d for a, d in bars_digests.items() if a in cells},
+                {a: d for a, d in data_digests.items() if a in cells})
             if plan.refusal:
                 print(plan.refusal, file=sys.stderr)
                 return 1
@@ -1012,6 +1073,8 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                     print(f"\n0 decision(s) chained, {n_present} already "
                           f"present; every owing strategy deferred (restated).")
                     return 0
+            # plan.ready is a subset of `survivors`, so a strategy whose
+            # simulation failed (or that left quarantine) is never `late`
             late = [sid for sid in plan.ready if sid not in rows_by_sid]
             if late:
                 report.unchecked = True
@@ -1020,7 +1083,6 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                       f"without being simulated; nothing written -- re-run "
                       f"the date.", file=sys.stderr)
                 return 1
-            states = view.states()
             chained = view.decision_keys()
             batch: set[tuple[str, str, str]] = set()
             items = [plan.write] if plan.write else []
@@ -1050,11 +1112,26 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                         n_skipped += 1
                         continue
                     if states.get(sid) != "quarantine":
-                        raise ValueError(
-                            f"strategy {sid!r} is not in quarantine")
+                        # Coen 2026-10-16: a live-gate move while the run
+                        # simulated is routine, not a failure. Its rows are
+                        # dropped (none queued, no degraded item) and the
+                        # others record; before, the raise withheld the
+                        # whole date.
+                        if sid not in left:
+                            left.add(sid)
+                            print(f"{sid}  skipped: left quarantine "
+                                  f"({states.get(sid)}) while this run "
+                                  f"simulated")
+                        continue
                     items.append(("quarantine_decision", row))
                     batch.add(key)
                     written.append(row)
+            if not any(kind == "quarantine_decision" for kind, _ in items):
+                # Provenance vouches for rows: with none queued (every owing
+                # strategy left quarantine, failed simulation, or landed
+                # while we simulated) not even the snapshot is appended
+                # (Coen 2026-10-16, fix round 1).
+                items = []
             if items:
                 # provenance first (invariant 9 asks for an EARLIER
                 # snapshot), then the rows in today's order. The view is not
