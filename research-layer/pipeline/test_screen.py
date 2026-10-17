@@ -310,7 +310,7 @@ def test_zero_stop_distance_skips_entry_no_crash(monkeypatch):
     bars = flat_bars(30)
     sig = [0] * len(bars)
     sig[10] = 1
-    monkeypatch.setattr(eng, "entry_signals", lambda block, b: (sig, [0] * len(b)))
+    monkeypatch.setattr(eng, "entry_signals", lambda block, b, **_: (sig, [0] * len(b)))
     monkeypatch.setattr(eng, "_tightest_stop",
                         lambda stops, entry_px, side, atr_series, i: entry_px)  # dist 0
     blocks = [
