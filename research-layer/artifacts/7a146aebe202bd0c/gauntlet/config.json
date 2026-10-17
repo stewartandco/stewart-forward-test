@@ -1,0 +1,191 @@
+{
+ "cutoff": "2023-12-31",
+ "data_sha256": {
+  "BTCUSD": "815ad51a3f33b950f67df75612b75adb2f14c53943a03a3b1f16faa5266b9636",
+  "ETHUSD": "ef5a4eb98df4e7adba57969ea17ee392d1159cece5cfa5f2d0f5e9086d7ad4db"
+ },
+ "group_context": {
+  "cluster_labels": {
+   "05be16ff262d1ab6": 0,
+   "08528204303c889d": 1,
+   "08b2b899076c2b7d": 1,
+   "0a179103b921c404": 1,
+   "0a6bd874b7a0fcea": 1,
+   "0a872bb0b01ac435": 1,
+   "150ac2892c6750e4": 0,
+   "1e46a478884a2db4": 1,
+   "2763cb1dc8d5731b": 1,
+   "2a81986933c36b30": 1,
+   "2da71a5efe037e15": 2,
+   "2e4155263436844e": 2,
+   "35cfad2c16aedc1e": 1,
+   "3653f424cf9ccba8": 0,
+   "3b25220ab072523b": 1,
+   "3e3da0e8da77b8f3": 1,
+   "43bf5e97b141ff78": 1,
+   "45d5410357ff9ea3": 1,
+   "48214fbc4de24f00": 1,
+   "48ebf9483d77674e": 1,
+   "49c5b2d04a4689b7": 2,
+   "51ca1fabf61053a7": 0,
+   "6697c1f8ab44fd70": 1,
+   "67399610cc55a813": 1,
+   "6ab8dbdbebb8d263": 1,
+   "6ea757eeca03c24f": 2,
+   "72e1ea7611b9ee76": 1,
+   "7546f0eaf8ba8557": 1,
+   "75773b65e7ce1834": 1,
+   "76043263fde44531": 1,
+   "78b75c3e46808ec2": 1,
+   "78fd19cd9b83e4c4": 1,
+   "7a146aebe202bd0c": 1,
+   "872dcb9adf2cd9e8": 1,
+   "876dc462f1d6e442": 1,
+   "8c9115911421894f": 2,
+   "8d13d7866706ff8a": 1,
+   "92784fad199a27e4": 3,
+   "9440b0b664606cea": 1,
+   "9593dc8a09a625b3": 1,
+   "9784e194d55a32ae": 2,
+   "995293c4e2ffee18": 1,
+   "9b2a9b23a940b91e": 1,
+   "9b6753a48c4d0ccd": 1,
+   "9cc49ddd9b6a569f": 1,
+   "9ef46e4dc7e968f1": 1,
+   "a1c3440ea84a784c": 1,
+   "a56f4224720cd7d8": 1,
+   "a61725295bffa35a": 1,
+   "a64ffec1d436bfac": 1,
+   "a77fade4e6b6ba4f": 2,
+   "a9a45afb10dd2c1b": 0,
+   "aa428a53305cf1f6": 1,
+   "ad654fd8097717bd": 1,
+   "add23d6d8a70590c": 2,
+   "b0c0d512d28274dc": 3,
+   "bd0b851cc7220d6a": 0,
+   "bfeb7e5265b32ff8": 1,
+   "ca3ea8e4a14f730f": 1,
+   "cad2d7e7be04039b": 0,
+   "ce1fef877a375712": 3,
+   "d1fbe83eace953c6": 1,
+   "d33a2a6112ada137": 1,
+   "d38568a59f987177": 1,
+   "d3f6eb2ff09b574b": 2,
+   "d67b59551be353df": 1,
+   "d738cfeb4c119e19": 0,
+   "daae8ef1314419b8": 1,
+   "dd7ee7ea95b7b88e": 2,
+   "ddeddafaa931b864": 1,
+   "e21a3a2a2d238bed": 1,
+   "ecd8c854495dc869": 1,
+   "edf31b12365cdfcc": 3,
+   "eec131da5c5b26dc": 1,
+   "ef7712f41e2188e2": 1,
+   "f10620e1dd3c3e28": 2,
+   "f12ad61db881016e": 2,
+   "f9623a573ccb52d2": 1,
+   "fae172f81ba68878": 1,
+   "ff5adaac5be53211": 1
+  },
+  "dsrs": {
+   "7a146aebe202bd0c": 0.7077612729337314,
+   "876dc462f1d6e442": 0.9009132419534902,
+   "9593dc8a09a625b3": 0.7084473789172477,
+   "9b6753a48c4d0ccd": 0.940412715544832
+  },
+  "effective_trials": 4,
+  "group": "channel_breakout_both_fixedfrac-2026-08-17-gen3",
+  "registered_n": 80
+ },
+ "metrics": {
+  "cost_stress_net_pnl": 0.3500004658540474,
+  "deflated_sharpe": 0.7077612729337314,
+  "edge_decay_pct": -5.453446281940302,
+  "expected_max_sharpe": 0.04228912629174214,
+  "is_edge_per_trade": 0.028633459878035384,
+  "is_edge_raw": 0.024218102389935145,
+  "is_vol": 0.8457972767905969,
+  "mc_p05_equity": 2.143800873886598,
+  "oos_edge_per_trade": 0.027071949524925795,
+  "oos_edge_raw": 0.015526148415471444,
+  "oos_vol": 0.5735142347682107,
+  "p_ruin": 0.0,
+  "protocol": "gauntlet-protocol-v3",
+  "registered_n": 80,
+  "sibling_group_n": 4,
+  "trials_n": 4,
+  "trials_sr_var": 0.0016155653923654644
+ },
+ "protocol": "gauntlet-protocol-v3",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-16T21:03:35Z",
+  "family": "channel_breakout_both_fixedfrac",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-17-gen3"
+  },
+  "name": "BTC+ETH 1d channel_breakout_both_fixedfrac dboth l100 al14 m2.0 mb40 f0.02",
+  "provenance": {
+   "card_ids": [
+    "3d3ec8dc2fe6799c",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "channel_breakout_both_fixedfrac-2026-08-17-gen3"
+  },
+  "strategy_id": "7a146aebe202bd0c",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

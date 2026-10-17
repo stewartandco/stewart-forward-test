@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+QQQ,long,2007-03-05 00:00:00,42.16,2007-03-22 00:00:00,44.44,signal:zscore_revert,0.05367969639468702
+QQQ,long,2023-10-27 00:00:00,346.43,2023-11-03 00:00:00,365.31379231956265,target,0.05410969119176352

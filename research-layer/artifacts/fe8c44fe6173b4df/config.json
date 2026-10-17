@@ -1,0 +1,132 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "46bc6290c0798704212906e62a458c36d106f0a359b7c9ad2eb435b94f980353",
+  "CAD_1d": "cc4af8d6e71898f9ccff1eaf37af28db98f92a34a5ae07dcb084e4778a74b825",
+  "CHF_1d": "15dd2180f0a7c5ff870aae2a562b325e728642813ad2a65e92078d30739d2c57",
+  "EUR_1d": "35e42d1db3da41c66e53d0110fa82ee7e5acd6548302df7e540e59675958622f",
+  "GBP_1d": "94815c2478bfd3ebeb9c26ec56ff47fd33d36f79fb0d0fec796d3cf88108306d",
+  "JPY_1d": "56c06303f9c56fc7a6b9b34ab8df41f39818f41dd14ec459e2a5f7a09f6f667b",
+  "MXN_1d": "c47df935ff7ade6cc3835e10f45fcd888b9e9f77675b037c38294093050b04d6",
+  "NOK_1d": "fce87a6ba530552466ccf09784950a36dd5f70837e78abd21777c0b8fcebcd2b",
+  "NZD_1d": "eaed9a97dfb0ea7b00b7ea0afa27c656d6fe99114f172a6fa260e804c7f3afe7",
+  "SEK_1d": "0fb438a4386cd636cf116be084346acb274483f3e7c88bd98ec8c2c178823b0c",
+  "SGD_1d": "ffae28377a1606493199cd40a2a37bc4f0a3e7102a0feb9ef6cacbee0b2eb4d3",
+  "ZAR_1d": "138d5120436cec10aef3ed086c737817f3e7e5b385fd9bbea017a56e5457253d"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "pct": 0.1
+    },
+    "role": "stop",
+    "type": "pct_stop"
+   },
+   {
+    "params": {
+     "r": 1.5
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-01T08:01:03Z",
+  "family": "fx_slow_trend_long_ma",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-01-073002-loop-fx"
+  },
+  "name": "MXN 1d fx_slow_trend_long_ma dlong f13 s130 ml200 l120 mp0.9 p0.1 r1.5 mb40 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "5d46eb5e6f34392f",
+    "6dba955b6b43f40d",
+    "73ba48a43e430161",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "b75771d2de3b3e53",
+    "bdd6f691940fb0de",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e519d19950313468",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_slow_trend_long_ma-2026-09-01-073002-loop-fx:MXN_1d"
+  },
+  "strategy_id": "fe8c44fe6173b4df",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "MXN"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

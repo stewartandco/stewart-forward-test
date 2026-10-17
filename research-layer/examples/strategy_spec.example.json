@@ -1,0 +1,91 @@
+{
+  "strategy_id": "bd0b5c058535d0dd",
+  "version": 1,
+  "created_utc": "2026-08-06T03:02:41Z",
+  "name": "MNQ ORB 15m 1.25R cut15:30 Mon-Tue-Thu-Fri orb<=75p",
+  "family": "orb_breakout",
+  "universe": {
+    "assets": [
+      "MNQ"
+    ],
+    "asset_class": "futures",
+    "timeframe": "15m",
+    "session": "RTH"
+  },
+  "blocks": [
+    {
+      "role": "entry",
+      "type": "orb_breakout",
+      "params": {
+        "window_min": 15,
+        "direction": "both"
+      }
+    },
+    {
+      "role": "filter",
+      "type": "day_of_week",
+      "params": {
+        "allow": [
+          "Mon",
+          "Tue",
+          "Thu",
+          "Fri"
+        ]
+      }
+    },
+    {
+      "role": "filter",
+      "type": "orb_size_max",
+      "params": {
+        "max_points": 75
+      }
+    },
+    {
+      "role": "stop",
+      "type": "structure",
+      "params": {
+        "ref": "orb_opposite"
+      }
+    },
+    {
+      "role": "target",
+      "type": "r_multiple",
+      "params": {
+        "r": 1.25
+      }
+    },
+    {
+      "role": "exit",
+      "type": "time_cut",
+      "params": {
+        "at": "15:30"
+      }
+    },
+    {
+      "role": "risk",
+      "type": "fixed_contracts",
+      "params": {
+        "n": 1
+      }
+    }
+  ],
+  "provenance": {
+    "card_ids": [
+      "1100678d37f1f221",
+      "5cd27d1bc914d958"
+    ],
+    "parent_strategy_id": null,
+    "sibling_group_id": "orb-mnq-2026w32",
+    "generation": 0
+  },
+  "generator": {
+    "agent": "composer",
+    "model": "claude-sonnet-5",
+    "pipeline_version": "g1.0.0",
+    "run_id": "2026-08-06-nightly"
+  },
+  "cost_model": {
+    "commission_per_side": 0.62,
+    "slippage_ticks": 1
+  }
+}

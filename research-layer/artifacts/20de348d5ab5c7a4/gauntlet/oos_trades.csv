@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+GBP,short,2024-04-17 00:00:00,1.2443,2024-05-15 00:00:00,1.2658,stop,-0.01872821657563091,1.0
+GBP,short,2024-11-13 00:00:00,1.2709,2025-02-27 00:00:00,1.2628,signal:regime_flip,0.0019929763774969352,1.0
+GBP,short,2026-03-09 00:00:00,1.3395,2026-03-11 00:00:00,1.3399,signal:regime_flip,-0.0007135614163804514,1.0

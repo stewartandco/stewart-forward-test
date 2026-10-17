@@ -1,0 +1,134 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "15c1f2a141f7d23e917cdfd84e670de9cdf03147ad6e29c67e8aa955d510c84c",
+  "EEM_1d": "3585c17d2a98ba7c2a0e5095bf0695f17c4c97eb2ab2371acff8f60aedbe05cd",
+  "EFA_1d": "87a7ac116ba1d58c8fb67e1c041345303918af13e6c8b16b54a636e2bc2fa7ce",
+  "EWA_1d": "addbf44f5a39214312ad71ff2f8da6203b0849ea6ce743479b30a3a829f740a2",
+  "EWC_1d": "acb1e72018e3aa7969faa53d625783af8d98bd52523cbee9bb46c6c7ce739b51",
+  "EWG_1d": "de72e12939094893c57f1eda650b079daa8994a65233a3160c93cd634398c8c3",
+  "EWH_1d": "92b2f9ab0a6d0c006d935257bc3dcbb00c2ca9433069609fd34b36fede7371cd",
+  "EWJ_1d": "b370e12596b1893bbca5f9fda394e245bfeccfc385e6ce29f7502b13bbce1614",
+  "EWU_1d": "b6c7f5ac4beee4e5651bf20e796b9f478d873728135547426de46f8f9e16737d",
+  "EWY_1d": "4125539aceb85da974ca90ca11e125a364a17c1c77d211baf899dd0969f00e4e",
+  "EWZ_1d": "d8a7166de1aafcd5c96d012ae7f84d0a771bc40a62b2634a6338120a46c71ac1",
+  "FXI_1d": "ebb49a6415fa0372d83cbce9b4eb187088fee5eca6b4de17aa00b69194d0b5e6",
+  "IWM_1d": "41f2d4b1c8e7e3462409a0a345aceafe96b762539b67fd59e50fb64db0ae909f",
+  "MDY_1d": "cd7ec55ef40f752288243aae0c901d21627f8d7db9ec87d3b899f659ec7ccba9",
+  "QQQ_1d": "b9dfd3f93e08cc1d441e034bcd888bd1ab605aaa0d76a3f31a1b746afd9bb134",
+  "SPY_1d": "a4dd61887b7fd4dd95b175854d3eaeb29f5cb144bfa9ed3b0a5b0abc6967ea49"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 180,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-14T12:19:07Z",
+  "family": "range_breakout_trend_long_regime_filtered",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-14-120032-loop-equity_etf"
+  },
+  "name": "EWJ 1d range_breakout_trend_long_regime_filtered dlong l100 ml200 l180 mp0.9 al14 m2.0 l20 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "10f17cd64def74fe",
+    "2243c5930df5c5be",
+    "2359bf09659f2885",
+    "35c61158d380a771",
+    "4cf9bb79602caeb9",
+    "538cb5fd38ba4ef3",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "dcbe4d37af0f4eaa",
+    "e519d19950313468",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_trend_long_regime_filtered-2026-10-14-120032-loop-equity_etf:EWJ_1d"
+  },
+  "strategy_id": "72324cfe81e0fb1f",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "EWJ"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

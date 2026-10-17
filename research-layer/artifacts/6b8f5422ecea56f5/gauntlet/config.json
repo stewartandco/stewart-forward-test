@@ -1,0 +1,278 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "SGD_1d": "2026-10-02 00:00:00"
+ },
+ "data_sha256": {
+  "SGD_1d": "01ce42ccd724d8953d9d5a3aa3e4161316e00fdb8101f1d1da42062f67545ad2"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.03692530695237358,
+   "excess": -0.047749833379134486,
+   "strategy_net": -0.010824526426760905,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.011420081160030349,
+  "edge_decay_pct": -3750.659984646086,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 8,
+    "net_pnl": -0.09745654211898092
+   },
+   "post_2022": {
+    "n_trades": 8,
+    "net_pnl": -0.06051760064217926
+   },
+   "pre_gfc": {
+    "n_trades": 17,
+    "net_pnl": 0.07244889489955808
+   },
+   "tightening": {
+    "n_trades": 9,
+    "net_pnl": -0.02992160257405252
+   }
+  },
+  "exit_reasons_is": {
+   "signal:ma_crossunder": 25,
+   "stop": 27
+  },
+  "exit_reasons_oos": {
+   "signal:ma_crossunder": 2,
+   "stop": 1
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.001849999798862205,
+  "is_edge_raw": 0.00011820543617076183,
+  "is_vol": 0.06389483730942082,
+  "mc_p05_equity": 0.780221772687365,
+  "oos_edge_per_trade": -0.0675372023730956,
+  "oos_edge_raw": -0.0036013360888615532,
+  "oos_vol": 0.05332373806315964,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.03270641714930018,
+   "dense_only": true,
+   "mean_ratio": 0.3907466510394115,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": -0.8840239228696509,
+     "score": -0.028913255191335568,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 2.987077629543352,
+     "score": 0.09769660700918761,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.7,
+     "ratio": -0.23974532828356293,
+     "score": -0.007841210716438124,
+     "to": 0.6
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.7,
+     "ratio": 0.9646102984767702,
+     "score": 0.0315489468084922,
+     "to": 0.8
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 13,
+     "ratio": 3.8788421567853155,
+     "score": 0.12686302963611173,
+     "to": 8
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "up",
+     "from": 13,
+     "ratio": -1.3418318171856716,
+     "score": -0.04388651115707807,
+     "to": 20
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 130,
+     "ratio": 1.1615602045163673,
+     "score": 0.03799047259293874,
+     "to": 80
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 130,
+     "ratio": -3.4005160126676275,
+     "score": -0.11121869523318235,
+     "to": 200
+    }
+   ],
+   "worst_ratio": -3.4005160126676275
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 3,
+     "net": -0.01080400826658466,
+     "win_rate": 0.6666666666666666,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.03270641714930018,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9896023434942032,
+     "n_trades": 8,
+     "net": 0.1290292644504712
+    },
+    {
+     "min_equity": 0.9276484427559132,
+     "n_trades": 22,
+     "net": 0.05971960829561378
+    },
+    {
+     "min_equity": 0.8315536318327207,
+     "n_trades": 22,
+     "net": -0.18260219006520528
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.7
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "exit",
+    "type": "ma_crossunder"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-12T12:26:41Z",
+  "family": "fx_trend_vol_percentile_gated",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-12-120031-loop-fx"
+  },
+  "name": "SGD 1d fx_trend_vol_percentile_gated l120 mp0.7 dboth f13 s130 f13 s130 ml50 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "5d46eb5e6f34392f",
+    "6dba955b6b43f40d",
+    "d0fc8344bd267d47",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_trend_vol_percentile_gated-2026-10-12-120031-loop-fx:SGD_1d"
+  },
+  "strategy_id": "6b8f5422ecea56f5",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "SGD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

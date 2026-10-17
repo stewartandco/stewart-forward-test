@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EEM,long,2024-02-09 00:00:00,39.46,2024-08-06 00:00:00,40.28,signal:regime_flip,0.0203805372529144,1.0
+EEM,long,2025-02-11 00:00:00,43.42,2025-03-03 00:00:00,43.46,signal:regime_flip,0.0005212344541684736,1.0

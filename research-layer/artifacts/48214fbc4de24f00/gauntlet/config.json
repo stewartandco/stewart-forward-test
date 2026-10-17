@@ -1,0 +1,120 @@
+{
+ "cutoff": "2023-12-31",
+ "data_sha256": {
+  "BTCUSD": "815ad51a3f33b950f67df75612b75adb2f14c53943a03a3b1f16faa5266b9636",
+  "ETHUSD": "ef5a4eb98df4e7adba57969ea17ee392d1159cece5cfa5f2d0f5e9086d7ad4db"
+ },
+ "group_context": {
+  "dsrs": {
+   "2763cb1dc8d5731b": 0.012196407984673252,
+   "3e3da0e8da77b8f3": 0.004106691785917882,
+   "48214fbc4de24f00": 0.04341206623604804,
+   "daae8ef1314419b8": 0.08482217914975532,
+   "eec131da5c5b26dc": 0.0014543925844731076,
+   "ff5adaac5be53211": 0.016871251514852803
+  },
+  "group": "two_sided_range_breakout-2026-08-15-gen2"
+ },
+ "metrics": {
+  "cost_stress_net_pnl": 0.4099695049700034,
+  "deflated_sharpe": 0.04341206623604804,
+  "edge_decay_pct": -65.66381486087518,
+  "is_edge_per_trade": 0.05285182940379508,
+  "is_edge_raw": 0.044701933383131075,
+  "is_vol": 0.8457972767905969,
+  "mc_p05_equity": 8.18693066933504,
+  "oos_edge_per_trade": 0.01814730199350149,
+  "oos_edge_raw": 0.010407736015910633,
+  "oos_vol": 0.5735142347682107,
+  "p_ruin": 0.0005,
+  "sibling_group_n": 6,
+  "trials_n": 56
+ },
+ "protocol": "gauntlet-protocol-v2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 20
+    },
+    "role": "entry",
+    "type": "channel_breakout"
+   },
+   {
+    "params": {
+     "lookback": 90,
+     "max_pctile": 1.0
+    },
+    "role": "filter",
+    "type": "vol_percentile"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-15T09:12:02Z",
+  "family": "two_sided_range_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-15-gen2"
+  },
+  "name": "BTC+ETH 1d two_sided_range_breakout dboth l20 l90 mp1.0 al14 m3.0 mb40 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "295c089b48478986",
+    "44569b1125588083",
+    "58d10771de3c6bd0",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "9aeedfe2b4f5e2cc",
+    "a2e3769454c39476",
+    "d0fc8344bd267d47",
+    "e818d7f15744fa91",
+    "f4ecce1a057489c4"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "two_sided_range_breakout-2026-08-15-gen2"
+  },
+  "strategy_id": "48214fbc4de24f00",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

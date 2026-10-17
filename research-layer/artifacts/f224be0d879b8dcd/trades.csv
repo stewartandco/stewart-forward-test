@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWA,long,1998-11-19 00:00:00,9.438,2001-03-14 00:00:00,8.68144,stop,-0.08056105107014204
+EWA,long,2001-05-23 00:00:00,9.82,2001-07-26 00:00:00,9.113,stop,-0.07239592668024446
