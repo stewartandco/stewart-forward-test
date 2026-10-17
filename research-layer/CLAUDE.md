@@ -1304,7 +1304,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - `run_quarantine.bat` ends with `python -m pipeline.quarantine --catch-up`:
   every OWED date (a deferred class, a missed day, a `deferred_lock` skip) is
   recorded through the unchanged `--date` path, oldest first, at most
-  `MAX_CATCHUP_DATES` (10) per run. A date counts as owed only when EVERY asset
+  `MAX_CATCHUP_DATES` (10) per run; a deferred-only date (every owing strategy
+  deferred for a restated asset or a failed simulation, 2026-10-17) is not
+  counted against it. A date counts as owed only when EVERY asset
   of the strategy has a bar on it -- the `--date` path's own readiness rule --
   so a calendar-gap date is never retried forever.
 - A failed date never strands later ones (exceptions included) but makes the
@@ -1332,20 +1334,24 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   `deferred_lock` line, without simulating; the acquire-time check stays as
   the backstop.
 - **A date is all or nothing for the strategies that record (2026-10-16;
-  per-strategy follow-up approved by Coen the same day).** A `ChainMoved` (an
-  unlocked writer, or a rewritten log: `CHAIN MOVED:` on stderr) or any
-  exception other than `ValueError` in simulation (a code bug) writes NOTHING
-  for the date; it stays owed and the run exits 1. A `ValueError` in ONE
-  strategy's simulation or row validation (`observe_day`'s non-positive equity
-  baseline, missing bar or no zero point; a malformed row) DEFERS only that
-  strategy: it gets no rows and stays owed (catch-up retries it every run),
+  per-strategy follow-up approved by Coen the same day; narrowed 2026-10-17).**
+  A `ChainMoved` (an unlocked writer, or a rewritten log: `CHAIN MOVED:` on
+  stderr) or any exception other than `SimulationDataError` in simulation or
+  row validation (a code bug, a plain `ValueError` included: a malformed row,
+  an unpacking mismatch, `max([])`) writes NOTHING for the date; it stays owed
+  and the run exits 1. Only `quarantine.SimulationDataError` (a `ValueError`
+  subclass, raised at the data-shaped sites: `observe_day`'s and
+  `_observe_intraday`'s missing bar, `_rebase_index` / `_rebase_index_day`'s no
+  zero point, and the two non-positive equity baselines) DEFERS ONE strategy:
+  it gets no rows and stays owed (catch-up retries it every run),
   stdout says `<sid>  deferred: simulation failed: <error>`, and a
   `simulation_failed` item keyed by the strategy reaches
   `logs/degraded_quarantine.json` (the Sentinel's `research_degraded`: WARN,
   then FAIL after 3 days); the others record and the run exits 0. If NOTHING
   records, nothing is already chained for the date and every ready strategy's
   simulation failed, it is a total stall: `REFUSED: nothing recorded ...` on
-  stderr, exit 1, chain.lock never taken. A strategy that left quarantine
+  stderr, exit 1, chain.lock never taken (that stalled date is still
+  `deferred_only`, below). A strategy that left quarantine
   while the run simulated (a live-gate move) is SKIPPED, not a failure:
   `<sid>  skipped: left quarantine (<state>) while this run simulated`, no
   degraded item, the others record, exit 0. The old `PARTIAL WRITE` path is
@@ -1394,8 +1400,18 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   restated asset whose strategies are fully recorded blocks nobody. A restated
   asset or a missing price file defers only the owing strategies that trade it
   (rules 2-3); every owing strategy missing a bar or a file, with no row
-  already chained for the date, is still a total stall (exit 1). A date where every owing strategy is deferred for a restated
-  asset uses no catch-up slot.
+  already chained for the date, is still a total stall (exit 1). A date where
+  every ready strategy was deferred (restated asset OR failed simulation, any
+  mix) uses no catch-up slot (Coen 2026-10-17): `DateReport.deferred_only` is
+  true when nothing was appended, at least one ready strategy was deferred and
+  every ready strategy still owing the date was; a strategy that left
+  quarantine mid-run no longer owes it and is not counted. It holds for the
+  all-simulation-failed total stall too (rc stays 1, REFUSED, but no slot), so
+  a strategy whose simulation ALWAYS fails (a non-positive baseline at its
+  entry rebase is date-independent) can no longer starve every other
+  strategy's lagged backfill. **Accepted cost (Coen):** such a strategy's dates
+  are re-simulated on every run, like restated dates; the `simulation_failed`
+  item (WARN, FAIL after 3 days) forces a human fix.
 - **Degraded ledger `logs/degraded_quarantine.json`** (read by the Ops
   Sentinel's `research_degraded`: WARN, FAIL after 3 days). `--date` only adds
   or refreshes items; `--catch-up` also removes recovered ones, and only when
