@@ -381,5 +381,6 @@ def test_the_grid_record_matches_the_gate():
 
     # the statements the note must make
     for needle in ("2023-12-31", "365 days", "fixed by this note", "RETIRED",
-                   "BTCUSD", "ETHUSD", "counted trial", "arithmetic", "never evidence of edge"):
+                   "BTCUSD", "ETHUSD", "counted trial", "arithmetic", "never evidence of edge",
+                   "the same 76 are used in every phase", "crypto_universe_manifest.json"):
         assert needle in text, needle
