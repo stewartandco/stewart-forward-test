@@ -929,19 +929,22 @@ def test_a_concurrent_writer_is_absorbed_not_crashed(tmp_path, capsys,
 
 
 def test_only_the_duplicate_case_is_absorbed(tmp_path, capsys, monkeypatch):
-    """A malformed payload must still be fatal: run() absorbs only a
-    DuplicateQuarantineDecision, never a ValueError. Since the 2026-10-16
-    fast path the payload is validated before anything is written, so the
-    date writes nothing at all (all or nothing, s3.6)."""
+    """A malformed payload is never absorbed: run() absorbs only a
+    DuplicateQuarantineDecision. Since the 2026-10-16 fast path the payload is
+    validated before anything is written. It is a ValueError, so (Coen
+    2026-10-16) it defers that strategy per strategy instead of failing the
+    date; with ONE strategy that is a total stall: REFUSED, exit 1, nothing
+    written."""
     reg, spec, data = quarantined(tmp_path)
 
     def bad(payload):
         raise ValueError("malformed payload")
 
     monkeypatch.setattr(quarantine_mod, "validated_quarantine_decision", bad)
-    with pytest.raises(ValueError, match="malformed payload"):
-        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
-    assert "PARTIAL WRITE" not in capsys.readouterr().err
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err and "malformed payload" in err
+    assert "PARTIAL WRITE" not in err
     assert decisions(reg) == []
     assert snapshots(reg) == []
 

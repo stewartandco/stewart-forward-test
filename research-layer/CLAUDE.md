@@ -1321,9 +1321,14 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   while the run simulated (a live-gate move) is SKIPPED, not a failure:
   `<sid>  skipped: left quarantine (<state>) while this run simulated`, no
   degraded item, the others record, exit 0. The old `PARTIAL WRITE` path is
-  gone. A deferred strategy's assets still ride in the date's provenance
-  snapshot (the plan covers every ready strategy), so a later restatement of
-  those bars defers its retry as `restated` (rule 2). In catch-up a `ChainMoved` date
+  gone. The date's provenance plan under the lock covers only the strategies
+  that will record (ready minus the simulation failures, digests filtered to
+  their cells): a deferred strategy's assets are NOT in the date's snapshot,
+  so its retry records with a `quarantine_data_snapshot_supplement` instead of
+  being pinned `restated` by a later bar correction. A date where no decision
+  row is queued (every owing strategy left quarantine, was skipped or failed
+  simulation) appends NOTHING, not even provenance: provenance vouches for
+  rows. In catch-up a `ChainMoved` date
   rebuilds the view with a fresh read and the later dates still run; that
   includes a ChainMoved from the advance at the START of a catch-up date
   (outside the lock), which fails that date with a traceback and the date is

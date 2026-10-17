@@ -423,7 +423,8 @@ def test_a_simulation_valueerror_defers_that_strategy_and_the_others_record(
             in out.out)
     assert "PARTIAL WRITE" not in out.err
     snaps = snapshots(reg)
-    assert len(snaps) == 1 and asset_of[ok_sid] in snaps[0]["bars_sha256"]
+    assert len(snaps) == 1
+    assert set(snaps[0]["bars_sha256"]) == {asset_of[ok_sid]}   # not the failed one's
     items = ledger(reg)["items"]
     assert [(i["source"], i["key"]) for i in items] == [
         ("simulation_failed", bad_sid)]
@@ -552,6 +553,57 @@ def test_a_strategy_leaving_quarantine_mid_run_is_skipped_and_the_others_record(
     assert (f"{two['strategy_id']}  skipped: left quarantine (graveyard) "
             f"while this run simulated") in out.out
     assert not (ledger(reg) or {"items": []})["items"]
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_the_date_provenance_names_only_the_strategies_that_record(
+        tmp_path, monkeypatch, capsys):
+    """Coen 2026-10-16, fix round 1: B (ETHUSD only) fails simulation, so the
+    chained snapshot covers BTCUSD only. The retry then records B with a
+    SUPPLEMENT for ETHUSD (not a `restated` pin), chain VALID."""
+    reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+    _sim_calls(monkeypatch, lambda spec, n: spec["strategy_id"] == b["strategy_id"],
+               lambda: ValueError("equity baseline is 0.0"))
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    snaps = snapshots(reg)
+    assert len(snaps) == 1
+    assert set(snaps[0]["bars_sha256"]) == {"BTCUSD"}
+    assert set(snaps[0]["data_sha256"]) == {"BTCUSD"}
+    monkeypatch.undo()
+    capsys.readouterr()
+    assert _catch_up(reg, data) == 0
+    sups = [e["payload"] for e in reg.entries()
+            if e["entry_type"] == "quarantine_data_snapshot_supplement"]
+    assert [set(p["bars_sha256"]) for p in sups
+            if p["date"] == "2023-01-22"] == [{"ETHUSD"}]
+    assert (b["strategy_id"], "2023-01-22", "ETHUSD") in {
+        (r["strategy_id"], r["date"], r["asset"]) for r in decisions(reg)}
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_date_where_the_only_owing_strategy_left_quarantine_appends_nothing(
+        tmp_path, monkeypatch, capsys):
+    """Coen 2026-10-16, fix round 1: provenance vouches for rows. With no row
+    queued (the only strategy left quarantine mid-run) not even the date's
+    snapshot is appended: rc 0, the skip line, the chain byte-identical."""
+    reg, spec, data = quarantined(tmp_path)
+    before = reg.log_path.read_bytes()
+    fired = race_before_lock(monkeypatch, lambda: reg.record_state_change(
+        spec["strategy_id"], "graveyard", "test"))
+    after_race = []
+    real_append = Registry._append_at
+    monkeypatch.setattr(Registry, "_append_at",
+                        lambda self, snap, items: after_race.append(items)
+                        or real_append(self, snap, items))
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    assert fired == [1]
+    monkeypatch.undo()
+    out = capsys.readouterr().out
+    assert (f"{spec['strategy_id']}  skipped: left quarantine (graveyard) "
+            f"while this run simulated") in out
+    assert after_race == []
+    assert snapshots(reg) == [] and decisions(reg) == []
+    assert "0 decision(s) chained" in out
     assert run_verifier(reg.log_path).returncode == 0
 
 

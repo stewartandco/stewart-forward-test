@@ -1030,8 +1030,17 @@ def _record_date(args, registry: Registry, view: QuarantineView,
             # The same decision against what is on the chain NOW: another
             # writer may have chained this date's provenance or rows while
             # we simulated.
-            plan = _plan_provenance(view, args.date, ready, specs,
-                                    bars_digests, data_digests)
+            # The plan vouches for the strategies that will RECORD: a
+            # strategy whose simulation failed queues no row, so its cells
+            # stay out of the date's snapshot (else a later bar correction
+            # would pin its retry as `restated` for ever; on retry its
+            # cells go in as a supplement). Coen 2026-10-16, fix round 1.
+            survivors = [sid for sid in ready if sid not in sim_failed]
+            cells = {a for sid in survivors for a in spec_cells(specs[sid])}
+            plan = _plan_provenance(
+                view, args.date, survivors, specs,
+                {a: d for a, d in bars_digests.items() if a in cells},
+                {a: d for a, d in data_digests.items() if a in cells})
             if plan.refusal:
                 print(plan.refusal, file=sys.stderr)
                 return 1
@@ -1110,6 +1119,12 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                     items.append(("quarantine_decision", row))
                     batch.add(key)
                     written.append(row)
+            if not any(kind == "quarantine_decision" for kind, _ in items):
+                # Provenance vouches for rows: with none queued (every owing
+                # strategy left quarantine, failed simulation, or landed
+                # while we simulated) not even the snapshot is appended
+                # (Coen 2026-10-16, fix round 1).
+                items = []
             if items:
                 # provenance first (invariant 9 asks for an EARLIER
                 # snapshot), then the rows in today's order. The view is not
