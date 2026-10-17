@@ -167,12 +167,9 @@ def test_fingerprint_completes_for_a_legacy_pooled_crypto_spec(tmp_path):
                                    ("ETHUSD", "1d"): dated_target_hit_bars()}, spec)
     with pytest.raises(ValueError, match="exactly one asset per cell"):
         gauntlet_core.evaluate_standalone(spec, sb, "2023-01-21", perturb=False)
-    # a single-asset crypto spec skips it too (the base computes none for crypto: A/B parity)
+    # a single-asset spec keeps the default (its control is computed)
     one = dict(spec, universe=dict(spec["universe"], assets=["BTCUSD"]))
-    assert dp._standalone_kwargs(one) == {"record_benchmark": False}
-    # a non-crypto spec keeps the default (its control is computed on both sides)
-    fx = dict(spec, universe=dict(spec["universe"], asset_class="fx", assets=["EURUSD"]))
-    assert dp._standalone_kwargs(fx) == {}
+    assert dp._standalone_kwargs(one) == {}
 
 
 # ---- --twins-1h (engine-perf Task 6) ----
@@ -251,9 +248,8 @@ def test_twins_1h_are_fingerprinted_and_compared(tmp_path, capsys):
     assert a["twins"] == {want: {"original": "a1" * 8, "asset": "BTCUSDT", "tf": "1h"}}
     assert a["meta"]["twins_1h"] == 1
     assert want in a["results"] and not a["errors"]
-    # a single-asset crypto twin must skip the Switch 1 benchmark control, or its
-    # `standalone` hash differs from the base's (which computes none) by one key
-    assert dp._standalone_kwargs(make_twin(orig, "BTCUSDT", "1h")) == {"record_benchmark": False}
+    # a single-asset crypto twin keeps the benchmark control, as on the pre-B live commit
+    assert dp._standalone_kwargs(make_twin(orig, "BTCUSDT", "1h")) == {}
     assert a["results"][want]["resolved_periods"] == 365 * 24          # a real 1h run
     assert set(a["sample"]) == {"a1" * 8, "b2" * 8}                      # 1d sample untouched
     assert dp.main(["compare", str(tmp_path / "a.json"), str(tmp_path / "b.json")]) == 0

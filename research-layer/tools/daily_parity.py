@@ -1,6 +1,12 @@
 """Daily parity for Morpheus 2b-1 (design s5.1, Ruling R5): fingerprint a
 sample of registered 1d strategies so pre-change and post-change code can be
-compared EXACTLY. Runs under the old code too (no pipeline.bars there)."""
+compared EXACTLY. Runs under the old code too (no pipeline.bars there).
+
+`dump --twins-1h N` also fingerprints N 1h twins (intraday_rehearsal.make_twin)
+of crypto 1d originals that carry a trend_scan/tstat_decay/vol_percentile
+block. The A/B "old" tree for an engine-perf proof is the pre-B live commit
+(8ddf33720 for this branch): it already has Switch 1's record_benchmark, so
+the benchmark control is compared on both sides, not skipped."""
 from __future__ import annotations
 
 import argparse
@@ -110,19 +116,22 @@ def select_twins(specs: dict, n: int, seed: int, assets: list[str]) -> tuple[dic
     return twin_specs, info
 
 
+def legacy_pooled_crypto(spec: dict) -> bool:
+    """A pre-Switch-1 pooled crypto spec (the 2-asset BTCUSD+ETHUSD book):
+    judged while crypto's benchmark was None, so no control; since Switch 1
+    computing one raises ("needs exactly one asset per cell")."""
+    uni = spec["universe"]
+    return uni.get("asset_class", "crypto") == "crypto" and len(uni["assets"]) != 1
+
+
 def _standalone_kwargs(spec: dict) -> dict:
-    """record_benchmark=False for EVERY crypto spec (pooled or per-cell, any
-    timeframe), passed ONLY when this code's evaluate_standalone has the
-    keyword: the tool also runs against pre-Switch-1 code for an A/B (see the
-    module docstring), where the keyword does not exist and crypto's benchmark
-    is None, so a crypto spec carries no `benchmark_relative` there. Skipping
-    the control on the new side makes the two sides produce the same metrics.
-    A pooled crypto spec must skip it anyway (computing one raises). A 1h twin
-    is a single-asset crypto spec: without this its `standalone` hash differs
-    from the base's by the one extra key, an artefact of Switch 1, not of the
-    engine."""
-    if (spec["universe"].get("asset_class", "crypto") == "crypto"
-            and "record_benchmark" in inspect.signature(evaluate_standalone).parameters):
+    """record_benchmark=False for a legacy pooled crypto spec, passed ONLY
+    when this code's evaluate_standalone has the keyword: the tool also runs
+    against pre-Switch-1 code for an A/B (see the module docstring), where
+    the keyword does not exist and crypto's benchmark is None anyway, so the
+    two sides produce the same metrics for these specs."""
+    if (legacy_pooled_crypto(spec) and "record_benchmark"
+            in inspect.signature(evaluate_standalone).parameters):
         return {"record_benchmark": False}
     return {}
 
