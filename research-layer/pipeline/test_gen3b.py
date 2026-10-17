@@ -966,20 +966,22 @@ def test_a_concurrent_writer_is_absorbed_not_crashed(tmp_path, capsys,
 def test_only_the_duplicate_case_is_absorbed(tmp_path, capsys, monkeypatch):
     """A malformed payload is never absorbed: run() absorbs only a
     DuplicateQuarantineDecision. Since the 2026-10-16 fast path the payload is
-    validated before anything is written. It is a ValueError, so (Coen
-    2026-10-16) it defers that strategy per strategy instead of failing the
-    date; with ONE strategy that is a total stall: REFUSED, exit 1, nothing
-    written."""
+    validated before anything is written. 2026-10-17 (Coen): only a
+    SimulationDataError defers a strategy, so a malformed payload (a plain
+    ValueError from validated_quarantine_decision, a code-shaped failure)
+    fails the date loudly again: it propagates, nothing is written, and
+    neither a PARTIAL WRITE nor a total-stall REFUSED is reported."""
     reg, spec, data = quarantined(tmp_path)
 
     def bad(payload):
         raise ValueError("malformed payload")
 
     monkeypatch.setattr(quarantine_mod, "validated_quarantine_decision", bad)
-    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
+    with pytest.raises(ValueError, match="malformed payload") as exc:
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert not isinstance(exc.value, quarantine_mod.SimulationDataError)
     err = capsys.readouterr().err
-    assert "REFUSED" in err and "malformed payload" in err
-    assert "PARTIAL WRITE" not in err
+    assert "PARTIAL WRITE" not in err and "REFUSED" not in err
     assert decisions(reg) == []
     assert snapshots(reg) == []
 

@@ -23,7 +23,7 @@ Usage:
     python -m pipeline.quarantine --catch-up
         records every OWED date through the --date path, oldest first, at
         most MAX_CATCHUP_DATES per run (a date where every owing strategy was
-        deferred for a restated asset uses no slot). The daily ends with it (2026-09-28):
+        deferred, for a restated asset or a failed simulation, uses no slot). The daily ends with it (2026-09-28):
         a deferred class or a missed day is filled on the next run, for EVERY
         owed strategy alike, so backfill is a schedule, never a selection.
 
@@ -65,11 +65,16 @@ Conventions:
     (2026-10-16 fast path): every row is simulated and validated before
     chain.lock is taken, and the date's provenance plus rows go to the chain
     in ONE append. A failure before that append writes nothing and the run
-    exits 1 -- except a ValueError in ONE strategy's simulation (observe_day's
-    data-shaped raises, or a malformed row), which defers only that strategy
-    (Coen 2026-10-16): a `simulation_failed` degraded item, WARN then FAIL
-    after 3 days, and it stays owed. A strategy that left quarantine while the
-    run simulated is skipped. Any other exception still fails the date.
+    exits 1 -- except a SimulationDataError in ONE strategy's simulation
+    (data-shaped: a missing bar, no zero point, a non-positive equity
+    baseline), which defers only that strategy (Coen 2026-10-16): a
+    `simulation_failed` degraded item, WARN then FAIL after 3 days, and it
+    stays owed. A strategy that left quarantine while the run simulated is
+    skipped. Any other exception, a plain ValueError (a malformed row)
+    included, is a code bug and still fails the date, loudly (Coen
+    2026-10-17). A date where every ready strategy was deferred (restated or
+    simulation-failed) appends nothing, uses no catch-up slot and is
+    re-attempted every run (Coen 2026-10-17).
 
 Graduation is NOT automatic. `--review` reports and writes nothing.
 """
@@ -98,6 +103,14 @@ from .qcells import (spec_cells, cell_path, split_cell_key, is_intraday_key,
 from .screen import load_bars
 
 MIN_TRADING_DAYS = 60
+
+
+class SimulationDataError(ValueError):
+    """A data-shaped simulation failure: it defers ONE strategy, never the
+    date (2026-10-17, Coen). Raised only where the data cannot support the
+    row: a missing bar, no zero point, a non-positive equity baseline. A
+    plain ValueError from the engine, a malformed payload or any other
+    exception is a code bug and fails the date loudly."""
 # a row chained more than this many days after its own bar is a backfill, not
 # a forward observation, and is reported as such
 BACKFILL_LAG_DAYS = 2
@@ -400,7 +413,7 @@ def _rebase_index(bars: list[dict], entered: str, asset: str) -> int:
         if b["date"] <= entered:
             idx = i
     if idx is None:
-        raise ValueError(
+        raise SimulationDataError(
             f"{asset}: no bar on or before the quarantine entry date "
             f"{entered}, so the forward record has no zero point (data starts "
             f"at {bars[0]['date']}). Rebasing on the first available bar would "
@@ -416,7 +429,7 @@ def _rebase_index_day(bars: list[dict], entered: str, key: str) -> int:
         if b["date"][:10] <= entered[:10]:
             idx = i
     if idx is None:
-        raise ValueError(
+        raise SimulationDataError(
             f"{key}: no bar on or before the quarantine entry date "
             f"{entered}, so the forward record has no zero point (data starts "
             f"at {bars[0]['date']}). Rebasing on the first available bar would "
@@ -456,7 +469,7 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
     universe = spec["universe"]
     session, tf = universe.get("session"), universe["timeframe"]
     if not bars or bars[-1]["date"][:10] != date:
-        raise ValueError(f"no {key} bar for {date}")
+        raise SimulationDataError(f"no {key} bar for {date}")
     book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
                           _bars.bars_per_year(session, tf),
                           version=spec.get("version", 1),
@@ -465,7 +478,7 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
     entries, exits, action = day_events(book["trades"], pos, bars, date)
     base = book["equity"][_rebase_index_day(bars, entered, key)]
     if base <= 0:
-        raise ValueError(
+        raise SimulationDataError(
             f"{key}: equity baseline at {entered} is {base!r}, so the "
             f"rebased forward equity for {date} is undefined")
     return {"strategy_id": spec["strategy_id"], "date": date, "asset": key,
@@ -489,7 +502,7 @@ def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
             rows.append(_observe_intraday(spec, asset, bars, date, entered))
             continue
         if not bars or bars[-1]["date"] != date:
-            raise ValueError(f"no {asset} bar for {date}")
+            raise SimulationDataError(f"no {asset} bar for {date}")
         # Spec s10.11 (T3 review): mirror run_spec's periods_per_year
         # derivation here too. Without it, an fx spec reaching quarantine
         # would forward-run on /365 financing and sqrt(365) vol sizing --
@@ -517,7 +530,7 @@ def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
             # reachable: a short gapped through its stop can drive
             # mark-to-market equity non-positive. The ratio is undefined, and
             # recording 0.0 would read as "the book was wiped out".
-            raise ValueError(
+            raise SimulationDataError(
                 f"{asset}: equity baseline at {entered} is {base!r}, so the "
                 f"rebased forward equity for {date} is undefined")
         rows.append({
@@ -655,8 +668,9 @@ def catch_up(dates: list[str], run_date) -> tuple[int, bool]:
     """Record each owed date through `run_date(date)`, oldest first.
     `run_date` returns an exit code, or (exit code, deferred_only). At most
     MAX_CATCHUP_DATES dates that can record are attempted per run; a date on
-    which every owing strategy was deferred for a restated asset uses no slot
-    (2026-10-08 addendum rule 6), so blocked dates never starve newer ones. A
+    which every owing strategy was deferred (a restated asset, 2026-10-08
+    addendum rule 6, or a failed simulation, 2026-10-17) uses no slot, so
+    blocked dates never starve newer ones. A
     failed date never strands the dates after it, but any failure makes the
     run exit 1. Returns (rc, reached_all): reached_all is False when the slot
     limit left owed dates unattempted, which is when the caller must not drop
@@ -683,7 +697,7 @@ def catch_up(dates: list[str], run_date) -> tuple[int, bool]:
         rc, deferred_only = (res, False) if isinstance(res, int) else res
         if deferred_only:
             print(f"catch-up: {date} recorded nothing (every owing strategy "
-                  f"deferred, restated); no slot used")
+                  f"deferred: restated or simulation failed); no slot used")
         else:
             used += 1
         if rc != 0:
@@ -851,7 +865,7 @@ class DateReport:
     degraded ledger (isolation design s6.1)."""
 
     def __init__(self) -> None:
-        self.deferred_only = False      # owing strategies existed; every one was deferred (rule 2)
+        self.deferred_only = False      # nothing appended; every owing strategy was deferred (restated or simulation failed, rule 2 + 2026-10-17)
         self.degraded: list[dict] = []  # {"source", "key", "reason"}
         # the run returned before checking provenance (a deferred_lock skip,
         # or a raise), so its silence is not recovery: the catch-up must not
@@ -954,8 +968,8 @@ def _record_date(args, registry: Registry, view: QuarantineView,
     # the run's one read (so a strategy deferred for a restated asset is
     # never simulated), and EVERY row's simulation and validation. A raise
     # here writes nothing and the date stays owed (s3.6); the one exception is
-    # a ValueError in a single strategy's simulation, which defers THAT
-    # strategy only (Coen 2026-10-16, below). The lock is then held for a tail
+    # a SimulationDataError in a single strategy's simulation, which defers
+    # THAT strategy only (Coen 2026-10-16, below). The lock is then held for a tail
     # read plus ONE append.
     rows_by_sid: dict[str, list[dict]] = {}
     sim_failed: dict[str, str] = {}
@@ -980,20 +994,23 @@ def _record_date(args, registry: Registry, view: QuarantineView,
         for sid in ([] if pre.refusal else pre.ready):
             # Coen 2026-10-16: a data-shaped failure in ONE strategy's
             # simulation (observe_day's non-positive equity baseline, missing
-            # bar or no zero point; validated_quarantine_decision's malformed
-            # row -- all ValueError) must not hold back the others' rows, as
+            # bar or no zero point -- all SimulationDataError) must not hold
+            # back the others' rows, as
             # one strategy's missing bar or restated asset already does not
             # (isolation addendum rules 2-3). The strategy gets no rows, is
             # reported (stdout + a `simulation_failed` degraded item: WARN,
             # FAIL after 3 days) and stays owed, so catch-up retries it every
-            # run. ValueError ONLY: any other exception is a code bug and
-            # still fails the whole date, loudly, with nothing written.
+            # run. SimulationDataError ONLY (Coen 2026-10-17): any other
+            # exception, a plain ValueError (a malformed row from
+            # validated_quarantine_decision, an engine bug) included, is a
+            # code bug and still fails the whole date, loudly, with nothing
+            # written.
             try:
                 rows_by_sid[sid] = [
                     validated_quarantine_decision(row) for row in
                     observe_day(specs[sid], bars_by_asset, args.date,
                                 entered[sid])]
-            except ValueError as exc:
+            except SimulationDataError as exc:
                 sim_failed[sid] = str(exc)
                 print(f"{sid}  deferred: simulation failed: {exc}")
                 report.degraded.append({"source": "simulation_failed",
@@ -1008,6 +1025,9 @@ def _record_date(args, registry: Registry, view: QuarantineView,
             # missing-bar refusal: a date whose other strategies are already
             # chained (n_present > 0) is a lagging strategy, not a dead
             # pipeline, and falls through to the summary, exit 0.
+            # Still a deferred-only date (2026-10-17, Coen): nothing owes a
+            # slot on it, so catch-up must not spend one (rc stays 1).
+            report.deferred_only = True
             print(f"REFUSED: nothing recorded for {args.date} -- every "
                   f"ready strategy's simulation failed "
                   f"({'; '.join(f'{sid}: {sim_failed[sid]}' for sid in ready)})"
@@ -1073,6 +1093,15 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                     print(f"\n0 decision(s) chained, {n_present} already "
                           f"present; every owing strategy deferred (restated).")
                     return 0
+            # A date that only deferred (2026-10-17, Coen): nothing is
+            # appended, and every ready strategy that still owes the date was
+            # deferred -- for a restated asset (`plan.deferred`) or a
+            # simulation failure (`sim_failed`). A strategy that LEFT
+            # quarantine no longer owes the date, so it is not counted. Such
+            # a date uses no catch-up slot and is re-attempted every run.
+            counted = [sid for sid in ready if sid not in left]
+            if counted and not plan.ready:
+                report.deferred_only = True
             # plan.ready is a subset of `survivors`, so a strategy whose
             # simulation failed (or that left quarantine) is never `late`
             late = [sid for sid in plan.ready if sid not in rows_by_sid]
