@@ -161,7 +161,7 @@ from .registry import Registry
 from .composer import (composition_fingerprint, registered_fingerprints,
                        validate_family, expand_family, run as composer_run)
 from .blocks import BLOCK_TYPES, block_type_payload
-from .test_composer import good_family, ACCEPTED
+from .test_composer import good_family, ACCEPTED, expand_fx
 from .test_pipeline import make_card
 
 TS = "2026-08-15T00:00:00Z"
@@ -170,24 +170,27 @@ TS = "2026-08-15T00:00:00Z"
 # ---------------- composition fingerprint ----------------
 
 def test_fingerprint_ignores_identity_fields():
-    a = expand_family(good_family(sweep=[]), "runA", "modelA", TS)[0]
-    b = expand_family(good_family(sweep=[]), "runB", "modelB",
-                      "2027-01-01T00:00:00Z")[0]
+    a = expand_fx(good_family(sweep=[]), "runA", "modelA", TS, assets=["EUR"])[0]
+    b = expand_fx(good_family(sweep=[]), "runB", "modelB",
+                  "2027-01-01T00:00:00Z", assets=["EUR"])[0]
     assert a["strategy_id"] != b["strategy_id"]      # content-addressed differ
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_ignores_block_and_asset_order():
-    a = expand_family(good_family(sweep=[], assets=["BTCUSD", "ETHUSD"]),
-                      "r", "m", TS)[0]
+    # a per-cell spec carries one asset, so widen its universe by hand: the
+    # fingerprint's order-insensitivity is a property of composition_fingerprint,
+    # not of any expander
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
+    a["universe"]["assets"] = ["EUR", "GBP"]
     b = copy.deepcopy(a)
     b["blocks"] = list(reversed(b["blocks"]))
-    b["universe"]["assets"] = ["ETHUSD", "BTCUSD"]
+    b["universe"]["assets"] = ["GBP", "EUR"]
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_changes_with_any_param():
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["blocks"][0]["params"]["t_min"] = 2.5
     assert composition_fingerprint(a) != composition_fingerprint(b)
@@ -196,14 +199,14 @@ def test_fingerprint_changes_with_any_param():
 def test_fingerprint_snaps_params_defensively():
     # an unsnapped int must not fingerprint differently from its float grid
     # value — the guard cannot depend on callers having run _snap_to_grid
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["blocks"][0]["params"]["t_min"] = 2      # grid value is 2.0
     assert composition_fingerprint(a) == composition_fingerprint(b)
 
 
 def test_fingerprint_distinguishes_universe_fields():
-    a = expand_family(good_family(sweep=[]), "r", "m", TS)[0]
+    a = expand_fx(good_family(sweep=[]), "r", "m", TS, assets=["EUR"])[0]
     b = copy.deepcopy(a)
     b["universe"]["asset_class"] = "futures"
     assert composition_fingerprint(a) != composition_fingerprint(b)
@@ -216,8 +219,8 @@ def test_registered_fingerprints_maps_to_ids(tmp_path):
     card = make_card()
     reg.register_card(card)
     reg.review_card(card["card_id"], "accepted", "tester")
-    spec = expand_family(good_family(sweep=[], card_ids=[card["card_id"]]),
-                         "r", "m", TS)[0]
+    spec = expand_fx(good_family(sweep=[], card_ids=[card["card_id"]]),
+                     "r", "m", TS, assets=["EUR"])[0]
     reg.register_strategy(spec)
     fps = registered_fingerprints(reg)
     assert fps[composition_fingerprint(spec)] == spec["strategy_id"]

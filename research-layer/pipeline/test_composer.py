@@ -179,7 +179,10 @@ def test_live_registry_still_valid():
     assert out.returncode == 0, out.stdout
 
 
-from .composer import validate_family, expand_family, SIBLING_CAP_DEFAULT
+from . import cells
+from .composer import (validate_family, expand_family, expand_family_for_class,
+                       SIBLING_CAP_DEFAULT)
+from .testing_crypto import active_crypto
 
 
 def good_family(**overrides):
@@ -295,7 +298,7 @@ def test_sibling_cap_queues_it_rather_than_rejecting_it():
     assert not [e for e in validate_family(fam, ACCEPTED, 25) if "cap" in e]
 
     from .composer import split_for_cycle
-    specs = expand_family(fam, "run", "m", "2026-08-31T00:00:00Z")
+    specs = expand_fx(fam, "run", "m", "2026-08-31T00:00:00Z", assets=["EUR"])
     assert len(specs) == 75
     this_cycle, queued = split_for_cycle(specs, 25)
     assert len(this_cycle) == 25 and len(queued) == 50
@@ -330,22 +333,43 @@ def test_duplicate_sweep_axis_rejected():
 
 TS = "2026-08-06T12:00:00Z"
 
+# Family MECHANICS (combo expansion, grid snapping, naming, identity) are the
+# same on every class, so these tests drive them through the per-cell expander
+# on fx -- no gate patch, no dependence on the legacy pooled crypto path that
+# the crypto activation commit deletes. fam["assets"] is not read on that path
+# (cells.active_cells picks the cells), so good_family()'s crypto ticker is
+# inert here. `assets` narrows the sweep to a subset of fx cells (sweep_cells),
+# the way D6's rotation window does; None = every active fx cell.
+FX_CELLS = cells.active_cells("fx")
+
+
+def expand_fx(fam, run_id, model, created_utc, assets=None):
+    return expand_family_for_class(fam, run_id, model, created_utc, "fx",
+                                   assets=assets)
+
 
 def test_expansion_count_is_axis_product():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
-    assert len(specs) == 9  # 3 t_min x 3 mult
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    assert len(specs) == 9 * len(FX_CELLS)  # 3 t_min x 3 mult, per cell
+    for asset, _tf in FX_CELLS:
+        assert len([s for s in specs if s["universe"]["assets"] == [asset]]) == 9
 
 
 def test_expansion_is_deterministic():
-    a = expand_family(good_family(), "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    a = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    b = expand_fx(good_family(), "run1", "claude-opus-5", TS)
     assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
 
 def test_siblings_share_group_and_vary_swept_params():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
+    # per-cell expansion gives each cell its own sibling group
+    # ("<family>-<run>:<cell_id>"); siblings are the combos WITHIN one cell
     groups = {s["provenance"]["sibling_group_id"] for s in specs}
-    assert groups == {"trend_scan_family-run1"}
+    assert groups == {f"trend_scan_family-run1:{cells.cell_id(a, tf)}"
+                      for a, tf in FX_CELLS}
+    for g in groups:
+        assert len([s for s in specs if s["provenance"]["sibling_group_id"] == g]) == 9
     t_values = {s["blocks"][0]["params"]["t_min"] for s in specs}
     assert t_values == {2.0, 2.5, 3.0}
     lookbacks = {s["blocks"][0]["params"]["max_lookback"] for s in specs}
@@ -353,19 +377,26 @@ def test_siblings_share_group_and_vary_swept_params():
 
 
 def test_no_sweep_yields_single_spec():
-    specs = expand_family(good_family(sweep=[]), "run1", "claude-opus-5", TS)
-    assert len(specs) == 1
+    specs = expand_fx(good_family(sweep=[]), "run1", "claude-opus-5", TS)
+    assert len(specs) == len(FX_CELLS)      # one combo, one spec per cell
 
 
 def test_expanded_specs_are_schema_valid():
     schema = json.loads((LAYER / "schemas" / "strategy_spec.schema.json").read_text())
     validator = jsonschema.Draft202012Validator(schema)
-    for spec in expand_family(good_family(), "run1", "claude-opus-5", TS):
+    for spec in expand_fx(good_family(), "run1", "claude-opus-5", TS):
+        validator.validate(spec)
+    # and the crypto per-cell shape the activation commit will emit
+    with active_crypto():
+        specs = expand_family_for_class(good_family(), "run1", "claude-opus-5", TS,
+                                        "crypto")
+    assert len(specs) == 9 * 2
+    for spec in specs:
         validator.validate(spec)
 
 
 def test_names_are_unique_and_bounded():
-    specs = expand_family(good_family(), "run1", "claude-opus-5", TS)
+    specs = expand_fx(good_family(), "run1", "claude-opus-5", TS)
     names = [s["name"] for s in specs]
     assert len(set(names)) == len(names)
     assert all(len(n) <= 120 for n in names)
@@ -373,17 +404,17 @@ def test_names_are_unique_and_bounded():
 
 def test_long_family_name_truncation_keeps_names_unique():
     fam = good_family(family="zscore_dip_buyer_with_a_very_long_descriptive_family_name_for_realism_and_extra_padding")
-    specs = expand_family(fam, "run1", "claude-opus-5", TS)
+    specs = expand_fx(fam, "run1", "claude-opus-5", TS)
     names = [s["name"] for s in specs]
     assert len(set(names)) == len(names)
     assert all(len(n) <= 120 for n in names)
 
 
 def test_int_and_float_sweep_values_hash_identically():
-    a = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2]}]),
-                      "run1", "claude-opus-5", TS)
-    b = expand_family(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}]),
-                      "run1", "claude-opus-5", TS)
+    a = expand_fx(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2]}]),
+                  "run1", "claude-opus-5", TS)
+    b = expand_fx(good_family(sweep=[{"block": 0, "param": "t_min", "values": [2.0]}]),
+                  "run1", "claude-opus-5", TS)
     assert [s["strategy_id"] for s in a] == [s["strategy_id"] for s in b]
 
 

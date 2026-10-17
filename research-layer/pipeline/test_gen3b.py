@@ -226,7 +226,7 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
 from .registry import Registry
 from .composer import (run as composer_run, expand_family,
                        composition_fingerprint, screen_siblings, SYSTEM_PROMPT)
-from .test_composer import good_family, register_grammar
+from .test_composer import good_family, register_grammar, expand_fx
 from .test_pipeline import make_card
 
 GEN3_TS = "2026-08-16T00:00:00Z"
@@ -270,10 +270,20 @@ def pre_expand(fam):
     return expand_family(fam, "seed-run", "m", GEN3_TS)
 
 
+def pre_expand_cell(fam):
+    """One spec per sweep combo, built through the per-cell expander on a
+    single fx cell. For tests whose subject is fingerprinting / chain
+    verification and which never feed the specs to a crypto composer.run():
+    those need pre_expand, because the crypto resurrection guard compares
+    against the crypto path's own (pooled, until the activation commit)
+    compositions."""
+    return expand_fx(fam, "seed-run", "m", GEN3_TS, assets=["EUR"])
+
+
 def test_screen_siblings_never_returns_a_guarded_fingerprint():
     """The invariant the public chain rests on, asserted on the return value
     rather than on a log line: nothing rule 7 guards can survive screening."""
-    specs = pre_expand(z_family())
+    specs = pre_expand_cell(z_family())
     known = {composition_fingerprint(specs[0]): "b" * 16}
     run = {composition_fingerprint(specs[1]): "fam_earlier"}
     kept, drop_notes, malformed = screen_siblings(specs, known, run)
@@ -1503,7 +1513,7 @@ def test_verifier_rejects_a_duplicate_composition_fingerprint(tmp_path):
     guard is bypassed here on purpose -- the point is that the CHAIN catches a
     re-registered composition even if the guard ever fails."""
     fam = good_family(family="dupfam", card_ids=[CARD_ID])
-    spec = pre_expand(fam)[0]
+    spec = pre_expand_cell(fam)[0]
     reg = seeded(tmp_path, pre_register=[spec])
     twin = json.loads(json.dumps(spec))
     twin["strategy_id"] = "f" * 16          # fresh id, identical composition
@@ -1780,7 +1790,7 @@ def test_verifier_survives_a_malformed_strategy_spec(tmp_path, mangle):
     """set() of a non-iterable, and a tuple containing a list, both raise --
     and both are reachable from a hand-appended spec."""
     reg = seeded(tmp_path)
-    spec = pre_expand(good_family(family="mangled", card_ids=[CARD_ID]))[0]
+    spec = pre_expand_cell(good_family(family="mangled", card_ids=[CARD_ID]))[0]
     reg.append("strategy_registered", dict(json.loads(json.dumps(spec)), **mangle))
     reg.append("note", {"text": "an entry after the bad one"})
     out = run_verifier(reg.log_path)
@@ -1805,7 +1815,7 @@ def test_duplicate_composition_names_the_original_not_none(tmp_path):
     the duplicate that follows reports 'already registered as None' and the
     real culprit goes unnamed."""
     reg = seeded(tmp_path)
-    spec = pre_expand(good_family(family="anon", card_ids=[CARD_ID]))[0]
+    spec = pre_expand_cell(good_family(family="anon", card_ids=[CARD_ID]))[0]
     anon = json.loads(json.dumps(spec))
     del anon["strategy_id"]
     reg.append("strategy_registered", anon)

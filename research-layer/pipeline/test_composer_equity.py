@@ -424,15 +424,18 @@ def test_fx_specs_never_carry_proxy_provenance_keys():
 
 
 def test_crypto_path_structurally_cannot_carry_proxy_keys():
-    """crypto composition never goes through expand_family_for_class at
-    all -- composer.run() branches to expand_family for asset_class ==
-    "crypto", a function this task does not touch and which builds its
-    provenance dict with no routed_via/proxy_card_ids branch at all. There
-    is therefore no code path by which a crypto spec's provenance could
-    carry either key; asserted directly against expand_family's output."""
+    """crypto composition carries no proxy-routing keys on its provenance.
+    composer.run() only builds a proxy set for equity_etf (it stays None for
+    every other class), so the per-cell expander is called for crypto with its
+    default proxy_card_ids=frozenset() and its provenance dict takes no
+    routed_via/proxy_card_ids branch. Asserted directly against the per-cell
+    expander's crypto output under an activated crypto gate."""
+    from .testing_crypto import active_crypto
     fam = dict(_FX_CHECK_FAMILY, family="crypto_check_family", assets=["BTCUSD"],
               card_ids=["dddddddddddddddd"])
-    specs = composer.expand_family(fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z")
+    with active_crypto(("BTCUSDT",)):
+        specs = composer.expand_family_for_class(
+            fam, "run1", composer.DEFAULT_MODEL, "2026-08-25T00:00:00Z", "crypto")
     assert len(specs) == 1
     assert "routed_via" not in specs[0]["provenance"]
     assert "proxy_card_ids" not in specs[0]["provenance"]

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .composer import (SWEEPABLE_TYPES, RANGE_REQUIRING, SPEC_VERSION, SYSTEM_PROMPT,
                        composition_fingerprint, validate_family, grammar_summary,
-                       v7_compliant_as_is, expand_family, expand_family_for_class,
+                       v7_compliant_as_is, expand_family_for_class,
                        system_prompt_for)
 from .blocks import RETIRED_TYPES
 from . import cells
@@ -106,11 +106,15 @@ def test_expanded_specs_are_version_2():
     assert SPEC_VERSION == 2
     f = fam([ENTRY, {"role": "stop", "type": "ma_stop", "params": {"ma_len": 50}}, RISK],
             sweep=[{"block": 1, "param": "ma_len", "values": [20, 50, 100]}])
-    specs = expand_family(f, "2026-09-03-test", "m", "2026-09-03T00:00:00Z")
-    assert len(specs) == 3 and all(s["version"] == 2 for s in specs)
     fx = {**f, "assets": ["EUR"]}
+    # one cell: one spec per sweep combo
+    specs = expand_family_for_class(fx, "2026-09-03-test", "m", "2026-09-03T00:00:00Z", "fx",
+                                    assets=["EUR"])
+    assert len(specs) == 3 and all(s["version"] == 2 for s in specs)
+    # the whole fx class: every cell's every combo is stamped
     specs = expand_family_for_class(fx, "2026-09-03-test", "m", "2026-09-03T00:00:00Z", "fx")
-    assert specs and all(s["version"] == 2 for s in specs)
+    assert len(specs) == 3 * len(cells.active_cells("fx"))
+    assert all(s["version"] == 2 for s in specs)
 
 
 def test_spec_schema_admits_both_versions():
