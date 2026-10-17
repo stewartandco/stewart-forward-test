@@ -1503,10 +1503,16 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   the targets files but is not matched by the executor's `targets-*.json`
   glob or by retention. **Sentinel side** (sc-ops-sentinel,
   `sentinel/checks/signal_status.py`, manifest block `signal_status`
-  `{path, max_age_hours: 26, warn_after_days: 2}`): FAIL when the file is
-  missing, unreadable, older than 26 h by `written_utc`, or `exit_code` is 2;
-  WARN for any sid whose `deferred_since` is 2+ calendar days before the
-  `written_utc` date; OK otherwise. **Merge order:** the Sentinel branch must
+  `{path, max_age_hours: 20, warn_after_days: 2}`): FAIL when the file is
+  missing, unreadable, older than 20 h by `written_utc`, or `exit_code` is not
+  0 (2 = refused). 20, not 26: the 08:45 write is about 0.5 h old at the
+  09:15 digest and yesterday's is 24.5 h old, so 26 h would pass a day on
+  which the service wrote nothing (31_SignalService is only `observing`, its
+  exit code is not read); a hand Sentinel run before 08:45 FAILs on
+  yesterday's status, expected. WARN for any sid deferred on its 2nd
+  calendar day or later (the first day counts: `(written_utc date -
+  deferred_since).days + 1 >= 2`, so first deferred on D and still deferred
+  on D+1 WARNs at the D+1 run); OK otherwise. **Merge order:** the Sentinel branch must
   merge only AFTER the first signal-service run on this code has written
   `status.json`, else the check FAILs "missing" (same ordering as the
   `crypto_refresh` ledger).

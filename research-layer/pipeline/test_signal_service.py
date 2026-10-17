@@ -404,7 +404,7 @@ def test_as_of_defaults_to_the_utc_date(tmp_path, monkeypatch):
             "--out-dir", str(tmp_path / "logs" / "signals")]
     monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=2))
     assert S.run(argv) == 2
-    assert not list((tmp_path / "logs" / "signals").glob("targets-*"))
+    assert sorted(p.name for p in (tmp_path / "logs" / "signals").iterdir()) == ["status.json"]
     monkeypatch.setattr(S, "_utc_today", lambda: last + dt.timedelta(days=1))
     assert S.run(argv) == 0
 
@@ -968,10 +968,16 @@ def test_a_crash_writes_no_status_and_leaves_the_previous_one(tmp_path, monkeypa
 
 
 def test_prune_never_touches_status_json(tmp_path):
-    reg, data, bars = _fixture_layer(tmp_path)
+    """prune_targets alone (run() rewrites status.json after it, so a run
+    would not show this): status.json survives byte-identical while the old
+    targets files beyond the newest KEEP_TARGETS go."""
     out_dir = tmp_path / "logs" / "signals"
-    last = dt.date.fromisoformat(bars[-1]["date"])
-    _old_targets(out_dir, last - dt.timedelta(days=40), 35)
-    _seed_status(tmp_path, {"deferred_since": {}})
-    assert S.run(_argv(tmp_path, reg, data)) == 0
-    assert (out_dir / "status.json").exists()
+    old = _old_targets(out_dir, dt.date(2026, 1, 1), 40)
+    status = _seed_status(tmp_path, {"deferred_since": {"abc": "2026-01-01"}})
+    before = status.read_bytes()
+    written = old[-1]
+    S.prune_targets(out_dir, written)
+    assert status.read_bytes() == before
+    assert sorted(p.name for p in out_dir.glob("targets-*.json")) == sorted(
+        p.name for p in old[-S.KEEP_TARGETS:])
+    assert not old[0].exists()

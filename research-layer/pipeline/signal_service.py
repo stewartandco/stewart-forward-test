@@ -37,8 +37,10 @@ parsing writes logs/signals/status.json ({written_utc, bar_end (or null),
 exit_code, published, deferred {sid: reason}, deferred_since {sid: first-seen
 UTC date}}), atomically (the same .tmp + os.replace retry as the targets),
 after the targets publish and on every exit 0 / exit 2 path. The Ops Sentinel
-reads it: a missing or >26 h old file, or exit_code 2, FAILs; a sid deferred
-2+ calendar days WARNs. deferred_since is carried over from the previous
+reads it: a missing file, one older than 20 h (the 08:45 write is about 0.5 h
+old at the 09:15 digest, so older means today's fire wrote nothing), or
+exit_code 2 FAILs; a sid deferred on its 2nd calendar day (the first counts)
+WARNs. deferred_since is carried over from the previous
 status for a sid still deferred and dropped for one no longer deferred; an
 unreadable previous status counts as empty (WARNING printed). An unhandled
 crash (exit 1) writes no status, so the staleness FAILs.
@@ -326,7 +328,7 @@ def run(argv=None) -> int:
         return rc
 
     if not a.registry.is_file():
-        print(f"REFUSED (nothing written): no registry file {a.registry}")
+        print(f"REFUSED (no targets written): no registry file {a.registry}")
         return finish(REFUSED_EXIT)
     specs, max_dd = {}, {}
 
@@ -343,7 +345,7 @@ def run(argv=None) -> int:
     snap = Registry(a.registry).snapshot(on_entry=on_entry)
     served = {sid: spec for sid, spec in specs.items() if snap.states.get(sid) in STATES}
     if not served:
-        print("no crypto strategies in quarantine/live; nothing written")
+        print("no crypto strategies in quarantine/live; no targets written")
         return finish(0)
     wanted = {x for spec in served.values() for x in spec["universe"]["assets"]}
     bar_end = None
@@ -355,7 +357,7 @@ def run(argv=None) -> int:
             raise DataRefused(f"no served asset has a bar (last bar dates: {detail})")
         check_fresh(bar_end, as_of)
     except DataRefused as exc:
-        print(f"REFUSED (nothing written): {exc}")
+        print(f"REFUSED (no targets written): {exc}")
         return finish(REFUSED_EXIT, bar_end)
     # minors item 1: per-strategy deferral -- every asset on bar_end, or none
     deferred = {}
@@ -365,7 +367,7 @@ def run(argv=None) -> int:
             deferred[sid] = "; ".join(bad)
     publish = {sid: spec for sid, spec in served.items() if sid not in deferred}
     if not publish:
-        print(f"REFUSED (nothing written): no strategy can be published on bar_end "
+        print(f"REFUSED (no targets written): no strategy can be published on bar_end "
               f"{bar_end} (last bar dates: {detail})")
         for sid in sorted(deferred):
             print(f"  deferred {sid}: {deferred[sid]}")
