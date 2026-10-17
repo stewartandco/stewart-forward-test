@@ -1523,9 +1523,10 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   Sentinel sees a live writer). The items ARE the alarm.
 - **Exit codes:** 0 = the run completed, stopped on a ban or stopped at the
   hard stop (failed/skipped cells are ledger items, not a non-zero exit: a
-  retry would hit Binance again); 2 = `--data-dir` missing, nothing written; 1 = crash; 4 = the wrapper
-  could not open its run log (`logs\crypto-refresh-run.log`); 124/125 = the task
-  guard's wall / the outer cmd died.
+  retry would hit Binance again); 2 = `--data-dir` missing, nothing written;
+  1 = crash; 4 = the wrapper could not open its run log
+  (`logs\crypto-refresh-run.log`); 124/125 = the task guard's wall / the outer
+  cmd died.
 - **Touches:** the cell CSVs (gitignored `data/*.csv`), the ledger, and
   `data/crypto_snapshot_manifest.json` (key-wise merge, COMPLETED cells only).
   Never the chain, git or `chain.lock`. `crypto_snapshot_manifest.json` is a
@@ -1551,8 +1552,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   merge day gates on the preflight below. The two parity tools
   (`tools/daily_parity.py`, `tools/gauntlet_parity.py`) call
   `evaluate_standalone(record_benchmark=False)` for a legacy pooled crypto spec
-  only, so they can re-run registered pooled specs; the hand-run `pipeline.gauntlet` registry pass would still raise
-  on a pooled spec in `gauntlet` state (hand runs already need Coen's say-so).
+  only, so they can re-run registered pooled specs; the hand-run
+  `pipeline.gauntlet` registry pass would still raise on a pooled spec in
+  `gauntlet` state (hand runs already need Coen's say-so).
   Every other 1d result (tradfi expansion, every registered spec's
   re-simulation, every quarantine row) is byte-identical across the switch.
 - **Per-cycle cap counts cells for every class** (`specs_per_combo =
