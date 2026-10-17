@@ -19,6 +19,12 @@ data/*.csv
 # ENGINE_REV -- and it grows with every gauntlet run, so it is not the record.
 simcache/
 
+# 2026-10-17 engine perf (docs/2026-10-17-engine-perf-design.md s3.3): the
+# exact indicator-series cache (pipeline/series_cache.py). Derived, like
+# simcache/ -- every entry is recomputable from the bars and ENGINE_REV, so
+# it is safe to delete at any time, and it is never committed or chained.
+seriescache/
+
 # 2026-09-13 (Coen): the registry and pipeline are the public trust asset;
 # plans, run logs, unify notes, diagnostics, prompt files and the raw
 # discovery queue are internal. Durable copy: stewartandco-agents/hubs/
