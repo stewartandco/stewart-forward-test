@@ -796,7 +796,8 @@ def test_status_is_written_on_a_clean_publish(tmp_path):
     assert S.run(_argv(tmp_path, reg, data)) == 0
     st = _status(tmp_path)
     assert set(st) == {"written_utc", "bar_end", "exit_code", "published", "deferred",
-                       "deferred_since"}
+                       "deferred_since", "deferrals_not_computed"}
+    assert st["deferrals_not_computed"] is False
     dt.datetime.strptime(st["written_utc"], "%Y-%m-%dT%H:%M:%SZ")
     assert (st["bar_end"], st["exit_code"], st["published"]) == (bars[-1]["date"], 0, 2)
     assert st["deferred"] == {} and st["deferred_since"] == {}
@@ -836,7 +837,8 @@ def test_status_is_written_on_a_stale_or_partial_refusal(tmp_path, as_of_days):
     assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=as_of_days)).isoformat())) == 2
     st = _status(tmp_path)
     assert (st["exit_code"], st["published"], st["bar_end"]) == (2, 0, bars[-1]["date"])
-    assert st["deferred"] == {} and st["deferred_since"] == {}
+    assert st["deferred"] == {} and st["deferred_since"] == {}      # no previous status
+    assert st["deferrals_not_computed"] is True
 
 
 def test_status_is_written_on_a_malformed_csv_with_a_null_bar_end(tmp_path):
@@ -981,3 +983,120 @@ def test_prune_never_touches_status_json(tmp_path):
     assert sorted(p.name for p in out_dir.glob("targets-*.json")) == sorted(
         p.name for p in old[-S.KEEP_TARGETS:])
     assert not old[0].exists()
+
+
+# ---------------- round 2: a failed status write, carry-forward on a refusal ----------
+
+def _status_replace_always_fails(monkeypatch):
+    real = os.replace
+
+    def fake(src, dst):
+        if Path(dst).name == "status.json":
+            raise PermissionError(13, "status.json held by the sentinel")
+        return real(src, dst)
+
+    monkeypatch.setattr(S.os, "replace", fake)
+    monkeypatch.setattr(S.time, "sleep", lambda s_: None)
+
+
+def test_a_failed_status_write_does_not_turn_a_good_publish_into_exit_1(tmp_path, monkeypatch, capsys):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _status_replace_always_fails(monkeypatch)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    out = capsys.readouterr().out
+    assert "WARNING: could not write status.json" in out and "held by the sentinel" in out
+    sig = tmp_path / "logs" / "signals"
+    assert (sig / f"targets-{bars[-1]['date']}.json").exists()            # the product is whole
+    assert sorted(p.name for p in sig.iterdir()) == [f"targets-{bars[-1]['date']}.json"]  # no .tmp
+
+
+def test_a_failed_status_write_does_not_turn_a_refusal_into_exit_1(tmp_path, monkeypatch, capsys):
+    reg, data, _ = _fixture_layer(tmp_path)
+    _lag_eth(data)
+    _status_replace_always_fails(monkeypatch)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    monkeypatch.undo()
+    assert "WARNING: could not write status.json" in capsys.readouterr().out
+
+
+def test_any_status_write_error_is_a_warning_not_a_crash(tmp_path, monkeypatch, capsys):
+    """Disk full / anything else, not only the PermissionError."""
+    reg, data, _ = _fixture_layer(tmp_path)
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(S, "write_status", full)
+    assert S.run(_argv(tmp_path, reg, data)) == 0
+    monkeypatch.undo()
+    assert "WARNING: could not write status.json" in capsys.readouterr().out
+
+
+def test_a_tmp_that_cannot_be_deleted_does_not_mask_the_write_error(tmp_path, monkeypatch):
+    out_dir = tmp_path / "logs" / "signals"
+    _status_replace_always_fails(monkeypatch)
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "status.json.tmp":
+            raise PermissionError(13, "tmp locked by an antivirus scan")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(PermissionError, match="held by the sentinel"):    # not the unlink error
+        S.write_status(out_dir, dt.date(2026, 1, 2), "2026-01-01", 0, 1, {})
+
+
+PREV = {"written_utc": "2026-01-01T00:45:00Z", "bar_end": "2025-12-31", "exit_code": 0,
+        "published": 1, "deferred": {"abc0000000000001": "ETHUSD behind: last bar 2025-12-30"},
+        "deferred_since": {"abc0000000000001": "2026-01-01"}, "deferrals_not_computed": False}
+
+
+@pytest.mark.parametrize("as_of_days", [2, 0])           # stale, partial
+def test_a_refusal_before_the_deferral_step_carries_the_previous_clocks(tmp_path, as_of_days):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=as_of_days)).isoformat())) == 2
+    st = _status(tmp_path)
+    assert st["deferred"] == PREV["deferred"] and st["deferred_since"] == PREV["deferred_since"]
+    assert st["deferrals_not_computed"] is True and st["exit_code"] == 2
+
+
+def test_a_malformed_csv_or_missing_registry_refusal_also_carries_them(tmp_path):
+    reg, data, _ = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    (data / "ETHUSD_1d.csv").write_bytes(b"date,open\n2026-01-01,abc\n")
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert (st["deferred"], st["deferred_since"]) == (PREV["deferred"], PREV["deferred_since"])
+    assert st["deferrals_not_computed"] is True
+    assert S.run(["--registry", str(tmp_path / "nope.jsonl"), "--data-dir", str(data),
+                  "--out-dir", str(tmp_path / "logs" / "signals"), "--as-of", "2026-07-20"]) == 2
+    st = _status(tmp_path)
+    assert (st["deferred"], st["deferred_since"]) == (PREV["deferred"], PREV["deferred_since"])
+
+
+def test_a_refusal_that_computed_deferrals_recomputes_them(tmp_path):
+    """exit 2 because nothing is publishable: the deferrals ARE computed, so
+    the previous (stale) sid is dropped and the flag is false."""
+    reg, data, _ = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    _lag_eth(data)
+    assert S.run(_argv(tmp_path, reg, data)) == 2
+    st = _status(tmp_path)
+    assert "abc0000000000001" not in st["deferred"] and st["deferrals_not_computed"] is False
+    assert set(st["deferred"]) == {SPEC["strategy_id"], "live0000000000001"}
+
+
+def test_a_later_normal_run_recomputes_and_drops_recovered_sids(tmp_path):
+    reg, data, bars = _fixture_layer(tmp_path)
+    _seed_status(tmp_path, PREV)
+    last = dt.date.fromisoformat(bars[-1]["date"])
+    assert S.run(_argv(tmp_path, reg, data, (last + dt.timedelta(days=2)).isoformat())) == 2
+    assert _status(tmp_path)["deferred_since"] == PREV["deferred_since"]    # carried over the refusal
+    assert S.run(_argv(tmp_path, reg, data)) == 0                           # data is fine again
+    st = _status(tmp_path)
+    assert st["deferred"] == {} and st["deferred_since"] == {}               # the recovered sid is gone
+    assert st["deferrals_not_computed"] is False

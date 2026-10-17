@@ -25,8 +25,8 @@ exactly the bar that closed at the start of the UTC day (`--as-of` - 1 day;
 data never rewrites an old targets file and exits 0; newer = a bar dated the
 run day or later, i.e. a still-open (partial) bar, which data_fetch never
 writes, so it is bad data. A registry file that does not exist refuses too
-(Registry.snapshot would read it as an empty chain: "nothing written", exit
-0). A malformed CSV row (short row, BOM-prefixed or incomplete header,
+(Registry.snapshot would read it as an empty chain: "no targets written", exit
+0; status.json is written either way). A malformed CSV row (short row, BOM-prefixed or incomplete header,
 non-numeric or non-finite price, a date that is not YYYY-MM-DD, undecodable
 bytes) refuses the run naming the file and row (minors item 3). Exit codes:
 0 written (or nothing served on an existing chain), REFUSED_EXIT = 2 for every
@@ -41,9 +41,18 @@ reads it: a missing file, one older than 20 h (the 08:45 write is about 0.5 h
 old at the 09:15 digest, so older means today's fire wrote nothing), or
 exit_code 2 FAILs; a sid deferred on its 2nd calendar day (the first counts)
 WARNs. deferred_since is carried over from the previous
-status for a sid still deferred and dropped for one no longer deferred; an
-unreadable previous status counts as empty (WARNING printed). An unhandled
-crash (exit 1) writes no status, so the staleness FAILs.
+status for a sid still deferred and dropped for one no longer deferred (its
+dates are the --as-of UTC date of the run that first saw the deferral); an
+unreadable previous status counts as empty (WARNING printed). A run that
+REFUSED before the deferral step (stale or partial bar_end, malformed CSV,
+missing registry) could not compute deferrals, so it carries the previous
+status's `deferred` and `deferred_since` forward unchanged and sets
+"deferrals_not_computed": true (false on every run that computed them), so a
+refusal day never resets a sid's clock. An unhandled crash (exit 1) writes no
+status, so the staleness FAILs. A status write that fails (a reader holding
+status.json past the retries, a full disk) prints "WARNING: could not write
+status.json" and never changes the exit code; the Sentinel's 20 h staleness
+FAIL is the backstop.
 
 RETENTION (minors item 4): after a publish, targets-<date>.json files beyond
 the newest KEEP_TARGETS by the date in the name are deleted (never the file
@@ -286,26 +295,48 @@ def _previous_since(status_path: Path) -> dict:
     return out
 
 
+def _previous_deferred(status_path: Path) -> dict:
+    """The previous status's `deferred` {sid: reason}; {} when absent or not
+    an object (the WARNING for an unreadable file comes from _previous_since)."""
+    try:
+        prev = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    deferred = prev.get("deferred") if isinstance(prev, dict) else None
+    return dict(deferred) if isinstance(deferred, dict) else {}
+
+
 def write_status(out_dir: Path, as_of: dt.date, bar_end, exit_code: int, published: int,
-                 deferred: dict) -> None:
+                 deferred: dict, computed: bool = True) -> None:
     """Write out_dir/status.json atomically (the targets publish's .tmp +
     os.replace retry). deferred_since: a sid still deferred keeps the previous
     status's first-seen date, a new one gets the run's UTC day (`as_of`), a
-    sid no longer deferred is dropped."""
+    sid no longer deferred is dropped. computed=False (the run refused before
+    the deferral step): `deferred` and `deferred_since` are the PREVIOUS
+    status's, unchanged, and "deferrals_not_computed" is true (false when
+    computed)."""
     path = out_dir / STATUS_NAME
     prev = _previous_since(path)
-    since = {sid: prev.get(sid, as_of.isoformat()) for sid in sorted(deferred)}
+    if computed:
+        since = {sid: prev.get(sid, as_of.isoformat()) for sid in sorted(deferred)}
+    else:
+        deferred = _previous_deferred(path)
+        since = dict(sorted(prev.items()))
     doc = {"written_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
            "bar_end": bar_end, "exit_code": exit_code, "published": published,
-           "deferred": dict(sorted(deferred.items())), "deferred_since": since}
+           "deferred": dict(sorted(deferred.items())), "deferred_since": since,
+           "deferrals_not_computed": not computed}
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     try:
         tmp.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
         _publish(tmp, path)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass                              # never mask the error that got us here
 
 
 def _spec_sha(spec: dict) -> str:
@@ -323,13 +354,18 @@ def run(argv=None) -> int:
     a = ap.parse_args(argv)
     as_of = a.as_of or _utc_today()
 
-    def finish(rc, bar_end=None, published=0, deferred=None):
-        write_status(a.out_dir, as_of, bar_end, rc, published, deferred or {})
+    def finish(rc, bar_end=None, published=0, deferred=None, computed=True):
+        # a failed status write must never change the exit code (a good publish
+        # stays 0, a refusal stays 2); the Sentinel's staleness FAIL is the backstop
+        try:
+            write_status(a.out_dir, as_of, bar_end, rc, published, deferred or {}, computed)
+        except Exception as exc:
+            print(f"WARNING: could not write {STATUS_NAME}: {exc!r}")
         return rc
 
     if not a.registry.is_file():
         print(f"REFUSED (no targets written): no registry file {a.registry}")
-        return finish(REFUSED_EXIT)
+        return finish(REFUSED_EXIT, computed=False)
     specs, max_dd = {}, {}
 
     def on_entry(e):
@@ -358,7 +394,7 @@ def run(argv=None) -> int:
         check_fresh(bar_end, as_of)
     except DataRefused as exc:
         print(f"REFUSED (no targets written): {exc}")
-        return finish(REFUSED_EXIT, bar_end)
+        return finish(REFUSED_EXIT, bar_end, computed=False)
     # minors item 1: per-strategy deferral -- every asset on bar_end, or none
     deferred = {}
     for sid, spec in served.items():

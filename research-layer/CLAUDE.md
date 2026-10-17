@@ -1494,12 +1494,25 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   {sid: reason} (as computed; {} on a refusal that never got that far),
   deferred_since {sid: first-seen UTC date}}`. `deferred_since` keeps the
   previous status's date for a sid still deferred, gives a newly deferred
-  sid the run's UTC day (`--as-of`), and drops a sid no longer deferred (it
-  also restarts at an unreadable date for one sid). A missing previous
+  sid the run's UTC day (the `--as-of` date, default today UTC: the
+  `deferred_since` dates are `--as-of` dates, not `written_utc` dates), and
+  drops a sid no longer deferred (it also restarts at an unreadable date for
+  one sid). A missing previous
   status is silent; a malformed one (bad bytes/JSON, not an object,
   `deferred_since` not an object) counts as empty and prints a `WARNING`
-  line, so every clock restarts. Refusals write it too (`exit_code` 2); a
-  crash (exit 1) writes NOTHING, so staleness is the signal. It lives beside
+  line, so every clock restarts. Refusals write it too (`exit_code` 2). A
+  refusal BEFORE the deferral step (stale or partial `bar_end`, malformed
+  CSV, missing registry) cannot compute deferrals, so it carries the previous
+  status's `deferred` and `deferred_since` forward unchanged and sets
+  `"deferrals_not_computed": true` (the key is `false` on every run that
+  computed them, including an exit 2 for "nothing publishable"); a refusal
+  day therefore never resets a sid's clock, and the next normal run
+  recomputes and drops recovered sids. A status write that FAILS (a reader
+  holding `status.json` past the retries, a full disk) prints `WARNING:
+  could not write status.json: ...` and leaves the exit code alone (a good
+  publish stays 0, a refusal stays 2); the Sentinel's 20 h staleness FAIL is
+  the backstop. A crash (exit 1) writes NOTHING, so staleness is the
+  signal. It lives beside
   the targets files but is not matched by the executor's `targets-*.json`
   glob or by retention. **Sentinel side** (sc-ops-sentinel,
   `sentinel/checks/signal_status.py`, manifest block `signal_status`
