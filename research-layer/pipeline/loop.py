@@ -53,7 +53,7 @@ from typing import Callable
 from . import cells, loop_state, pipeline_budget, pipeline_status
 from .budget import BudgetMeter, PIPELINE_CAP_USD
 from .chainlock import ChainLock, ChainLockHeld
-from .composer import expand_family, expander_for, routable_cards
+from .composer import routable_cards
 from .registry import Registry
 from .tradfi_data import DEFAULT_TS_ROOT
 
@@ -101,9 +101,12 @@ _REST_OF_CYCLE_S = 90 * 60
 # D6 sweep rotation (docs/2026-08-28-market-data-universe-design.md s5): a
 # generation sweeps a ROTATING WINDOW of this many of its class's active
 # assets, not all of them, with the cursor persisted per class in
-# logs/loop_state.json. 12 is the spec's declared number, sized against the
-# 100-asset crypto universe: full coverage in 9 generations (100/12, last
-# window short).
+# logs/loop_state.json. 12 is the spec's declared number (sized against the
+# 100-asset declared crypto universe). Switch 1 activated 76 crypto assets:
+# every one is reached in 7 generations (76/12 rounded up). The cursor WRAPS
+# rather than emitting a short window -- the 7th window is the last 4 assets
+# then the first 8 -- so later passes start 8 further on (loop_state.
+# rotation_window).
 #
 # IT IS A SCHEDULE, NEVER A SELECTION. Every active cell is swept with equal
 # frequency (pinned in test_sp5_p2t4.py); the window decides WHEN a cell is
@@ -128,9 +131,10 @@ ROTATION_SIZE = 12
 # no cost problem to solve. Adding a class here is a reviewed commit, and
 # ships with its own window size if 12 is not right for it.
 #
-# Crypto's own active set is EMPTY this phase (ACTIVE_CELLS["crypto"] is
-# ((), ())), so rotation is inert everywhere today -- machinery built,
-# behaviour frozen. Pinned by test_phase2_freeze.py.
+# Crypto is the one rotating class: Switch 1 (SP5 Phase 3) activated 76
+# assets at 1d, so a crypto generation sweeps 12 of them, and the four
+# tradfi classes still sweep their whole active sets. Pinned by
+# test_switch1.py and test_phase2_freeze.py.
 ROTATION_CLASSES = ("crypto",)
 
 # The scheduled task this module runs under, and the shortest execution
@@ -1064,26 +1068,18 @@ def _sweep_window(state: dict, asset_class: str) -> tuple[list[str], bool]:
 
     `rotates` False means the window IS the whole active set, so the loop
     passes no `--assets` at all and the composer invocation is byte-identical
-    to its pre-D6 form. That is the state every class is in today: the four
-    tradfi classes are not in ROTATION_CLASSES, and crypto's active set is
-    empty.
+    to its pre-D6 form. That is the state of the four tradfi classes (not in
+    ROTATION_CLASSES). crypto rotates: 76 active assets, 12 per generation.
 
-    TWO gates, and the second one is not redundant (P2-T4 review F2).
-    ROTATION_CLASSES says which classes SHOULD rotate; the routing dispatch
-    says which classes CAN accept a window at all -- `--assets` is a view onto
-    active cells, and the legacy pooled expander has none, so the composer
-    refuses it. crypto is in ROTATION_CLASSES today AND still pooled, so
-    without this second gate a Phase 3 commit that populated
-    ACTIVE_CELLS["crypto"] without also switching expander_for would emit a
-    window into a composer guaranteed to exit 1 -- stage_failed and a Sentinel
-    FAIL on every crypto fire, three times a day. Reading the dispatch makes
-    rotation switch on in the SAME commit that makes it legal. The loud
-    failure for a half-landed Phase 3 lives in the test suite
-    (test_phase2_freeze.py's activation-simulation tests), which is where a
-    coupling error should be caught -- not in a live crash loop."""
+    One gate since Switch 1: ROTATION_CLASSES. Until then a second gate read
+    the routing dispatch (`expander_for(cls) is expand_family`) because the
+    legacy pooled crypto expander had no active cells and the composer
+    refused `--assets` on it (P2-T4 review F2). Switch 1 deleted that path
+    and the refusal in the same commit that activated crypto's cells, so
+    every class's composer now accepts a window and the gate had nothing
+    left to guard."""
     assets = _rotation_assets(asset_class)
-    if (asset_class not in ROTATION_CLASSES
-            or expander_for(asset_class) is expand_family):
+    if asset_class not in ROTATION_CLASSES:
         return assets, False
     window = loop_state.rotation_window(state, asset_class, assets, ROTATION_SIZE)
     return window, window != assets
@@ -2096,12 +2092,11 @@ def _run_locked_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
     # Gated on `rotates` (the value _sweep_window returned at 4b-pre), NOT on
     # ROTATION_CLASSES membership (P2-T4 re-review, observation B). Those are
     # different questions: membership says the class SHOULD rotate, `rotates`
-    # says a window was emitted this cycle. In a half-landed Phase 3 --
-    # ACTIVE_CELLS["crypto"] populated, expander_for still pooled -- the
-    # membership test alone walks the cursor 12 positions per completed
-    # generation while `rotates` is False and nothing was ever swept from a
-    # window. That is precisely the silent skip the paragraph above forbids,
-    # committed by the code that forbids it.
+    # says a window was emitted this cycle. (The case that exposed it, a
+    # half-landed Phase 3 with crypto's cells active and the pooled expander
+    # still routing, cannot arise since Switch 1 landed both halves at once;
+    # keyed on `rotates`, the advance stays right for any future reason a
+    # rotating class emits no window.)
     if rotates:
         loop_state.advance_rotation(state, asset_class,
                                     len(_rotation_assets(asset_class)),

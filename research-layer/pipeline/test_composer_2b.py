@@ -468,7 +468,7 @@ def test_schema_rejects_bond_and_metal_before_the_additive_change():
 
 def test_bond_prompt_names_coupon_understatement():
     system = composer.system_prompt_for("bond_etf")
-    assert system is not composer.SYSTEM_PROMPT
+    assert system is not composer.CRYPTO_SYSTEM_PROMPT
     assert system == composer._bond_etf_system_prompt()
 
     assert "coupon" in system.lower()
@@ -484,7 +484,7 @@ def test_bond_prompt_names_coupon_understatement():
 
 def test_metal_prompt_names_gld_slv_trust_structure():
     system = composer.system_prompt_for("metal_etf")
-    assert system is not composer.SYSTEM_PROMPT
+    assert system is not composer.CRYPTO_SYSTEM_PROMPT
     assert system == composer._metal_etf_system_prompt()
 
     assert "trust" in system.lower()

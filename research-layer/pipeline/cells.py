@@ -25,8 +25,8 @@ every existing crypto caller (all_cells, phase_cells, validate_cell with two
 positional args) keeps its exact current SHAPE - they read the same two
 tuples they always did. SP5 P2-T3 widened those tuples to the pinned
 100-asset universe, so all_cells()/phase_cells() now enumerate the widened
-DECLARATION; what a generation may sweep is ACTIVE_CELLS, which is still
-empty for crypto.
+DECLARATION; what a generation may sweep is ACTIVE_CELLS, which Switch 1
+(SP5 Phase 3, build 2b-3, 2026-10-17) set to 76 of those assets at 1d.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 # design docs/2026-08-28-market-data-universe-design.md s2/s4): the crypto
 # grid's 5 incumbents become the pinned 100-asset universe. See the comment
 # block above CLASSES["crypto"] for the provenance, the amended selection
-# rule, the observed data end, and why NOTHING sweeps on this commit.
+# rule, the observed data end, and which of these cells Switch 1 activated.
 # Order is the manifest's own (CoinGecko market-cap rank at selection);
 # it is part of the declaration, so this tuple is never re-sorted.
 ASSETS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "TRXUSDT", "ZECUSDT",
@@ -132,12 +132,13 @@ METAL_ETF_ERAS = (("pre_gfc", "2004-11-18", "2008-12-31"), ("zirp", "2009-01-01"
 # whether the gauntlet records a same-OOS-window buy-and-hold control against
 # the cell's own asset. `"self"` for a class whose cells are single-name
 # assets with an honest long buy-and-hold (equity_etf; bond/metal declare
-# their own value at 2b, not inherited from here). `None` for crypto:
-# crypto is still served by the legacy POOLED path, whose specs are the
-# 2-asset BTCUSD+ETHUSD book, and a "self" control needs exactly one asset
-# per cell. crypto flips at SP5 Phase 3, in the same commit that routes it
-# through expand_family_for_class -- see the crypto entry's own comment
-# block below for the coupling and its test pin. fx flips to "self" under SP5
+# their own value at 2b, not inherited from here). `None` means no control
+# is recorded; no class declares it today. crypto was None while the legacy
+# POOLED path served it (2-asset BTCUSD+ETHUSD specs; a "self" control needs
+# exactly one asset per cell) and flipped to "self" at Switch 1 (SP5 Phase
+# 3), in the same commit that routed it through expand_family_for_class --
+# see the crypto entry's own comment block below for the coupling and its
+# test pin. fx flips to "self" under SP5
 # (docs/2026-08-28-market-data-universe-design.md s7, Coen 2026-08-28):
 # recorded-not-gated means a control is strictly more information than
 # none. LIMITATION, declared: a USD-per-foreign hold's true return driver
@@ -147,13 +148,17 @@ METAL_ETF_ERAS = (("pre_gfc", "2004-11-18", "2008-12-31"), ("zirp", "2009-01-01"
 # and the addendum's pre-registration for the exact shape.
 CLASSES = {
     # SP5 Phase 2 P2-T3 (addendum docs/2026-08-29-sp5-crypto-grid-addendum.md,
-    # design docs/2026-08-28-market-data-universe-design.md s2/s4). DECLARED,
-    # NOT ACTIVATED: ACTIVE_CELLS["crypto"] stays {"assets": (), "timeframes":
-    # ()} on this commit, so active_cells("crypto") is [] and NOTHING sweeps
-    # any of these 600 cells. The composer's legacy pooled crypto branch
-    # (ALLOWED_ASSETS BTCUSD/ETHUSD, UNIVERSE_BASE, COST_MODEL) keeps serving
-    # every live crypto trigger until Coen's own Phase 3 activation commit --
-    # which is the DENOMINATOR EVENT, never a side effect of this file.
+    # design docs/2026-08-28-market-data-universe-design.md s2/s4) DECLARED
+    # these 600 cells. SWITCH 1 (SP5 Phase 3, build 2b-3, Coen 2026-10-17)
+    # ACTIVATED 76 of them -- the assets below with at least 365 days of
+    # daily history before screen.DEFAULT_CUTOFF (first bar on or before
+    # 2022-12-31), at "1d" only -- in ACTIVE_CELLS["crypto"]. That is the
+    # DENOMINATOR EVENT. The other 24 declared assets (first bar 2023 or
+    # 2024) and the five intraday timeframes stay declared and unswept;
+    # intraday is Switch 2. The composer's legacy pooled crypto branch
+    # (ALLOWED_ASSETS BTCUSD/ETHUSD, UNIVERSE_BASE, COST_MODEL,
+    # expand_family) was DELETED in the same commit: crypto now expands per
+    # cell like every other class.
     # PROVENANCE: `assets` is a LITERAL written from the pinned manifest
     # data/crypto_universe_manifest.json (selected_utc 2026-08-28T15:19:44Z,
     # CoinGecko /coins/markets + a Binance first/last-bar probe), in manifest
@@ -183,42 +188,38 @@ CLASSES = {
     # bar, which is what "a 24x7 feed fetched today ends today" means for a
     # closed-bar fetch; it is not lag between cells, and this field only ever
     # widens a CROSS-class comparison.
-    # cost_model: the literal values of composer.COST_MODEL, now declared
-    # where every other class declares theirs (design s4). Reading it here
-    # does not change the legacy path, which still reads composer.COST_MODEL.
-    # benchmark STAYS None through Phase 2 -- DEFERRED DELIBERATELY, not an
-    # oversight. The SP5 design (s4/s7) put the flip to "self" on this
-    # declaration commit; that was wrong and the design is being corrected.
-    # The reason: the legacy pooled path still serves crypto here, and it
-    # names specs from composer.ALLOWED_ASSETS (BTCUSD/ETHUSD), which emits
-    # MULTI-asset specs -- all 155 crypto strategies on the chain are the
-    # 2-asset BTCUSD+ETHUSD book. gauntlet._benchmark_relative REQUIRES
-    # exactly one asset per cell for a benchmark:"self" class, so flipping
-    # this field alone makes every crypto verdict raise
-    # ("benchmark-relative control needs exactly one asset per cell").
-    # REQUIRED COMPANION CHANGE: the flip to "self" belongs to the PHASE 3
-    # ACTIVATION COMMIT and only there -- the same commit that populates
-    # ACTIVE_CELLS["crypto"], routes crypto through expand_family_for_class
-    # (single-asset per-cell specs), and deletes the crypto branch in
-    # composer.expander_for. Whoever flips this field must make that routing
-    # change in the SAME commit; neither half is safe alone, and the two
-    # halves fail DIFFERENTLY. Benchmark alone: every crypto verdict RAISES
-    # (loud). Routing alone: crypto goes per-cell with benchmark still None,
-    # so _benchmark_relative returns None and NO control is written on any
-    # crypto verdict -- and absence is this codebase's declared signal for
-    # "not applicable", so the loss is SILENT. That is the dangerous half.
-    # BOTH directions are test-pinned, against the real routing dispatch
-    # rather than a proxy for it (test_gauntlet_classes.py:
-    # test_crypto_benchmark_and_the_legacy_pooled_path_flip_together reads
-    # composer.expander_for("crypto")); both were mutation-tested at the
-    # P2-T3 rider, so a half-flip in either direction fails rather than
-    # shipping green. gauntlet.py's BENCHMARK_BASIS already declares
-    # crypto's basis string, ready for the flip.
+    # cost_model: the literal values of the deleted composer.COST_MODEL
+    # (10 bps commission + 5 bps slippage per side, both FRACTIONS of
+    # notional), declared where every other class declares theirs (design
+    # s4); the per-cell expander reads it from here. No short financing is
+    # declared for crypto, so none is charged.
+    # benchmark is "self" FROM SWITCH 1. It stayed None through Phase 2 on
+    # purpose: the legacy pooled path emitted MULTI-asset specs (all 155
+    # pre-switch crypto strategies on the chain are the 2-asset
+    # BTCUSD+ETHUSD book), and gauntlet._benchmark_relative REQUIRES exactly
+    # one asset per cell for a benchmark:"self" class ("benchmark-relative
+    # control needs exactly one asset per cell"). The flip and the routing
+    # change (crypto through expand_family_for_class, the crypto branch in
+    # composer.expander_for deleted) landed in the SAME commit, because the
+    # two halves fail DIFFERENTLY alone. Benchmark alone: every crypto
+    # verdict RAISES (loud). Routing alone: crypto goes per-cell with
+    # benchmark still None, so _benchmark_relative returns None and NO
+    # control is written on any crypto verdict -- and absence is this
+    # codebase's declared signal for "not applicable", so the loss is
+    # SILENT. Pinned in its landed form by test_switch1.py::
+    # test_crypto_routes_per_cell_and_benchmarks_itself (reads
+    # composer.expander_for("crypto") together with this field). The basis
+    # string on every crypto verdict is gauntlet.py's BENCHMARK_BASIS
+    # ("price returns, staking/funding yield excluded on both sides").
+    # CONSEQUENCE, declared: a pre-switch pooled BTCUSD+ETHUSD spec that
+    # reaches the gauntlet now RAISES there; build 2b-3's grid_switch
+    # preflight (its Task 6) is the guard that refuses the switch while any
+    # such spec is in flight.
     "crypto": {"assets": ASSETS, "timeframes": TIMEFRAMES, "session": "24x7",
                "periods_per_year": 365, "bar_kind": "ohlcv",
                "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005},
                "eras": (), "max_end_lag_days": 0,
-               "excluded_block_types": frozenset(), "benchmark": None},
+               "excluded_block_types": frozenset(), "benchmark": "self"},
     "fx": {"assets": FX_ASSETS, "timeframes": ("1d",), "session": "fx_5d",
            "periods_per_year": 261, "bar_kind": "single_fix",
            "cost_model": FX_COST_MODEL, "eras": FX_ERAS,
@@ -278,9 +279,28 @@ LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08
 # own reviewed commit, never a side effect of declaring assets above.
 # "all" = the class's whole declared grid (the four tradfi classes: byte-
 # identical to pre-SP5 behavior, test-pinned).
+# crypto: SWITCH 1 (SP5 Phase 3, Coen 2026-10-17). The 76 declared assets
+# whose first daily bar is on or before 2022-12-31 (>= 365 days of history
+# before screen.DEFAULT_CUTOFF 2023-12-31), in ASSETS declaration order (the
+# import-time gate check below requires it), at 1d only. Excluded, still
+# declared: ENA ETHFI JUP PYTH RENDER STRK TAO WIF ZK ZRO (first bar 2024)
+# and GAS GLM PROM ARB SUI FLOKI PEPE PENDLE WLD SEI TIA ORDI JTO BONK
+# (first bar 2023-03-17..2023-12-15). Pinned by test_switch1.py.
 ACTIVE_CELLS = {
     # class -> {"assets": tuple | "all", "timeframes": tuple | "all"}
-    "crypto":     {"assets": (), "timeframes": ()},   # empty until activation
+    "crypto":     {"assets": (
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "TRXUSDT", "ZECUSDT",
+        "DOGEUSDT", "LINKUSDT", "ADAUSDT", "XLMUSDT", "BCHUSDT", "LTCUSDT", "HBARUSDT",
+        "AVAXUSDT", "SHIBUSDT", "UNIUSDT", "NEARUSDT", "PAXGUSDT", "AAVEUSDT", "DOTUSDT",
+        "ICPUSDT", "ETCUSDT", "QNTUSDT", "NEXOUSDT", "ALGOUSDT", "ATOMUSDT", "JSTUSDT",
+        "VETUSDT", "FILUSDT", "CAKEUSDT", "INJUSDT", "STXUSDT", "DASHUSDT", "CRVUSDT",
+        "APTUSDT", "FETUSDT", "SUNUSDT", "GNOUSDT", "LDOUSDT", "LUNCUSDT", "XTZUSDT",
+        "ENSUSDT", "CFXUSDT", "DCRUSDT", "JASMYUSDT", "RAYUSDT", "CVXUSDT", "OPUSDT",
+        "IOTAUSDT", "COMPUSDT", "TWTUSDT", "GRTUSDT", "THETAUSDT", "RUNEUSDT", "AXSUSDT",
+        "NEOUSDT", "CHZUSDT", "MANAUSDT", "APEUSDT", "XECUSDT", "ARUSDT", "SFPUSDT",
+        "SNXUSDT", "1INCHUSDT", "SANDUSDT", "IMXUSDT", "EGLDUSDT", "BATUSDT", "DYDXUSDT",
+        "ZENUSDT", "RSRUSDT", "GALAUSDT", "QTUMUSDT", "DGBUSDT", "YFIUSDT"),
+                   "timeframes": ("1d",)},
     "fx":         {"assets": "all", "timeframes": "all"},
     "equity_etf": {"assets": "all", "timeframes": "all"},
     "bond_etf":   {"assets": "all", "timeframes": "all"},

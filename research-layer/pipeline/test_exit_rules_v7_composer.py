@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .composer import (SWEEPABLE_TYPES, RANGE_REQUIRING, SPEC_VERSION, SYSTEM_PROMPT,
+from .composer import (SWEEPABLE_TYPES, RANGE_REQUIRING, SPEC_VERSION, CRYPTO_SYSTEM_PROMPT,
                        composition_fingerprint, validate_family, grammar_summary,
                        v7_compliant_as_is, expand_family_for_class,
                        system_prompt_for)
@@ -41,7 +41,7 @@ def test_retired_types_are_never_sweepable():
 
 
 def fam(blocks, sweep=None):
-    return {"family": "d15_fam", "assets": ["BTCUSD"], "card_ids": ["c1"], "regime_hypothesis": "x",
+    return {"family": "d15_fam", "assets": ["BTCUSDT"], "card_ids": ["c1"], "regime_hypothesis": "x",
             "blocks": blocks, "sweep": sweep or []}
 
 
@@ -159,7 +159,7 @@ def test_grammar_summary_omits_retired_types_and_names_them():
 
 
 def test_every_prompt_carries_the_d15_exit_rule():
-    prompts = {"crypto": SYSTEM_PROMPT}
+    prompts = {"crypto": CRYPTO_SYSTEM_PROMPT}
     for cls in ("fx", "equity_etf", "bond_etf", "metal_etf"):
         prompts[cls] = system_prompt_for(cls)
     for cls, text in prompts.items():

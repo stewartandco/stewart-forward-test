@@ -248,8 +248,9 @@ def test_crypto_verdict_native_alignment_no_era_summary(tmp_path):
     chain_gauntlet_note(reg)
     data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
     art = tmp_path / "art"
+    from .test_gauntlet import HIT_BARS_CUTOFF   # an OOS bar for crypto's control
     rc = gauntlet_run(["--registry", str(reg.log_path),
-                       "--data-dir", str(data),
+                       "--data-dir", str(data), "--cutoff", HIT_BARS_CUTOFF,
                        "--artifacts-dir", str(art)])
     assert rc == 0
 
@@ -1000,7 +1001,9 @@ def test_progress_lines_appear_in_dry_run_too(tmp_path, capsys):
 # same-OOS-window buy-and-hold of the cell's own asset, RECORDED, NOT GATED.
 # Classes with `benchmark: None` carry no key at all. SP5 D3
 # (docs/2026-08-28-market-data-universe-design.md s7): fx flipped to "self"
-# with a per-class-honest basis string; crypto stays None until Phase 3.
+# with a per-class-honest basis string; crypto flipped at Switch 1 (SP5
+# Phase 3), in the same commit that routed it per cell, so every declared
+# class now records the control.
 
 from .gauntlet import (BENCHMARK_BASIS, _benchmark_relative,
                        _candidate_payload, _evaluate_candidate)
@@ -1038,80 +1041,28 @@ def test_benchmark_relative_analytic_fixture():
         "basis": "price returns, dividends excluded on both sides"}
 
 
-def test_benchmark_relative_absent_for_none_classes():
-    """crypto (the one remaining `benchmark: None` class -- fx flipped under
-    SP5 D3) -- absence of the key, never a null placeholder (the addendum's
-    own convention)."""
-    bars = {"BTCUSDT": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
-                         "low": 1.0, "close": 1.0, "volume": 1.0}]}
-    crypto_spec = {"strategy_id": "x",
-                   "universe": {"assets": ["BTCUSDT"], "asset_class": "crypto"}}
-    assert _benchmark_relative(crypto_spec, bars, 0.01, "2023-12-31") is None
+def test_benchmark_relative_absent_for_none_classes(monkeypatch):
+    """A class whose CLASSES entry declares `benchmark: None` gets no key --
+    absence, never a null placeholder (the addendum's own convention). No
+    declared class is None since Switch 1 flipped crypto, so the rule is
+    exercised on a test-only declaration (and on an undeclared class name,
+    which reads as no declaration at all)."""
+    monkeypatch.setitem(cells.CLASSES, "nobench_test",
+                        dict(cells.CLASSES["equity_etf"], benchmark=None))
+    bars = {"SPY": [{"date": "2024-01-01", "open": 1.0, "high": 1.0,
+                     "low": 1.0, "close": 1.0, "volume": 1.0}]}
+    for cls in ("nobench_test", "not_a_declared_class"):
+        spec = {"strategy_id": "x",
+                "universe": {"assets": ["SPY"], "asset_class": cls}}
+        assert _benchmark_relative(spec, bars, 0.01, "2023-12-31") is None, cls
+    assert all(c["benchmark"] == "self" for c in cells.CLASSES.values()
+               if c is not cells.CLASSES["nobench_test"])
 
 
-def test_crypto_benchmark_and_the_legacy_pooled_path_flip_together():
-    """SP5 P2-T3: the deferral is BOTH-OR-NEITHER, pinned so it cannot be
-    half-shipped.
-
-    Phase 2 declares crypto's 100-asset grid and its cost_model but leaves
-    `benchmark` at None. It has to: while crypto is routed to the legacy
-    pooled path, its specs are named from composer.ALLOWED_ASSETS
-    (BTCUSD/ETHUSD -- tickers that are not declared crypto cell assets at
-    all) and are the 2-asset pooled book. All 155 crypto strategies on the
-    chain are that book. `_benchmark_relative` REQUIRES exactly one asset
-    per cell for a benchmark:"self" class, so flipping the declaration on
-    its own turns every crypto verdict into a ValueError -- which is exactly
-    what the first cut of this task did, against a green-looking cells.py.
-
-    The flip belongs to the PHASE 3 ACTIVATION COMMIT, which in the same
-    commit populates ACTIVE_CELLS["crypto"], routes crypto through
-    expand_family_for_class (single-asset per-cell specs sourced from the
-    DECLARED grid), and deletes the legacy branch in composer.expander_for.
-
-    This pin reads the REAL ROUTING DISPATCH (composer.expander_for), not a
-    proxy for it. An earlier cut keyed on whether composer.ALLOWED_ASSETS
-    still differed from the declared grid; review mutation-tested that and
-    found it caught the benchmark-flipped-alone case but PASSED when the
-    routing was switched alone -- and the routing-alone half-land is the
-    silent one: crypto specs go single-asset per-cell, benchmark stays None,
-    _benchmark_relative returns None before touching anything, and no
-    benchmark key appears on any crypto verdict, where absence is the
-    declared signal for "not applicable". Hundreds of crypto strategies with
-    no buy-and-hold control and nothing complaining -- the same
-    beta-blindness the equity audit exposed. Hence: observe the dispatch.
-    """
-    from . import composer
-
-    # THE ROUTING DECISION ITSELF. expander_for returns expand_family only
-    # while crypto takes the legacy pooled path; Phase 3 deleting that branch
-    # makes this False, and the benchmark must move in the same commit.
-    routed_to_legacy_pooled = (
-        composer.expander_for("crypto") is composer.expand_family)
-    assert (cells.CLASSES["crypto"]["benchmark"] is None) == routed_to_legacy_pooled, (
-        "crypto's benchmark and its composer routing must flip in the SAME "
-        "commit (SP5 Phase 3): benchmark 'self' needs exactly one asset per "
-        "cell, which only expand_family_for_class provides -- and a per-cell "
-        "route with benchmark still None writes NO control on any crypto "
-        "verdict, silently")
-
-    # And prove it behaviourally on a real spec off that path, so the pin is
-    # not merely a restatement of the rule: a pooled spec must survive
-    # _benchmark_relative today (no key, no raise).
-    fam = {"family": "coupling_pin", "card_ids": ["aaaaaaaaaaaaaaaa"],
-           "assets": list(composer.ALLOWED_ASSETS),
-           "blocks": [
-               {"role": "entry", "type": "ma_cross", "params": {"fast": 5, "slow": 50}},
-               {"role": "stop", "type": "atr_stop", "params": {"atr_len": 14, "mult": 2.0}},
-               {"role": "target", "type": "r_multiple", "params": {"r": 1.5}},
-               {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
-           ]}
-    pooled = composer.expand_family(fam, "run-coupling", "claude-opus-5",
-                                    "2026-08-29T00:00:00Z")[0]
-    assert len(pooled["universe"]["assets"]) == 2, pooled["universe"]
-    assert pooled["universe"]["asset_class"] == "crypto"
-    # Empty bars on purpose: with benchmark None this returns before touching
-    # them. If someone flips the declaration alone, this raises instead.
-    assert _benchmark_relative(pooled, {}, 0.0, "2023-12-31") is None
+# The P2-T3 coupling pin (test_crypto_benchmark_and_the_legacy_pooled_path_
+# flip_together) was REPLACED at Switch 1 by test_switch1.py::
+# test_crypto_routes_per_cell_and_benchmarks_itself, its landed form: the
+# pooled path it read is deleted, and the two halves moved in one commit.
 
 
 def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
@@ -1139,17 +1090,15 @@ def test_benchmark_relative_suffixed_bar_exactly_on_cutoff_is_train_side():
     assert result["buy_hold_net"] == pytest.approx(expected_buy_hold, abs=1e-12)
 
 
-def test_crypto_verdicts_carry_no_benchmark_key(tmp_path):
+def test_crypto_verdicts_carry_the_benchmark_key(tmp_path):
     """End to end through gauntlet.run(): the mixed crypto+fx registry
     already exercised elsewhere in this file (era summaries, intersection
-    alignment) proves the negative here for free -- crypto (the one
-    remaining `benchmark: None` class since SP5 D3 flipped fx) never gets
-    the key on its verdict's metrics dict. The fx verdicts of the SAME run
-    DO carry it now, with the carry-excluded basis -- asserted here so the
-    flip is pinned end to end, not only at the worker level. The explicit
-    --cutoff sits INSIDE every fixture calendar (all three end 2020-12-31);
-    the pre-flip default (2023-12-31) would leave fx with zero OOS bars,
-    which _benchmark_relative loudly refuses."""
+    alignment). Since Switch 1 crypto declares `benchmark: "self"`, so its
+    single-asset verdict NOW carries the key, with crypto's own basis; the
+    fx verdicts of the SAME run carry it with the carry-excluded basis. The
+    explicit --cutoff sits INSIDE every fixture calendar (all three end
+    2020-12-31); the default (2023-12-31) would leave every cell with zero
+    OOS bars, which _benchmark_relative loudly refuses."""
     from .gauntlet import run as gauntlet_run
 
     reg, crypto_spec, gbp_spec, eur_spec = mixed_class_gauntlet_registry(tmp_path)
@@ -1168,7 +1117,10 @@ def test_crypto_verdicts_carry_no_benchmark_key(tmp_path):
                for e in reg.entries() if e["entry_type"] == "verdict"
                and e["payload"]["stage"] == "gauntlet"}
     assert len(verdicts) == 3
-    assert "benchmark_relative" not in verdicts[crypto_spec["strategy_id"]]["metrics"]
+    assert crypto_spec["universe"]["assets"] == ["BTCUSD"]   # one asset per cell
+    cb = verdicts[crypto_spec["strategy_id"]]["metrics"]["benchmark_relative"]
+    assert cb["basis"] == "price returns, staking/funding yield excluded on both sides"
+    assert cb["window"] == "oos"
     for fx_spec in (gbp_spec, eur_spec):
         b = verdicts[fx_spec["strategy_id"]]["metrics"]["benchmark_relative"]
         assert b["basis"] == "price returns, carry excluded on both sides"

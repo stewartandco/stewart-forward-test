@@ -456,7 +456,9 @@ def test_composer_run_persists_one_drift_record_per_invocation(tmp_path):
     rec = json.loads(lines[0])
     assert rec["run_id"] == "driftrun"
     assert rec["mode"] == "dry"
-    assert rec["n_specs"] == 9
+    # 9 combos per active crypto cell (per-cell expansion since Switch 1)
+    from pipeline import cells
+    assert rec["n_specs"] == 9 * len(cells.active_cells("crypto")) == 9 * 76
 
 
 from pipeline.stats import harvey_liu_haircut

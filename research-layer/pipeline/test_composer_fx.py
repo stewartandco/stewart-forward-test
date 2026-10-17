@@ -123,6 +123,12 @@ def test_default_flag_is_byte_identical(tmp_path, monkeypatch):
     Re-captured 2026-09-03 (D15 exit rules v7, plan Task 3): every spec the
     composer builds now carries version 2, and strategy_id hashes the spec,
     so all nine ids moved. Nothing else in the record changed.
+
+    Re-captured 2026-10-17 by the Switch 1 commit (SP5 Phase 3): the default
+    class now expands per ACTIVE cell, 9 combos x 76 crypto cells = 684
+    single-asset specs (they were 9 pooled BTCUSD+ETHUSD specs), so every id
+    moved. The 684 ids are pinned by the sha256 of their JSON list (in
+    order) rather than inline; the rest of the record is compared whole.
     """
     monkeypatch.setattr(composer, "datetime", _FixedDatetime)
     monkeypatch.setattr(reader, "datetime", _FixedDatetime)
@@ -131,17 +137,17 @@ def test_default_flag_is_byte_identical(tmp_path, monkeypatch):
         ["--registry", str(path), "--run-id", "fixed-run", "--dry-run"],
         propose_fn=lambda cards: [good_family(card_ids=[cid])])
     assert rc == 0
-    assert _drift_record(path) == {
+    record = _drift_record(path)
+    ids = record.pop("strategy_ids")
+    assert record == {
         "families": ["trend_scan_family"],
         "mode": "dry",
-        "n_specs": 9,
+        "n_specs": 9 * 76,
         "run_id": "fixed-run",
-        "strategy_ids": [
-            "bb64bdbf67d9be80", "5e065f24d2d38caa", "855366f19eb21955",
-            "a52e18c8a72af968", "d5b971f49603484a", "eb84a4c901b2ed19",
-            "fe3512d82cc2116b", "6a739e2e88738f02", "0c6accd7ea3c370b",
-        ],
     }
+    assert len(ids) == len(set(ids)) == 9 * 76
+    assert hashlib.sha256(json.dumps(ids).encode("utf-8")).hexdigest() \
+        == "c4cc522641f7b436a9ec4f898af320d1b043ff57b44b38d4ba3d8f004bed48b3"
 
 
 # ---------------- fx universe, costs, cell expansion ----------------
@@ -329,8 +335,15 @@ def test_fx_specs_validate_against_schema(tmp_path):
 # Re-pinned 2026-09-03 (D15 exit rules v7, plan Task 3): SYSTEM_PROMPT gained
 # the EXITS rule paragraph. The pin's purpose is unchanged -- the fx branch
 # must never alter the crypto prompt -- so it moves with the crypto prompt.
-CRYPTO_SYSTEM_PROMPT_SHA256 = "3cf8b69dcae1f2b5bf181f62c09a353778163defc87547ef549ba49bbda039ea"
-CRYPTO_PROPOSAL_SCHEMA_SHA256 = "8345ffec2e7f2c20b80695acd50bad53df1b9fa32e6a07c5707f5b38750c48ce"
+# Re-pinned 2026-10-17 by the Switch 1 commit (SP5 Phase 3, build 2b-3 Task
+# 5, "feat(research-layer): Switch 1, crypto per cell at 1d"): SYSTEM_PROMPT
+# was renamed CRYPTO_SYSTEM_PROMPT and rewritten for per-cell daily crypto on
+# the 76 active assets (the generation history kept verbatim, pinned in
+# test_switch1.py), and the schema's assets enum moved from the deleted
+# ALLOWED_ASSETS (BTCUSD/ETHUSD) to the 76 active crypto assets. The brief
+# text is a DRAFT pending Coen; re-pin when he approves it.
+CRYPTO_SYSTEM_PROMPT_SHA256 = "68cb3af8656f2a5378d94a6721110056d97242630efa8061dd378aa121d72bb6"
+CRYPTO_PROPOSAL_SCHEMA_SHA256 = "725c7b936492af190be6ada4104aa92b4d0a6109378e2827af096da9a40a83b9"
 
 
 class _FakeStream:
@@ -380,24 +393,28 @@ def _meter(tmp_path) -> BudgetMeter:
 
 
 def test_crypto_prompt_and_schema_are_byte_identical_to_pre_edit(tmp_path):
-    """(a) Crypto system prompt + schema pinned against the pre-edit values,
-    both as module constants and as what propose_families actually sends."""
-    assert hashlib.sha256(composer.SYSTEM_PROMPT.encode("utf-8")).hexdigest() \
+    """(a) Crypto system prompt + schema pinned (re-pinned at Switch 1, see
+    above), both as module constants and as what propose_families actually
+    sends."""
+    assert hashlib.sha256(composer.CRYPTO_SYSTEM_PROMPT.encode("utf-8")).hexdigest() \
         == CRYPTO_SYSTEM_PROMPT_SHA256
     assert hashlib.sha256(
         json.dumps(composer.PROPOSAL_SCHEMA, sort_keys=True).encode("utf-8")
     ).hexdigest() == CRYPTO_PROPOSAL_SCHEMA_SHA256
 
-    # Identity, not reconstruction: task 6b's dispatchers must hand back the
-    # exact pre-existing objects on the default class.
-    assert composer.system_prompt_for("crypto") is composer.SYSTEM_PROMPT
-    assert composer.proposal_schema_for("crypto") is composer.PROPOSAL_SCHEMA
+    # The prompt is handed back by identity. The schema is BUILT per class
+    # since Switch 1 (deep copy, enum from the class's active assets), so for
+    # crypto it equals PROPOSAL_SCHEMA rather than being it.
+    assert composer.system_prompt_for("crypto") is composer.CRYPTO_SYSTEM_PROMPT
+    assert composer.proposal_schema_for("crypto") == composer.PROPOSAL_SCHEMA
 
     client = _FakeClient(families=[])
     composer.propose_families(composer.DEFAULT_MODEL, {}, 8,
                               client=client, meter=_meter(tmp_path))
-    assert client.captured["system"] is composer.SYSTEM_PROMPT
-    assert client.captured["output_config"]["format"]["schema"] is composer.PROPOSAL_SCHEMA
+    assert client.captured["system"] is composer.CRYPTO_SYSTEM_PROMPT
+    sent = client.captured["output_config"]["format"]["schema"]
+    assert hashlib.sha256(json.dumps(sent, sort_keys=True).encode("utf-8")
+                          ).hexdigest() == CRYPTO_PROPOSAL_SCHEMA_SHA256
 
 
 def test_fx_prompt_names_the_real_universe_and_drops_crypto_history(tmp_path):
@@ -412,7 +429,7 @@ def test_fx_prompt_names_the_real_universe_and_drops_crypto_history(tmp_path):
                               asset_class="fx")
 
     system = client.captured["system"]
-    assert system is not composer.SYSTEM_PROMPT
+    assert system is not composer.CRYPTO_SYSTEM_PROMPT
     assert system == composer.system_prompt_for("fx")
 
     # The crypto mission statement must not leak into an fx run.
@@ -455,5 +472,5 @@ def test_fx_schema_assets_enum_is_the_fx_universe(tmp_path):
     # Nothing else in the schema moved.
     stripped_fx = json.loads(json.dumps(schema))
     stripped_fx["properties"]["families"]["items"]["properties"]["assets"]["items"]["enum"] = \
-        list(composer.ALLOWED_ASSETS)
+        list(dict.fromkeys(a for a, _ in cells_mod.active_cells("crypto")))
     assert stripped_fx == composer.PROPOSAL_SCHEMA

@@ -193,8 +193,9 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
     reg, specs = multi_strategy_registry(tmp_path, n=3)
     data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
     art = tmp_path / "art"
+    from .test_gauntlet import HIT_BARS_CUTOFF   # an OOS bar for crypto's control
     rc = gauntlet_run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                       "--artifacts-dir", str(art)])
+                       "--artifacts-dir", str(art), "--cutoff", HIT_BARS_CUTOFF])
     assert rc == 0
 
     verdicts = [e["payload"] for e in reg.entries()
@@ -224,10 +225,26 @@ def test_full_run_records_cluster_count_and_group_context(tmp_path):
 # ---------------- rule 7: sibling-level fingerprint guard ----------------
 
 from .registry import Registry
-from .composer import (run as composer_run, expand_family,
-                       composition_fingerprint, screen_siblings, SYSTEM_PROMPT)
+from .composer import (run as composer_run, expand_family_for_class,
+                       composition_fingerprint, screen_siblings, CRYPTO_SYSTEM_PROMPT)
 from .test_composer import good_family, register_grammar, expand_fx
 from .test_pipeline import make_card
+from .testing_crypto import active_crypto
+
+# Rule 7's composer.run() tests sweep crypto per cell (Switch 1). Two active
+# cells keep the counts small and make the per-cell multiple visible: a
+# family of n combos expands to 2n specs, and an overlap of k combos with a
+# registered (or same-run) family collides on 2k of them, one per cell.
+TWO_CELLS = ("BTCUSDT", "ETHUSDT")
+
+
+@pytest.fixture
+def two_crypto_cells():
+    with active_crypto(TWO_CELLS):
+        yield
+
+
+_on_two_crypto_cells = pytest.mark.usefixtures("two_crypto_cells")
 
 GEN3_TS = "2026-08-16T00:00:00Z"
 # ONE card object shared by CARD_ID and seeded(): build_card() stamps
@@ -262,21 +279,21 @@ def z_family(family="zfam", z_values=(60, 75, 90)):
 
 
 def pre_expand(fam):
-    """The specs a family WOULD produce, for pre-registration. Their ids
-    differ from a later composer run's (created_utc and model feed the id),
-    but their composition FINGERPRINTS are identical - and the fingerprint is
-    what rule 7 compares. expand_family deep-copies its input, so the same
-    family object can be handed straight to the composer afterwards."""
-    return expand_family(fam, "seed-run", "m", GEN3_TS)
+    """The specs a family WOULD produce on the crypto per-cell path (call it
+    under two_crypto_cells), for pre-registration: one spec per combo per
+    active cell, combos outer, cells inner. Their ids differ from a later
+    composer run's (created_utc and model feed the id), but their
+    composition FINGERPRINTS are identical - and the fingerprint is what
+    rule 7 compares. The expander deep-copies its input, so the same family
+    object can be handed straight to the composer afterwards."""
+    return expand_family_for_class(fam, "seed-run", "m", GEN3_TS, "crypto")
 
 
 def pre_expand_cell(fam):
     """One spec per sweep combo, built through the per-cell expander on a
     single fx cell. For tests whose subject is fingerprinting / chain
     verification and which never feed the specs to a crypto composer.run():
-    those need pre_expand, because the crypto resurrection guard compares
-    against the crypto path's own (pooled, until the activation commit)
-    compositions."""
+    those use pre_expand, which builds the crypto cells' own compositions."""
     return expand_fx(fam, "seed-run", "m", GEN3_TS, assets=["EUR"])
 
 
@@ -295,21 +312,23 @@ def test_screen_siblings_never_returns_a_guarded_fingerprint():
     assert len(drop_notes) == 2
 
 
+@_on_two_crypto_cells
 def test_family_survives_partial_sibling_collision(tmp_path, capsys):
     fam = z_family()
     specs = pre_expand(fam)
-    assert len(specs) == 3
-    reg = seeded(tmp_path, pre_register=[specs[0]])
+    assert len(specs) == 3 * 2                    # 3 combos x 2 cells
+    reg = seeded(tmp_path, pre_register=[specs[0]])   # one combo, one cell
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
                        "--dry-run"],
                       propose_fn=lambda cards: [fam])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "3 expanded, 1 already registered, 2 new" in out
+    assert "6 expanded, 1 already registered, 5 new" in out
     assert "DROPPED family zfam" not in out
     assert "1 families kept" in out
 
 
+@_on_two_crypto_cells
 def test_family_dropped_when_every_sibling_collides(tmp_path, capsys):
     reg = seeded(tmp_path, pre_register=pre_expand(z_family()))
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3",
@@ -317,12 +336,13 @@ def test_family_dropped_when_every_sibling_collides(tmp_path, capsys):
                       propose_fn=lambda cards: [z_family()])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "3 expanded, 3 already registered, 0 new" in out
+    assert "6 expanded, 6 already registered, 0 new" in out
     assert "every sibling already registered" in out
     assert "DROPPED family zfam" in out
     assert "0 families kept" in out
 
 
+@_on_two_crypto_cells
 def test_cross_family_run_collision_drops_the_sibling_only(tmp_path, capsys):
     """fam_b overlaps fam_a on one sibling. fam_a wins the overlap; fam_b
     keeps its remaining siblings instead of dying."""
@@ -334,13 +354,15 @@ def test_cross_family_run_collision_drops_the_sibling_only(tmp_path, capsys):
                       propose_fn=lambda cards: [fam_a, fam_b])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "fam_a: 3 expanded, 0 already registered, 3 new" in out
-    assert ("fam_b: 3 expanded, 0 already registered, "
-            "1 duplicated in this run, 2 new") in out
+    # the overlap is one combo, so one sibling per cell: 2 of fam_b's 6
+    assert "fam_a: 6 expanded, 0 already registered, 6 new" in out
+    assert ("fam_b: 6 expanded, 0 already registered, "
+            "2 duplicated in this run, 4 new") in out
     assert "DROPPED family fam_b" not in out
     assert "2 families kept" in out
 
 
+@_on_two_crypto_cells
 def test_run_duplicates_are_never_reported_as_already_registered(tmp_path, capsys):
     """Nothing is registered in this run's chain, so neither the count nor
     the drop reason may claim a buried composition. The two diagnoses differ:
@@ -353,14 +375,15 @@ def test_run_duplicates_are_never_reported_as_already_registered(tmp_path, capsy
                                                 z_family(family="fam_b")])
     assert rc == 0
     out = capsys.readouterr().out
-    assert ("fam_b: 3 expanded, 0 already registered, "
-            "3 duplicated in this run, 0 new") in out
+    assert ("fam_b: 6 expanded, 0 already registered, "
+            "6 duplicated in this run, 0 new") in out
     assert ("DROPPED family fam_b: every sibling already registered "
             "or duplicated in this run") in out
     assert not [e for e in reg.entries()
                 if e["entry_type"] == "strategy_registered"]
 
 
+@_on_two_crypto_cells
 def test_intra_family_duplicate_siblings_still_kill_the_family(tmp_path, capsys):
     """Mirrored sweep axes are a malformed proposal, not a collision.
 
@@ -387,25 +410,27 @@ def test_intra_family_duplicate_siblings_still_kill_the_family(tmp_path, capsys)
                 if e["entry_type"] == "strategy_registered"]
 
 
+@_on_two_crypto_cells
 def test_partial_collision_registers_only_the_new_siblings(tmp_path, capsys):
-    """Not a dry run. good_family's default sweep is 3 x 3 = 9 siblings;
-    pre-register 3 of them and exactly the other 6 must reach the chain, and
-    no buried composition may be re-registered."""
+    """Not a dry run. good_family's default sweep is 3 x 3 = 9 combos, 18
+    specs over the two active cells; pre-register 6 of them (3 combos on
+    both cells) and exactly the other 12 must reach the chain, and no buried
+    composition may be re-registered."""
     fam = good_family(family="ninefam", card_ids=[CARD_ID])
     specs = pre_expand(fam)
-    assert len(specs) == 9
-    buried = specs[:3]
+    assert len(specs) == 9 * 2
+    buried = specs[:6]
     reg = seeded(tmp_path, pre_register=buried)
     rc = composer_run(["--registry", str(reg.log_path), "--run-id", "gen3"],
                       propose_fn=lambda cards: [fam])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "9 expanded, 3 already registered, 6 new" in out
+    assert "18 expanded, 6 already registered, 12 new" in out
     chained = [e["payload"] for e in reg.entries()
                if e["entry_type"] == "strategy_registered"]
-    assert len(chained) == 9                      # 3 pre-existing + 6 new
+    assert len(chained) == 18                     # 6 pre-existing + 12 new
     fps = [composition_fingerprint(s) for s in chained]
-    assert len(set(fps)) == 9                     # no composition twice
+    assert len(set(fps)) == 18                    # no composition twice
     assert set(fps) == {composition_fingerprint(s) for s in specs}
 
 
@@ -422,9 +447,9 @@ IMPERATIVES = ("Treat ", "Do ", "Don't ", "Avoid ", "Prefer ", "Use ",
 
 def evidence_block() -> str:
     """The measured-outcomes paragraph only, excluding the Rules: block."""
-    start = SYSTEM_PROMPT.index(EVIDENCE_HEAD)
-    end = SYSTEM_PROMPT.index(EVIDENCE_TAIL)
-    return SYSTEM_PROMPT[start + len(EVIDENCE_HEAD):end]
+    start = CRYPTO_SYSTEM_PROMPT.index(EVIDENCE_HEAD)
+    end = CRYPTO_SYSTEM_PROMPT.index(EVIDENCE_TAIL)
+    return CRYPTO_SYSTEM_PROMPT[start + len(EVIDENCE_HEAD):end]
 
 
 def test_prompt_frames_evidence_not_instruction():
@@ -440,8 +465,8 @@ def test_prompt_frames_evidence_not_instruction():
     topic where the sample has a single arm. It was replaced with the fact
     that licenses the inference instead: fixed_fraction exists in the grammar,
     is registered on 4 specs, and has never reached the gauntlet."""
-    assert EVIDENCE_TAIL in SYSTEM_PROMPT
-    assert "volatility-normalized" in SYSTEM_PROMPT
+    assert EVIDENCE_TAIL in CRYPTO_SYSTEM_PROMPT
+    assert "volatility-normalized" in CRYPTO_SYSTEM_PROMPT
     body = evidence_block()
     for line in body.splitlines():
         stripped = line.lstrip("- ").strip()
@@ -449,21 +474,21 @@ def test_prompt_frames_evidence_not_instruction():
             assert not stripped.startswith(imp), (
                 f"bare imperative in the evidence block: {line.strip()!r}")
     # the directives the v3 rewrite removed must not creep back
-    assert "Do not simply reproduce" not in SYSTEM_PROMPT
-    assert "Treat sizing as untested" not in SYSTEM_PROMPT
+    assert "Do not simply reproduce" not in CRYPTO_SYSTEM_PROMPT
+    assert "Treat sizing as untested" not in CRYPTO_SYSTEM_PROMPT
 
 
 def test_prompt_drops_the_generation_1_only_framing():
     # the old paragraph told the model what NOT to do; the new one states
     # measured outcomes and lets it conclude
-    assert "Do not simply reproduce that shape." not in SYSTEM_PROMPT
-    assert "What happened in generation 1:" not in SYSTEM_PROMPT
+    assert "Do not simply reproduce that shape." not in CRYPTO_SYSTEM_PROMPT
+    assert "What happened in generation 1:" not in CRYPTO_SYSTEM_PROMPT
 
 
 def test_prompt_still_has_grammar_guidance():
-    assert "trend_scan_ds" in SYSTEM_PROMPT
-    assert "regime_ma_short" in SYSTEM_PROMPT
-    assert "regime_hypothesis" in SYSTEM_PROMPT
+    assert "trend_scan_ds" in CRYPTO_SYSTEM_PROMPT
+    assert "regime_ma_short" in CRYPTO_SYSTEM_PROMPT
+    assert "regime_hypothesis" in CRYPTO_SYSTEM_PROMPT
 
 
 def test_prompt_figures_match_what_was_measured():
@@ -495,25 +520,25 @@ def test_prompt_figures_match_what_was_measured():
     'as measured, not as opinion' banner, which is exactly the claim that
     makes a wrong figure a defect rather than a wording choice."""
     # gen-1 figures - the inherited sentence that was wrong went unpinned
-    assert "13 of its 22 specs" in SYSTEM_PROMPT
-    assert "all 13 then failed out of sample" in SYSTEM_PROMPT
+    assert "13 of its 22 specs" in CRYPTO_SYSTEM_PROMPT
+    assert "all 13 then failed out of sample" in CRYPTO_SYSTEM_PROMPT
     # gen-2 headline verdict, which an earlier draft omitted entirely while
     # keeping a flattering sub-metric
-    assert "It still passed nothing." in SYSTEM_PROMPT
-    assert "18 of its 34 specs" in SYSTEM_PROMPT
-    assert "all 18 then failed the gauntlet" in SYSTEM_PROMPT
+    assert "It still passed nothing." in CRYPTO_SYSTEM_PROMPT
+    assert "18 of its 34 specs" in CRYPTO_SYSTEM_PROMPT
+    assert "all 18 then failed the gauntlet" in CRYPTO_SYSTEM_PROMPT
     # measured detail
-    assert "Of the 18 that reached the gauntlet, 12 showed POSITIVE" in SYSTEM_PROMPT
-    assert "from +1.8% to +54.3%" in SYSTEM_PROMPT
-    assert "The other 6" in SYSTEM_PROMPT and "-69.8%" in SYSTEM_PROMPT
-    assert "lost 46% to 66% over the training window" in SYSTEM_PROMPT
-    assert "only 10-19 trades in six and a half years" in SYSTEM_PROMPT
-    assert "Four of its eight specs were also" in SYSTEM_PROMPT
+    assert "Of the 18 that reached the gauntlet, 12 showed POSITIVE" in CRYPTO_SYSTEM_PROMPT
+    assert "from +1.8% to +54.3%" in CRYPTO_SYSTEM_PROMPT
+    assert "The other 6" in CRYPTO_SYSTEM_PROMPT and "-69.8%" in CRYPTO_SYSTEM_PROMPT
+    assert "lost 46% to 66% over the training window" in CRYPTO_SYSTEM_PROMPT
+    assert "only 10-19 trades in six and a half years" in CRYPTO_SYSTEM_PROMPT
+    assert "Four of its eight specs were also" in CRYPTO_SYSTEM_PROMPT
     # the sizing bullet must keep its no-contrast-group caveat, or it reads as
     # a finding when all 18 entrants shared the one sizing rule
-    assert "All 18 used vol_target sizing" in SYSTEM_PROMPT
-    assert "nothing here compares sizing rules" in SYSTEM_PROMPT
-    assert "registered on 4 specs and has never reached the" in SYSTEM_PROMPT
+    assert "All 18 used vol_target sizing" in CRYPTO_SYSTEM_PROMPT
+    assert "nothing here compares sizing rules" in CRYPTO_SYSTEM_PROMPT
+    assert "registered on 4 specs and has never reached the" in CRYPTO_SYSTEM_PROMPT
 
 
 # ---------------- quarantine: the daily forward runner ----------------

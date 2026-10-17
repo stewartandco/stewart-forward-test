@@ -423,15 +423,16 @@ def test_fx_specs_never_carry_proxy_provenance_keys():
     # fx run actually produces.
 
 
-def test_crypto_path_structurally_cannot_carry_proxy_keys():
+def test_crypto_path_structurally_cannot_carry_proxy_keys_with_the_default_proxy_set():
     """crypto composition carries no proxy-routing keys on its provenance.
     composer.run() only builds a proxy set for equity_etf (it stays None for
     every other class), so the per-cell expander is called for crypto with its
     default proxy_card_ids=frozenset() and its provenance dict takes no
     routed_via/proxy_card_ids branch. Asserted directly against the per-cell
-    expander's crypto output under an activated crypto gate."""
+    expander's crypto output, narrowed to one cell (crypto has expanded per
+    cell since Switch 1)."""
     from .testing_crypto import active_crypto
-    fam = dict(_FX_CHECK_FAMILY, family="crypto_check_family", assets=["BTCUSD"],
+    fam = dict(_FX_CHECK_FAMILY, family="crypto_check_family", assets=["BTCUSDT"],
               card_ids=["dddddddddddddddd"])
     with active_crypto(("BTCUSDT",)):
         specs = composer.expand_family_for_class(
@@ -631,7 +632,7 @@ def test_equity_prompt_names_dividends_and_survivorship():
     because a family reasoning about either would be reasoning about data
     this universe does not carry."""
     system = composer.system_prompt_for("equity_etf")
-    assert system is not composer.SYSTEM_PROMPT
+    assert system is not composer.CRYPTO_SYSTEM_PROMPT
     assert system == composer._equity_etf_system_prompt()
 
     assert "dividend" in system.lower()
