@@ -1304,7 +1304,9 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
 - `run_quarantine.bat` ends with `python -m pipeline.quarantine --catch-up`:
   every OWED date (a deferred class, a missed day, a `deferred_lock` skip) is
   recorded through the unchanged `--date` path, oldest first, at most
-  `MAX_CATCHUP_DATES` (10) per run. A date counts as owed only when EVERY asset
+  `MAX_CATCHUP_DATES` (10) per run; a deferred-only date (every owing strategy
+  deferred for a restated asset or a failed simulation, 2026-10-17) is not
+  counted against it. A date counts as owed only when EVERY asset
   of the strategy has a bar on it -- the `--date` path's own readiness rule --
   so a calendar-gap date is never retried forever.
 - A failed date never strands later ones (exceptions included) but makes the

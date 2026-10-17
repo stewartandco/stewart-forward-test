@@ -403,7 +403,7 @@ def _sim_calls(monkeypatch, fail_on, exc_factory):
     return calls
 
 
-def test_a_simulation_valueerror_defers_that_strategy_and_the_others_record(
+def test_a_simulation_data_error_defers_that_strategy_and_the_others_record(
         tmp_path, monkeypatch, capsys):
     """2026-10-16 (Coen, follow-up to design s3.6): the second strategy's
     data-shaped raise defers ONLY that strategy. The first one's row IS
@@ -921,6 +921,10 @@ def test_the_real_data_shaped_raises_are_simulation_data_errors(monkeypatch):
     with pytest.raises(SimulationDataError, match="no BTCUSD@1h bar"):
         quarantine_mod.observe_day(sh, {"BTCUSD@1h": upto}, daily[152]["date"],
                                    daily[150]["date"])
+    nan_bars = upto[:-1] + [dict(upto[-1], close=float("nan"))]
+    with pytest.raises(SimulationDataError, match="non-finite close"):
+        quarantine_mod.observe_day(sh, {"BTCUSD@1h": nan_bars}, day,
+                                   daily[150]["date"])
     ibook = {"equity": [0.0] * len(upto), "position": None, "trades": []}
     monkeypatch.setattr(quarantine_mod, "simulate_asset",
                         lambda *a, **k: ibook)
@@ -966,9 +970,12 @@ def test_a_date_where_every_ready_strategy_failed_simulation_is_deferred_only(
 
 def test_a_mixed_restated_and_failed_date_is_deferred_only(
         tmp_path, monkeypatch, capsys):
-    """A's asset is restated (deferred for provenance, never simulated), B's
-    simulation fails: every ready strategy is deferred, nothing is appended,
-    rc 0, deferred_only."""
+    """REGRESSION PIN, not a driver of the A3 change: A's asset is restated
+    (deferred for provenance, never simulated), B's simulation fails. The
+    date returns through the PRE-EXISTING `plan.conflicted` branch (which
+    already set deferred_only), so this passes with or without the new
+    post-plan rule; it pins that a mix of the two deferral reasons stays
+    deferred_only, nothing appended, rc 0."""
     reg, a, b, data = _flat_pair(tmp_path)
     reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
     restate(data, "BTCUSD", "2023-01-21",
@@ -988,11 +995,14 @@ def test_a_mixed_restated_and_failed_date_is_deferred_only(
         "restated", "simulation_failed"]
 
 
-def test_a_left_quarantine_strategy_does_not_count_against_deferred_only(
+def test_a_left_quarantine_strategy_does_not_block_deferred_only(
         tmp_path, monkeypatch, capsys):
     """B fails simulation, A leaves quarantine mid-run. A no longer owes the
-    date, so it is excluded from the count: the date is deferred_only and
-    nothing is written."""
+    date, so it must not BLOCK deferred_only: the date is deferred_only and
+    nothing is written. This kills a rule that requires every ready strategy
+    (left ones included) to be deferred (the `and not left` mutant). It does
+    NOT kill a rule that counts a left strategy as owing; that direction is
+    pinned by the left-only test below."""
     reg, a, b, data = _flat_pair(tmp_path)
     _sim_calls(monkeypatch,
                lambda spec, n: spec["strategy_id"] == b["strategy_id"],
@@ -1015,7 +1025,10 @@ def test_a_left_quarantine_strategy_does_not_count_against_deferred_only(
 def test_a_date_where_only_a_left_quarantine_strategy_remains_is_not_deferred_only(
         tmp_path, monkeypatch, capsys):
     """Nobody was deferred: the only owing strategy left quarantine. That is
-    not a deferral (nothing owes the date any more), so it keeps its slot."""
+    not a deferral (nothing owes the date any more), so it keeps its slot.
+    This kills a rule that counts a left-quarantine strategy as owing or
+    deferred (`counted = list(ready)`): with no sim failure and no restated
+    asset such a rule would wrongly set deferred_only."""
     reg, spec, data = quarantined(tmp_path)
     race_before_lock(monkeypatch, lambda: reg.record_state_change(
         spec["strategy_id"], "graveyard", "test"))
@@ -1074,3 +1087,31 @@ def test_a_permanently_failing_strategy_does_not_starve_catch_up(
         view.entry_dates(), view.specs(), data)
     assert set(older) <= set(owed) and "2023-02-11" in owed
     assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_nan_close_defers_that_strategy_and_the_other_records(
+        tmp_path, monkeypatch, capsys):
+    """A literal "nan" in ONE strategy's price file is bad data: it defers
+    THAT strategy (a SimulationDataError from the finite-close guard), not
+    the date. Without the guard the NaN reaches validated_quarantine_decision
+    as a plain ValueError and halts the whole date. B (ETHUSD) records
+    nothing and gets a `simulation_failed` item; A (BTCUSD) records."""
+    reg, a, b, data = _flat_pair(tmp_path)
+    restate(data, "ETHUSD", "2023-01-10",
+            "2023-01-10,100.0,100.0,100.0,nan,1.0")
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    out = capsys.readouterr()
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
+    assert (f"{b['strategy_id']}  deferred: simulation failed: ETHUSD: "
+            f"non-finite close") in out.out
+    assert "PARTIAL WRITE" not in out.err
+    items = ledger(reg)["items"]
+    assert [(i["source"], i["key"]) for i in items] == [
+        ("simulation_failed", b["strategy_id"])]
+    assert "non-finite close" in items[0]["reason"]
+    assert run_verifier(reg.log_path).returncode == 0
+    # the guard is the raise site itself (no monkeypatch)
+    with pytest.raises(SimulationDataError, match="non-finite close"):
+        quarantine_mod._require_finite_closes(
+            [{"date": "2023-01-01", "close": float("inf")}], "X", "2023-01-02")

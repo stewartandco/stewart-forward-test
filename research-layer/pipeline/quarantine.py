@@ -81,6 +81,7 @@ Graduation is NOT automatic. `--review` reports and writes nothing.
 from __future__ import annotations
 
 import sys
+import math
 import json
 import time
 import hashlib
@@ -111,6 +112,20 @@ class SimulationDataError(ValueError):
     row: a missing bar, no zero point, a non-positive equity baseline. A
     plain ValueError from the engine, a malformed payload or any other
     exception is a code bug and fails the date loudly."""
+
+
+def _require_finite_closes(bars: list[dict], label: str, date: str) -> None:
+    """A non-finite close (a literal "nan"/"inf" in a price file) is bad
+    DATA: it defers this strategy. Left alone it would poison the equity
+    curve and surface at validated_quarantine_decision as a plain ValueError,
+    which fails (and halts) the whole date."""
+    for b in bars:
+        if not math.isfinite(b["close"]):
+            raise SimulationDataError(
+                f"{label}: non-finite close {b['close']!r} on {b['date']}, "
+                f"so the book for {date} cannot be simulated")
+
+
 # a row chained more than this many days after its own bar is a backfill, not
 # a forward observation, and is reported as such
 BACKFILL_LAG_DAYS = 2
@@ -124,8 +139,11 @@ MAX_LISTED_GAPS = 12
 # date (the 2026-10-16 replay measured one 490-row date at 2,308 s), so 10
 # dates bound the chain.lock exposure of a catch-up, not its duration.
 # Steady state owes one or two dates a day (equity lags a day, FRED fx
-# arrives weekly). A date refused every run keeps its slot (oldest first) --
-# that needs a human, and the run exits 1 each time.
+# arrives weekly). A deferred-only date -- every owing strategy deferred for a
+# restated asset or a failed simulation (2026-10-17) -- uses NO slot and is
+# re-attempted (re-simulated) on every run, so that re-simulation is not
+# bounded by this 10; a stalled one still makes the run exit 1 each time and
+# needs a human (the `simulation_failed` / `restated` ledger item forces it).
 MAX_CATCHUP_DATES = 10
 
 CONE_CAVEAT = (
@@ -470,6 +488,7 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
     session, tf = universe.get("session"), universe["timeframe"]
     if not bars or bars[-1]["date"][:10] != date:
         raise SimulationDataError(f"no {key} bar for {date}")
+    _require_finite_closes(bars, key, date)
     book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
                           _bars.bars_per_year(session, tf),
                           version=spec.get("version", 1),
@@ -503,6 +522,7 @@ def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
             continue
         if not bars or bars[-1]["date"] != date:
             raise SimulationDataError(f"no {asset} bar for {date}")
+        _require_finite_closes(bars, asset, date)
         # Spec s10.11 (T3 review): mirror run_spec's periods_per_year
         # derivation here too. Without it, an fx spec reaching quarantine
         # would forward-run on /365 financing and sqrt(365) vol sizing --
