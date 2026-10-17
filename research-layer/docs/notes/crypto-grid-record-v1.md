@@ -10,7 +10,7 @@ Phase 2 cells (inactive until their own Coen-gated commit): timeframes 1h, 4h, 1
 
 Phase 3 cells (inactive until their own Coen-gated commit): timeframes 15m, 30m on the same assets
 
-The assets are listed in manifest order, and the same 76 are used in every phase. Phase 1 is active from the registry entry of this note. Phase 2 and phase 3 are not active at this entry: each is activated only by its own commit, which Coen decides. The grid is 76 assets by 6 timeframes, 456 cells in all, and 76 of them are active now.
+The assets are listed in manifest order, and the same 76 are used in every phase. Phase 1 is active from the registry entry of this note. Phase 2 and phase 3 are not active at this entry: each is activated only by its own commit, which Coen decides. The grid is 76 assets by 6 timeframes, 456 cells in all, and 76 of them are active now. A phase 2 or phase 3 cell whose own first bar falls after 2022-12-31 is excluded when its phase is activated and is named in that phase's note; an exclusion never adds a cell.
 
 THE EXCLUDED ASSETS. Each is the ticker followed by USDT. The first bar is the date of its first daily bar, first_1d_utc in data/crypto_universe_manifest.json. Ten have a first bar in 2024 and fourteen have one between 2023-03-17 and 2023-12-15. All 24 fall after 2022-12-31.
 

@@ -382,5 +382,11 @@ def test_the_grid_record_matches_the_gate():
     # the statements the note must make
     for needle in ("2023-12-31", "365 days", "fixed by this note", "RETIRED",
                    "BTCUSD", "ETHUSD", "counted trial", "arithmetic", "never evidence of edge",
-                   "the same 76 are used in every phase", "crypto_universe_manifest.json"):
+                   "the same 76 are used in every phase", "crypto_universe_manifest.json",
+                   # per-cell exclusions in later phases (spec D-d1, s8.3: an
+                   # intraday file can start later than its asset's 1d file)
+                   "A phase 2 or phase 3 cell whose own first bar falls after "
+                   "2022-12-31 is excluded when its phase is activated and is "
+                   "named in that phase's note",
+                   "an exclusion never adds a cell"):
         assert needle in text, needle
