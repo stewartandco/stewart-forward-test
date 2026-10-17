@@ -159,6 +159,33 @@ def test_chain_note_refuses_a_second_note_with_the_prefix(tmp_path):
     assert _n_lines(reg) == before
 
 
+def test_chain_note_duplicate_prefix_is_refused_before_any_lock_is_taken(tmp_path, monkeypatch):
+    # The cheap pre-check is a guard in its own right: a duplicate must be
+    # refused without ever reaching ChainLock.acquire (the under-lock re-scan
+    # is the race guard, not a substitute for this one).
+    reg = _chain_with_entry(tmp_path)
+    reg.append("note", {"text": PREFIX + " first one\n"})
+    note = _note_file(tmp_path)
+
+    def no_acquire(self):
+        raise AssertionError("the lock was taken for a duplicate prefix")
+
+    monkeypatch.setattr(ChainLock, "acquire", no_acquire)
+    before = _n_lines(reg)
+    assert gs.chain_note(reg.log_path, note, PREFIX, dry_run=False) == 2
+    assert _n_lines(reg) == before
+    assert not (tmp_path / "logs").exists()
+
+
+def test_chain_note_dry_run_runs_the_duplicate_prefix_guard(tmp_path):
+    reg = _chain_with_entry(tmp_path)
+    reg.append("note", {"text": PREFIX + " first one\n"})
+    note = _note_file(tmp_path)
+    before = reg.log_path.read_bytes()
+    assert gs.chain_note(reg.log_path, note, PREFIX, dry_run=True) == 2
+    assert reg.log_path.read_bytes() == before
+
+
 def test_chain_note_refuses_a_held_chain_lock(tmp_path):
     reg = _chain_with_entry(tmp_path)
     note = _note_file(tmp_path)

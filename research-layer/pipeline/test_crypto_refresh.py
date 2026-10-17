@@ -169,6 +169,15 @@ def test_no_attempt_starts_after_the_deadline(tmp_path):
     assert out["items"][0]["source"] == cr.FETCH_SOURCE
 
 
+def test_no_retry_starts_exactly_at_the_deadline(tmp_path):
+    # "never start at or after the deadline": the boundary instant is past it.
+    deadline = NOW_MS + 13 * MIN
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom"), None]})
+    out = _run(tmp_path, fake, [A, B], deadline_ms=deadline, clock=lambda: deadline)
+    assert fake.symbols() == [A, B]                 # B was NOT retried
+    assert [i["key"] for i in out["items"]] == ["XUSDT"]
+
+
 def test_a_retry_starts_while_before_the_deadline(tmp_path):
     now = {"ms": NOW_MS}
     fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom"), None]},
