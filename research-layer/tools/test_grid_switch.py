@@ -233,3 +233,37 @@ def test_chain_note_exits_1_loudly_when_verify_is_invalid(tmp_path, capsys):
     cap = capsys.readouterr()
     assert rc == 1
     assert "CHAINED" in cap.out + cap.err
+
+
+def test_chain_note_rescans_under_the_lock(tmp_path, monkeypatch):
+    reg = _chain_with_entry(tmp_path)
+    note = _note_file(tmp_path)
+    real_acquire = ChainLock.acquire
+
+    def racing_acquire(self):
+        # a same-prefix note lands between the pre-check and the acquire
+        Registry(reg.log_path).append("note", {"text": PREFIX + " raced in\n"})
+        real_acquire(self)
+
+    monkeypatch.setattr(ChainLock, "acquire", racing_acquire)
+    before = _n_lines(reg)
+    assert gs.chain_note(reg.log_path, note, PREFIX, dry_run=False) == 2
+    assert _n_lines(reg) == before + 1                 # only the raced note
+    assert [t for t in _notes(reg) if t.startswith(PREFIX)] == [
+        PREFIX + " raced in\n"]
+    assert not (tmp_path / "logs" / "chain.lock").exists()   # released
+
+
+def test_chain_note_appends_while_holding_the_lock(tmp_path, monkeypatch):
+    reg = _chain_with_entry(tmp_path)
+    note = _note_file(tmp_path)
+    seen = []
+    real_append = Registry.append
+
+    def spy(self, *a, **kw):
+        seen.append((tmp_path / "logs" / "chain.lock").exists())
+        return real_append(self, *a, **kw)
+
+    monkeypatch.setattr(Registry, "append", spy)
+    assert gs.chain_note(reg.log_path, note, PREFIX, dry_run=False) == 0
+    assert seen == [True]

@@ -121,6 +121,20 @@ def _verify(registry_path: Path) -> tuple[int, str]:
     return (0 if ok else 1), verdict
 
 
+def _prefix_on_chain(registry_path: Path, prefix: str) -> dict | None:
+    """First chained note whose text starts with prefix (fresh read), or None."""
+    for entry in Registry(registry_path).entries():
+        if entry["entry_type"] == "note" and str(
+                (entry.get("payload") or {}).get("text", "")).startswith(prefix):
+            return entry
+    return None
+
+
+def _dup_msg(prefix: str, entry: dict) -> str:
+    return (f"a note starting with {prefix!r} is already chained "
+            f"(prev_entry_hash {str(entry.get('prev_entry_hash'))[:12]}...)")
+
+
 def chain_note(registry_path: Path, note_path: Path, prefix: str, *,
                dry_run: bool) -> int:
     registry_path, note_path = Path(registry_path), Path(note_path)
@@ -141,12 +155,9 @@ def chain_note(registry_path: Path, note_path: Path, prefix: str, *,
         return _refuse(f"the first line of {note_path} does not start with "
                        f"{prefix!r}")
     reg = Registry(registry_path)
-    for entry in reg.entries():
-        if entry["entry_type"] == "note" and str(
-                (entry.get("payload") or {}).get("text", "")).startswith(prefix):
-            return _refuse(f"a note starting with {prefix!r} is already "
-                           f"chained (prev_entry_hash "
-                           f"{str(entry.get('prev_entry_hash'))[:12]}...)")
+    hit = _prefix_on_chain(registry_path, prefix)
+    if hit is not None:
+        return _refuse(_dup_msg(prefix, hit))
     lock = ChainLock(registry_path.parent / "logs", "grid_switch", "chain note")
     if lock.path.exists():
         alive = lock.holder_alive()
@@ -165,6 +176,12 @@ def chain_note(registry_path: Path, note_path: Path, prefix: str, *,
     except ChainLockHeld as exc:
         return _refuse(str(exc))
     try:
+        # Re-scan UNDER the lock: anything appended between the cheap pre-check
+        # above and the acquire (a second run, a hand append) must be seen, or
+        # a duplicate prefixed note would be chained for good.
+        hit = _prefix_on_chain(registry_path, prefix)
+        if hit is not None:
+            return _refuse(_dup_msg(prefix, hit))
         entry = reg.append("note", {"text": text})
     finally:
         lock.release()
