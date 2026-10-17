@@ -70,22 +70,59 @@ def select(specs: dict, n: int, seed: int) -> list[str]:
     return sorted(out)
 
 
-def legacy_pooled_crypto(spec: dict) -> bool:
-    """A pre-Switch-1 pooled crypto spec (the 2-asset BTCUSD+ETHUSD book):
-    judged while crypto's benchmark was None, so no control; since Switch 1
-    computing one raises ("needs exactly one asset per cell")."""
-    uni = spec["universe"]
-    return uni.get("asset_class", "crypto") == "crypto" and len(uni["assets"]) != 1
+def _twin_block(spec: dict) -> bool:
+    """A block whose code the engine-perf change touched: trend_scan*,
+    tstat_decay, vol_percentile*."""
+    return any(str(b.get("type", "")).startswith(("trend_scan", "vol_percentile"))
+               or b.get("type") == "tstat_decay"
+               for b in spec.get("blocks", []))
+
+
+def twin_candidates(specs: dict) -> dict:
+    """The registered crypto 1d specs that carry a changed-code block: the
+    pool the --twins-1h originals are drawn from."""
+    return {s: p for s, p in specs.items()
+            if p["universe"].get("asset_class", "crypto") == "crypto"
+            and p["universe"].get("timeframe", "1d") == "1d" and _twin_block(p)}
+
+
+def hourly_assets(data_dir: Path) -> list[str]:
+    """Assets with a `<ASSET>_1h.csv` price file in the data dir, USDT cells."""
+    return sorted(f.name[:-len("_1h.csv")] for f in Path(data_dir).glob("*USDT_1h.csv"))
+
+
+def select_twins(specs: dict, n: int, seed: int, assets: list[str]) -> tuple[dict, dict]:
+    """(twin specs by sid, {sid: {original, asset, tf}}) for up to n 1h twins:
+    originals by the seeded `select` over `twin_candidates`, each given one
+    asset drawn (seeded) from `assets`. Uses only make_twin, which exists in
+    the pre-change tools, so old and new code build the same twins."""
+    if n <= 0 or not assets:
+        return {}, {}
+    from tools.intraday_rehearsal import make_twin             # lazy: only --twins-1h needs it
+    cand = twin_candidates(specs)
+    rng = random.Random(seed + 1)
+    twin_specs, info = {}, {}
+    for orig in select(cand, n, seed):
+        asset = rng.choice(assets)
+        two = make_twin(specs[orig], asset, "1h")
+        twin_specs[two["strategy_id"]] = two
+        info[two["strategy_id"]] = {"original": orig, "asset": asset, "tf": "1h"}
+    return twin_specs, info
 
 
 def _standalone_kwargs(spec: dict) -> dict:
-    """record_benchmark=False for a legacy pooled crypto spec, passed ONLY
-    when this code's evaluate_standalone has the keyword: the tool also runs
-    against pre-Switch-1 code for an A/B (see the module docstring), where
-    the keyword does not exist and crypto's benchmark is None anyway, so the
-    two sides produce the same metrics for these specs."""
-    if (legacy_pooled_crypto(spec) and "record_benchmark"
-            in inspect.signature(evaluate_standalone).parameters):
+    """record_benchmark=False for EVERY crypto spec (pooled or per-cell, any
+    timeframe), passed ONLY when this code's evaluate_standalone has the
+    keyword: the tool also runs against pre-Switch-1 code for an A/B (see the
+    module docstring), where the keyword does not exist and crypto's benchmark
+    is None, so a crypto spec carries no `benchmark_relative` there. Skipping
+    the control on the new side makes the two sides produce the same metrics.
+    A pooled crypto spec must skip it anyway (computing one raises). A 1h twin
+    is a single-asset crypto spec: without this its `standalone` hash differs
+    from the base's by the one extra key, an artefact of Switch 1, not of the
+    engine."""
+    if (spec["universe"].get("asset_class", "crypto") == "crypto"
+            and "record_benchmark" in inspect.signature(evaluate_standalone).parameters):
         return {"record_benchmark": False}
     return {}
 
@@ -125,6 +162,10 @@ def main(argv=None) -> int:
     d.add_argument("--sample", type=int, default=200)
     d.add_argument("--seed", type=int, default=20261010)
     d.add_argument("--cutoff", default=DEFAULT_CUTOFF)
+    d.add_argument("--twins-1h", type=int, default=0, metavar="N",
+                   help="also fingerprint N 1h twins of crypto 1d originals that carry a "
+                        "trend_scan/tstat_decay/vol_percentile block (assets from the "
+                        "*USDT_1h.csv files in --data-dir); fewer than N is an error")
     c = sub.add_parser("compare")
     c.add_argument("a", type=Path)
     c.add_argument("b", type=Path)
@@ -151,6 +192,8 @@ def main(argv=None) -> int:
                 bad.append(f"cutoff differs: {x['meta'].get('cutoff')} != {y['meta'].get('cutoff')}")
             if x["meta"].get("sample_n") != y["meta"].get("sample_n"):
                 bad.append(f"sample_n differs: {x['meta'].get('sample_n')} != {y['meta'].get('sample_n')}")
+            if x["meta"].get("twins_1h", 0) != y["meta"].get("twins_1h", 0):
+                bad.append(f"twins_1h differs: {x['meta'].get('twins_1h', 0)} != {y['meta'].get('twins_1h', 0)}")
             if x["meta"].get("registry_sha256") != y["meta"].get("registry_sha256"):
                 bad.append(f"registry_sha256 differs: {x['meta'].get('registry_sha256')} != {y['meta'].get('registry_sha256')}")
         # Check for empty results or any errors
@@ -164,6 +207,15 @@ def main(argv=None) -> int:
                 print(f"B error {sid}: {err}")
         if x["sample"] != y["sample"]:
             bad.append("sample differs")
+        if x.get("twins", {}) != y.get("twins", {}):
+            bad.append("twins differ")
+        for side, d in (("A", x), ("B", y)):
+            want = d.get("meta", {}).get("twins_1h", 0)
+            if len(d.get("twins", {})) != want:
+                bad.append(f"{side}: twins_1h {want} requested, {len(d.get('twins', {}))} recorded")
+            for tsid in sorted(d.get("twins", {})):
+                if tsid not in d.get("results", {}) and tsid not in d.get("errors", {}):
+                    bad.append(f"{side}: twin {tsid} has neither a result nor an error")
         for sid in sorted(set(x["results"]) | set(y["results"])):
             if x["results"].get(sid) != y["results"].get(sid):
                 bad.append(f"{sid}: {x['results'].get(sid)} != {y['results'].get(sid)}")
@@ -174,15 +226,26 @@ def main(argv=None) -> int:
     specs = {e["payload"]["strategy_id"]: e["payload"]
              for e in Registry(a.registry).entries()
              if e["entry_type"] == "strategy_registered"}
+    if a.twins_1h < 0:
+        print("--twins-1h must be >= 0", file=sys.stderr)
+        return 2
     sample = select(specs, a.sample, a.seed)
+    twin_specs, twins = select_twins(specs, a.twins_1h, a.seed, hourly_assets(a.data_dir))
+    if len(twins) < a.twins_1h:                 # never a vacuous or short proof
+        print(f"--twins-1h {a.twins_1h}: built only {len(twins)} twin(s) "
+              f"({len(twin_candidates(specs))} eligible originals, "
+              f"{len(hourly_assets(a.data_dir))} *USDT_1h.csv files in {a.data_dir}); "
+              f"nothing written", file=sys.stderr)
+        return 2
     results, errors = {}, {}
-    for i, sid in enumerate(sample, 1):
+    todo = [(sid, specs[sid]) for sid in sample] + [(sid, twin_specs[sid]) for sid in sorted(twins)]
+    for i, (sid, spec) in enumerate(todo, 1):
         try:
-            results[sid] = fingerprint(specs[sid], a.data_dir, a.cutoff)
+            results[sid] = fingerprint(spec, a.data_dir, a.cutoff)
         except Exception as exc:             # identical errors on both sides are parity too
             errors[sid] = f"{type(exc).__name__}: {exc}"
         if i % 20 == 0:
-            print(f"{i}/{len(sample)}", flush=True)
+            print(f"{i}/{len(todo)}", flush=True)
     # Compute registry SHA256
     registry_sha256 = _h(a.registry.read_bytes())
     meta = {
@@ -192,10 +255,12 @@ def main(argv=None) -> int:
         "seed": a.seed,
         "cutoff": a.cutoff,
         "sample_n": a.sample,
+        "twins_1h": a.twins_1h,
         "registry_sha256": registry_sha256,
         "registry_entries": len(specs),
     }
-    a.out.write_text(json.dumps({"meta": meta, "sample": sample, "results": results, "errors": errors},
+    a.out.write_text(json.dumps({"meta": meta, "sample": sample, "twins": twins,
+                                 "results": results, "errors": errors},
                                 indent=1, sort_keys=True), encoding="utf-8")
     print(f"wrote {a.out}: {len(results)} fingerprints, {len(errors)} errors")
     return 0
