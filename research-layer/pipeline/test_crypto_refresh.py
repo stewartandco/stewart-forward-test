@@ -138,6 +138,23 @@ def test_one_failed_cell_does_not_stop_the_others(tmp_path, monkeypatch):
     assert set(_manifest(tmp_path / "data")) == {f"{A}_1d", f"{C}_1d"}
 
 
+def test_a_malformed_cell_is_a_refresh_failure_not_a_stop(tmp_path, monkeypatch):
+    # fetch_symbol refuses to write a malformed CSV (MalformedData, a
+    # ValueError): an ordinary cell failure, not a ban -- the run continues.
+    _gate(monkeypatch, [A, B, C])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data",
+                {B: [cd.MalformedData("XUSDT_1d.csv: row 7: close '0.0' is not positive")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert A in fake.symbols() and C in fake.symbols()
+    items = [i for i in _ledger(tmp_path / "logs")["items"]
+             if i["source"] == cr.FETCH_SOURCE]
+    assert [i["key"] for i in items] == ["XUSDT"]
+    assert "XUSDT" in items[0]["reason"] and "1d" in items[0]["reason"]
+    assert "row 7" in items[0]["reason"]
+    assert set(_manifest(tmp_path / "data")) == {f"{A}_1d", f"{C}_1d"}
+
+
 def test_a_failed_cell_is_retried_and_recovers(tmp_path):
     fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom"), None]})
     out = _run(tmp_path, fake, [A, B, C])

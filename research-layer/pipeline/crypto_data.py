@@ -33,7 +33,9 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -56,6 +58,17 @@ UNIVERSE_TOOL = "tools_select_crypto_universe.py"
 # later; a partial bar admitted once would poison every downstream read of
 # full history forever.
 SKEW_MARGIN_MS = 60_000
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+class MalformedData(ValueError):
+    """The merged series (existing rows + new bars) breaks the CSV contract the
+    downstream readers enforce (the build 4a signal service refuses its WHOLE
+    run on such a file). `fetch_symbol` raises it BEFORE the replace, so the
+    existing CSV stays byte-identical. A ValueError, not a ban or a limit:
+    `crypto_refresh` records it as an ordinary cell failure."""
 
 
 class RateLimited(Exception):
@@ -150,7 +163,10 @@ def _read_existing(path: Path) -> dict[str, tuple]:
     try:
         with path.open("r", encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
-                rows[row["date"]] = tuple(row[k] for k in FIELDS)
+                # Fields past the sixth (a long row) are kept after the six so
+                # `validate_rows` can refuse them instead of this read healing them.
+                rows[row["date"]] = (tuple(row[k] for k in FIELDS)
+                                     + tuple(row.get(None) or ()))
         if rows:
             _date_to_ms(next(reversed(rows)))   # resume anchor must parse
     except (KeyError, TypeError, ValueError, csv.Error, UnicodeDecodeError) as e:
@@ -158,6 +174,65 @@ def _read_existing(path: Path) -> dict[str, tuple]:
             f"{path} is not a readable fetch CSV ({e!r}) - "
             "delete it to refetch from scratch") from e
     return rows
+
+
+def validate_rows(rows: list[dict], tf: str, name: str) -> None:
+    """Refuse a series the signal service would refuse (it raises `DataRefused`
+    for the same defects in `parse_daily_csv`; this module must not import it).
+
+    `rows` are in FILE ORDER, one dict per data row; `name` is the file name.
+    Per row: exactly the six FIELDS (no missing value, no extra key), a date
+    that matches `DATE_FMT` and parses, open/high/low/close finite and > 0,
+    volume finite and >= 0 (a zero-volume bar is real). Across rows: dates
+    strictly increasing; for "1d" no two rows on one UTC day (time part
+    ignored). Raises `MalformedData` naming `name` and the 1-based DATA row
+    (the header is not counted).
+    """
+    prev: str | None = None
+    first_on_day: dict[str, int] = {}
+    for n, row in enumerate(rows, start=1):
+        try:
+            if set(row) != set(FIELDS):
+                extra = sorted(str(k) for k in set(row) - set(FIELDS))
+                lacking = [k for k in FIELDS if k not in row]
+                raise ValueError(f"long row (extra field(s) {extra})" if extra
+                                 else f"short row (lacks {lacking})")
+            if any(row[k] is None for k in FIELDS):
+                raise ValueError("short row (a missing value)")
+            date = row["date"]
+            if not isinstance(date, str) or not _DATE_RE.match(date):
+                raise ValueError(f"date {date!r} is not YYYY-MM-DD HH:MM:SS")
+            datetime.strptime(date, DATE_FMT)
+            for c in FIELDS[1:]:
+                v = float(row[c])
+                if not math.isfinite(v):
+                    raise ValueError(f"{c} {row[c]!r} is not finite")
+                if c != "volume" and v <= 0:
+                    raise ValueError(f"{c} {row[c]!r} is not positive")
+                if c == "volume" and v < 0:
+                    raise ValueError(f"volume {row[c]!r} is negative")
+            if prev is not None and date <= prev:
+                raise ValueError(f"date {date} is not after the row before it ({prev}): "
+                                 "dates must be strictly increasing")
+            if tf == "1d":
+                day = date[:10]
+                if day in first_on_day:
+                    raise ValueError(f"duplicate day {day} (first on row {first_on_day[day]})")
+                first_on_day[day] = n
+        except (ValueError, TypeError) as exc:
+            if isinstance(exc, MalformedData):
+                raise
+            raise MalformedData(f"{name}: row {n}: {exc}") from None
+        prev = date
+
+
+def _as_row(r: tuple) -> dict:
+    """A merged tuple as `validate_rows` wants it; fields past the sixth (kept
+    by `_read_existing`) ride along under '+N' keys so they get refused."""
+    row = dict(zip(FIELDS, r))
+    for i, extra in enumerate(r[len(FIELDS):], start=1):
+        row[f"+{i}"] = extra
+    return row
 
 
 def last_complete_utc_day_end_ms(now_ms: int) -> int:
@@ -184,6 +259,11 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
     where this bug was first fixed). Pagination advances from the RAW batch,
     not the filtered one, or a final batch consisting only of the open kline
     would be re-requested forever.
+
+    The FULL post-merge row list is validated (`validate_rows`) right before
+    the `.tmp` is written; a defect raises `MalformedData` and leaves the
+    existing CSV byte-identical. `_read_existing` keeps its own refusal
+    (RuntimeError, "delete it to refetch") for files it cannot parse at all.
 
     The write is atomic (`.tmp` + os.replace): a failure mid-write leaves the
     original file untouched and no `.tmp` masquerading as data. On Windows
@@ -240,7 +320,12 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
             break
         time.sleep(0.2)                  # ban-safety pacing between pages
 
-    rows = [merged[d] for d in sorted(merged)]
+    # File order, NOT sorted: `merged` keeps the existing rows in the order the
+    # file holds them (a re-served boundary bar overwrites in place) and new
+    # bars arrive ascending after them, so an out-of-order existing file is
+    # seen by `validate_rows` rather than silently re-sorted into validity.
+    rows = list(merged.values())
+    validate_rows([_as_row(r) for r in rows], tf, path.name)
 
     data_dir.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(path) + ".tmp")
