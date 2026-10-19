@@ -162,3 +162,12 @@ def test_grace_boundary():
     assert not is_stale("2026-10-18 00:00:00", "1d", just_before)
     assert not is_stale("2026-10-18 00:00:00", "1d", at_edge)
     assert is_stale("2026-10-17 00:00:00", "1d", at_edge)
+    # The grace is what decides: at 00:01:59 the 10-19 bar is inside skew (60 s)
+    # + grace (60 s), so the 10-17 bar is not yet behind; without grace it is.
+    assert not is_stale("2026-10-17 00:00:00", "1d", just_before)
+    assert is_stale("2026-10-17 00:00:00", "1d", just_before, grace_s=0)
+    # 1h analogue: at 01:01:59 the 01:00 close is inside skew + grace (expected
+    # close 00:00, so open 23:00 is fresh); with grace_s=0 expected is 01:00.
+    h_now = _ms(2026, 10, 19, 1, 1) + 59_000
+    assert not is_stale("2026-10-18 23:00:00", "1h", h_now)
+    assert is_stale("2026-10-18 23:00:00", "1h", h_now, grace_s=0)
