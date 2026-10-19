@@ -159,7 +159,8 @@ def _parse_blob(blob: bytes) -> tuple[str, _Entry] | None:
             stored_key = str(z["key"])
             expected = str(z["sha256"])
         f8 = np.dtype("<f8")
-        if inputs.dtype != f8 or values.dtype != f8                 or inputs.ndim != 1 or values.ndim != 1:
+        if inputs.dtype != f8 or values.dtype != f8 \
+                or inputs.ndim != 1 or values.ndim != 1:
             return None
         n = int(inputs.shape[0])
         if n == 0 or none_prefix < 0 or none_prefix + int(values.shape[0]) != n:
@@ -258,7 +259,6 @@ class SeriesCache:
             out.extend(entry.values[: n - p].tolist())
         return out
 
-
     # ---------------------------------------------------------------- prune
 
     def prune(self, *, now: float | None = None,
@@ -278,7 +278,12 @@ class SeriesCache:
         "kept"}. A no-op returning zeros on a read-only cache or an absent
         directory. A per-file error (vanished, sharing violation, unreadable
         right now) is swallowed and that file is left alone; prune never
-        raises."""
+        raises. An entry whose (mtime_ns, size) changed between the read and
+        the unlink was replaced by a writer and is left alone too. A key whose
+        repr is not a Python literal (e.g. nan/inf in params) cannot be read
+        back by `_stored_rev`, so it is treated as corrupt (counted under
+        stale_rev_removed) and pruned on every run; all current params are
+        ints and strings."""
         out = {"tmp_removed": 0, "stale_rev_removed": 0, "corrupt_removed": 0,
                "kept": 0}
         if self.read_only or self.directory is None:
@@ -296,6 +301,7 @@ class SeriesCache:
                         path.unlink()
                         out["tmp_removed"] += 1
                 elif name.endswith(".npz"):
+                    st0 = path.stat()
                     blob = path.read_bytes()
                     parsed = _parse_blob(blob)
                     if parsed is None:
@@ -304,6 +310,12 @@ class SeriesCache:
                         reason = "stale_rev_removed"
                     else:
                         out["kept"] += 1
+                        continue
+                    # a writer may have replaced the file since it was read;
+                    # the verdict is about the old bytes, so a changed file
+                    # is left alone
+                    st1 = path.stat()
+                    if (st1.st_mtime_ns, st1.st_size) != (st0.st_mtime_ns, st0.st_size):
                         continue
                     path.unlink()
                     out[reason] += 1

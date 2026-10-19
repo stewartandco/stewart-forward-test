@@ -47,6 +47,8 @@ SCREEN_PRIOR_S_PER_SPEC = 2.0
 # above (SCREEN_PRIOR_S_PER_SPEC stays its alias); the 1h mean is rounded up to
 # the next 10 s. Judged only until a chunk of that timeframe has run, then the
 # MEASURED rate for that timeframe rules (DeadlineBudget key=tf).
+# 1h = the measured MEAN (20.38 s) rounded up to 30 s, chosen deliberately;
+# unlike the gauntlet's PRIOR_S_BY_TF["1h"], which is the heaviest class.
 SCREEN_PRIOR_S_BY_TF = {"1d": SCREEN_PRIOR_S_PER_SPEC, "1h": 30.0}
 SCREEN_CHUNK_PER_WORKER = 8
 
@@ -79,7 +81,9 @@ def _tf_chunks(jobs: list, size: int) -> list[tuple[str, list]]:
     """(timeframe, chunk) in jobs' order. A chunk never mixes timeframes: a run
     of one timeframe is cut every `size`, and a change of timeframe cuts it
     too. Nothing is reordered, so verdicts chain in the order they always did;
-    an all-1d run gets exactly `_deadline.chunks(jobs, size)`."""
+    an all-1d run gets exactly `_deadline.chunks(jobs, size)`. A registry that
+    alternates timeframes shrinks its chunks toward 1 spec; that costs
+    performance only, the verdict chain is unchanged."""
     size = max(1, int(size))
     out: list[tuple[str, list]] = []
     i = 0

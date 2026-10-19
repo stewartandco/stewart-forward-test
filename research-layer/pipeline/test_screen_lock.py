@@ -436,3 +436,26 @@ def test_with_only_1h_specs_not_even_one_fits_at_the_1h_prior(tmp_path, monkeypa
     r = _result(reg)
     assert r["evaluated"] == 0 and r["deferred"] == 2 and r["stopped_at_deadline"] is True
     assert "not even one spec fits" in capsys.readouterr().out   # the early exit, at 30 s
+
+
+def test_a_mixed_registry_is_not_deferred_by_the_dearest_prior(tmp_path, monkeypatch):
+    """Engine perf Task 9b. The early "not even one spec fits" exit asks about
+    the CHEAPEST spec (min over the registry), because the cheapest one is the
+    only one the run could still start. 1d + 1h specs, deadline 10 s: between
+    the 1d prior (2 s) and the 1h prior (30 s). The 1d spec fits, so the run
+    does NOT exit early and the 1d chunk runs; the 1h chunk is then judged at
+    its own 30 s prior and deferred. An exit on max() (30 s) would defer both
+    and run nothing."""
+    reg, sids, data = _registry_with(tmp_path, 2)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 1)
+    one_d = sids[0]
+    real_spec_tf = screen._spec_tf
+    monkeypatch.setattr(screen, "_spec_tf", lambda spec: real_spec_tf(spec)
+                        if spec["strategy_id"] == one_d else "1h")
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=1.0)
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(10)) == 0
+    assert calls["n"] == 1                                   # the 1d chunk ran
+    states = reg.strategy_states()
+    assert states[one_d] in ("gauntlet", "graveyard") and states[sids[1]] == "proposed"
+    r = _result(reg)
+    assert r["evaluated"] == 1 and r["deferred"] == 1 and r["stopped_at_deadline"] is True

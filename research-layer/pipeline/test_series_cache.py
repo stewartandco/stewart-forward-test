@@ -592,3 +592,72 @@ def test_prune_swallows_a_per_file_error_and_keeps_going(tmp_path, monkeypatch):
 
     monkeypatch.setattr(type(stuck), "stat", stat)
     assert SeriesCache(d).prune(now=now)["tmp_removed"] == 0
+
+
+# ------------------------------------------------- prune: races and errors
+# Review minors (engine perf Task 9b): prune must not delete a file a writer
+# replaced between prune's read and its unlink, and an unreadable entry is left
+# alone. Neither touches a served value.
+
+def _stale_entry(tmp_path, monkeypatch, params):
+    """A readable entry stored under another ENGINE_REV (prune would unlink it)."""
+    d = tmp_path / CACHE_DIRNAME
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), make_inputs(100), params=params)
+    monkeypatch.undo()
+    (path,) = [p for p in d.iterdir() if p.suffix == ".npz"]
+    return d, path
+
+
+@pytest.mark.parametrize("how", ["mtime_only", "size_only"])
+def test_prune_does_not_unlink_an_entry_rewritten_after_it_was_read(
+        tmp_path, monkeypatch, how):
+    """Delete-after-read race: a writer replaces the entry between prune's read
+    and its unlink. prune judged the OLD bytes; the file now there is a new
+    entry nobody judged, so it must survive. Each leg changes only ONE of the
+    two things prune re-checks (mtime_ns, size) and restores the other."""
+    d, path = _stale_entry(tmp_path, monkeypatch, (10,))
+    st0 = path.stat()
+    old_bytes = path.read_bytes()
+    new_bytes = (b"Z" * len(old_bytes) if how == "mtime_only"
+                 else old_bytes + b"appended-by-the-writer")
+    real_read = type(path).read_bytes
+    fired = []
+
+    def read_then_rewrite(self):
+        data = real_read(self)
+        if self.name == path.name and not fired:
+            fired.append(1)
+            self.write_bytes(new_bytes)
+            if how == "mtime_only":     # same size, a strictly later mtime
+                os.utime(self, ns=(st0.st_atime_ns, st0.st_mtime_ns + 5_000_000_000))
+            else:                       # a different size, the old mtime back
+                os.utime(self, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+        return data
+
+    monkeypatch.setattr(type(path), "read_bytes", read_then_rewrite)
+    out = SeriesCache(d).prune()                 # must not raise
+    assert fired == [1]
+    assert out["stale_rev_removed"] == 0 and out["corrupt_removed"] == 0
+    assert path.exists() and path.read_bytes() == new_bytes
+
+
+def test_prune_leaves_an_entry_it_cannot_read_and_goes_on(tmp_path, monkeypatch):
+    d, blocked = _stale_entry(tmp_path, monkeypatch, (10,))
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), make_inputs(100), params=(20,))
+    monkeypatch.undo()
+    (other,) = [p for p in d.iterdir() if p.suffix == ".npz" and p != blocked]
+    real_read = type(blocked).read_bytes
+
+    def read(self):
+        if self.name == blocked.name:
+            raise PermissionError("sharing violation")
+        return real_read(self)
+
+    monkeypatch.setattr(type(blocked), "read_bytes", read)
+    out = SeriesCache(d).prune()                 # must not raise
+    assert blocked.exists()                      # left alone
+    assert not other.exists()                    # the walk went on
+    assert out == {"tmp_removed": 0, "stale_rev_removed": 1,
+                   "corrupt_removed": 0, "kept": 0}
