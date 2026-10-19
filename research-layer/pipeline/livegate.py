@@ -260,7 +260,11 @@ def train_contributions(spec: dict, data_dir, cutoff: str) -> list[float]:
     bars = {a: load_bars(data_dir, a, cutoff, timeframe=tf)
             for a in universe["assets"]}
     res = run_spec(spec, bars)
-    return contributions([t for t in res["trades"] if t["entry_date"] <= cutoff])
+    # Compare UTC DATES (2b-3 C5): an intraday entry_date carries a time
+    # ("2023-12-31 05:00:00"), which a plain string compare puts after the
+    # bare cutoff date, dropping every trade entered on the cutoff day.
+    return contributions([t for t in res["trades"]
+                          if t["entry_date"][:10] <= cutoff[:10]])
 
 
 def write_report(out_dir, report: dict, min_days: int, q: float):
