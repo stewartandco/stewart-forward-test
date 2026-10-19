@@ -1471,6 +1471,21 @@ per window per bar; the percentile is an exact incremental one.
     that alternates timeframes shrinks chunks toward 1 spec: slower, chain
     unchanged. The screen's early "not even one spec fits" exit uses the
     CHEAPEST prior in the registry (min, never max).
+- **Switch 2 gates (2026-10-19 final review).** None is a defect at 1d; all
+  four are costs or edge cases that arrive with 1h scale:
+  - **Prune reads and sha-checks every entry on each recorder run**, and the
+    morning wrapper may run it twice. At 1h scale that is GBs of reads per
+    morning on E:. Before Switch 2, make prune read only the key/rev, or cap
+    the cache size.
+  - **Each key stores its own copy of the closes** (about half the bytes of an
+    entry). Measure the disk at 1h and decide on a cap before activation.
+  - **In-process entries are never evicted**, in the quarantine process or on
+    the serial worker path (`worker_count` == 1, which is exactly the
+    low-commit case). Evict per cell or per payload before 1h load.
+  - **Exit-only trend windows are now computed over all n bars on per-call
+    caches** (screen). The values are identical, but a pathological series
+    (overflow, or a standard-error underflow) could now raise on bars the old
+    path never visited.
 - **Still uncached (follow-up candidate, Coen's call):** vol_target sizing's
   realized vol (about 66 s of the warm 201 s), channel_breakout
   highest/lowest (about 25 s), and the sma/stdev series and `atr_wilder`.

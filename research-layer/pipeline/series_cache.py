@@ -34,9 +34,15 @@ A NaN anywhere in the compared prefix is also a mismatch even when the bytes
 are identical (the design's "NaN is never equal", and "when in doubt,
 recompute"): a NaN-bearing input is never trusted, only recomputed.
 
-KEY: (kind, params, ENGINE_REV, cell). ENGINE_REV is read from this module's
-global at call time, so a bumped revision is a different key, never a stale
-hit (the simcache.py contract). `cell=None` means memory-only for that call.
+KEY: (kind, params, ENGINE_REV, cell). A bumped revision is a different key,
+never a stale hit (the simcache.py contract). `series_cache.ENGINE_REV` is a
+COPY taken from the engine at import (`from .engine import ENGINE_REV`); the
+functions here look the name up in THIS module's globals at call time. In
+production that is exact, because ENGINE_REV only ever changes in code, i.e.
+between processes. A test that wants another revision must patch
+`series_cache.ENGINE_REV` (as test_series_cache does); patching
+`engine.ENGINE_REV` does not reach the cache. `cell=None` means memory-only for
+that call.
 
 MEMORY LAYOUT: a series is `(none_prefix, values)`. Indicators have a warm-up
 of leading None and never a None after the first value; a `compute` result
@@ -96,7 +102,7 @@ from typing import Callable
 
 import numpy as np
 
-from .engine import ENGINE_REV  # noqa: F401  (re-read as a module global at call time)
+from .engine import ENGINE_REV  # noqa: F401  (a copy at import; see the KEY paragraph above)
 
 CACHE_DIRNAME = "seriescache"
 
