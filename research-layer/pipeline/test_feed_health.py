@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .feed_health import (ACK_FILE, HOLE_SOURCE, STALE_SOURCE,
-                          STALE_TOLERANCE_S, find_holes, is_stale,
+                          STALE_GRACE_S, find_holes, is_stale,
                           load_acks, scan)
 
 HEADER = "date,open,high,low,close,volume\n"
@@ -32,7 +32,7 @@ def _hourly(start: datetime, end: datetime, skip_day=None):
 
 def test_stale_constants():
     assert (HOLE_SOURCE, STALE_SOURCE) == ("feed_hole", "feed_stale")
-    assert STALE_TOLERANCE_S == 600
+    assert STALE_GRACE_S == 60
     assert ACK_FILE == "intraday_holes_ack.json"
 
 
@@ -55,12 +55,7 @@ def test_bare_daily_dates_work():
 def test_fresh_at_the_refresh_and_fetch_times():
     now_daily = _ms(2026, 10, 19, 0, 2)
     assert not is_stale("2026-10-18 00:00:00", "1d", now_daily)
-    # BRIEF CONFLICT (reported): the brief expects open 2026-10-17 to be stale at
-    # 00:02, but the specified rule (close < now - 1 bar - 10 min) cannot flag it
-    # until 00:10 UTC, because the missing 10-18 bar closed only 2 min before. The
-    # rule is implemented as written; this pins what it actually does.
-    assert not is_stale("2026-10-17 00:00:00", "1d", now_daily)
-    assert is_stale("2026-10-17 00:00:00", "1d", _ms(2026, 10, 19, 0, 12))
+    assert is_stale("2026-10-17 00:00:00", "1d", now_daily)
     now_hourly = _ms(2026, 10, 19, 0, 20)
     assert not is_stale("2026-10-18 23:00:00", "1h", now_hourly)
     assert is_stale("2026-10-18 22:00:00", "1h", now_hourly)
@@ -69,7 +64,7 @@ def test_fresh_at_the_refresh_and_fetch_times():
 def test_is_stale_accepts_a_bare_date_as_midnight_utc():
     now = _ms(2026, 10, 19, 0, 2)
     assert not is_stale("2026-10-18", "1d", now)
-    assert is_stale("2026-10-17", "1d", _ms(2026, 10, 19, 0, 12))
+    assert is_stale("2026-10-17", "1d", now)
 
 
 def test_an_acknowledged_hole_is_printed_not_itemised(tmp_path, capsys):
@@ -141,7 +136,7 @@ def test_stale_only_for_stale_keys(tmp_path):
     assert len(items) == 1 and items[0]["source"] == STALE_SOURCE
     assert items[0]["key"] == "BTCUSDT"
     assert items[0]["reason"] == \
-        "last closed bar 2024-01-02 00:00:00 is older than one 1d bar + 10 min"
+        "last closed bar 2024-01-02 00:00:00 ends before "         "2024-01-30 00:00:00 (the newest closed 1d bar)"
 
 
 def test_intraday_cell_path_and_fresh_feed(tmp_path):
@@ -149,3 +144,21 @@ def test_intraday_cell_path_and_fresh_feed(tmp_path):
     items = scan(tmp_path, ["BTCUSDT@1h"], now_ms=_ms(2026, 10, 19, 0, 20),
                  stale_keys={"BTCUSDT@1h"}, acks={})
     assert items == []
+
+
+def test_end_cap_bounds_the_expected_bar():
+    now = _ms(2026, 10, 19, 13, 0)
+    end = _ms(2026, 10, 19, 0, 0)
+    assert not is_stale("2026-10-18 00:00:00", "1d", now, end_ms=end)
+    # Without the cap, a later "now" does expect a newer bar.
+    assert is_stale("2026-10-18 00:00:00", "1d", _ms(2026, 10, 20, 13, 0))
+    assert not is_stale("2026-10-18 00:00:00", "1d", _ms(2026, 10, 20, 13, 0),
+                        end_ms=end)
+
+
+def test_grace_boundary():
+    just_before = _ms(2026, 10, 19, 0, 1) + 59_000
+    at_edge = _ms(2026, 10, 19, 0, 2)
+    assert not is_stale("2026-10-18 00:00:00", "1d", just_before)
+    assert not is_stale("2026-10-18 00:00:00", "1d", at_edge)
+    assert is_stale("2026-10-17 00:00:00", "1d", at_edge)
