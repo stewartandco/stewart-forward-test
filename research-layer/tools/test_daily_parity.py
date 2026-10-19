@@ -170,3 +170,148 @@ def test_fingerprint_completes_for_a_legacy_pooled_crypto_spec(tmp_path):
     # a single-asset spec keeps the default (its control is computed)
     one = dict(spec, universe=dict(spec["universe"], assets=["BTCUSD"]))
     assert dp._standalone_kwargs(one) == {}
+
+
+# ---- --twins-1h (engine-perf Task 6) ----
+
+def _walk(n, step_hours, seed):
+    """Seeded random-walk OHLCV rows, dated like the real CSVs."""
+    import datetime as dt
+    import random
+    rng = random.Random(seed)
+    px, t0, rows = 100.0, dt.datetime(2023, 1, 1), []
+    for i in range(n):
+        o = px
+        px = max(1.0, px * (1 + rng.gauss(0.0002, 0.01)))
+        hi, lo = max(o, px) * 1.004, min(o, px) * 0.996
+        t = t0 + dt.timedelta(hours=step_hours * i)
+        d = t.strftime("%Y-%m-%d") if step_hours == 24 else t.strftime("%Y-%m-%d %H:%M:%S")
+        rows.append({"date": d, "open": o, "high": hi, "low": lo, "close": px, "volume": 1000.0})
+    return rows
+
+
+def _write_csv(path, rows):
+    import csv
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["date", "open", "high", "low", "close", "volume"])
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _crypto_spec(sid, entry_type, asset="BTCUSDT", asset_class="crypto"):
+    return {"strategy_id": sid, "version": 2, "family": "f",
+            "universe": {"assets": [asset], "asset_class": asset_class,
+                         "timeframe": "1d", "session": "24x7"},
+            "blocks": [{"role": "entry", "type": entry_type,
+                        "params": ({"max_lookback": 60, "t_min": 2.0} if entry_type == "trend_scan"
+                                   else {"lookback": 20, "direction": "long"})},
+                       {"role": "stop", "type": "atr_stop", "params": {"atr_len": 14, "mult": 2.0}},
+                       (
+                           {"role": "exit", "type": "tstat_decay",
+                            "params": {"max_lookback": 60, "t_exit": 0.5}}
+                           if entry_type == "trend_scan" else
+                           {"role": "exit", "type": "regime_flip", "params": {"ma_len": 50}}),
+                       {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}],
+            "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005},
+            "provenance": {"card_ids": ["c1"], "run_id": "r", "sibling_group_id": "g"}}
+
+
+def _twin_world(tmp_path, with_1h=True):
+    """A raw chain (one trend_scan crypto spec + one channel_breakout crypto
+    spec, both 1d) and a data dir with BTCUSDT 1d, and 1h unless told not."""
+    reg = tmp_path / "reg.jsonl"
+    specs = [_crypto_spec("a1" * 8, "trend_scan"), _crypto_spec("b2" * 8, "channel_breakout")]
+    reg.write_text("".join(json.dumps({"entry_type": "strategy_registered", "payload": s}) + "\n"
+                           for s in specs), encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_csv(data / "BTCUSDT_1d.csv", _walk(400, 24, 1))
+    if with_1h:
+        _write_csv(data / "BTCUSDT_1h.csv", _walk(2880, 1, 2))
+    return reg, data
+
+
+def _dump(reg, data, out, *extra):
+    return dp.main(["dump", "--registry", str(reg), "--data-dir", str(data), "--out", str(out),
+                    "--sample", "2", "--cutoff", "2023-03-15", *extra])
+
+
+def test_twins_1h_are_fingerprinted_and_compared(tmp_path, capsys):
+    from tools.intraday_rehearsal import make_twin
+    reg, data = _twin_world(tmp_path)
+    assert _dump(reg, data, tmp_path / "a.json", "--twins-1h", "1") == 0
+    assert _dump(reg, data, tmp_path / "b.json", "--twins-1h", "1") == 0
+    a = json.loads((tmp_path / "a.json").read_text())
+    # the twin is a 1h twin of the trend_scan original (the only eligible one), on the 1h file's asset
+    orig = _crypto_spec("a1" * 8, "trend_scan")
+    want = make_twin(orig, "BTCUSDT", "1h")["strategy_id"]
+    assert a["twins"] == {want: {"original": "a1" * 8, "asset": "BTCUSDT", "tf": "1h"}}
+    assert a["meta"]["twins_1h"] == 1
+    assert want in a["results"] and not a["errors"]
+    # a single-asset crypto twin keeps the benchmark control, as on the pre-B live commit
+    assert dp._standalone_kwargs(make_twin(orig, "BTCUSDT", "1h")) == {}
+    assert a["results"][want]["resolved_periods"] == 365 * 24          # a real 1h run
+    assert set(a["sample"]) == {"a1" * 8, "b2" * 8}                      # 1d sample untouched
+    assert dp.main(["compare", str(tmp_path / "a.json"), str(tmp_path / "b.json")]) == 0
+    assert "compared 3" in capsys.readouterr().out
+
+
+def test_twins_1h_compare_catches_a_twin_mismatch_and_a_missing_twin(tmp_path, capsys):
+    reg, data = _twin_world(tmp_path)
+    _dump(reg, data, tmp_path / "a.json", "--twins-1h", "1")
+    a = json.loads((tmp_path / "a.json").read_text())
+    (twin,) = a["twins"]
+    A, B = str(tmp_path / "a.json"), str(tmp_path / "b.json")
+    # a changed twin fingerprint
+    b = json.loads(json.dumps(a))
+    b["results"][twin]["run_full"] = "tampered"
+    (tmp_path / "b.json").write_text(json.dumps(b))
+    assert dp.main(["compare", A, B]) == 1
+    assert twin in capsys.readouterr().out
+    # twins requested but absent on one side (no vacuous pass on the 1d part)
+    b = json.loads(json.dumps(a))
+    b["twins"], b["results"] = {}, {k: v for k, v in a["results"].items() if k != twin}
+    (tmp_path / "b.json").write_text(json.dumps(b))
+    assert dp.main(["compare", A, B]) == 1
+    out = capsys.readouterr().out
+    assert "twins differ" in out
+    # twins requested and absent on BOTH sides
+    (tmp_path / "a.json").write_text(json.dumps(b))
+    assert dp.main(["compare", A, B]) == 1
+    assert "twins_1h" in capsys.readouterr().out
+    # different twin counts requested
+    b = json.loads(json.dumps(a))
+    b["meta"]["twins_1h"] = 2
+    (tmp_path / "b.json").write_text(json.dumps(b))
+    (tmp_path / "a.json").write_text(json.dumps(a))
+    assert dp.main(["compare", A, B]) == 1
+    assert "twins_1h differs" in capsys.readouterr().out
+
+
+def test_twins_1h_zero_produced_is_an_error(tmp_path, capsys):
+    reg, data = _twin_world(tmp_path, with_1h=False)             # no *USDT_1h.csv
+    assert _dump(reg, data, tmp_path / "a.json", "--twins-1h", "1") != 0
+    assert not (tmp_path / "a.json").exists()
+    assert "twin" in capsys.readouterr().err
+    # fewer than asked is an error too (the proof wants all N): only one eligible original
+    (tmp_path / "w2").mkdir()
+    reg, data = _twin_world(tmp_path / "w2")
+    assert _dump(reg, data, tmp_path / "w2" / "a.json", "--twins-1h", "2") != 0
+    # no twins requested: unchanged output shape, no twins needed
+    assert _dump(reg, data, tmp_path / "w2" / "c.json") == 0
+    c = json.loads((tmp_path / "w2" / "c.json").read_text())
+    assert c["twins"] == {} and c["meta"]["twins_1h"] == 0
+
+
+def test_twin_originals_are_restricted_to_crypto_1d_changed_code_blocks():
+    def sp(sid, cls="crypto", tf="1d", btype="channel_breakout", role="entry"):
+        return {"strategy_id": sid, "blocks": [{"role": role, "type": btype}],
+                "universe": {"asset_class": cls, "timeframe": tf, "assets": ["BTCUSDT"]}}
+    specs = {s["strategy_id"]: s for s in [
+        sp("ts", btype="trend_scan"), sp("tsd", btype="trend_scan_dense"),
+        sp("td", btype="tstat_decay", role="exit"), sp("vp", btype="vol_percentile", role="filter"),
+        sp("vpd", btype="vol_percentile_dense", role="filter"),
+        sp("plain"), sp("fx_ts", cls="fx", btype="trend_scan"),
+        sp("h1_ts", tf="1h", btype="trend_scan")]}
+    got = dp.twin_candidates(specs)
+    assert set(got) == {"ts", "tsd", "td", "vp", "vpd"}

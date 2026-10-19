@@ -795,3 +795,380 @@ def test_run_started_ignores_unusable_stamps(monkeypatch):
     assert gw._run_started(now) == good              # naive = UTC
     monkeypatch.delenv(STARTED_ENV)
     assert gw._run_started(now) == now
+
+
+# ---- engine perf Task 4: the worker writes the series cache ----
+# (docs/2026-10-17-engine-perf-design.md s3.3: a pool's processes are new per
+# chunk, so only the disk cache shares series across candidates on one cell)
+
+from datetime import date as _date, timedelta as _timedelta
+
+from . import gauntlet_core
+from .series_cache import CACHE_DIRNAME, SeriesCache
+
+
+def _dense_trend_spec():
+    """A version-2 dense trend spec with a vol-percentile filter: every
+    one-step perturbation re-runs run_spec, and all three cached kinds are
+    touched (trend_tstat, realized_ann_vol, vol_pctile)."""
+    return {"strategy_id": "0123456789abcdef", "version": 2,
+            "universe": {"assets": ["BTCUSD"], "asset_class": "crypto",
+                         "timeframe": "1d", "session": "24x7"},
+            "blocks": [
+                {"role": "entry", "type": "trend_scan_dense",
+                 "params": {"max_lookback": 60, "t_min": 2.0, "direction": "both"}},
+                {"role": "filter", "type": "vol_percentile_dense",
+                 "params": {"lookback": 90, "max_pctile": 1.0}},
+                {"role": "stop", "type": "atr_stop_dense",
+                 "params": {"atr_len": 14, "mult": 3.0}},
+                {"role": "exit", "type": "tstat_decay",
+                 "params": {"max_lookback": 60, "t_exit": 0.5}},
+                {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}],
+            "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005}}
+
+
+def _dense_trend_bars(n=700):
+    from .test_engine_perf import walk_bars
+    d0 = _date(2022, 1, 1)
+    return {"BTCUSD": [dict(b, date=(d0 + _timedelta(days=i)).isoformat())
+                       for i, b in enumerate(walk_bars(n))]}
+
+
+def test_worker_payload_carries_the_cache_dir_and_perturbations_share_it(
+        tmp_path, monkeypatch):
+    # the worker: every payload names <registry dir>/seriescache, and
+    # _evaluate_payload opens it ONCE per process
+    reg, spec, data = _setup(tmp_path)
+    monkeypatch.setattr(gw, "_SERIES_CACHES", {})
+    payloads, handed = [], []
+    real_eval = gw.evaluate_standalone
+
+    def spy(spec, spec_bars, cutoff, perturb, *, series_cache=None):
+        handed.append(series_cache)
+        return real_eval(spec, spec_bars, cutoff, perturb,
+                         series_cache=series_cache)
+
+    real_payload = gw._evaluate_payload
+
+    def spy_payload(payload):
+        payloads.append(payload)
+        return real_payload(payload)
+
+    monkeypatch.setattr(gw, "evaluate_standalone", spy)
+    monkeypatch.setattr(gw, "_evaluate_payload", spy_payload)
+    assert _run(reg, data, tmp_path) == 0
+    want = reg.log_path.parent / CACHE_DIRNAME
+    assert [p["series_cache_dir"] for p in payloads] == [str(want)]
+    assert isinstance(handed[0], SeriesCache) and not handed[0].read_only
+    assert handed[0].directory == want
+    assert real_payload(dict(payloads[0])) is not None
+    assert handed[1] is handed[0]                  # once per process, per dir
+
+    # evaluate_standalone: base, stressed and EVERY perturbation get the cache
+    seen = []
+    real_run_spec = gauntlet_core.run_spec
+
+    def spy_run_spec(spec, bars_by_asset, *, series_cache=None):
+        seen.append(series_cache)
+        return real_run_spec(spec, bars_by_asset, series_cache=series_cache)
+
+    monkeypatch.setattr(gauntlet_core, "run_spec", spy_run_spec)
+    cache = SeriesCache(tmp_path / "sc")
+    out = gauntlet_core.evaluate_standalone(
+        _dense_trend_spec(), _dense_trend_bars(), "2023-06-30", True,
+        series_cache=cache)
+    n_pert = out["metrics"]["perturbation"]["n_perturbations"]
+    assert n_pert > 0
+    assert len(seen) == 2 + n_pert and all(s is cache for s in seen)
+
+
+def _canon(obj):
+    import struct
+    if isinstance(obj, float):
+        return ("f", struct.pack("<d", obj))
+    if isinstance(obj, dict):
+        return {k: _canon(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_canon(v) for v in obj)
+    return obj
+
+
+def test_evaluate_standalone_is_identical_with_no_a_cold_and_a_warm_cache(tmp_path):
+    spec, bars = _dense_trend_spec(), _dense_trend_bars()
+    off = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True)
+    cold_cache = SeriesCache(tmp_path / "sc")
+    cold = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True,
+                                             series_cache=cold_cache)
+    assert cold_cache.stats["misses"] > 0
+    warm_cache = SeriesCache(tmp_path / "sc")      # a new process: disk only
+    warm = gauntlet_core.evaluate_standalone(spec, bars, "2023-06-30", True,
+                                             series_cache=warm_cache)
+    assert warm_cache.stats["misses"] == 0 and warm_cache.stats["hits"] > 0
+    assert off["oos_trades"] and off["metrics"]["exit_reasons_is"]   # not vacuous
+    assert _canon(cold) == _canon(off)
+    assert _canon(warm) == _canon(off)
+
+
+# ---- engine perf Task 5: a per-timeframe deadline budget and prior ----
+
+def test_prior_for_unmeasured_tf_scales_from_1h_and_is_floored(monkeypatch):
+    p = gauntlet_core.PRIOR_S_BY_TF
+    assert p["1d"] == gauntlet_core.GAUNTLET_PRIOR_S_PER_CANDIDATE == 20.0
+    assert gauntlet_core.prior_s_for("1d") == 20.0
+    assert gauntlet_core.prior_s_for("1h") == p["1h"]          # a measured entry
+    assert gauntlet_core.prior_s_for("15m") == 4 * p["1h"]     # 96 / 24
+    assert gauntlet_core.prior_s_for("30m") == 2 * p["1h"]
+    # (the measured 1h prior is 70 s, so 4h and 12h are already on the floor)
+    assert gauntlet_core.prior_s_for("4h") == max(20.0, p["1h"] / 4)
+    assert gauntlet_core.prior_s_for("12h") == max(20.0, p["1h"] / 12)
+    # the floor: a 1h prior this small would put 12h under the 1d prior
+    monkeypatch.setitem(p, "1h", 100.0)
+    assert gauntlet_core.prior_s_for("12h") == 20.0            # 100/12 floored
+    assert gauntlet_core.prior_s_for("4h") == 25.0
+    # an unknown timeframe falls back to the 1d prior, never raises
+    assert gauntlet_core.prior_s_for("7m") == 20.0
+
+
+def _tf_spec(sid, tf):
+    return {"strategy_id": sid, "universe": {"assets": ["X"], "timeframe": tf}}
+
+
+def test_tf_chunks_split_at_timeframe_changes_and_keep_order():
+    todo = [_tf_spec(f"d{i}", "1d") for i in range(5)] +            [_tf_spec(f"h{i}", "1h") for i in range(3)] + [_tf_spec("d5", "1d")]
+    out = gw._tf_chunks(todo, 4)
+    assert [(start, tf, [s["strategy_id"] for s in c]) for start, tf, c in out] == [
+        (0, "1d", ["d0", "d1", "d2", "d3"]), (4, "1d", ["d4"]),
+        (5, "1h", ["h0", "h1", "h2"]), (8, "1d", ["d5"])]
+    assert [s["strategy_id"] for _, _, c in out for s in c] ==         [s["strategy_id"] for s in todo]                      # never reordered
+    # a spec with no timeframe key is 1d
+    assert gw._candidate_tf({"universe": {"assets": ["X"]}}) == "1d"
+    assert gw._tf_chunks([], 4) == []
+
+
+def test_worker_never_mixes_timeframes_in_a_chunk(tmp_path, monkeypatch):
+    """The cheaper candidate (B) is told to be a 1h one, A stays 1d: each
+    chunk is judged at ITS timeframe's prior, the first 1h chunk at the 1h
+    prior. (One worker means chunks of one; the split itself is pinned by
+    test_tf_chunks_split_at_timeframe_changes_and_keep_order.)"""
+    reg, a, b, data = _two_candidates(tmp_path)
+    sb = b["strategy_id"]
+    asked = []
+
+    class Spy(gw._deadline.DeadlineBudget):
+        def rate_s(self, prior_s, key=None):
+            rate = super().rate_s(prior_s, key=key)
+            asked.append((key, rate))
+            return rate
+
+        def record(self, n, elapsed_s, key=None):
+            asked.append(("record", key))
+            return super().record(n, elapsed_s, key=key)
+
+    monkeypatch.setattr(gw._deadline, "DeadlineBudget", Spy)
+    monkeypatch.setattr(gw, "_candidate_tf",
+                        lambda spec: "1h" if spec["strategy_id"] == sb else "1d")
+    assert _run(reg, data, tmp_path) == 0
+    # B is cheapest first, so the 1h chunk comes first, at the 1h prior; the
+    # 1d chunk after it is still at the 1d prior (no 1d rate measured yet)
+    assert asked[0] == ("1h", gauntlet_core.prior_s_for("1h"))
+    assert asked[1] == ("record", "1h")
+    assert asked[2] == ("1d", gauntlet_core.prior_s_for("1d"))
+    assert asked[3] == ("record", "1d")
+
+
+# ---- final review 2026-10-19: the first chunk of an unmeasured timeframe is
+# ---- one pool round. A prior is a SINGLE-PROCESS seconds-per-candidate, and a
+# ---- full chunk of it (6 workers x 4 = 24 x 70 s + the reserve) is more than
+# ---- the 25-minute budget, so a 1h chunk could never start and no 1h rate was
+# ---- ever measured.
+
+class _Budget:
+    """A DeadlineBudget stand-in for the chunk walk: only has_rate is asked."""
+    def __init__(self, measured=()):
+        self.measured = set(measured)
+
+    def has_rate(self, key=None):
+        return key in self.measured
+
+
+def _sids(chunk):
+    return [s["strategy_id"] for s in chunk]
+
+
+def _walk(todo, chunk_size, workers, budget):
+    """Walk like the run loop: a chunk that has run is a measured rate."""
+    out = []
+    for start, tf, chunk in gw._walk_chunks(todo, chunk_size, workers, budget):
+        out.append((start, tf, chunk))
+        budget.measured.add(tf)
+    return out
+
+
+def test_walk_caps_only_the_first_chunk_of_an_unmeasured_timeframe_and_keeps_order():
+    todo = ([_tf_spec(f"d{i}", "1d") for i in range(3)] +
+            [_tf_spec(f"h{i}", "1h") for i in range(40)])
+    out = _walk(todo, 24, 6, _Budget())
+    # 1d: 3 candidates, already under the cap; 1h: ONE pool round (6), then the
+    # normal chunk (24), then what is left (10)
+    assert [(start, tf, len(c)) for start, tf, c in out] == \
+        [(0, "1d", 3), (3, "1h", 6), (9, "1h", 24), (33, "1h", 10)]
+    assert [s for _, _, c in out for s in _sids(c)] == _sids(todo)   # never reordered
+
+
+def test_walk_with_a_measured_timeframe_is_tf_chunks():
+    """Once a timeframe has a rate the walk is exactly `_tf_chunks`, and the
+    `_tf_chunks` contract (split at timeframe changes, order kept) is intact."""
+    todo = [_tf_spec(f"d{i}", "1d") for i in range(30)] + \
+           [_tf_spec(f"h{i}", "1h") for i in range(30)]
+    walked = list(gw._walk_chunks(todo, 24, 6, _Budget(measured=("1d", "1h"))))
+    assert [(a, t, _sids(c)) for a, t, c in walked] == \
+        [(a, t, _sids(c)) for a, t, c in gw._tf_chunks(todo, 24)]
+
+
+def test_walk_cap_is_per_timeframe_and_a_returning_timeframe_stays_measured():
+    todo = [_tf_spec("d0", "1d")] + [_tf_spec(f"h{i}", "1h") for i in range(8)] + \
+           [_tf_spec(f"e{i}", "1d") for i in range(30)]
+    out = _walk(todo, 24, 6, _Budget())
+    # 1d is measured by its first chunk, so its second run is a full chunk
+    assert [(tf, len(c)) for _, tf, c in out] == \
+        [("1d", 1), ("1h", 6), ("1h", 2), ("1d", 24), ("1d", 6)]
+
+
+def test_walk_at_one_worker_is_unchanged():
+    todo = [_tf_spec(f"h{i}", "1h") for i in range(5)]
+    out = _walk(todo, 1, 1, _Budget())
+    assert [len(c) for _, _, c in out] == [1, 1, 1, 1, 1]
+
+
+def test_the_production_first_1h_chunk_fits_the_25_minute_budget_and_the_full_one_never_did(
+        monkeypatch):
+    """The numbers of the flaw. 6 workers x GAUNTLET_CHUNK_PER_WORKER = 24
+    candidates x the 70 s 1h prior + the 75 s reserve is 1,755 s against a
+    1,500 s budget; one pool round (6 x 70 + 75 = 495 s) fits."""
+    from . import deadline as dl
+    monkeypatch.setattr(dl, "_wall_now_utc",
+                        lambda: dl._parse_iso("2026-10-19T12:00:00Z"))
+    budget = dl.DeadlineBudget("2026-10-19T12:25:00Z", reserve_s=gw.DRAIN_RESERVE_S,
+                               clock=lambda: 0.0)
+    prior = gw.prior_s_for("1h")
+    full = 6 * gw.GAUNTLET_CHUNK_PER_WORKER
+    assert full == 24
+    assert budget.fits(full, prior) is False
+    todo = [_tf_spec(f"h{i}", "1h") for i in range(40)]
+    first = next(iter(gw._walk_chunks(todo, full, 6, budget)))
+    assert len(first[2]) == 6
+    assert budget.fits(len(first[2]), prior) is True
+
+
+class _InlinePool:
+    """Stands in for ProcessPoolExecutor: runs each submission inline, and on
+    exit advances the fake clock by one pool round per `workers` candidates
+    (wall time = rounds x the per-candidate seconds of the chunk's timeframe)."""
+    seconds = {"1d": 20.0, "1h": 70.0}
+    rounds: list = []
+    clock = None
+
+    def __init__(self, max_workers=None, **kw):
+        self.workers = max_workers
+        self.n = 0
+        self.tf = None
+
+    def __enter__(self):
+        return self
+
+    def submit(self, fn, payload):
+        from concurrent.futures import Future
+        self.n += 1
+        self.tf = gw._candidate_tf(payload["spec"])
+        fut = Future()
+        fut.set_result(fn(payload))
+        return fut
+
+    def __exit__(self, *exc):
+        rounds = -(-self.n // self.workers)
+        type(self).rounds.append((self.tf, self.n))
+        type(self).clock.advance(rounds * type(self).seconds[self.tf])
+        return False
+
+
+def _many(tmp_path, n_total):
+    """n_total candidates in `gauntlet` state that differ only by name (so
+    each gets its own strategy id), all on the fixture's BTCUSD file."""
+    reg, a = gauntlet_registry(tmp_path)
+    reg.append("note", {"text": V61})
+    specs = [a]
+    for i in range(1, n_total):
+        b = copy.deepcopy(a)
+        b["name"] = f"test breakout copy {i}"
+        b["strategy_id"] = None
+        b["strategy_id"] = content_id(b, "strategy_id")
+        reg.register_strategy(b)
+        reg.record_state_change(b["strategy_id"], "screened", "test")
+        reg.record_verdict(b["strategy_id"], "screened", "pass",
+                           {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
+                            "max_dd": -0.1}, "0" * 64)
+        reg.record_state_change(b["strategy_id"], "gauntlet", None)
+        specs.append(b)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    return reg, [s["strategy_id"] for s in specs], data
+
+
+def _pool_run(tmp_path, monkeypatch, drain_clock, sids, tf_of, reg, data):
+    """A 6-worker, 25-minute run with a fake clock: queue order = `sids`,
+    each candidate's timeframe from `tf_of`, a pool round costing the
+    timeframe's per-candidate seconds (the priors, i.e. a run that is exactly
+    as slow as the budget assumed)."""
+    import types
+    monkeypatch.setattr(gw, "worker_count", lambda n_cpu, avail: 6)
+    monkeypatch.setattr(gw, "ProcessPoolExecutor", _InlinePool)
+    monkeypatch.setattr(gw, "time", types.SimpleNamespace(time=drain_clock))
+    rank = {s: i for i, s in enumerate(sids)}
+    monkeypatch.setattr(gw, "cost_key", lambda spec, rows: (rank[spec["strategy_id"]],))
+    monkeypatch.setattr(gw, "_candidate_tf", lambda spec: tf_of[spec["strategy_id"]])
+    _InlinePool.rounds = []
+    _InlinePool.clock = drain_clock
+    submitted = []
+    real = gw._evaluate_payload
+
+    def spy(payload):
+        submitted.append(payload["spec"]["strategy_id"])
+        return real(payload)
+
+    monkeypatch.setattr(gw, "_evaluate_payload", spy)
+    rc = gw.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                 "--artifacts-dir", str(tmp_path / "art"),
+                 "--logs-dir", str(tmp_path / "logs"), "--no-perturb",
+                 "--max-workers", "6", "--cutoff", HIT_BARS_CUTOFF])
+    return rc, list(_InlinePool.rounds), submitted
+
+
+def test_a_1h_queue_at_6_workers_starts_its_first_chunk_then_runs_full_chunks(
+        tmp_path, monkeypatch, drain_clock):
+    """Final review 2026-10-19, end to end: 3 x 1d then 32 x 1h at 6 workers
+    and 25 minutes. Before the cap the first 1h chunk (24 x 70 s + reserve)
+    never started: 1h candidates starved and no 1h rate was ever measured."""
+    reg, sids, data = _many(tmp_path, 35)
+    tf_of = {s: ("1d" if i < 3 else "1h") for i, s in enumerate(sids)}
+    rc, rounds, submitted = _pool_run(tmp_path, monkeypatch, drain_clock, sids,
+                                      tf_of, reg, data)
+    assert rc == 0
+    # 1d: 3 (under the cap); 1h: ONE pool round (6), then the normal chunk
+    # (24, now judged at the MEASURED 70 s / 6 per candidate), then the rest
+    assert rounds == [("1d", 3), ("1h", 6), ("1h", 24), ("1h", 2)]
+    assert submitted == sids                                  # order preserved
+    st = _status(tmp_path)
+    assert (st["evaluated"], st["deferred_deadline"], st["exit_reason"]) == \
+        (35, 0, "drained")
+
+
+def test_an_all_1d_queue_is_unchanged_except_its_unmeasured_first_chunk(
+        tmp_path, monkeypatch, drain_clock):
+    reg, sids, data = _many(tmp_path, 31)
+    tf_of = {s: "1d" for s in sids}
+    rc, rounds, submitted = _pool_run(tmp_path, monkeypatch, drain_clock, sids,
+                                      tf_of, reg, data)
+    assert rc == 0
+    # was [24, 7]: the first chunk is one pool round, every later one is full
+    assert rounds == [("1d", 6), ("1d", 24), ("1d", 1)]
+    assert submitted == sids
+    assert _status(tmp_path)["evaluated"] == 31

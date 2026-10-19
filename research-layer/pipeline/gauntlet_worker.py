@@ -10,6 +10,14 @@ A verdict whose write finds chain.lock held is KEPT (in memory, this run
 only) and its write retried between chunks and in a final drain pass; it is
 never waited for and never persisted across runs.
 
+Chunks are cut per timeframe, and the budget judges each at its timeframe's
+measured rate, else its prior. A prior is a single-process figure, so the
+FIRST chunk of a timeframe with no measured rate is capped at one pool round
+(`max_workers` candidates, `_walk_chunks`); a full 6 x 4 = 24 chunk of the 70 s
+1h prior needs more than the whole 25-minute budget and could never start
+(final review 2026-10-19). After that chunk the rate is measured and chunks
+are the normal size.
+
 Exit 0: drained, stopped at the deadline, or deferred on a lock (routine).
 Exit 1: a candidate raised, or setup was refused. The Ops Sentinel alarms on 1.
 """
@@ -33,9 +41,10 @@ from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
                             write_gauntlet_artifacts, _spec_bars,
-                            GAUNTLET_PRIOR_S_PER_CANDIDATE,
+                            GAUNTLET_PRIOR_S_PER_CANDIDATE, prior_s_for,
                             GAUNTLET_CHUNK_PER_WORKER, worker_count,
                             available_commit_mb, worker_env)
+from .series_cache import CACHE_DIRNAME, SeriesCache
 
 LAYER = Path(__file__).resolve().parent.parent
 PRIOR_S_PER_CANDIDATE = GAUNTLET_PRIOR_S_PER_CANDIDATE
@@ -78,6 +87,60 @@ def _run_started(now: datetime) -> datetime:
 def _cells(spec: dict) -> list[tuple[str, str]]:
     tf = spec["universe"].get("timeframe", "1d")
     return sorted({(a, tf) for a in spec["universe"]["assets"]})
+
+
+def _candidate_tf(spec: dict) -> str:
+    return spec["universe"].get("timeframe", "1d")
+
+
+def _tf_chunks(todo: list, chunk_size: int) -> list[tuple[int, str, list]]:
+    """(start index in todo, timeframe, chunk) in todo's order. A chunk never
+    mixes timeframes: a run of one timeframe is cut every `chunk_size`, and a
+    change of timeframe cuts it too, so a chunk may be short at a boundary.
+    Nothing is reordered (todo is already cheapest first)."""
+    out: list[tuple[int, str, list]] = []
+    i = 0
+    while i < len(todo):
+        end = _chunk_end(todo, i, chunk_size)
+        out.append((i, _candidate_tf(todo[i]), todo[i:end]))
+        i = end
+    return out
+
+
+def _chunk_end(todo: list, i: int, size: int) -> int:
+    """Index one past the chunk that starts at `i`: at most `size` candidates
+    of todo[i]'s timeframe."""
+    tf = _candidate_tf(todo[i])
+    end = i + 1
+    while end < len(todo) and end - i < size and _candidate_tf(todo[end]) == tf:
+        end += 1
+    return end
+
+
+def _walk_chunks(todo: list, chunk_size: int, max_workers: int, budget):
+    """`_tf_chunks`, lazily, with one difference: the FIRST chunk of a
+    timeframe that has no measured rate yet (`budget.has_rate(tf)` is False)
+    is cut at `max_workers` candidates, which is one pool round.
+
+    Why (final review 2026-10-19): the prior is a SINGLE-PROCESS seconds per
+    candidate, and `fits` charges a chunk n x prior with no pool amortisation
+    until a rate exists. A full first chunk (6 workers x 4 = 24 at the 70 s
+    1h prior, plus the reserve) needed more than the whole 25-minute budget,
+    so a 1h chunk never started, no 1h rate was ever measured and 1h
+    candidates starved. One pool round (6 x 70 s) fits, runs, and records the
+    pool's real rate; every later chunk of that timeframe is the normal size.
+    Nothing is reordered: the remainder of the run simply follows. The
+    generator is consumed one chunk at a time, so each cut sees the rates
+    recorded by the chunks before it. At one worker the chunk is already 1."""
+    i = 0
+    while i < len(todo):
+        tf = _candidate_tf(todo[i])
+        size = chunk_size
+        if not budget.has_rate(tf):
+            size = min(size, max_workers)
+        end = _chunk_end(todo, i, size)
+        yield i, tf, todo[i:end]
+        i = end
 
 
 def cost_key(spec: dict, row_counts: dict) -> tuple:
@@ -183,11 +246,31 @@ def repair_orphans(registry: Registry, logs_dir: Path) -> int:
     return _repair(registry, logs_dir, snap, view)[0]
 
 
+# Engine perf (docs/2026-10-17-engine-perf-design.md s3.3): the worker is a
+# series-cache WRITER. A pool's processes are new per chunk, so only the disk
+# cache shares indicator series across candidates on one cell; each process
+# opens the payload's directory ONCE (keyed by the directory) and hands it to
+# every run_spec of every candidate it judges. The cache only skips work:
+# verdicts are bit-identical with it, without it, cold or warm.
+_SERIES_CACHES: dict[str, SeriesCache] = {}
+
+
+def _series_cache(directory: str | None) -> SeriesCache | None:
+    if directory is None:               # a payload from before the cache: none
+        return None
+    cache = _SERIES_CACHES.get(directory)
+    if cache is None:
+        cache = _SERIES_CACHES[directory] = SeriesCache(Path(directory))
+    return cache
+
+
 def _evaluate_payload(payload: dict) -> dict:
     """One candidate's standalone battery. Module-level and plain-data in,
     plain-data out, so it is the only thing a spawned pool worker runs."""
     return evaluate_standalone(payload["spec"], payload["spec_bars"],
-                               payload["cutoff"], payload["perturb"])
+                               payload["cutoff"], payload["perturb"],
+                               series_cache=_series_cache(
+                                   payload.get("series_cache_dir")))
 
 
 def _record_bundle(logs_dir: Path, repo_root: Path, bundle: Path) -> None:
@@ -318,6 +401,10 @@ def run(argv: list[str] | None = None) -> int:
         print(f"gauntlet_worker: {len(todo)} queued, {max_workers} worker(s), "
               f"deadline in {a.deadline_minutes:g} min", flush=True)
 
+        # gitignored beside simcache/ (the registry's directory is the layer
+        # in production; a test's tmp registry keeps its cache in tmp)
+        series_cache_dir = str(a.registry.parent / CACHE_DIRNAME)
+
         def prepare(spec: dict) -> dict | None:
             """Load the candidate's own cells. None = deferred or errored
             (already counted); a dict = the payload plus its provenance."""
@@ -339,7 +426,8 @@ def run(argv: list[str] | None = None) -> int:
                 status["deferred_not_comparable"] += 1
                 return None
             return {"payload": {"spec": spec, "spec_bars": _spec_bars(bars, spec),
-                                "cutoff": a.cutoff, "perturb": a.perturb},
+                                "cutoff": a.cutoff, "perturb": a.perturb,
+                                "series_cache_dir": series_cache_dir},
                     "hashes": hashes, "data_end": data_end}
 
         def write(item: dict) -> str:
@@ -455,9 +543,12 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{sid}  ERROR: no verdict written; stays queued", flush=True)
             status["errored"] += 1
 
-        for start in range(0, len(todo), chunk_size):
-            chunk = todo[start:start + chunk_size]
-            if not budget.fits(len(chunk), budget.rate_s(PRIOR_S_PER_CANDIDATE)):
+        for start, tf, chunk in _walk_chunks(todo, chunk_size, max_workers, budget):
+            # the rate is measured, and the prior assumed, per timeframe; the
+            # first chunk of an unmeasured timeframe is one pool round
+            # (_walk_chunks), so its prior-based check can pass
+            if not budget.fits(len(chunk),
+                               budget.rate_s(prior_s_for(tf), key=tf)):
                 status["deferred_deadline"] += len(todo) - start
                 break
             t0 = time.time()
@@ -489,7 +580,7 @@ def run(argv: list[str] | None = None) -> int:
                 # measured rate: conservative for the deadline.)
                 retry_pending()
             finally:
-                budget.record(len(chunk), time.time() - t0)
+                budget.record(len(chunk), time.time() - t0, key=tf)
 
         final_drain()
         for item in pending:

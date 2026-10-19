@@ -1,6 +1,8 @@
 """Next-bar targets for every quarantined/live crypto 1d strategy (build 4a,
 spec 4.2). READ-ONLY: never appends to the chain, never takes chain.lock,
-never writes data/. Output: logs/signals/targets-<bar_end>.json (gitignored).
+never writes data/ or seriescache/ (it READS the indicator series the
+quarantine recorder stores there; engine perf 2026-10-17). Output:
+logs/signals/targets-<bar_end>.json (gitignored).
 
 P1 (the synthetic next bar): the engine fills entries at the NEXT open from
 the previous close's signal, and fills declared/time exits at the next open
@@ -84,10 +86,14 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import cells
 from .engine import ENGINE_REV, simulate_asset
 from .registry import Registry
+
+if TYPE_CHECKING:       # series_cache imports numpy, which this module did not
+    from .series_cache import SeriesCache   # load before the engine-perf branch
 
 STATES = {"quarantine", "live"}
 REFUSED_EXIT = 2          # every refusal; an unhandled crash exits 1
@@ -106,16 +112,25 @@ def _synthetic_next(bars: list[dict]) -> dict:
     return {"date": d.isoformat(), "open": c, "high": c, "low": c, "close": c, "volume": 0.0}
 
 
-def next_bar_position(spec: dict, bars: list[dict]) -> dict:
+def next_bar_position(spec: dict, bars: list[dict], *,
+                      series_cache: SeriesCache | None = None,
+                      cell: str | None = None) -> dict:
     """P1: append a flat synthetic next bar so the engine takes its own
     next-open decisions; read the position after it. Periods per year and
     version are derived exactly as quarantine.observe_day derives them for a
-    daily spec."""
+    daily spec.
+
+    series_cache (engine perf s3.3) is READ here: run() passes a read_only
+    cache on <registry dir>/seriescache with cell = the asset (1d), so the
+    series the quarantine recorder stored are served and only the synthetic
+    bar is computed, in memory; it never reaches the disk. None = the
+    engine's private memory-only cache, as before. Bit-identical either way."""
     if not bars:
         return {"side": "flat", "frac": 0.0}
     ppy = cells.SESSION_PERIODS.get(spec["universe"].get("session"), 365)
     book = simulate_asset(spec["blocks"], bars + [_synthetic_next(bars)], spec["cost_model"],
-                          ppy, version=spec.get("version", 1))
+                          ppy, version=spec.get("version", 1),
+                          series_cache=series_cache, cell=cell)
     pos = book["position"]
     if pos is None:
         return {"side": "flat", "frac": 0.0}
@@ -409,8 +424,13 @@ def run(argv=None) -> int:
             print(f"  deferred {sid}: {deferred[sid]}")
         return finish(REFUSED_EXIT, bar_end, 0, deferred)
     out = {}
+    # engine perf s3.3: READ-ONLY (read_only=True never writes, not even the
+    # directory), so the service's contract is unchanged
+    from .series_cache import CACHE_DIRNAME, SeriesCache   # lazy: pulls in numpy
+    series_cache = SeriesCache(a.registry.parent / CACHE_DIRNAME, read_only=True)
     for sid, spec in publish.items():
-        assets = {x: next_bar_position(spec, bars_by[x]) for x in spec["universe"]["assets"]}
+        assets = {x: next_bar_position(spec, bars_by[x], series_cache=series_cache, cell=x)
+                  for x in spec["universe"]["assets"]}
         out[sid] = {"spec_sha": _spec_sha(spec), "max_dd": max_dd.get(sid), "assets": assets}
     used = {x for spec in publish.values() for x in spec["universe"]["assets"]}
     doc = {"bar_end": bar_end, "engine_rev": ENGINE_REV,

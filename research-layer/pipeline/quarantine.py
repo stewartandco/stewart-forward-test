@@ -103,6 +103,7 @@ from .engine import simulate_asset
 from .qcells import (spec_cells, cell_path, split_cell_key, is_intraday_key,
                      complete_days)
 from .screen import load_bars
+from .series_cache import CACHE_DIRNAME, SeriesCache
 
 MIN_TRADING_DAYS = 60
 
@@ -155,6 +156,42 @@ MAX_LISTED_GAPS = 12
 # bounded by this 10; a stalled one still makes the run exit 1 each time and
 # needs a human (the `simulation_failed` / `restated` ledger item forces it).
 MAX_CATCHUP_DATES = 10
+
+# Engine perf (docs/2026-10-17-engine-perf-design.md s3.3): the recorder is a
+# series-cache WRITER. One SeriesCache per registry directory per process, so
+# catch-up's per-date run() calls and a plain --date run share one cache (one
+# memory copy of each series, one disk directory). The cache only skips work:
+# every series it serves is checked bar by bar against today's closes, and a
+# recorded row is bit-identical with it, without it, cold or warm.
+_SERIES_CACHES: dict[str, SeriesCache] = {}
+
+
+def _series_cache(registry_path: Path) -> SeriesCache:
+    """The process's cache at <registry dir>/seriescache (gitignored beside
+    simcache/; never chained, safe to delete)."""
+    directory = (Path(registry_path).parent / CACHE_DIRNAME).resolve()
+    key = str(directory)
+    cache = _SERIES_CACHES.get(key)
+    if cache is None:
+        cache = _SERIES_CACHES[key] = SeriesCache(directory)
+        # Housekeeping, ONCE per process run (the cache is built once, before
+        # the first date is simulated, and catch-up's later dates reuse it):
+        # drop dead writers' temp files and entries under an old ENGINE_REV.
+        # Never raises; says something only when it removed something.
+        removed = cache.prune()
+        if any(removed[k] for k in ("tmp_removed", "stale_rev_removed",
+                                    "corrupt_removed")):
+            print(f"seriescache: pruned {removed['tmp_removed']} tmp, "
+                  f"{removed['stale_rev_removed']} stale-rev, "
+                  f"{removed['corrupt_removed']} corrupt "
+                  f"({removed['kept']} kept)", flush=True)
+    return cache
+
+
+def _reset_series_caches() -> None:
+    """Forget every process cache (tests: a fresh process's memory)."""
+    _SERIES_CACHES.clear()
+
 
 CONE_CAVEAT = (
     "  NOTE: that cone is a terminal-equity distribution over the strategy's\n"
@@ -493,7 +530,8 @@ def day_events(trades: list[dict], position: dict | None, bars: list[dict],
 
 
 def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
-                      entered: str) -> dict:
+                      entered: str, *, series_cache: SeriesCache | None = None
+                      ) -> dict:
     universe = spec["universe"]
     session, tf = universe.get("session"), universe["timeframe"]
     if not bars or bars[-1]["date"][:10] != date:
@@ -502,7 +540,8 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
     book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
                           _bars.bars_per_year(session, tf),
                           version=spec.get("version", 1),
-                          bars_per_day=_bars.bars_per_day(session, tf))
+                          bars_per_day=_bars.bars_per_day(session, tf),
+                          series_cache=series_cache, cell=key)
     pos = book["position"]
     entries, exits, action = day_events(book["trades"], pos, bars, date)
     base = book["equity"][_rebase_index_day(bars, entered, key)]
@@ -518,17 +557,21 @@ def _observe_intraday(spec: dict, key: str, bars: list[dict], date: str,
 
 
 def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
-                entered: str) -> list[dict]:
+                entered: str, *, series_cache: SeriesCache | None = None
+                ) -> list[dict]:
     """One decision row per CELL in the spec's universe: a RECORD of what the
     book did on `date`, not an instruction. `bars_by_cell` must already be
     truncated to bars <= date. A daily spec's cell key is its bare asset, so
-    its rows are unchanged; an intraday cell records its daily mark (2b-2)."""
+    its rows are unchanged; an intraday cell records its daily mark (2b-2).
+    `series_cache` (engine perf s3.3) keys each cell's indicator series by
+    its cell key; None = the engine's private memory-only cache, as before."""
     rows = []
     intraday = spec["universe"].get("timeframe", "1d") != "1d"
     for asset in spec_cells(spec):
         bars = bars_by_cell[asset]
         if intraday:
-            rows.append(_observe_intraday(spec, asset, bars, date, entered))
+            rows.append(_observe_intraday(spec, asset, bars, date, entered,
+                                          series_cache=series_cache))
             continue
         if not bars or bars[-1]["date"] != date:
             raise SimulationDataError(f"no {asset} bar for {date}")
@@ -543,7 +586,8 @@ def observe_day(spec: dict, bars_by_cell: dict[str, list[dict]], date: str,
         # D15: the spec's registration version selects the engine path; a
         # legacy sid (no key) keeps the byte-identical version-1 path.
         book = simulate_asset(spec["blocks"], bars, spec["cost_model"],
-                              periods_per_year, version=spec.get("version", 1))
+                              periods_per_year, version=spec.get("version", 1),
+                              series_cache=series_cache, cell=asset)
         pos = book["position"]
         exited = [t for t in book["trades"] if t["exit_date"] == date]
         if exited:
@@ -1021,6 +1065,9 @@ def _record_date(args, registry: Registry, view: QuarantineView,
         data_digests = hash_price_files(args.data_dir, assets)
         pre = _plan_provenance(view, args.date, ready, specs, bars_digests,
                                data_digests)
+        # engine perf s3.3: the run's one series cache (shared by catch-up's
+        # dates); None only when a test disables it
+        series_cache = _series_cache(args.registry)
         # a refusal simulates nothing; the plan under the lock refuses again
         # (ruling R7)
         for sid in ([] if pre.refusal else pre.ready):
@@ -1041,7 +1088,7 @@ def _record_date(args, registry: Registry, view: QuarantineView,
                 rows_by_sid[sid] = [
                     validated_quarantine_decision(row) for row in
                     observe_day(specs[sid], bars_by_asset, args.date,
-                                entered[sid])]
+                                entered[sid], series_cache=series_cache)]
             except SimulationDataError as exc:
                 sim_failed[sid] = str(exc)
                 print(f"{sid}  deferred: simulation failed: {exc}")

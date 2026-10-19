@@ -1100,3 +1100,116 @@ def test_a_later_normal_run_recomputes_and_drops_recovered_sids(tmp_path):
     st = _status(tmp_path)
     assert st["deferred"] == {} and st["deferred_since"] == {}               # the recovered sid is gone
     assert st["deferrals_not_computed"] is False
+
+
+# ---- engine perf Task 4: the service READS the series cache, never writes ----
+# (docs/2026-10-17-engine-perf-design.md "Calls made by the designer", Q2:
+# its synthetic next bar must never reach the disk)
+
+TREND_SPEC = {
+    "strategy_id": "7e57000000000001", "version": 2,
+    "universe": {"asset_class": "crypto", "assets": ["BTCUSD"],
+                 "session": "24x7", "timeframe": "1d"},
+    "blocks": [
+        {"role": "entry", "type": "trend_scan_dense",
+         "params": {"max_lookback": 60, "t_min": 2.0, "direction": "both"}},
+        {"role": "filter", "type": "vol_percentile_dense",
+         "params": {"lookback": 90, "max_pctile": 1.0}},
+        {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 3.0}},
+        {"role": "exit", "type": "tstat_decay",
+         "params": {"max_lookback": 60, "t_exit": 0.5}},
+        {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}],
+    "cost_model": {"commission_per_side": 0.001, "slippage_ticks": 0.0005},
+}
+
+
+def _trend_layer(root: Path):
+    from pipeline.test_engine_perf import walk_bars
+    root.mkdir()
+    reg = Registry(root / "registry_log.jsonl")
+    reg.append("strategy_registered", TREND_SPEC)
+    _walk(reg, TREND_SPEC["strategy_id"], "quarantine")
+    data = root / "data"
+    data.mkdir()
+    d0 = dt.date(2025, 1, 1)
+    bars = [dict(b, date=(d0 + dt.timedelta(days=i)).isoformat())
+            for i, b in enumerate(walk_bars(700))]
+    _write_csv(data / "BTCUSD_1d.csv", bars)
+    return reg, data, bars
+
+
+class _FrozenNow(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc)
+
+
+def test_signal_service_never_writes_the_cache(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from pipeline import series_cache as series_cache_module
+    from pipeline.series_cache import CACHE_DIRNAME, SeriesCache
+    # written_utc is the one field two runs would differ on
+    monkeypatch.setattr(S, "dt", SimpleNamespace(
+        date=dt.date, timedelta=dt.timedelta, timezone=dt.timezone,
+        datetime=_FrozenNow))
+    made = []
+
+    class Spy(SeriesCache):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            made.append(self)
+
+    # run() imports the cache lazily, so the name is patched where it lives
+    monkeypatch.setattr(series_cache_module, "SeriesCache", Spy)
+    reg_c, data_c, bars = _trend_layer(tmp_path / "cached")
+    reg_n, data_n, _ = _trend_layer(tmp_path / "uncached")
+    # prefilled as the quarantine recorder leaves it: the real bars, no
+    # synthetic one, written under the bare-asset cell key
+    cache_dir = reg_c.log_path.parent / CACHE_DIRNAME
+    served = S.parse_daily_csv((data_c / "BTCUSD_1d.csv").read_bytes())
+    prefill = SeriesCache(cache_dir)
+    simulate_asset(TREND_SPEC["blocks"], served, TREND_SPEC["cost_model"], 365,
+                   version=2, series_cache=prefill, cell="BTCUSD")
+    assert prefill.stats["misses"] == 5 + 2       # 5 windows + vol + pctile
+    before = _tree(cache_dir)
+    as_of = _next(bars)
+
+    def argv(root, reg, data):
+        return ["--registry", str(reg.log_path), "--data-dir", str(data),
+                "--out-dir", str(root / "logs" / "signals"), "--as-of", as_of]
+
+    assert S.run(argv(tmp_path / "cached", reg_c, data_c)) == 0
+    assert S.run(argv(tmp_path / "uncached", reg_n, data_n)) == 0
+
+    # the listing (names AND bytes) is unchanged, and no cache dir appeared
+    # where there was none
+    assert _tree(cache_dir) == before
+    assert not (reg_n.log_path.parent / CACHE_DIRNAME).exists()
+    # read-only, opened on <registry dir>/seriescache, and really read: the
+    # synthetic bar extended the stored series in memory only
+    assert [c.read_only for c in made] == [True, True]
+    assert made[0].directory == cache_dir
+    assert made[0].stats["misses"] == 0 and made[0].stats["extends"] > 0
+    assert made[1].stats["misses"] > 0
+    name = f"targets-{bars[-1]['date']}.json"
+    cached = (tmp_path / "cached" / "logs" / "signals" / name).read_bytes()
+    uncached = (tmp_path / "uncached" / "logs" / "signals" / name).read_bytes()
+    assert cached == uncached
+    doc = json.loads(cached)
+    assert set(doc["strategies"]) == {TREND_SPEC["strategy_id"]}
+    assert doc["strategies"][TREND_SPEC["strategy_id"]]["assets"]["BTCUSD"] == \
+        S.next_bar_position(TREND_SPEC, served)
+
+
+def test_importing_the_signal_service_does_not_load_the_series_cache():
+    """The service did not import numpy before the engine-perf branch; the
+    cache (which does) is imported inside run(), so importing the module still
+    loads neither. Nothing else it imports pulls numpy, so both are asserted."""
+    layer = Path(__file__).resolve().parent.parent
+    code = ("import pipeline.signal_service, sys; "
+            "print('numpy' in sys.modules, "
+            "'pipeline.series_cache' in sys.modules)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=layer,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["False", "False"], r.stdout + r.stderr

@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import cells
 from .engine import run_spec, exit_reason_counts
@@ -22,7 +23,10 @@ from .plateau import annualized_sharpe, TRADING_DAYS
 from .perturb import sensitivity
 from .walkforward import walkforward_report
 from .regime import regime_by_date, regime_split
-from .bars import daily_marks, daily_bars
+from .bars import daily_marks, daily_bars, bars_per_day, IntradayUnsupported
+
+if TYPE_CHECKING:                       # annotation only; the worker opens it
+    from .series_cache import SeriesCache
 
 PROTOCOL_V61 = "gauntlet-protocol-v6.1"
 DECAY_MIN_PCT = -25.0
@@ -364,7 +368,8 @@ def evaluate_gates(is_trades, oos_trades, stress_oos_trades, is_vol: float,
 
 
 def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
-                        perturb: bool, *, record_benchmark: bool = True) -> dict:
+                        perturb: bool, *, record_benchmark: bool = True,
+                        series_cache: SeriesCache | None = None) -> dict:
     """One candidate, end to end, from its own bars only: the verdict and
     every per-strategy metric _evaluate_candidate records, minus the group
     ones (plateau_ok, haircut, trials, sibling_group_n, sim_cache,
@@ -379,10 +384,17 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     tools/daily_parity.py), which re-run REGISTERED specs: every pre-switch
     crypto strategy (533 at 2026-10-17, all pooled BTCUSD+ETHUSD) was judged
     while crypto's benchmark was None, so their chained verdicts carry no control and re-judging them must
-    not try to compute one. It changes nothing else in the result."""
+    not try to compute one. It changes nothing else in the result.
+
+    series_cache (engine perf s3.3): ONE cache handed to EVERY run_spec here
+    (base, stressed, each perturbation), so a variant that changes only a
+    cost or a threshold recomputes no indicator series, and the gauntlet
+    worker's disk cache carries them across candidates on one cell. None =
+    each run_spec makes its own private memory-only cache, as before.
+    Bit-identical either way."""
     sid = spec["strategy_id"]
-    res = run_spec(spec, spec_bars)
-    stress_res = run_spec(stressed(spec), spec_bars)
+    res = run_spec(spec, spec_bars, series_cache=series_cache)
+    stress_res = run_spec(stressed(spec), spec_bars, series_cache=series_cache)
     is_t, oos_t = split_trades(res["trades"], cutoff)
     _, stress_oos = split_trades(stress_res["trades"], cutoff)
     assets = spec["universe"]["assets"]
@@ -413,7 +425,7 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
         window="train")
     if perturb:
         def _score(pspec):
-            r = run_spec(pspec, spec_bars)
+            r = run_spec(pspec, spec_bars, series_cache=series_cache)
             return annualized_sharpe([(d, v) for d, v in r["equity"]
                                       if _date_le(d, cutoff)])
         metrics["perturbation"] = sensitivity(spec, train_sharpe, _score,
@@ -435,6 +447,41 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
 # chunk has run; after that the measured rate rules. 20 s is the 2026-09-01
 # fx cycle's observed wall per candidate (~150 min / 499), rounded up.
 GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
+# The prior per timeframe (engine perf Task 5). A 1h candidate simulates 24x
+# the bars of a 1d one, so one flat 20 s prior would let the first 1h chunk
+# through a deadline it cannot meet. The worker keeps the MEASURED rate per
+# timeframe too (DeadlineBudget key=tf); this is only the answer before the
+# first chunk of that timeframe has run. "1d" is the legacy prior above and
+# GAUNTLET_PRIOR_S_PER_CANDIDATE stays its alias, so gauntlet.py is unchanged.
+PRIOR_S_BY_TF = {
+    "1d": GAUNTLET_PRIOR_S_PER_CANDIDATE,
+    # MEASURED 2026-10-19 (engine perf Task 7): one 1h gauntlet candidate
+    # through the worker's path (evaluate_standalone, perturb=True, a fresh
+    # empty disk SeriesCache), the heaviest class (trend_scan_dense +
+    # vol_percentile_dense + vol_target, BTCUSDT, 78,732 bars): 69.9 s cold
+    # (a second cold run of the same spec: 69.0 s; the other 1h twins 10.9 to
+    # 66.8 s). Rounded up to the next 10 s. The 2026-10-10 rehearsal's ~940 s
+    # was the pre-change engine on the same class. Warm: 16 s.
+    "1h": 70.0,
+}
+
+
+def prior_s_for(tf: str) -> float:
+    """Seconds per candidate to assume before a chunk of `tf` has run: a
+    measured entry if PRIOR_S_BY_TF has one, else the 1h prior scaled by bars
+    per day (15m = 4x the 1h prior, 12h = 1/12), never below the 1d prior."""
+    floor = PRIOR_S_BY_TF["1d"]
+    if tf in PRIOR_S_BY_TF:
+        return float(PRIOR_S_BY_TF[tf])
+    try:
+        # intraday is 24x7-only, so any other session cannot get here; the
+        # session argument only selects the 24x7 table
+        bpd = bars_per_day("24x7", tf)
+    except IntradayUnsupported:
+        # an unknown timeframe: fall back to the 1d prior rather than crash
+        # the budget (such a spec is refused at registration since 2b-3)
+        return float(floor)
+    return max(float(floor), PRIOR_S_BY_TF["1h"] * bpd / 24)
 GAUNTLET_CHUNK_PER_WORKER = 4          # chunk = workers x this
 # Memory envelope for the worker pool (2026-09-03 incident: a worker died
 # with "OpenBLAS error: Memory allocation still failed after 10 retries" and

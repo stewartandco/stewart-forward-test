@@ -393,11 +393,11 @@ def _sim_calls(monkeypatch, fail_on, exc_factory):
     real = quarantine_mod.observe_day
     calls = []
 
-    def wrapped(spec, *x):
+    def wrapped(spec, *x, **k):
         calls.append(spec["strategy_id"])
         if fail_on(spec, len(calls)):
             raise exc_factory()
-        return real(spec, *x)
+        return real(spec, *x, **k)
 
     monkeypatch.setattr(quarantine_mod, "observe_day", wrapped)
     return calls
@@ -660,7 +660,8 @@ def test_a_restated_strategy_is_not_simulated(tmp_path, monkeypatch, capsys):
     simulated = []
     real = quarantine_mod.observe_day
     monkeypatch.setattr(quarantine_mod, "observe_day",
-                        lambda s, *x: simulated.append(s["strategy_id"]) or real(s, *x))
+                        lambda s, *x, **k: simulated.append(s["strategy_id"])
+                        or real(s, *x, **k))
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     assert simulated == [spec["strategy_id"]]
     cap = capsys.readouterr()
@@ -841,6 +842,282 @@ def test_a_repeated_cell_in_one_universe_chains_one_row(tmp_path):
     assert len(rows) == 1 and rows[0]["asset"] == "BTCUSD"
     out = run_verifier(reg.log_path)
     assert out.returncode == 0, out.stdout
+
+
+# ---- engine perf Task 4: the recorder reads and writes the series cache ----
+# (docs/2026-10-17-engine-perf-design.md s3.3: the quarantine recorder is a
+# writer; a cache may only skip work, never change a recorded number)
+
+import os
+import shutil
+import subprocess
+import sys
+from datetime import date as _date, timedelta as _timedelta
+from pathlib import Path
+
+from .series_cache import CACHE_DIRNAME
+
+LAYER = Path(__file__).resolve().parent.parent
+# trend_scan (windows 20..60 step 10) plus a vol_percentile filter, so the
+# recorder touches all three cached kinds (trend_tstat, realized_ann_vol,
+# vol_pctile); max_pctile 1.0 only gates the warm-up
+TREND_BLOCKS = [
+    {"role": "entry", "type": "trend_scan",
+     "params": {"max_lookback": 60, "t_min": 2.0}},
+    {"role": "filter", "type": "vol_percentile",
+     "params": {"lookback": 90, "max_pctile": 1.0}},
+    {"role": "stop", "type": "pct_stop", "params": {"pct": 0.05}},
+    {"role": "exit", "type": "time_stop", "params": {"max_bars": 40}},
+    {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}},
+]
+TREND_WINDOWS = list(range(20, 60 + 1, 10))
+N_TREND_ENTRIES = len(TREND_WINDOWS) + 2      # + realized vol + percentile
+# 566 bars: the walk's book exits on bar 561 (time stop) and re-enters on
+# 562, so the last five dates hold an entry and a held position
+N_TREND_BARS = 566
+
+
+@pytest.fixture
+def fresh_series_caches():
+    quarantine_mod._reset_series_caches()
+    yield
+    quarantine_mod._reset_series_caches()
+
+
+def _trend_bars(n=N_TREND_BARS):
+    from .test_engine_perf import walk_bars
+    d0 = _date(2022, 1, 1)
+    return [dict(b, date=(d0 + _timedelta(days=i)).isoformat())
+            for i, b in enumerate(walk_bars(n))]
+
+
+def _trend_quarantined(root: Path, entered: str):
+    """One trend_scan strategy in quarantine since `entered`, on a BTCUSD
+    random walk (test_engine_perf.walk_bars, re-dated daily from 2022-01-01)."""
+    from .test_screen import screening_registry, write_data_dir
+    root.mkdir(parents=True, exist_ok=True)
+    reg, spec = screening_registry(root, blocks=TREND_BLOCKS)
+    sid = spec["strategy_id"]
+    reg.append("note", {"text": "screen-protocol-v1: test anchor"})
+    reg.record_state_change(sid, "screened", "test")
+    reg.record_verdict(sid, "screened", "pass",
+                       {"trades": 50, "net_pnl": 0.5, "win_rate": 0.5,
+                        "max_dd": -0.1}, "0" * 64)
+    reg.record_state_change(sid, "gauntlet", None)
+    reg.append("note", {"text": "gauntlet-protocol-v3: test anchor"})
+    reg.record_verdict(sid, "gauntlet", "pass", {"deflated_sharpe": 0.5},
+                       "0" * 64)
+    reg.record_state_change(sid, "quarantine", "test",
+                            ts_utc=f"{entered}T00:00:00Z")
+    data = write_data_dir(root, {"BTCUSD": _trend_bars()})
+    return reg, spec, data
+
+
+def _trend_chain_copies(tmp_path, names, entered):
+    """Byte-identical copies of ONE trend chain + data dir (a rebuild would
+    not do: the fixture card's id carries the build time)."""
+    from .registry import Registry
+    reg, spec, data = _trend_quarantined(tmp_path / "base", entered)
+    out = {}
+    for name in names:
+        shutil.copytree(tmp_path / "base", tmp_path / name)
+        out[name] = (Registry(tmp_path / name / reg.log_path.name), spec,
+                     tmp_path / name / data.name)
+    return out
+
+
+def _appended(reg, skip):
+    """(entry_type, payload) of every entry past the first `skip`: ts_utc and
+    the hash links differ between two chains by construction."""
+    return [(e["entry_type"], e["payload"]) for e in list(reg.entries())[skip:]]
+
+
+_COUNT_TSTAT = (
+    "import sys\n"
+    "from pipeline import engine, quarantine\n"
+    "calls = [0]\n"
+    "real = engine.trend_tstat\n"
+    "def counted(w):\n"
+    "    calls[0] += 1\n"
+    "    return real(w)\n"
+    "engine.trend_tstat = counted\n"
+    "rc = quarantine.run(sys.argv[1:])\n"
+    "print(f'TSTAT_CALLS {calls[0]} RC {rc}')\n")
+
+
+def _record_in_a_new_process(reg, data, date):
+    """`--date` in a fresh interpreter: nothing survives from this process's
+    caches, so whatever it reuses came from the disk."""
+    r = subprocess.run([sys.executable, "-c", _COUNT_TSTAT,
+                        *argv_for(reg, data, "--date", date)],
+                       cwd=LAYER, capture_output=True, text=True, timeout=600)
+    lines = r.stdout.strip().splitlines()
+    assert lines and lines[-1].startswith("TSTAT_CALLS"), r.stdout + r.stderr
+    _, calls, _, rc = lines[-1].split()
+    return int(calls), int(rc)
+
+
+def test_quarantine_second_run_reuses_the_series(tmp_path, fresh_series_caches):
+    bars = _trend_bars()
+    entered, d1, d2 = bars[-5]["date"], bars[-3]["date"], bars[-2]["date"]
+    chains = _trend_chain_copies(tmp_path, ("warm", "cold"), entered)
+    warm_reg, spec, warm_data = chains["warm"]
+    cold_reg, _, cold_data = chains["cold"]
+    for reg, data in ((warm_reg, warm_data), (cold_reg, cold_data)):
+        assert quarantine_run(argv_for(reg, data, "--date", d1)) == 0
+    cache_dir = warm_reg.log_path.parent / CACHE_DIRNAME
+    assert len(list(cache_dir.glob("*.npz"))) == N_TREND_ENTRIES
+    shutil.rmtree(cold_reg.log_path.parent / CACHE_DIRNAME)
+    n_warm, n_cold = len(list(warm_reg.entries())), len(list(cold_reg.entries()))
+
+    warm_calls, warm_rc = _record_in_a_new_process(warm_reg, warm_data, d2)
+    cold_calls, cold_rc = _record_in_a_new_process(cold_reg, cold_data, d2)
+
+    assert warm_rc == 0 and cold_rc == 0
+    k = len(bars) - 1                       # bars on or before d2
+    # the second run computes ONLY d2's bar, once per window
+    assert warm_calls == len(TREND_WINDOWS)
+    # the cold run really recomputes from bar 0 (the count above has teeth)
+    assert cold_calls == sum(k - w + 1 for w in TREND_WINDOWS)
+    rows = _appended(warm_reg, n_warm)
+    held = [p for t, p in rows if t == "quarantine_decision"]
+    assert [p["date"] for p in held] == [d2] and held[0]["position_frac"] > 0
+    assert rows == _appended(cold_reg, n_cold)
+
+
+def test_quarantine_results_identical_with_a_cold_and_a_warm_cache(
+        tmp_path, monkeypatch, fresh_series_caches):
+    """The same date on three chain copies: no cache dir (cold), a cache
+    prefilled from LONGER bars than the date sees (warm: every series served
+    as a prefix of a longer entry), and the cache disabled outright (the
+    pre-Task-4 path). The chained payloads are equal."""
+    from .engine import simulate_asset
+    from .series_cache import SeriesCache
+    bars = _trend_bars()
+    entered, d = bars[-5]["date"], bars[-3]["date"]
+    chains = _trend_chain_copies(tmp_path, ("cold", "warm", "off"), entered)
+    warm_reg, spec, _ = chains["warm"]
+    prefill = SeriesCache(warm_reg.log_path.parent / CACHE_DIRNAME)
+    simulate_asset(spec["blocks"], bars, spec["cost_model"],
+                   series_cache=prefill, cell="BTCUSD")
+    assert prefill.stats["misses"] == N_TREND_ENTRIES
+
+    got, stats = {}, {}
+    for name in ("cold", "warm", "off"):
+        reg, _, data = chains[name]
+        n = len(list(reg.entries()))
+        quarantine_mod._reset_series_caches()      # each run as its own process
+        if name == "off":
+            monkeypatch.setattr(quarantine_mod, "_series_cache",
+                                lambda registry_path: None)
+        assert quarantine_run(argv_for(reg, data, "--date", d)) == 0
+        got[name] = _appended(reg, n)
+        if name != "off":
+            stats[name] = quarantine_mod._series_cache(reg.log_path).stats
+    # not vacuous: the date is held in a position, so equity is rebased
+    held = [p for t, p in got["cold"] if t == "quarantine_decision"]
+    assert held and held[0]["position_frac"] > 0 and held[0]["equity"] != 1.0
+    assert got["warm"] == got["cold"] == got["off"]
+    # the warm run was served from the prefilled entries, never recomputed
+    assert stats["warm"]["misses"] == 0 and stats["warm"]["hits"] > 0
+    assert stats["cold"]["misses"] == N_TREND_ENTRIES
+    # the disabled run wrote nothing
+    assert not (chains["off"][0].log_path.parent / CACHE_DIRNAME).exists()
+
+
+def test_one_cache_per_registry_dir_per_process(tmp_path, fresh_series_caches):
+    a = quarantine_mod._series_cache(tmp_path / "x" / "registry_log.jsonl")
+    b = quarantine_mod._series_cache(tmp_path / "x" / "registry_log.jsonl")
+    c = quarantine_mod._series_cache(tmp_path / "y" / "registry_log.jsonl")
+    assert a is b and a is not c
+    assert a.directory == (tmp_path / "x" / CACHE_DIRNAME).resolve()
+    assert not a.read_only
+    quarantine_mod._reset_series_caches()
+    assert quarantine_mod._series_cache(tmp_path / "x" / "registry_log.jsonl") is not a
+
+
+def test_catch_up_records_every_date_through_one_cache(
+        tmp_path, monkeypatch, fresh_series_caches):
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    seen = []
+    real = quarantine_mod.observe_day
+
+    def spy(spec, bars_by_cell, date, entered, *, series_cache=None):
+        seen.append(series_cache)
+        return real(spec, bars_by_cell, date, entered, series_cache=series_cache)
+
+    monkeypatch.setattr(quarantine_mod, "observe_day", spy)
+    assert _catch_up(reg, data) == 0
+    assert len(seen) == 4 and seen[0] is not None
+    assert all(s is seen[0] for s in seen)
+    rows = sorted(decisions(reg), key=lambda r: r["date"])
+    assert [r["date"] for r in rows] == [b["date"] for b in bars[-4:]]
+    assert rows[0]["action"] == "enter_long"
+
+
+def test_the_recorder_prunes_the_cache_once_per_run_before_the_first_date(
+        tmp_path, monkeypatch, fresh_series_caches, capsys):
+    """Ledger ruling (s3.3 "prunable"): ONE prune per process run, on the
+    cache the recorder builds, before any date is simulated -- even across a
+    multi-date catch-up -- and a line printed only when something went."""
+    from .series_cache import SeriesCache
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    cache_dir = reg.log_path.parent / CACHE_DIRNAME
+    cache_dir.mkdir()
+    leftover = cache_dir / "ab.npz.1.deadbeef.tmp"
+    leftover.write_bytes(b"x")
+    os.utime(leftover, (1.0, 1.0))                  # a killed writer, long ago
+    events = []
+    real_prune, real_observe = SeriesCache.prune, quarantine_mod.observe_day
+
+    def prune_spy(self, **kw):
+        events.append("prune")
+        return real_prune(self, **kw)
+
+    def observe_spy(*a, **kw):
+        events.append("observe")
+        return real_observe(*a, **kw)
+
+    monkeypatch.setattr(SeriesCache, "prune", prune_spy)
+    monkeypatch.setattr(quarantine_mod, "observe_day", observe_spy)
+    assert _catch_up(reg, data) == 0
+    assert events.count("observe") == 4 and events.count("prune") == 1
+    assert events[0] == "prune"                     # before the first date
+    assert not leftover.exists()
+    out = capsys.readouterr().out
+    assert out.count("seriescache: pruned") == 1
+    assert "1 tmp" in out
+
+
+def test_the_recorder_prints_nothing_when_a_prune_removes_nothing(
+        tmp_path, fresh_series_caches, capsys):
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    assert _catch_up(reg, data) == 0
+    assert "seriescache: pruned" not in capsys.readouterr().out
+
+
+def test_an_intraday_cell_is_cached_under_its_cell_key(monkeypatch):
+    calls = []
+
+    def fake_sim(blocks, bars, cost_model, ppy, **kw):
+        calls.append(kw)
+        return {"position": None, "trades": [], "equity": [1.0] * len(bars)}
+
+    monkeypatch.setattr(quarantine_mod, "simulate_asset", fake_sim)
+    spec = {"strategy_id": "s", "blocks": [], "cost_model": {},
+            "universe": {"assets": ["BTCUSDT"], "timeframe": "1h",
+                         "session": "24x7", "asset_class": "crypto"}}
+    bars = [{"date": f"{d}T00:00:00Z", "open": 1.0, "high": 1.0,
+             "low": 1.0, "close": 1.0, "volume": 1.0}
+            for d in ("2022-12-31", "2023-01-01")]
+    marker = object()
+    quarantine_mod._observe_intraday(spec, "BTCUSDT@1h", bars, "2023-01-01",
+                                     "2022-12-31", series_cache=marker)
+    assert calls[-1]["series_cache"] is marker
+    assert calls[-1]["cell"] == "BTCUSDT@1h"
 
 
 # ---- A3 (2026-10-17, Coen): SimulationDataError + deferred-only dates ----

@@ -8,9 +8,16 @@ signals on close t, fills at open t+1; warmup enforced; same-bar stop+target
 from __future__ import annotations
 
 import math
+from array import array
+from bisect import bisect_left, bisect_right, insort
+from typing import TYPE_CHECKING, Callable
 
 from . import bars as _bars
 from . import cells
+from . import qcells
+
+if TYPE_CHECKING:                       # series_cache imports ENGINE_REV from here
+    from .series_cache import SeriesCache
 
 # SP4 Task P4: bumped by hand on ANY change to this module that can alter a
 # simulated number (trade fills, equity, sizing) -- never on a comment-only
@@ -91,6 +98,31 @@ def trend_tstat(window_closes: list[float]) -> float:
     return slope / se
 
 
+def trend_tstat_series(closes: list[float], w: int, cache: SeriesCache,
+                       cell: str | None) -> list[float | None]:
+    """Engine perf (docs/2026-10-17-engine-perf-design.md s3.1): the per-bar
+    trend t-stat over a window of `w` closes, computed once per (cell, w,
+    bar). Element i is exactly `trend_tstat(closes[i-w+1:i+1])` -- the same
+    call on the same slice the direct path makes -- for i >= w-1, None before.
+    The cache only skips work (an exact-input prefix it already holds); it
+    never computes a value differently."""
+    def compute(start: int, stop: int) -> list:
+        return [trend_tstat(closes[i - w + 1:i + 1]) if i >= w - 1 else None
+                for i in range(start, stop)]
+    return cache.get("trend_tstat", (w,), cell, array("d", closes), compute)
+
+
+def _best_tstat(closes: list[float], i: int, windows: list[int],
+                series: list[list] | None) -> float:
+    """max |t| over `windows` at bar i, ties to the FIRST window in ascending
+    order (max's rule). series None = the direct reference path, one
+    trend_tstat call per window; otherwise series[k] is windows[k]'s shared
+    per-bar series (trend_tstat_series), read in the same order."""
+    if series is None:
+        return max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows), key=abs)
+    return max((s[i] for s in series), key=abs)
+
+
 def realized_ann_vol(closes: list[float], n: int, periods_per_year: int = 365) -> list:
     """Annualized stdev of daily log returns over n returns.
 
@@ -118,12 +150,97 @@ def percentile_rank(values: list[float], i: int, window: int) -> float | None:
     return sum(1 for v in win if v <= values[i]) / len(win)
 
 
+def vol_percentile_series(vol: list[float | None], window: int, *,
+                          start: int = 0, stop: int | None = None) -> list[float | None]:
+    """Engine perf (docs/2026-10-17-engine-perf-design.md s3.2): element k is
+    exactly `percentile_rank(vol, start + k, window)` for bars [start, stop),
+    without rescanning the window per bar. The trailing window's values are
+    kept sorted, so `bisect_right` gives the same integer count of
+    `v <= vol[i]` that percentile_rank's sum does, divided by `window` (=
+    len(win) whenever a value is returned): the same int / int -> the same
+    float. Same None rule: a window reaching before bar 0 or holding any None
+    -> None. A window holding a NaN falls back to percentile_rank for that
+    bar (a NaN breaks the sorted order; Review Focus 2). +/-inf order under
+    bisect exactly as under `<=`. Bar i reads vol[:i+1] only, so a [start,
+    stop) slice equals the full pass's (the series cache's extend)."""
+    stop = len(vol) if stop is None else stop
+    if window < 1:                      # percentile_rank's own behaviour (it raises)
+        return [percentile_rank(vol, i, window) for i in range(start, stop)]
+    # bar start-1's window: the loop adds vol[i] and drops vol[i - window]
+    head = vol[max(start - window, 0):start]
+    nones = sum(1 for v in head if v is None)
+    nans = sum(1 for v in head if v is not None and v != v)
+    win = sorted(v for v in head if v is not None and v == v)
+    out: list[float | None] = []
+    for i in range(start, stop):
+        v = vol[i]
+        if v is None:
+            nones += 1
+        elif v != v:
+            nans += 1
+        else:
+            insort(win, v)
+        j = i - window                  # the value leaving the window
+        if j >= 0:
+            u = vol[j]
+            if u is None:
+                nones -= 1
+            elif u != u:
+                nans -= 1
+            else:
+                del win[bisect_left(win, u)]
+        if j + 1 < 0 or nones:
+            out.append(None)
+        elif nans:
+            out.append(percentile_rank(vol, i, window))
+        else:
+            out.append(bisect_right(win, v) / window)
+    return out
+
+
+# The gate's realized vol has always been `realized_ann_vol(closes, lookback)`:
+# its default periods_per_year in every session and timeframe. Kept, and named
+# in the cache key.
+GATE_VOL_PERIODS_PER_YEAR = 365
+
+
+def gate_vol_series(closes: list[float], lookback: int, cache: SeriesCache,
+                    cell: str | None) -> list[float | None]:
+    """Engine perf s3.3: the vol_percentile gate's realized vol, element for
+    element `realized_ann_vol(closes, lookback)` (the gate's call, unchanged),
+    through the series cache. Bar i reads returns i-lookback+1..i only, so
+    the tail [start, stop) is computed by the same function on closes from
+    start - lookback: the same returns in the same order, the same floats."""
+    def compute(start: int, stop: int) -> list:
+        a = max(start - max(lookback, 0), 0)
+        return realized_ann_vol(closes[a:stop], lookback)[start - a:]
+    return cache.get("realized_ann_vol", (lookback, GATE_VOL_PERIODS_PER_YEAR), cell,
+                     array("d", closes), compute)
+
+
+def vol_percentile_gate_series(closes: list[float], lookback: int, window: int,
+                               cache: SeriesCache, cell: str | None) -> list[float | None]:
+    """The gate's percentile series, element for element
+    `percentile_rank(realized_ann_vol(closes, lookback), i, window)`, through
+    the series cache. A hit never touches the vol series."""
+    def compute(start: int, stop: int) -> list:
+        vol = gate_vol_series(closes, lookback, cache, cell)
+        return vol_percentile_series(vol, window, start=start, stop=stop)
+    return cache.get("vol_pctile", (lookback, window), cell, array("d", closes), compute)
+
+
 # ---------------- entry signals + gates ------------------------------------
 
-def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
+def entry_signals(block: dict, bars: list[dict], *,
+                  tstat: Callable[[int], list] | None = None) -> tuple[list[int], list[int]]:
     """Per-bar entry signal (+1 long, -1 short, 0 none), evaluated on close.
     Also returns a per-bar desired-state list (used by ma_cross signal exits;
-    zeros for stateless entries). Warmup bars emit 0."""
+    zeros for stateless entries). Warmup bars emit 0.
+
+    `tstat(w)` (engine perf s3.1) returns window w's per-bar trend t-stat
+    series over these bars' closes (trend_tstat_series); the trend_scan*
+    types read it instead of recomputing. None = the direct path, kept as the
+    reference implementation: same values, bit for bit."""
     p = block["params"]
     closes = [b["close"] for b in bars]
     n = len(bars)
@@ -164,9 +281,10 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
 
     elif block["type"] == "trend_scan":
         windows = list(range(20, p["max_lookback"] + 1, 10))
-        for i in range(max(windows) - 1, n):
-            best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows),
-                       key=abs)
+        first = max(windows) - 1        # empty windows raise HERE, as before
+        series = None if tstat is None else [tstat(w) for w in windows]
+        for i in range(first, n):
+            best = _best_tstat(closes, i, windows, series)
             if best >= p["t_min"]:
                 sig[i] = 1
 
@@ -174,9 +292,10 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
         windows = list(range(20, p["max_lookback"] + 1, 10))
         allow_long = p["direction"] in ("long", "both")
         allow_short = p["direction"] in ("short", "both")
-        for i in range(max(windows) - 1, n):
-            best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows),
-                       key=abs)
+        first = max(windows) - 1        # empty windows raise HERE, as before
+        series = None if tstat is None else [tstat(w) for w in windows]
+        for i in range(first, n):
+            best = _best_tstat(closes, i, windows, series)
             if allow_long and best >= p["t_min"]:
                 sig[i] = 1
             elif allow_short and best <= -p["t_min"]:
@@ -199,12 +318,23 @@ def entry_signals(block: dict, bars: list[dict]) -> tuple[list[int], list[int]]:
     return sig, state
 
 
-def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1) -> list[bool]:
+def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1, *,
+              series_cache: SeriesCache | None = None, cell: str | None = None,
+              _reference: bool = False) -> list[bool]:
     """AND of all regime/filter blocks; False during any gate's warmup.
 
     The vol_percentile window is one year of DAILY bars scaled by
     `bars_per_day` (365 * bars_per_day; Ruling R2), never bars-per-year, so a
     1d strategy keeps 365 in every session (fx included).
+
+    Engine perf (docs/2026-10-17-engine-perf-design.md s3.2-3.3): the
+    vol_percentile series comes from vol_percentile_gate_series through
+    `series_cache` keyed by `cell` (None = memory-only); with
+    `series_cache=None` a private memory-only SeriesCache is made, and only
+    when a vol_percentile gate exists. Bit-identical either way.
+    `_reference` is TEST-ONLY: True forces the direct path (realized_ann_vol
+    plus percentile_rank per bar), the reference the tests compare against.
+    Never pass it in production code.
     """
     closes = [b["close"] for b in bars]
     n = len(bars)
@@ -221,10 +351,20 @@ def gate_mask(gates: list[dict], bars: list[dict], bars_per_day: int = 1) -> lis
             for i in range(n):
                 if ma[i] is None or closes[i] >= ma[i]:
                     mask[i] = False
-        elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
+        elif g["type"] in ("vol_percentile", "vol_percentile_dense") and _reference:
             vol = realized_ann_vol(closes, p["lookback"])
             for i in range(n):
                 r = percentile_rank(vol, i, 365 * bars_per_day)
+                if r is None or r > p["max_pctile"]:
+                    mask[i] = False
+        elif g["type"] in ("vol_percentile", "vol_percentile_dense"):
+            if series_cache is None:
+                from .series_cache import SeriesCache   # deferred: it imports ENGINE_REV
+                series_cache = SeriesCache()
+            pct = vol_percentile_gate_series(closes, p["lookback"], 365 * bars_per_day,
+                                             series_cache, cell)
+            for i in range(n):
+                r = pct[i]
                 if r is None or r > p["max_pctile"]:
                     mask[i] = False
         else:
@@ -341,10 +481,15 @@ def _stop_price(stops: list[dict], bars: list[dict], entry_px: float, side: int,
 
 
 def signal_exit(block: dict, bars: list[dict], closes: list[float], i: int,
-                side: int, series: dict) -> bool:
+                side: int, series: dict, *,
+                tstat: Callable[[int], list] | None = None) -> bool:
     """D15 indicator-EVENT exit evaluated on close i for a position of `side`.
     True means: exit at the open of bar i+1 (the caller fills it). False
-    during the indicator's warmup."""
+    during the indicator's warmup.
+
+    `tstat` as in entry_signals: tstat_decay reads the shared per-window
+    series over THIS block's own windows (a window the entry already computed
+    is served, not recomputed); None = the direct reference path."""
     p, t = block["params"], block["type"]
     if t == "ma_crossunder":
         f = series[("sma", p["fast"])][i]
@@ -370,7 +515,8 @@ def signal_exit(block: dict, bars: list[dict], closes: list[float], i: int,
         windows = list(range(20, p["max_lookback"] + 1, 10))
         if i < max(windows) - 1:
             return False
-        best = max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows), key=abs)
+        best = _best_tstat(closes, i, windows,
+                           None if tstat is None else [tstat(w) for w in windows])
         return (best <= p["t_exit"]) if side == 1 else (best >= -p["t_exit"])
     if t == "regime_flip":
         ma = series[("sma", p["ma_len"])][i]
@@ -391,8 +537,21 @@ def exit_reason_counts(trades: list[dict]) -> dict[str, int]:
 
 def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
                    periods_per_year: int = 365, *, version: int = 1,
-                   bars_per_day: int = 1) -> dict:
+                   bars_per_day: int = 1, series_cache: SeriesCache | None = None,
+                   cell: str | None = None, _reference: bool = False) -> dict:
     """Run one asset's book.
+
+    Engine perf (docs/2026-10-17-engine-perf-design.md s3.1): the trend
+    t-stat series are fetched once per window and shared by the trend_scan*
+    entry and every tstat_decay exit, through `series_cache` keyed by `cell`
+    (qcells.cell_key; None = memory-only). With `series_cache=None` a private
+    memory-only SeriesCache serves this call alone. Results are bit-identical
+    either way: the cache only skips recomputing a value. The same cache and
+    cell serve gate_mask's vol_percentile series (s3.2-3.3).
+    `_reference` is TEST-ONLY: True forces the direct trend_tstat path
+    (`tstat=None`) in entry_signals and signal_exit, and gate_mask's direct
+    vol_percentile path, the reference the tests compare against. Never pass
+    it in production code.
 
     `version` is the spec's registration version (D15 exit rules v7):
       * 1 (default, and every spec without the key) -- the legacy path, kept
@@ -449,13 +608,29 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
         time_stops = []
         signal_exits = exits
 
-    sig, state = entry_signals(entry, bars)
-    mask = gate_mask(gates, bars, bars_per_day) if gates else [True] * len(bars)
+    closes = [b["close"] for b in bars]
+    # engine perf s3.1: one series per window per call, served from the cache
+    # (computed on first use only, so a spec with no trend block costs nothing)
+    tstat_memo: dict = {}
+
+    def tstat(w: int) -> list:
+        nonlocal series_cache
+        s = tstat_memo.get(w)
+        if s is None:
+            if series_cache is None:
+                from .series_cache import SeriesCache   # deferred: it imports ENGINE_REV
+                series_cache = SeriesCache()
+            s = tstat_memo[w] = trend_tstat_series(closes, w, series_cache, cell)
+        return s
+    tstat_fn = None if _reference else tstat
+
+    sig, state = entry_signals(entry, bars, tstat=tstat_fn)
+    mask = (gate_mask(gates, bars, bars_per_day, series_cache=series_cache, cell=cell,
+                      _reference=_reference) if gates else [True] * len(bars))
     atr_series = {}
     for s in stops:
         if s["type"] in ("atr_stop", "atr_stop_dense"):
             atr_series[(s["params"]["atr_len"],)] = atr_wilder(bars, s["params"]["atr_len"])
-    closes = [b["close"] for b in bars]
     # D15: the sma/stdev series the new stops and exits read, once per spec
     ind_series = {} if legacy else _indicator_series(stops + signal_exits, closes)
     vol_series = (realized_ann_vol(closes, risk["params"]["lookback"], periods_per_year)
@@ -566,7 +741,8 @@ def simulate_asset(blocks: list[dict], bars: list[dict], cost_model: dict,
         if not legacy and pos is not None:
             pos["exit_pending"] = None
             for x in signal_exits:
-                if signal_exit(x, bars, closes, i, pos["side"], ind_series):
+                if signal_exit(x, bars, closes, i, pos["side"], ind_series,
+                               tstat=tstat_fn):
                     pos["exit_pending"] = f"signal:{x['type']}"
                     break
 
@@ -590,10 +766,17 @@ def max_drawdown(curve: list[float]) -> float:
     return dd
 
 
-def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
+def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]], *,
+             series_cache: SeriesCache | None = None) -> dict:
     """Run a strategy spec: one independent equal-capital book per universe
     asset, combined by mean. Returns {trades, equity, metrics}; equity is
-    [(date, combined_equity)] over the shortest common calendar."""
+    [(date, combined_equity)] over the shortest common calendar.
+
+    `series_cache` (engine perf s3.1): pass ONE SeriesCache to every variant
+    of a spec run on the same bars (the gauntlet's perturbations) and a
+    variant that changes only e.g. `t_min` recomputes no trend t-stat. Each
+    asset's series is keyed by its cell, qcells.cell_key(asset, tf). None =
+    a private memory-only cache per asset, as before in cost and result."""
     # Spec s10 item 4: periods_per_year is derived from the universe's
     # session via the class registry (crypto 24x7 -> 365, fx_5d -> 261);
     # an unrecognised/missing session falls back to 365 (today's behaviour).
@@ -609,7 +792,9 @@ def run_spec(spec: dict, bars_by_asset: dict[str, list[dict]]) -> dict:
     for asset in spec["universe"]["assets"]:
         books[asset] = simulate_asset(spec["blocks"], bars_by_asset[asset],
                                       spec["cost_model"], periods_per_year,
-                                      version=version, bars_per_day=bars_per_day)
+                                      version=version, bars_per_day=bars_per_day,
+                                      series_cache=series_cache,
+                                      cell=qcells.cell_key(asset, tf))
     n = min(len(bars_by_asset[a]) for a in books)
     dates = [bars_by_asset[next(iter(books))][i]["date"] for i in range(n)]
     for a in books:
