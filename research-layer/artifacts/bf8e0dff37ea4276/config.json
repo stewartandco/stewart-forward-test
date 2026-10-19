@@ -1,0 +1,103 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "15888ab7768dc88f51a20c250ca425720d1e7f437f76934da6c7012752129edc",
+  "EMB_1d": "324a799d0bda75620b4a45e7ee361f5e4314345187e13a5b1c3ce03b853a494d",
+  "HYG_1d": "d4a223edbc57512d014462103f56dce69e3b7d165bf2d3410d120387996e925f",
+  "IEF_1d": "79a1251e3baaf6a6b9e9b6d5e32e57c9e7253a6933f89b7d03758882800bccf6",
+  "LQD_1d": "02a2cf654b90775a91fa06e058210cbf692d4299d3712c446c55efcebc6aaa66",
+  "SHY_1d": "94954c2360902e025a606faf5ce770ee7c3b62dbca1dd6588e6b235982379a4b",
+  "TIP_1d": "9efa73a139b846b646c8d79224c0eea51023e37f9e73b21b741803dfffc41af2",
+  "TLT_1d": "5fe2c563d7717f666b2066a69c311e6181360e44c31c3e87ff69fd55b241123a"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-19T12:23:00Z",
+  "family": "duration_bear_short",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-19-120339-loop-bond_etf"
+  },
+  "name": "LQD 1d duration_bear_short dshort f13 s130 ml100 l20 al14 m3.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "1c11d61fbf10b3a0",
+    "3605eedc183f09ce",
+    "a81e453c981f0c9d",
+    "c7c0e61fc25e8ba1",
+    "e6cc6c4188b35751",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "duration_bear_short-2026-10-19-120339-loop-bond_etf:LQD_1d"
+  },
+  "strategy_id": "bf8e0dff37ea4276",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "LQD"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
