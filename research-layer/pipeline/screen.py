@@ -25,6 +25,7 @@ from collections.abc import Iterable
 from . import commit_list as _commit_list
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id
+from .bars import bars_per_day, IntradayUnsupported
 from .parallel import run_all, CellError
 from .chainlock import ChainLock, ChainLockHeld
 from .registry import Registry, ChainMoved, UnstableEntry, SCREEN_BATCH_MAX
@@ -38,7 +39,58 @@ DEFAULT_CUTOFF = "2023-12-31"
 # judged only until the first chunk has run; the 2026-09-01 fx cycle screened
 # 1,260 specs in ~25 min wall (~1.2 s each) -- 2 s is that, rounded up.
 SCREEN_PRIOR_S_PER_SPEC = 2.0
+# The prior per timeframe (engine perf Task 7, ledger ruling B4). Measured
+# 2026-10-19 on six single-asset twins of crypto 1d specs (the same spec at 1d
+# and at 1h, train bars to the 2023-12-31 cutoff, SpecJob, one process): 1d
+# 0.12 to 1.69 s (mean 0.83), 1h 3.1 to 42.4 s (mean 20.4), 24.6x the 1d cost,
+# so the flat 2.0 s was 10x too low for a 1h spec. "1d" is the legacy prior
+# above (SCREEN_PRIOR_S_PER_SPEC stays its alias); the 1h mean is rounded up to
+# the next 10 s. Judged only until a chunk of that timeframe has run, then the
+# MEASURED rate for that timeframe rules (DeadlineBudget key=tf).
+SCREEN_PRIOR_S_BY_TF = {"1d": SCREEN_PRIOR_S_PER_SPEC, "1h": 30.0}
 SCREEN_CHUNK_PER_WORKER = 8
+
+
+def screen_prior_s_for(tf: str) -> float:
+    """Seconds per spec to assume before a chunk of `tf` has run: the measured
+    entry if SCREEN_PRIOR_S_BY_TF has one, else the 1h prior scaled by bars
+    per day (15m = 4x), never below the 1d prior; an unknown timeframe gets
+    the 1d prior (gauntlet_core.prior_s_for's rule, with the screen's table)."""
+    floor = SCREEN_PRIOR_S_BY_TF["1d"]
+    if tf in SCREEN_PRIOR_S_BY_TF:
+        return float(SCREEN_PRIOR_S_BY_TF[tf])
+    try:
+        bpd = bars_per_day("24x7", tf)
+    except IntradayUnsupported:
+        return float(floor)
+    return max(float(floor), SCREEN_PRIOR_S_BY_TF["1h"] * bpd / 24)
+
+
+def _spec_tf(spec: dict) -> str:
+    """A spec with no declared timeframe is a legacy daily."""
+    return spec["universe"].get("timeframe", "1d")
+
+
+def _job_tf(job: tuple) -> str:
+    return _spec_tf(job[0])
+
+
+def _tf_chunks(jobs: list, size: int) -> list[tuple[str, list]]:
+    """(timeframe, chunk) in jobs' order. A chunk never mixes timeframes: a run
+    of one timeframe is cut every `size`, and a change of timeframe cuts it
+    too. Nothing is reordered, so verdicts chain in the order they always did;
+    an all-1d run gets exactly `_deadline.chunks(jobs, size)`."""
+    size = max(1, int(size))
+    out: list[tuple[str, list]] = []
+    i = 0
+    while i < len(jobs):
+        tf = _job_tf(jobs[i])
+        end = i + 1
+        while end < len(jobs) and end - i < size and _job_tf(jobs[end]) == tf:
+            end += 1
+        out.append((tf, jobs[i:end]))
+        i = end
+    return out
 
 # 2026-10-08 design: screen takes chain.lock only for each batch write. A
 # batch that meets a held lock is kept and retried at the next chunk
@@ -452,7 +504,9 @@ def run(argv: list[str] | None = None) -> int:
 
     budget = _deadline.DeadlineBudget(args.deadline_utc)
     n_specs_total = len(specs)
-    if budget.active and not budget.fits(1, SCREEN_PRIOR_S_PER_SPEC):
+    # the cheapest spec's prior: "not even one fits" means not even that one
+    cheapest_prior_s = min(screen_prior_s_for(_spec_tf(s)) for s in specs)
+    if budget.active and not budget.fits(1, cheapest_prior_s):
         print(f"DEADLINE: {budget.remaining_s():.0f}s remain before {args.deadline_utc}; "
               f"not even one spec fits -- deferring all {n_specs_total} (they stay "
               f"'proposed' and the next run screens them).")
@@ -555,18 +609,19 @@ def run(argv: list[str] | None = None) -> int:
             _sleep(DRAIN_INTERVAL_S)
 
     try:
-        for chunk in _deadline.chunks(jobs, chunk_size):
+        for tf, chunk in _tf_chunks(jobs, chunk_size):
             # the drain reserve is held back only while a batch is pending
             # (the gauntlet worker's reserve_s): stop unless this chunk AND
             # the reserve both fit in what is left
             reserve = DRAIN_RESERVE_S if pending else 0.0
-            if budget.active and (len(chunk) * budget.rate_s(SCREEN_PRIOR_S_PER_SPEC)
+            # the rate is measured, and the prior assumed, per timeframe
+            if budget.active and (len(chunk) * budget.rate_s(screen_prior_s_for(tf), key=tf)
                                   + reserve > (budget.remaining_s() or 0)):
                 stopped_at_deadline = True
                 break
             t_c0 = time.time()
             outcomes = run_all(SpecJob(GATE_MIN_TRADES), chunk, workers=args.workers)
-            budget.record(len(chunk), time.time() - t_c0)
+            budget.record(len(chunk), time.time() - t_c0, key=tf)
             for (spec, _), outcome in zip(chunk, outcomes):
                 if isinstance(outcome, CellError):
                     # a verdict chain must not silently graveyard a spec that

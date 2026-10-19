@@ -366,3 +366,73 @@ def test_dry_run_takes_no_lock_and_writes_nothing(tmp_path):
     finally:
         holder.release()
     assert reg.log_path.read_bytes() == before
+
+
+# ---- engine perf Task 7 (ledger ruling B4): a per-timeframe screen prior ----
+
+def test_screen_prior_for_a_timeframe_is_measured_scaled_and_floored(monkeypatch):
+    t = screen.SCREEN_PRIOR_S_BY_TF
+    assert t["1d"] == screen.SCREEN_PRIOR_S_PER_SPEC == 2.0     # the legacy alias
+    assert screen.screen_prior_s_for("1d") == 2.0
+    assert t["1h"] == 30.0 and screen.screen_prior_s_for("1h") == 30.0
+    assert screen.screen_prior_s_for("15m") == 4 * t["1h"]      # 96 / 24
+    assert screen.screen_prior_s_for("30m") == 2 * t["1h"]
+    assert screen.screen_prior_s_for("4h") == max(2.0, t["1h"] / 4)
+    monkeypatch.setitem(t, "1h", 6.0)
+    assert screen.screen_prior_s_for("12h") == 2.0              # 6/12 floored
+    assert screen.screen_prior_s_for("4h") == 2.0               # 6/4 floored
+    assert screen.screen_prior_s_for("7m") == 2.0               # unknown: never raises
+
+
+def _job(sid, tf):
+    return ({"strategy_id": sid, "universe": {"assets": ["X"], "timeframe": tf}}, {})
+
+
+def test_screen_tf_chunks_never_mix_timeframes_and_keep_order():
+    jobs = [_job(f"d{i}", "1d") for i in range(5)] + [_job(f"h{i}", "1h") for i in range(3)] \
+        + [_job("d5", "1d")]
+    out = screen._tf_chunks(jobs, 4)
+    assert [(tf, [j[0]["strategy_id"] for j in c]) for tf, c in out] == [
+        ("1d", ["d0", "d1", "d2", "d3"]), ("1d", ["d4"]),
+        ("1h", ["h0", "h1", "h2"]), ("1d", ["d5"])]
+    assert [j for _, c in out for j in c] == jobs                # nothing reordered
+    legacy = [({"strategy_id": "L", "universe": {"assets": ["X"]}}, {})]
+    assert screen._tf_chunks(legacy, 4) == [("1d", legacy)]      # no timeframe = 1d
+
+
+def test_an_all_1d_run_is_chunked_exactly_as_before():
+    jobs = [_job(f"d{i}", "1d") for i in range(19)]
+    assert [c for _, c in screen._tf_chunks(jobs, 8)] == screen._deadline.chunks(jobs, 8)
+
+
+def test_a_1h_chunk_is_judged_at_the_1h_prior_not_at_the_1d_rate(tmp_path, monkeypatch):
+    """Three specs, one per chunk; the first is 1d, the other two are called
+    1h. 25 s ahead, 1 s per spec. After the 1d chunk the 1d rate is 1 s, but
+    the 1h chunk has no measurement of its own, so it is judged at the 1h
+    prior (30 s > ~24 s left) and not started. One flat bucket would have
+    answered 1 s and started it."""
+    reg, sids, data = _registry_with(tmp_path, 3)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 1)
+    one_d = sids[0]
+    real_spec_tf = screen._spec_tf
+    monkeypatch.setattr(screen, "_spec_tf", lambda spec: real_spec_tf(spec)
+                        if spec["strategy_id"] == one_d else "1h")
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=1.0)
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(25)) == 0
+    assert calls["n"] == 1                                       # only the 1d chunk ran
+    r = _result(reg)
+    assert r["evaluated"] == 1 and r["deferred"] == 2 and r["stopped_at_deadline"] is True
+    assert budgets[0].rate_s(30.0, key="1d") == 1.0              # measured per timeframe
+    assert budgets[0].rate_s(30.0, key="1h") == 30.0             # nothing measured for 1h
+
+
+def test_with_only_1h_specs_not_even_one_fits_at_the_1h_prior(tmp_path, monkeypatch, capsys):
+    reg, sids, data = _registry_with(tmp_path, 2)
+    monkeypatch.setattr(screen, "_spec_tf", lambda spec: "1h")
+    now, budgets, calls = _fake_clock(monkeypatch, chunk_s=1.0)
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(20)) == 0
+    assert calls["n"] == 0
+    assert all(reg.strategy_states()[s] == "proposed" for s in sids)
+    r = _result(reg)
+    assert r["evaluated"] == 0 and r["deferred"] == 2 and r["stopped_at_deadline"] is True
+    assert "not even one spec fits" in capsys.readouterr().out   # the early exit, at 30 s
