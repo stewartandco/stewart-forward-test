@@ -5,7 +5,10 @@ BEFORE starting work it cannot finish by then, and leaves the remainder in a
 state the next cycle resumes from. It never abandons work mid-flight: the
 unit of decision is a chunk it is about to submit, judged against a rate it
 has measured on the chunks already done (a conservative prior before the
-first one).
+first one). A prior is a SINGLE-PROCESS seconds per item and is charged
+un-amortised, so a caller that runs a pool keeps its first chunk of an
+unmeasured key to one pool round (`has_rate`; gauntlet_worker, final review
+2026-10-19) or the prior alone can exceed the whole budget.
 
 Why this exists: on 2026-09-01 the 21:30 loop cycle was hard-killed by Task
 Scheduler at exactly the PT4H ExecutionTimeLimit. Everything it had done was
@@ -81,6 +84,14 @@ class DeadlineBudget:
         if n <= 0:
             return float(prior_s)
         return s / n
+
+    def has_rate(self, key=None) -> bool:
+        """True once at least one item has been recorded under `key`, i.e.
+        rate_s(.., key) is a measurement and no longer the prior. The gauntlet
+        worker uses it to cap the FIRST chunk of an unmeasured timeframe at one
+        pool round (final review 2026-10-19: a prior is a single-process
+        figure, so a full chunk of it can never fit a 25-minute budget)."""
+        return self._done.get(key, (0, 0.0))[0] > 0
 
     def fits(self, n: int, rate_s: float) -> bool:
         """True if n more items at rate_s each, plus the reserve, end before

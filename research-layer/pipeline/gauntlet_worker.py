@@ -10,6 +10,14 @@ A verdict whose write finds chain.lock held is KEPT (in memory, this run
 only) and its write retried between chunks and in a final drain pass; it is
 never waited for and never persisted across runs.
 
+Chunks are cut per timeframe, and the budget judges each at its timeframe's
+measured rate, else its prior. A prior is a single-process figure, so the
+FIRST chunk of a timeframe with no measured rate is capped at one pool round
+(`max_workers` candidates, `_walk_chunks`); a full 6 x 4 = 24 chunk of the 70 s
+1h prior needs more than the whole 25-minute budget and could never start
+(final review 2026-10-19). After that chunk the rate is measured and chunks
+are the normal size.
+
 Exit 0: drained, stopped at the deadline, or deferred on a lock (routine).
 Exit 1: a candidate raised, or setup was refused. The Ops Sentinel alarms on 1.
 """
@@ -93,13 +101,46 @@ def _tf_chunks(todo: list, chunk_size: int) -> list[tuple[int, str, list]]:
     out: list[tuple[int, str, list]] = []
     i = 0
     while i < len(todo):
-        tf = _candidate_tf(todo[i])
-        end = i + 1
-        while end < len(todo) and end - i < chunk_size and _candidate_tf(todo[end]) == tf:
-            end += 1
-        out.append((i, tf, todo[i:end]))
+        end = _chunk_end(todo, i, chunk_size)
+        out.append((i, _candidate_tf(todo[i]), todo[i:end]))
         i = end
     return out
+
+
+def _chunk_end(todo: list, i: int, size: int) -> int:
+    """Index one past the chunk that starts at `i`: at most `size` candidates
+    of todo[i]'s timeframe."""
+    tf = _candidate_tf(todo[i])
+    end = i + 1
+    while end < len(todo) and end - i < size and _candidate_tf(todo[end]) == tf:
+        end += 1
+    return end
+
+
+def _walk_chunks(todo: list, chunk_size: int, max_workers: int, budget):
+    """`_tf_chunks`, lazily, with one difference: the FIRST chunk of a
+    timeframe that has no measured rate yet (`budget.has_rate(tf)` is False)
+    is cut at `max_workers` candidates, which is one pool round.
+
+    Why (final review 2026-10-19): the prior is a SINGLE-PROCESS seconds per
+    candidate, and `fits` charges a chunk n x prior with no pool amortisation
+    until a rate exists. A full first chunk (6 workers x 4 = 24 at the 70 s
+    1h prior, plus the reserve) needed more than the whole 25-minute budget,
+    so a 1h chunk never started, no 1h rate was ever measured and 1h
+    candidates starved. One pool round (6 x 70 s) fits, runs, and records the
+    pool's real rate; every later chunk of that timeframe is the normal size.
+    Nothing is reordered: the remainder of the run simply follows. The
+    generator is consumed one chunk at a time, so each cut sees the rates
+    recorded by the chunks before it. At one worker the chunk is already 1."""
+    i = 0
+    while i < len(todo):
+        tf = _candidate_tf(todo[i])
+        size = chunk_size
+        if not budget.has_rate(tf):
+            size = min(size, max_workers)
+        end = _chunk_end(todo, i, size)
+        yield i, tf, todo[i:end]
+        i = end
 
 
 def cost_key(spec: dict, row_counts: dict) -> tuple:
@@ -502,8 +543,10 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{sid}  ERROR: no verdict written; stays queued", flush=True)
             status["errored"] += 1
 
-        for start, tf, chunk in _tf_chunks(todo, chunk_size):
-            # the rate is measured, and the prior assumed, per timeframe
+        for start, tf, chunk in _walk_chunks(todo, chunk_size, max_workers, budget):
+            # the rate is measured, and the prior assumed, per timeframe; the
+            # first chunk of an unmeasured timeframe is one pool round
+            # (_walk_chunks), so its prior-based check can pass
             if not budget.fits(len(chunk),
                                budget.rate_s(prior_s_for(tf), key=tf)):
                 status["deferred_deadline"] += len(todo) - start

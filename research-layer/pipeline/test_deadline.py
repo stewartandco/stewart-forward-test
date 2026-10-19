@@ -110,6 +110,21 @@ def test_no_key_is_todays_single_bucket(monkeypatch):
     assert b.rate_s(20.0) == 10.0
 
 
+def test_has_rate_is_true_only_once_that_key_has_recorded_items(monkeypatch):
+    """Final review 2026-10-19: the gauntlet worker caps the FIRST chunk of a
+    timeframe that has no measured rate yet. has_rate is that question."""
+    clock, b = _budget_300s(monkeypatch)
+    assert b.has_rate("1h") is False and b.has_rate() is False
+    b.record(0, elapsed_s=50.0, key="1h")                  # n <= 0 records nothing
+    assert b.has_rate("1h") is False
+    b.record(3, elapsed_s=30.0, key="1d")
+    assert b.has_rate("1d") is True
+    assert b.has_rate("1h") is False                       # per key, as rate_s is
+    assert b.has_rate() is False                           # the unkeyed bucket too
+    b.record(1, elapsed_s=5.0)
+    assert b.has_rate() is True
+
+
 # ---------------- gauntlet end to end --------------------------------------
 
 def _chain(reg):

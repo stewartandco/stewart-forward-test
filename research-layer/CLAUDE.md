@@ -1456,7 +1456,18 @@ per window per bar; the percentile is an exact incremental one.
   - Both are conservative on purpose: the budget charges chunk wall / n
     across a pool, and a prior is judged only until a chunk of that
     timeframe has run. `DeadlineBudget` keeps its rates per timeframe
-    (`key=tf`); gauntlet and screen chunks never mix timeframes. A registry
+    (`key=tf`); gauntlet and screen chunks never mix timeframes.
+  - **The FIRST gauntlet chunk of a timeframe with no measured rate is ONE
+    pool round (`max_workers` candidates; `gauntlet_worker._walk_chunks`,
+    `DeadlineBudget.has_rate`), then chunks return to the normal size
+    (2026-10-19 final review).** A prior is a single-process seconds per
+    candidate and `fits` charges it un-amortised, so the full production
+    chunk (6 workers x `GAUNTLET_CHUNK_PER_WORKER` 4 = 24 at the 70 s 1h
+    prior, plus the 75 s reserve = 1,755 s) exceeded the whole 25-minute
+    budget: a 1h chunk could never start and no 1h rate was ever measured.
+    One round (6 x 70 + 75 = 495 s) fits and records the pool's real rate.
+    No candidate is reordered. The same cap applies to an unmeasured first
+    1d chunk (24 becomes 6 once per run). A registry
     that alternates timeframes shrinks chunks toward 1 spec: slower, chain
     unchanged. The screen's early "not even one spec fits" exit uses the
     CHEAPEST prior in the registry (min, never max).
