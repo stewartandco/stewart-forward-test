@@ -260,14 +260,18 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `closed_forward_trades` (`pipeline/livegate.py`) SUMS `exits` on rows
   that carry them and counts `action == "exit"` on daily rows. Cost
   hazard: each date re-simulates the cell from bar 0 (measured in the
-  2026-10-15 rehearsal: ~145 s pure simulation per 1h vol-percentile
-  strategy-day, ~175 s per strategy-day including chain I/O, at today's
-  O(n x 365 x bars_per_day) percentile; chain I/O removed from that figure
-  by the 2026-10-16 fast path; simulation still runs per date, now outside
-  chain.lock),
-  and the whole intraday file is read per strategy per catch-up or
-  review and once per date per cell (`_load_cell_bars`); bounded only by
-  the 2b-3 incremental percentile, so cost it before activating. Proof:
+  2026-10-15 rehearsal, before 2026-10-17 engine perf: ~145 s pure
+  simulation per 1h vol-percentile strategy-day, ~175 s per strategy-day
+  including chain I/O, at the then O(n x 365 x bars_per_day) percentile;
+  chain I/O removed from that figure by the 2026-10-16 fast path;
+  simulation still runs per date, now outside chain.lock). Since the
+  2026-10-17 engine perf (section "Engine series cache") the percentile is
+  an exact incremental one and the series are cached across runs: the
+  catch-up of date 2026-10-14 went 2,857 s to 286 s cold / 201 s warm, and
+  `--date` plus the catch-up of the 10-18 morning 1,810 s to 259 s (single
+  process, measured 2026-10-19). The whole intraday file is still read per
+  strategy per catch-up or review and once per date per cell
+  (`_load_cell_bars`); cost it before activating. Proof:
   `tools/quarantine_parity.py` (`dump` before and after a change, then
   `compare`) recomputes a seeded sample of chained daily quarantine days
   and compares snapshot digests and rows exactly, old code vs new;
@@ -300,10 +304,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   registers an intraday strategy.
 - **Switch 2 hazards (cost these before activating intraday; Switch 1 is 1d
   only):** `vol_percentile` in
-  `gate_mask` is O(n x 365 x bars_per_day), about 940 s per 1h
+  `gate_mask` was O(n x 365 x bars_per_day), about 940 s per 1h
   vol_percentile candidate under perturbation, and
-  `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) is far too low for 1h, so the
-  cycle budget would be misjudged. Artifact storage: screen writes the
+  `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) was ~47x too low for 1h, so the
+  cycle budget would have been misjudged (both before 2026-10-17 engine
+  perf). Now one 1h gauntlet candidate (vol_percentile + trend_scan) takes
+  ~70 s cold / ~16 s warm (measured 2026-10-19), and the priors are per
+  timeframe (`PRIOR_S_BY_TF`, `SCREEN_PRIOR_S_BY_TF`; section "Engine series
+  cache"); 1h still costs about 22-25x a 1d candidate, so cost the grid
+  before activating. Artifact storage: screen writes the
   per-bar `equity.csv` into each bundle, and bundles are committed to the
   PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
   tens of KB for 1d, so grid scale means tens of GB. Two explicit Switch 2
@@ -1087,8 +1096,9 @@ of it.
   `t_pbo` is printed every run. The PT4H task limit remains the backstop --
   hitting it is evidence of a bug, not weather.
 - Tuning constants: `gauntlet.GAUNTLET_PRIOR_S_PER_CANDIDATE / _CHUNK_PER_WORKER /
-  _RESERVE_FRAC / _RESERVE_MIN_S`, `screen.SCREEN_PRIOR_S_PER_SPEC /
-  _CHUNK_PER_WORKER`, `loop.SAFETY_MARGIN_S`. Tests: `pipeline/test_deadline.py`
+  _RESERVE_FRAC / _RESERVE_MIN_S`, `gauntlet_core.PRIOR_S_BY_TF` (with
+  `prior_s_for`), `screen.SCREEN_PRIOR_S_PER_SPEC / SCREEN_PRIOR_S_BY_TF`
+  (with `screen_prior_s_for`) `/ _CHUNK_PER_WORKER`, `loop.SAFETY_MARGIN_S`. Tests: `pipeline/test_deadline.py`
   (fake-clock unit tests + both stages end to end) and the four
   `*deadline*` / `stale_stage` tests in test_loop.py.
 
@@ -1402,6 +1412,57 @@ Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-
   it reached every owed date, no attempted date failed, and none was skipped
   on chain.lock (a date that returned before its provenance check reports
   nothing, which is not recovery). Deferrals exit 0.
+
+## Engine series cache (2026-10-17, measured 2026-10-19)
+Design: `docs/2026-10-17-engine-perf-design.md`. The engine got faster without
+changing a bit: `pipeline/series_cache.py` (`SeriesCache`) caches the trend
+t-stat, realized vol and vol percentile series; the t-stat is computed once
+per window per bar; the percentile is an exact incremental one.
+- **Location:** `<registry dir>/seriescache/`. Gitignored and safe to delete,
+  at the cost of one cold run.
+- **Key:** `(kind, params, ENGINE_REV, cell)`. An `ENGINE_REV` bump orphans
+  every entry (never served); prune removes them.
+- **Validity rule: exact input bytes.** A request for a prefix of the stored
+  input is served from the store; a longer input that extends the stored one
+  extends it; ANY other difference (a restated bar, -0.0 vs 0.0, a NaN)
+  recomputes from bar 0. Never relax this to a hash or a float `==`.
+- **Prune:** once per quarantine recorder run, before the first date. It
+  removes `.tmp` files older than 1 h, stale-rev entries and corrupt entries,
+  leaves an entry a writer replaced mid-prune alone, and never raises.
+- **Who uses it:** the quarantine recorder and the gauntlet worker WRITE it;
+  the signal service is read-only and imports the cache lazily (it must not
+  write `seriescache/`); screen and `run_spec` callers pass none, so they use
+  per-call (memory-only) caches.
+- **Bit-identical by rule.** Any change to a cached kind or to the engine
+  needs `tools/daily_parity dump --twins-1h N` against the pre-change commit,
+  plus `tools/quarantine_replay`. The 2026-10-19 proofs: daily_parity 220/220
+  (200 1d + 20 1h twins), 0 mismatches; quarantine replay 800/800 MATCH and
+  2,251 rows equal to live.
+- **Figures** (2026-10-19, single process):
+  - catch-up date 2026-10-14: 2,857 s to 286 s cold / 201 s warm (realistic);
+  - one 1h gauntlet candidate (vol_percentile + trend_scan): ~940 s to 70 s
+    cold / 16 s warm;
+  - quarantine `--date` plus the catch-up of the 10-18 morning: 1,810 s to
+    259 s;
+  - the 1h/1d cost ratio is about 22-25x for screen, gauntlet and quarantine.
+- **Deadline priors are per timeframe, and so are the measured rates.**
+  - `gauntlet_core.PRIOR_S_BY_TF` = {"1d": 20.0, "1h": 70.0} plus
+    `prior_s_for(tf)` (an unlisted timeframe = the 1h prior scaled by bars per
+    day, floored at the 1d prior). The 1h value is the HEAVIEST class
+    measured, rounded up to 10 s.
+  - `screen.SCREEN_PRIOR_S_BY_TF` = {"1d": 2.0, "1h": 30.0} plus
+    `screen_prior_s_for(tf)`. The 1h value is the MEAN measurement (20.38 s)
+    rounded up to 10 s, deliberately, unlike the gauntlet's.
+  - Both are conservative on purpose: the budget charges chunk wall / n
+    across a pool, and a prior is judged only until a chunk of that
+    timeframe has run. `DeadlineBudget` keeps its rates per timeframe
+    (`key=tf`); gauntlet and screen chunks never mix timeframes. A registry
+    that alternates timeframes shrinks chunks toward 1 spec: slower, chain
+    unchanged. The screen's early "not even one spec fits" exit uses the
+    CHEAPEST prior in the registry (min, never max).
+- **Still uncached (follow-up candidate, Coen's call):** vol_target sizing's
+  realized vol (about 66 s of the warm 201 s), channel_breakout
+  highest/lowest (about 25 s), and the sma/stdev series and `atr_wilder`.
 
 ## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
 - `python -m pipeline.livegate` judges BOTH arms of the chained
