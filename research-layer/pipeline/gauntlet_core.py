@@ -455,9 +455,14 @@ GAUNTLET_PRIOR_S_PER_CANDIDATE = 20.0
 # GAUNTLET_PRIOR_S_PER_CANDIDATE stays its alias, so gauntlet.py is unchanged.
 PRIOR_S_BY_TF = {
     "1d": GAUNTLET_PRIOR_S_PER_CANDIDATE,
-    # PROVISIONAL: 24 bars per day x the 1d prior. Task 7 replaces it with a
-    # measured 1h gauntlet wall per candidate.
-    "1h": GAUNTLET_PRIOR_S_PER_CANDIDATE * 24,
+    # MEASURED 2026-10-19 (engine perf Task 7): one 1h gauntlet candidate
+    # through the worker's path (evaluate_standalone, perturb=True, a fresh
+    # empty disk SeriesCache), the heaviest class (trend_scan_dense +
+    # vol_percentile_dense + vol_target, BTCUSDT, 78,732 bars): 69.9 s cold
+    # (a second cold run of the same spec: 69.0 s; the other 1h twins 10.9 to
+    # 66.8 s). Rounded up to the next 10 s. The 2026-10-10 rehearsal's ~940 s
+    # was the pre-change engine on the same class. Warm: 16 s.
+    "1h": 70.0,
 }
 
 

@@ -918,8 +918,9 @@ def test_prior_for_unmeasured_tf_scales_from_1h_and_is_floored(monkeypatch):
     assert gauntlet_core.prior_s_for("1h") == p["1h"]          # a measured entry
     assert gauntlet_core.prior_s_for("15m") == 4 * p["1h"]     # 96 / 24
     assert gauntlet_core.prior_s_for("30m") == 2 * p["1h"]
-    assert gauntlet_core.prior_s_for("4h") == p["1h"] / 4
-    assert gauntlet_core.prior_s_for("12h") == p["1h"] / 12
+    # (the measured 1h prior is 70 s, so 4h and 12h are already on the floor)
+    assert gauntlet_core.prior_s_for("4h") == max(20.0, p["1h"] / 4)
+    assert gauntlet_core.prior_s_for("12h") == max(20.0, p["1h"] / 12)
     # the floor: a 1h prior this small would put 12h under the 1d prior
     monkeypatch.setitem(p, "1h", 100.0)
     assert gauntlet_core.prior_s_for("12h") == 20.0            # 100/12 floored
