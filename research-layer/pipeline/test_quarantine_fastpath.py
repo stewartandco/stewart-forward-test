@@ -403,7 +403,7 @@ def _sim_calls(monkeypatch, fail_on, exc_factory):
     return calls
 
 
-def test_a_simulation_valueerror_defers_that_strategy_and_the_others_record(
+def test_a_simulation_data_error_defers_that_strategy_and_the_others_record(
         tmp_path, monkeypatch, capsys):
     """2026-10-16 (Coen, follow-up to design s3.6): the second strategy's
     data-shaped raise defers ONLY that strategy. The first one's row IS
@@ -413,7 +413,7 @@ def test_a_simulation_valueerror_defers_that_strategy_and_the_others_record(
     reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
     asset_of = {a["strategy_id"]: "BTCUSD", b["strategy_id"]: "ETHUSD"}
     calls = _sim_calls(monkeypatch, lambda spec, n: n == 2,
-                       lambda: ValueError("equity baseline is 0.0"))
+                       lambda: quarantine_mod.SimulationDataError("equity baseline is 0.0"))
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     assert len(calls) == 2
     ok_sid, bad_sid = calls
@@ -480,7 +480,7 @@ def test_every_ready_strategy_failing_simulation_is_a_total_stall(
     seen_lock = []
     calls = _sim_calls(monkeypatch,
                        lambda spec, n: seen_lock.append(lock_path.exists()) or True,
-                       lambda: ValueError("no zero point"))
+                       lambda: quarantine_mod.SimulationDataError("no zero point"))
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 1
     assert len(calls) == 2 and seen_lock == [False, False]
     out = capsys.readouterr()
@@ -505,7 +505,7 @@ def test_failed_simulations_beside_an_already_chained_strategy_are_not_a_stall(
     assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
     extend_ethusd(data)                                  # B is ready now
     _sim_calls(monkeypatch, lambda spec, n: True,
-               lambda: ValueError("no zero point"))
+               lambda: quarantine_mod.SimulationDataError("no zero point"))
     capsys.readouterr()
     assert quarantine_run(argv) == 0
     out = capsys.readouterr()
@@ -521,7 +521,7 @@ def test_a_strategy_that_failed_simulation_is_retried_by_the_next_catch_up(
     ledger item goes away."""
     reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
     _sim_calls(monkeypatch, lambda spec, n: spec["strategy_id"] == b["strategy_id"],
-               lambda: ValueError("equity baseline is 0.0"))
+               lambda: quarantine_mod.SimulationDataError("equity baseline is 0.0"))
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
     monkeypatch.undo()
@@ -568,7 +568,7 @@ def test_the_date_provenance_names_only_the_strategies_that_record(
     SUPPLEMENT for ETHUSD (not a `restated` pin), chain VALID."""
     reg, a, b, data = btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
     _sim_calls(monkeypatch, lambda spec, n: spec["strategy_id"] == b["strategy_id"],
-               lambda: ValueError("equity baseline is 0.0"))
+               lambda: quarantine_mod.SimulationDataError("equity baseline is 0.0"))
     assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
     snaps = snapshots(reg)
     assert len(snaps) == 1
@@ -1118,3 +1118,299 @@ def test_an_intraday_cell_is_cached_under_its_cell_key(monkeypatch):
                                      "2022-12-31", series_cache=marker)
     assert calls[-1]["series_cache"] is marker
     assert calls[-1]["cell"] == "BTCUSDT@1h"
+
+
+# ---- A3 (2026-10-17, Coen): SimulationDataError + deferred-only dates ----
+
+from .common import content_id
+from .quarantine import SimulationDataError
+from .test_gauntlet import gauntlet_registry
+from .test_gen3b import write_data_dir
+
+
+def _flat_pair(tmp_path):
+    """A = BTCUSD, B = ETHUSD, both with a 2023-01-22 bar (flat, never
+    signalling), both quarantined at ENTERED."""
+    return btc_and_eth_solo(tmp_path, eth_bars=flat_dated_bars())
+
+
+def test_a_plain_valueerror_in_simulation_fails_the_date(
+        tmp_path, monkeypatch, capsys):
+    """A CODE bug that happens to raise ValueError (an unpacking mismatch,
+    max([]), a malformed payload) must not defer a strategy quietly: only
+    SimulationDataError does. The date fails loudly, nothing is written, and
+    no `simulation_failed` item reaches the ledger."""
+    reg, a, b, data = _flat_pair(tmp_path)
+    before = reg.log_path.read_bytes()
+    calls = _sim_calls(monkeypatch, lambda spec, n: n == 2,
+                       lambda: ValueError("bug"))
+    with pytest.raises(ValueError, match="bug") as exc:
+        quarantine_run(argv_for(reg, data, "--date", "2023-01-22"))
+    assert not isinstance(exc.value, SimulationDataError)
+    assert len(calls) == 2
+    assert reg.log_path.read_bytes() == before
+    out = capsys.readouterr()
+    assert "simulation failed" not in out.out
+    assert "PARTIAL WRITE" not in out.err
+    monkeypatch.undo()
+    assert not [i for i in (ledger(reg) or {"items": []})["items"]
+                if i["source"] == "simulation_failed"]
+
+
+def test_simulation_data_error_is_a_valueerror_subclass():
+    """Callers that catch ValueError around observe_day keep working."""
+    assert issubclass(SimulationDataError, ValueError)
+
+
+def test_the_real_data_shaped_raises_are_simulation_data_errors(monkeypatch):
+    """The raise sites themselves, not a monkeypatched stand-in: a missing
+    bar (daily and intraday), a missing zero point (both rebases) and a
+    non-positive equity baseline (daily and intraday; the engine is stubbed
+    only to make the book's equity non-positive, the raise is the real one)."""
+    from .test_intraday_statistics import _twin_bars, _twin_spec
+    bars = flat_dated_bars(n=5)
+    spec = {"strategy_id": "s", "blocks": [], "cost_model": {},
+            "universe": {"assets": ["BTCUSD"], "timeframe": "1d"}}
+    # missing bar for the date (daily)
+    with pytest.raises(SimulationDataError, match="no BTCUSD bar"):
+        quarantine_mod.observe_day(spec, {"BTCUSD": bars}, "2023-01-09",
+                                   "2023-01-02")
+    # no zero point (both rebases)
+    with pytest.raises(SimulationDataError, match="no bar on or before"):
+        quarantine_mod._rebase_index([{"date": "2023-05-01"}], "2023-01-01",
+                                     "BTCUSD")
+    with pytest.raises(SimulationDataError, match="no bar on or before"):
+        quarantine_mod._rebase_index_day([{"date": "2023-05-01 00:00:00"}],
+                                         "2023-01-01", "BTCUSD@1h")
+    # non-positive baseline (daily)
+    book = {"equity": [0.0] * len(bars), "position": None, "trades": []}
+    monkeypatch.setattr(quarantine_mod, "simulate_asset",
+                        lambda *a, **k: book)
+    with pytest.raises(SimulationDataError, match="equity baseline"):
+        quarantine_mod.observe_day(spec, {"BTCUSD": bars}, "2023-01-05",
+                                   "2023-01-02")
+    monkeypatch.undo()
+    # intraday: missing bar for the date, then a non-positive baseline
+    daily, hourly, _ = _twin_bars()
+    sh = _twin_spec("1h")
+    day = daily[151]["date"]
+    upto = [b for b in hourly if b["date"][:10] <= day]
+    with pytest.raises(SimulationDataError, match="no BTCUSD@1h bar"):
+        quarantine_mod.observe_day(sh, {"BTCUSD@1h": upto}, daily[152]["date"],
+                                   daily[150]["date"])
+    nan_bars = upto[:-1] + [dict(upto[-1], close=float("nan"))]
+    with pytest.raises(SimulationDataError, match="non-finite close"):
+        quarantine_mod.observe_day(sh, {"BTCUSD@1h": nan_bars}, day,
+                                   daily[150]["date"])
+    ibook = {"equity": [0.0] * len(upto), "position": None, "trades": []}
+    monkeypatch.setattr(quarantine_mod, "simulate_asset",
+                        lambda *a, **k: ibook)
+    with pytest.raises(SimulationDataError, match="equity baseline"):
+        quarantine_mod.observe_day(sh, {"BTCUSD@1h": upto}, day,
+                                   daily[150]["date"])
+
+
+def test_a_date_where_every_ready_strategy_failed_simulation_is_deferred_only(
+        tmp_path, monkeypatch, capsys):
+    """Nothing appended and every ready strategy deferred for a simulation
+    failure: the date uses no catch-up slot. With something already chained
+    (n_present > 0) it is a deferral, rc 0; with nothing (n_present == 0) it
+    is the total stall, rc 1 REFUSED, and still deferred_only."""
+    # n_present > 0
+    (tmp_path / "present").mkdir()
+    reg, a, b, data = btc_and_eth_solo(tmp_path / "present")
+    argv = argv_for(reg, data, "--date", "2023-01-22")
+    assert quarantine_run(argv) == 0                 # A records, B lacks a bar
+    extend_ethusd(data)                              # B is ready now
+    _sim_calls(monkeypatch, lambda spec, n: True,
+               lambda: SimulationDataError("no zero point"))
+    capsys.readouterr()
+    rep = quarantine_mod.DateReport()
+    assert quarantine_run(argv, report=rep) == 0
+    assert rep.deferred_only is True
+    assert "REFUSED" not in capsys.readouterr().err
+    monkeypatch.undo()
+    # n_present == 0
+    (tmp_path / "stall").mkdir()
+    reg, a, b, data = _flat_pair(tmp_path / "stall")
+    before = reg.log_path.read_bytes()
+    _sim_calls(monkeypatch, lambda spec, n: True,
+               lambda: SimulationDataError("no zero point"))
+    capsys.readouterr()
+    rep = quarantine_mod.DateReport()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                          report=rep) == 1
+    assert "REFUSED" in capsys.readouterr().err
+    assert rep.deferred_only is True
+    assert reg.log_path.read_bytes() == before
+
+
+def test_a_mixed_restated_and_failed_date_is_deferred_only(
+        tmp_path, monkeypatch, capsys):
+    """REGRESSION PIN, not a driver of the A3 change: A's asset is restated
+    (deferred for provenance, never simulated), B's simulation fails. The
+    date returns through the PRE-EXISTING `plan.conflicted` branch (which
+    already set deferred_only), so this passes with or without the new
+    post-plan rule; it pins that a mix of the two deferral reasons stays
+    deferred_only, nothing appended, rc 0."""
+    reg, a, b, data = _flat_pair(tmp_path)
+    reg.record_quarantine_snapshot(snap_payload(data, ["BTCUSD", "ETHUSD"]))
+    restate(data, "BTCUSD", "2023-01-21",
+            "2023-01-21,100.0,100.0,100.0,101.0,1.0")
+    before = reg.log_path.read_bytes()
+    calls = _sim_calls(monkeypatch,
+                       lambda spec, n: spec["strategy_id"] == b["strategy_id"],
+                       lambda: SimulationDataError("no zero point"))
+    capsys.readouterr()
+    rep = quarantine_mod.DateReport()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                          report=rep) == 0
+    assert calls == [b["strategy_id"]]               # A was never simulated
+    assert rep.deferred_only is True
+    assert reg.log_path.read_bytes() == before
+    assert sorted(i["source"] for i in rep.degraded) == [
+        "restated", "simulation_failed"]
+
+
+def test_a_left_quarantine_strategy_does_not_block_deferred_only(
+        tmp_path, monkeypatch, capsys):
+    """B fails simulation, A leaves quarantine mid-run. A no longer owes the
+    date, so it must not BLOCK deferred_only: the date is deferred_only and
+    nothing is written. This kills a rule that requires every ready strategy
+    (left ones included) to be deferred (the `and not left` mutant). It does
+    NOT kill a rule that counts a left strategy as owing; that direction is
+    pinned by the left-only test below."""
+    reg, a, b, data = _flat_pair(tmp_path)
+    _sim_calls(monkeypatch,
+               lambda spec, n: spec["strategy_id"] == b["strategy_id"],
+               lambda: SimulationDataError("no zero point"))
+    fired = race_before_lock(monkeypatch, lambda: reg.record_state_change(
+        a["strategy_id"], "graveyard", "test"))
+    capsys.readouterr()
+    rep = quarantine_mod.DateReport()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                          report=rep) == 0
+    assert fired == [1]
+    monkeypatch.undo()
+    out = capsys.readouterr().out
+    assert f"{a['strategy_id']}  skipped: left quarantine (graveyard)" in out
+    assert rep.deferred_only is True
+    assert decisions(reg) == [] and snapshots(reg) == []
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_date_where_only_a_left_quarantine_strategy_remains_is_not_deferred_only(
+        tmp_path, monkeypatch, capsys):
+    """Nobody was deferred: the only owing strategy left quarantine. That is
+    not a deferral (nothing owes the date any more), so it keeps its slot.
+    This kills a rule that counts a left-quarantine strategy as owing or
+    deferred (`counted = list(ready)`): with no sim failure and no restated
+    asset such a rule would wrongly set deferred_only."""
+    reg, spec, data = quarantined(tmp_path)
+    race_before_lock(monkeypatch, lambda: reg.record_state_change(
+        spec["strategy_id"], "graveyard", "test"))
+    rep = quarantine_mod.DateReport()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22"),
+                          report=rep) == 0
+    assert rep.deferred_only is False
+
+
+def test_a_permanently_failing_strategy_does_not_starve_catch_up(
+        tmp_path, monkeypatch, capsys):
+    """B (ETHUSD) fails simulation on every date and owes 20 older dates
+    (more than MAX_CATCHUP_DATES); A (BTCUSD) entered later and owes ONE newer
+    date. Each of B's older dates is a total stall (only B owes it): rc 1,
+    REFUSED, but deferred_only, so it uses no slot and ONE catch-up run
+    reaches A's date and records it. On A's date B fails beside a strategy
+    that records: a deferral, rc 0, and that date uses its slot. B's dates all
+    stay owed. The run's rc is 1 and reflects ONLY the stalled dates."""
+    reg, spec = gauntlet_registry(tmp_path)
+    reg.record_verdict(spec["strategy_id"], "gauntlet", "pass",
+                       {"deflated_sharpe": 0.5}, "0" * 64)
+    reg.record_state_change(spec["strategy_id"], "quarantine", "test",
+                            ts_utc="2023-02-10T00:00:00Z")      # A: late entry
+    b = json.loads(json.dumps(spec))
+    b["universe"] = dict(b["universe"], assets=["ETHUSD"])
+    b["strategy_id"] = None
+    b["strategy_id"] = content_id(b, "strategy_id")
+    reg.register_strategy(b)
+    reg.record_state_change(b["strategy_id"], "screened", "test")
+    reg.record_state_change(b["strategy_id"], "gauntlet", None)
+    reg.record_state_change(b["strategy_id"], "quarantine", "test",
+                            ts_utc="2023-01-21T00:00:00Z")      # B: early entry
+    data = write_data_dir(tmp_path, {"BTCUSD": flat_dated_bars(n=42),
+                                     "ETHUSD": flat_dated_bars(n=42)})
+    older = ([f"2023-01-{d:02d}" for d in range(22, 32)]
+             + [f"2023-02-{d:02d}" for d in range(1, 11)])
+    assert len(older) == 20 > quarantine_mod.MAX_CATCHUP_DATES
+    _sim_calls(monkeypatch,
+               lambda s, n: s["strategy_id"] == b["strategy_id"],
+               lambda: SimulationDataError("equity baseline is 0.0"))
+    capsys.readouterr()
+    assert _catch_up(reg, data) == 1                 # the stalled dates fail
+    out = capsys.readouterr().out
+    assert out.count("recorded nothing") == len(older)
+    assert "owed date(s) left for the next run" not in out   # all reached
+    assert f"FAILED on {', '.join(older)}" in out            # and only those
+    recorded = {(r["strategy_id"], r["date"]) for r in decisions(reg)}
+    assert recorded == {(spec["strategy_id"], "2023-02-11")}
+    # B's dates all stay owed
+    monkeypatch.undo()
+    view = QuarantineView.build(reg)
+    keys = view.decision_keys()
+    assert not [k for k in keys if k[0] == b["strategy_id"]]
+    owed = quarantine_mod._owed_dates_for_catch_up(
+        view, sorted([spec["strategy_id"], b["strategy_id"]]),
+        view.entry_dates(), view.specs(), data)
+    assert set(older) <= set(owed) and "2023-02-11" in owed
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+@pytest.mark.parametrize("field_,row", [
+    ("close", "2023-01-10,100.0,100.0,100.0,nan,1.0"),
+    ("high", "2023-01-10,100.0,nan,100.0,100.0,1.0"),
+    ("low", "2023-01-10,100.0,100.0,nan,100.0,1.0"),
+    ("open", "2023-01-10,nan,100.0,100.0,100.0,1.0"),
+])
+def test_a_nan_price_defers_that_strategy_and_the_other_records(
+        tmp_path, monkeypatch, capsys, field_, row):
+    """A literal "nan" in ONE strategy's price file is bad data: it defers
+    THAT strategy (a SimulationDataError from the finite-price guard), not
+    the date. Without the guard nothing fails in this fixture: both
+    strategies simply record (for a NaN high/low the engine's stop
+    comparisons and ATR silently go wrong, so the row would be wrong, not
+    loud). B (ETHUSD) records nothing and gets a `simulation_failed` item
+    naming the field; A (BTCUSD) records."""
+    reg, a, b, data = _flat_pair(tmp_path)
+    restate(data, "ETHUSD", "2023-01-10", row)
+    capsys.readouterr()
+    assert quarantine_run(argv_for(reg, data, "--date", "2023-01-22")) == 0
+    out = capsys.readouterr()
+    assert {r["strategy_id"] for r in decisions(reg)} == {a["strategy_id"]}
+    assert (f"{b['strategy_id']}  deferred: simulation failed: ETHUSD: "
+            f"non-finite {field_} nan on 2023-01-10") in out.out
+    assert "PARTIAL WRITE" not in out.err
+    items = ledger(reg)["items"]
+    assert [(i["source"], i["key"]) for i in items] == [
+        ("simulation_failed", b["strategy_id"])]
+    assert f"non-finite {field_} nan" in items[0]["reason"]
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_the_finite_price_guard_itself():
+    """The raise site, no monkeypatch: a non-finite value in any price field
+    raises naming the field; finite bars and a close-only bar (open/high/low
+    absent or None, however a loader represents a missing field) pass."""
+    guard = quarantine_mod._require_finite_prices
+    for field_ in ("open", "high", "low", "close"):
+        bar = {"date": "2023-01-01", "open": 1.0, "high": 1.0, "low": 1.0,
+               "close": 1.0}
+        bar[field_] = float("inf")
+        with pytest.raises(SimulationDataError,
+                           match=f"non-finite {field_} inf on 2023-01-01"):
+            guard([bar], "X", "2023-01-02")
+    guard([{"date": "d", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}],
+          "X", "2023-01-02")
+    guard([{"date": "d", "close": 1.0}], "X", "2023-01-02")             # absent
+    guard([{"date": "d", "open": None, "high": None, "low": None,
+            "close": 1.0}], "X", "2023-01-02")                          # None
