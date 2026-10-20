@@ -1,5 +1,5 @@
 {
-  "strategy_id": "bd0b5c058535d0dd",
+  "strategy_id": "2b243d7d4b3e9ad6",
   "version": 1,
   "created_utc": "2026-08-06T03:02:41Z",
   "name": "MNQ ORB 15m 1.25R cut15:30 Mon-Tue-Thu-Fri orb<=75p",
@@ -10,7 +10,7 @@
     ],
     "asset_class": "futures",
     "timeframe": "15m",
-    "session": "RTH"
+    "session": "24x7"
   },
   "blocks": [
     {
