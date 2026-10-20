@@ -321,3 +321,65 @@ def test_the_detectors_pass_every_key_with_nothing_retired(tmp_path, monkeypatch
         tmp_path, [("BTCUSDT", "1d"), ("ETHUSDT", "1d")], {"fetched": {}}, 1_800_000_000_000)
     quarantine._feed_health_items(tmp_path, ["BTCUSDT@1h", "ETHUSDT@1h"], set(), 1_800_000_000_000)
     assert seen == [["BTCUSDT", "ETHUSDT"], ["BTCUSDT@1h", "ETHUSDT@1h"]]
+
+
+# ---------------- quarantine --fetch-owed (fix round 1) ----------------
+
+_NOW_MS = 1_791_201_600_000          # 2026-10-05 12:00:00 UTC
+
+
+def _owed_pair():
+    """Two quarantined 1h strategies: BTCUSD@1h and ETHUSD@1h."""
+    import json as _json
+    from .test_intraday_statistics import _twin_spec
+    a = _twin_spec("1h")
+    b = _json.loads(_json.dumps(a))
+    b["strategy_id"] = "b" * 16
+    b["universe"]["assets"] = ["ETHUSD"]
+    return a, b, {a["strategy_id"]: a, b["strategy_id"]: b}
+
+
+def test_a_retired_owed_cell_is_never_fetched_but_its_sibling_is(tmp_path, monkeypatch, capsys):
+    a, b, specs = _owed_pair()
+    _retire(monkeypatch, "BTCUSD@1h")
+    calls, sleeps = [], []
+
+    def fetch(sym, tf, d):
+        if sym == "BTCUSD":
+            raise RuntimeError("delisted")      # would cost two 120 s retry passes
+        calls.append((sym, tf))
+        return {}
+
+    items = quarantine.fetch_owed([a["strategy_id"], b["strategy_id"]], specs,
+                                  tmp_path, fetch=fetch, sleep=sleeps.append,
+                                  now_ms=_NOW_MS)
+    assert calls == [("ETHUSD", "1h")]
+    assert sleeps == []                          # no pacing (one cell), no retry wait
+    assert not [i for i in items if i["source"] == quarantine.FETCH_SOURCE]
+    out = capsys.readouterr().out
+    assert "fetch-owed: BTCUSD@1h retired (2026-10-20); not fetched" in out
+    assert "fetch-owed: ETHUSD@1h fetched" in out
+
+
+def test_when_every_owed_cell_is_retired_nothing_is_fetched_and_nothing_sleeps(
+        tmp_path, monkeypatch, capsys):
+    a, b, specs = _owed_pair()
+    _retire(monkeypatch, "BTCUSD@1h", "ETHUSD@1h")
+    calls, sleeps = [], []
+    items = quarantine.fetch_owed([a["strategy_id"], b["strategy_id"]], specs,
+                                  tmp_path,
+                                  fetch=lambda *x, **k: calls.append(x) or {},
+                                  sleep=sleeps.append, now_ms=_NOW_MS)
+    assert calls == [] and sleeps == [] and items == []
+    out = capsys.readouterr().out
+    assert out.count("retired (2026-10-20); not fetched") == 2
+    assert "fetch-owed: no intraday cell owed" in out
+
+
+def test_with_nothing_retired_every_owed_cell_is_fetched(tmp_path):
+    a, b, specs = _owed_pair()
+    calls = []
+    quarantine.fetch_owed([a["strategy_id"], b["strategy_id"]], specs, tmp_path,
+                          fetch=lambda sym, tf, d: calls.append(sym) or {},
+                          sleep=lambda s: None, now_ms=_NOW_MS)
+    assert sorted(calls) == ["BTCUSD", "ETHUSD"]

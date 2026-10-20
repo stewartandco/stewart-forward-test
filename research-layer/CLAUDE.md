@@ -1794,8 +1794,17 @@ per window per bar; the percentile is an exact incremental one.
   a reviewed commit that adds the cell to `RETIRED_CELLS` (and removes it from
   `ACTIVE_CELLS` in the same commit) plus the Coen-approved retirement note
   chained verbatim; the code change is the switch and the note is the record,
-  never one without the other. The refresh stops fetching the cell because it
-  is no longer active. Pinned by `test_retired_cells.py`.
+  never one without the other. `note_prefix` is a review convention, not
+  code-enforced: the import check only requires a non-empty string, so the
+  reviewer confirms the note is chained and its prefix matches. The refresh
+  stops fetching the cell because it is no longer active, and
+  `quarantine --fetch-owed` skips a retired intraday cell (one console line,
+  no fetch, no retry wait, no `intraday_fetch_failed` item). Retiring a crypto
+  cell removes it from `ACTIVE_CELLS["crypto"]` in the same commit, which
+  changes the 76-asset count, the rotation `% n` arithmetic and the
+  `test_switch1.py` pins; all are updated in that commit. A retired cell whose
+  price file is MISSING or EMPTY still blocks via the preflight's rule 3 (a
+  different failure, alarmed on purpose). Pinned by `test_retired_cells.py`.
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy

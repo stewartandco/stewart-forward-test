@@ -1418,6 +1418,13 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
     the clock) are injectable for tests."""
     cells_owed = sorted({k for sid in quarantined if sid in specs
                          for k in spec_cells(specs[sid]) if is_intraday_key(k)})
+    # A retired (delisted) cell (cells.RETIRED_CELLS) is never fetched: a
+    # raising fetch would cost two 120 s retry passes and leave a standing
+    # intraday_fetch_failed item every day. Its strategies keep their record.
+    for key in [k for k in cells_owed if cells.is_retired(k)]:
+        print(f"fetch-owed: {key} retired "
+              f"({cells.RETIRED_CELLS[key]['retired_utc']}); not fetched")
+        cells_owed.remove(key)
     if not cells_owed:
         print("fetch-owed: no intraday cell owed")
         return []
