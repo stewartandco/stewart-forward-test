@@ -118,6 +118,25 @@ def test_malformed_ack_file_is_an_item_and_honours_nothing(tmp_path):
         assert acks == {} and note, bad
 
 
+def test_one_bad_entry_voids_every_good_entry_in_the_ack_file(tmp_path):
+    """A half-trusted ack would hide a hole: the valid entry that PRECEDES a
+    malformed one is dropped too (Task 8 mutants: partial honour, no reason
+    check)."""
+    good = {"dates": ["2024-01-02"], "reason": "exchange outage"}
+    for name, entry in (
+            ("bad date", {"dates": ["2024-13-99"], "reason": "x"}),
+            ("empty reason", {"dates": ["2024-01-03"], "reason": ""}),
+            ("blank reason", {"dates": ["2024-01-03"], "reason": "   "}),
+            ("missing reason", {"dates": ["2024-01-03"]}),
+            ("non-string date", {"dates": [20240103], "reason": "x"}),
+            ("short date", {"dates": ["2024-1-3"], "reason": "x"}),
+            ("entry not an object", ["2024-01-03"])):
+        (tmp_path / ACK_FILE).write_text(
+            json.dumps({"BTCUSDT@1h": good, "ETHUSDT@1h": entry}), encoding="utf-8")
+        acks, note = load_acks(tmp_path)
+        assert acks == {} and note, name
+
+
 def test_ack_file_missing_empty_and_valid(tmp_path):
     assert load_acks(tmp_path) == ({}, None)
     (tmp_path / ACK_FILE).write_text("{}", encoding="utf-8")
