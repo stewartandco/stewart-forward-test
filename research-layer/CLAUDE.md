@@ -1771,16 +1771,31 @@ per window per bar; the percentile is an exact incremental one.
 - **Per-cycle cap counts cells for every class** (`specs_per_combo =
   max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips
   `USDT`, so strategy names read `BTC`, not `BTCUSDT`.
-- **Known limit: a retired or delisted pair has no exit in code.** Once a dead
+- **Known limit: a retired or delisted pair needs a declared exit.** Once a dead
   USDT cell has registered strategies, its file stops growing, so the loop's
   freshness preflight parks every crypto fire at `stale_data`, and
   `gauntlet_stats` refuses `cells_not_comparable` REGISTRY-WIDE, for all
   classes (`pipeline/gauntlet_stats.py` ~682-691), once the vintage passes the
   cell's last bar. Nothing reads a retirement note: the grid record's
   "RETIRED by a new note" is policy, not code. Tradfi has the same latent
-  exposure (a delisted ETF or a dead FX series). Plan 3 owns an excluded-cells
-  mechanism (`comparable_cells`, the preflight and the stats honouring retired
-  cells).
+  exposure (a delisted ETF or a dead FX series). **The exit is
+  `cells.RETIRED_CELLS` (2b-3 plan 3, Task 6; empty as committed).** It maps a
+  cell key (`qcells.cell_key`: the bare asset at 1d, `ASSET@TF` otherwise) to
+  `{"retired_utc": "YYYY-MM-DD", "note_prefix": "<chain note prefix>"}`.
+  A retired cell is dropped from `screen.assert_cells_comparable`'s
+  `data_end` (so the preflight's rules 1-2, `gauntlet_stats` and the gauntlet
+  worker stop refusing over it; `loop._lagging_cells` skips it too), and the
+  `feed_health` detectors in `crypto_refresh` and the quarantine fetch step
+  skip it. It must NOT be in `ACTIVE_CELLS` (import-time check,
+  `cells.assert_retired_cells_valid`), so no new spec can name it. Its
+  strategies stay registered, counted in N, simulated on the bars that exist
+  (`comparable_cells` still lists the cell) and keep their forward record;
+  quarantine simply has no new bar to record. **Procedure to retire a cell:**
+  a reviewed commit that adds the cell to `RETIRED_CELLS` (and removes it from
+  `ACTIVE_CELLS` in the same commit) plus the Coen-approved retirement note
+  chained verbatim; the code change is the switch and the note is the record,
+  never one without the other. The refresh stops fetching the cell because it
+  is no longer active. Pinned by `test_retired_cells.py`.
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy

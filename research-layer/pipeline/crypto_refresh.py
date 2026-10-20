@@ -270,9 +270,15 @@ def _feed_health_items(data_dir: Path, cell_list: list[tuple[str, str]],
     (`out["fetched"]`, keyed `{asset}_{tf}`) is checked for staleness, with the
     same end cap `refresh` fetched with. Never raises (`feed_health` contract).
     """
-    keys = [qcells.cell_key(a, tf) for a, tf in cell_list]
+    # A retired cell (cells.RETIRED_CELLS) is never scanned: its feed is
+    # dead by declaration, so a hole or stale item would be a standing alarm.
+    # The refresh iterates ACTIVE cells and retired ones are never active, so
+    # this is belt and braces for a hand-passed list.
+    keys = [k for k in (qcells.cell_key(a, tf) for a, tf in cell_list)
+            if not cells.is_retired(k)]
     stale_keys = {qcells.cell_key(a, tf) for a, tf in cell_list
-                  if f"{a}_{tf}" in out["fetched"]}
+                  if f"{a}_{tf}" in out["fetched"]
+                  and not cells.is_retired(qcells.cell_key(a, tf))}
     acks, note = feed_health.load_acks(data_dir)
     items: list[dict] = []
     if note:

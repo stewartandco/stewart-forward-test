@@ -497,3 +497,102 @@ def validate_cell(asset: str, timeframe: str, asset_class: str | None = None) ->
     if timeframe not in spec["timeframes"]:
         raise ValueError(f"{timeframe!r} is not a declared {asset_class} timeframe: {spec['timeframes']}")
     return asset, timeframe
+
+
+# ---------------------------------------------------------------------------
+# RETIRED_CELLS (2b-3 plan 3, Task 6; Coen approved the design 2026-10-20).
+#
+# A delisted or dead cell keeps its registered strategies (counted in N,
+# simulated on the bars that exist, their forward record kept) but its file
+# stops growing, and the registry-wide comparability rule
+# (screen.assert_cells_comparable) would then refuse everything: the loop's
+# freshness preflight parks, gauntlet_stats refuses `cells_not_comparable`
+# for every class, the gauntlet worker defers. RETIRED_CELLS is the one
+# declared exit. It is code, in a reviewed commit that lands next to the
+# Coen-approved retirement note chained verbatim (crypto-grid-record-v1:
+# "RETIRED by a new note"): the code change is the switch, the note is the
+# record. An entry is
+#   cell key -> {"retired_utc": "YYYY-MM-DD", "note_prefix": "<chain note prefix>"}
+# and the cell key is the QUARANTINE cell key (qcells.cell_key): the bare asset
+# for a 1d cell, "ASSET@TF" for an intraday one. Empty today.
+#
+# What it does: a retired cell is never in ACTIVE_CELLS (checked at import
+# below), so the refresh skips it and no new spec can name it; the feed
+# detectors skip it (is_retired); assert_cells_comparable ignores it
+# (retired_cell_ids). What it does NOT change: N, comparable_cells' cell
+# list, the verifier, any 1d result.
+# ---------------------------------------------------------------------------
+RETIRED_CELLS: dict[str, dict] = {}
+
+# qcells.SEP, copied: qcells imports bars, which imports this module, so
+# cells.py cannot import qcells at load. test_retired_cells pins the two equal.
+_KEY_SEP = "@"
+
+
+def _parse_retired_key(key: str) -> tuple[str, str]:
+    """(asset, timeframe) of a quarantine cell key; the same grammar as
+    qcells.split_cell_key (bare asset = 1d, "ASSET@TF" otherwise, "@1d"
+    never valid). Raises AssertionError on a malformed key."""
+    if not isinstance(key, str) or not key:
+        raise AssertionError(f"RETIRED_CELLS: bad cell key {key!r}")
+    if _KEY_SEP not in key:
+        return key, "1d"
+    asset, tf = key.split(_KEY_SEP, 1)
+    if not asset or not tf or _KEY_SEP in tf or tf == "1d":
+        raise AssertionError(f"RETIRED_CELLS: bad cell key {key!r}")
+    return asset, tf
+
+
+def is_retired(cell_key: str) -> bool:
+    """True when `cell_key` (qcells.cell_key format) is declared retired.
+    Reads RETIRED_CELLS at call time."""
+    return cell_key in RETIRED_CELLS
+
+
+def retired_cell_ids() -> frozenset[str]:
+    """The retired cells in cell_id format (`ASSET_TF`), the key format of the
+    `data_end` / `class_of` dicts that screen.assert_cells_comparable and the
+    loop preflight take. The ONE mapping between the two key formats: built
+    from the declared keys, never by parsing a cell id back apart."""
+    return frozenset(cell_id(*_parse_retired_key(k)) for k in RETIRED_CELLS)
+
+
+def assert_retired_cells_valid(retired: dict | None = None) -> None:
+    """Import-time shape and consistency check for RETIRED_CELLS (callable
+    with crafted input). Each entry must be a declared cell of a declared
+    class, carry a real `retired_utc` date and a non-empty `note_prefix`, and
+    must NOT be an active cell: retirement removes a cell from the sweep, it
+    cannot coexist with ACTIVE_CELLS."""
+    import datetime as _dt
+    declared = RETIRED_CELLS if retired is None else retired
+    for key, entry in declared.items():
+        asset, tf = _parse_retired_key(key)
+        try:
+            cls = class_of_asset(asset)
+            validate_cell(asset, tf, cls)
+        except ValueError as exc:
+            raise AssertionError(f"RETIRED_CELLS[{key!r}]: {exc}") from None
+        if not isinstance(entry, dict):
+            raise AssertionError(f"RETIRED_CELLS[{key!r}] must be a dict, got {entry!r}")
+        date = entry.get("retired_utc")
+        try:
+            ok = (isinstance(date, str) and len(date) == 10
+                  and _dt.date.fromisoformat(date).isoformat() == date)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise AssertionError(
+                f"RETIRED_CELLS[{key!r}]['retired_utc'] must be a YYYY-MM-DD date, got {date!r}")
+        prefix = entry.get("note_prefix")
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise AssertionError(
+                f"RETIRED_CELLS[{key!r}]['note_prefix'] must name the chained "
+                f"retirement note's prefix, got {prefix!r}")
+        if (asset, tf) in active_cells(cls):
+            raise AssertionError(
+                f"RETIRED_CELLS[{key!r}] is an ACTIVE cell ({asset} {tf} in "
+                f"ACTIVE_CELLS[{cls!r}]): remove it from ACTIVE_CELLS in the same "
+                f"reviewed commit that retires it")
+
+
+assert_retired_cells_valid()

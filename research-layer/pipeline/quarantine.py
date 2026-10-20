@@ -1374,9 +1374,13 @@ def _feed_health_items(data_dir: Path, cells_owed: list[str],
             items.append({"source": feed_health.HOLE_SOURCE,
                           "key": feed_health.ACK_FILE,
                           "reason": f"ack file unreadable: {note}"})
+        # A retired cell (cells.RETIRED_CELLS) is not scanned: its feed is dead
+        # by declaration, so a hole or stale item would be a standing alarm.
+        scan_keys = [k for k in cells_owed if not cells.is_retired(k)]
+        scan_stale = {k for k in fetched_ok if not cells.is_retired(k)}
         # No end cap: this fetch has none, only the closed-bar rule.
-        items += feed_health.scan(Path(data_dir), cells_owed, now_ms=now_ms,
-                                  stale_keys=fetched_ok, acks=acks)
+        items += feed_health.scan(Path(data_dir), scan_keys, now_ms=now_ms,
+                                  stale_keys=scan_stale, acks=acks)
         return items
     except Exception as exc:  # noqa: BLE001 - see the docstring
         print(f"fetch-owed: feed health detector failed: {exc!r}",

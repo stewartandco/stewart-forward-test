@@ -24,7 +24,7 @@ from collections.abc import Iterable
 
 from . import commit_list as _commit_list
 from . import deadline as _deadline
-from .cells import CLASSES, cell_id
+from .cells import CLASSES, cell_id, retired_cell_ids
 from .bars import bars_per_day, IntradayUnsupported
 from .parallel import run_all, CellError
 from .chainlock import ChainLock, ChainLockHeld
@@ -298,7 +298,18 @@ def assert_cells_comparable(data_end: dict[str, str],
     (the default, every caller before the per-class amendment) keeps today's
     single-class behaviour exactly -- one same-day rule across every cell --
     so crypto-only runs are byte-identical.
+
+    RETIRED cells (`cells.RETIRED_CELLS`, empty as committed) are dropped from
+    `data_end` before any check: a delisted or dead cell must not make every
+    other cell incomparable. This is NOT quiet subsetting of the search space:
+    the retired cell's strategies stay registered and counted in N, and
+    comparable_cells still lists the cell (stats loads its bars to simulate
+    them); only this end-date comparison skips it. `class_of` is left as is
+    (it is only looked up for the cells that remain).
     """
+    retired = retired_cell_ids()
+    if retired:
+        data_end = {cid: end for cid, end in data_end.items() if cid not in retired}
     empty = sorted(cid for cid, end in data_end.items() if not end)
     if empty:
         raise ValueError(
