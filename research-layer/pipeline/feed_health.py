@@ -144,8 +144,10 @@ def _scan_one(data_dir: Path, key: str, now_ms: int, stale: bool,
     if stale:
         last = max(dates)
         if is_stale(last, tf, now_ms, end_ms=end_ms):
-            exp_open = _expected_close_ms(tf, now_ms, end_ms, STALE_GRACE_S)                 - TF_MS[tf]
-            exp_s = datetime.fromtimestamp(exp_open / 1000, tz=timezone.utc)                 .strftime(DATE_FMT)
+            exp_open = (_expected_close_ms(tf, now_ms, end_ms, STALE_GRACE_S)
+                        - TF_MS[tf])
+            exp_s = (datetime.fromtimestamp(exp_open / 1000, tz=timezone.utc)
+                     .strftime(DATE_FMT))
             last_s = datetime.fromtimestamp(_open_ms(last) / 1000,
                                             tz=timezone.utc).strftime(DATE_FMT)
             items.append({"source": STALE_SOURCE, "key": key,

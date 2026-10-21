@@ -268,25 +268,34 @@ def _feed_health_items(data_dir: Path, cell_list: list[tuple[str, str]],
 
     Holes are scanned for EVERY cell; only a cell fetched OK this run
     (`out["fetched"]`, keyed `{asset}_{tf}`) is checked for staleness, with the
-    same end cap `refresh` fetched with. Never raises (`feed_health` contract).
+    same end cap `refresh` fetched with. NEVER raises: it runs between `refresh`
+    and the ledger write, so an exception here would drop the whole write (the
+    `crypto_refresh_failed` items too) and fail the task. A detector crash is ONE
+    `feed_hole` item keyed `feed_health` (as in the quarantine fetch step).
     """
-    # A retired cell (cells.RETIRED_CELLS) is never scanned: its feed is
-    # dead by declaration, so a hole or stale item would be a standing alarm.
-    # The refresh iterates ACTIVE cells and retired ones are never active, so
-    # this is belt and braces for a hand-passed list.
-    keys = [k for k in (qcells.cell_key(a, tf) for a, tf in cell_list)
-            if not cells.is_retired(k)]
-    stale_keys = {qcells.cell_key(a, tf) for a, tf in cell_list
-                  if f"{a}_{tf}" in out["fetched"]
-                  and not cells.is_retired(qcells.cell_key(a, tf))}
-    acks, note = feed_health.load_acks(data_dir)
-    items: list[dict] = []
-    if note:
-        items.append({"source": feed_health.HOLE_SOURCE, "key": feed_health.ACK_FILE,
-                      "reason": f"ack file unreadable: {note}"})
-    items += feed_health.scan(data_dir, keys, now_ms=now_ms, stale_keys=stale_keys,
-                              acks=acks, end_ms=last_complete_utc_day_end_ms(now_ms))
-    return items
+    try:
+        # A retired cell (cells.RETIRED_CELLS) is never scanned: its feed is
+        # dead by declaration, so a hole or stale item would be a standing alarm.
+        # The refresh iterates ACTIVE cells and retired ones are never active, so
+        # this is belt and braces for a hand-passed list.
+        keys = [k for k in (qcells.cell_key(a, tf) for a, tf in cell_list)
+                if not cells.is_retired(k)]
+        stale_keys = {qcells.cell_key(a, tf) for a, tf in cell_list
+                      if f"{a}_{tf}" in out["fetched"]
+                      and not cells.is_retired(qcells.cell_key(a, tf))}
+        acks, note = feed_health.load_acks(data_dir)
+        items: list[dict] = []
+        if note:
+            items.append({"source": feed_health.HOLE_SOURCE, "key": feed_health.ACK_FILE,
+                          "reason": f"ack file unreadable: {note}"})
+        items += feed_health.scan(data_dir, keys, now_ms=now_ms, stale_keys=stale_keys,
+                                  acks=acks, end_ms=last_complete_utc_day_end_ms(now_ms))
+        return items
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        print(f"crypto_refresh: feed health detector failed: {exc!r}",
+              file=sys.stderr)
+        return [{"source": feed_health.HOLE_SOURCE, "key": "feed_health",
+                 "reason": f"detector failed: {exc!r}"}]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -205,10 +205,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `data_hashes[cell_id]` lookup in `registry_series` raises `KeyError`
   (no cell hash). Registration now refuses such a spec up front (2b-3
   C3, done: `registry.register_strategy` calls `bars.bars_per_day` on the
-  spec's universe BEFORE any write and raises a `ValueError` naming the
-  strategy, the session and the timeframe; every 1d spec, whatever its
-  session, passes; pinned by `test_registry_session_refusal.py`). The fixture
-  `test_pipeline.make_strategy` and `examples/regenerate_example.py` register
+  spec's universe BEFORE any write and raises a `ValueError` that starts with
+  the strategy id and ends "(2b-3 C3: intraday needs a 24x7 session)"; in
+  between is the `bars.IntradayUnsupported` text, which names the timeframe
+  and the session for a non-24x7 session, but only the timeframe for an
+  unknown one on a 24x7 session (the session check runs first, so an unknown
+  timeframe on a non-24x7 session reports the session text); every 1d spec,
+  whatever its session, passes; pinned by `test_registry_session_refusal.py`).
+  The fixture `test_pipeline.make_strategy` and `examples/regenerate_example.py` register
   their 15m spec on session `24x7` for that reason (Coen 2026-10-20).
 - **Quarantine records intraday strategies (2b-2, 2026-10-11):** the
   recorder writes one row per CELL per UTC day. The cell key
@@ -1812,6 +1816,10 @@ unusable file is one `feed_hole` "cannot scan" item).
   intraday spec (see "24x7 only" above). C5 = the live gate's train cutoff
   compares UTC DATES (`entry_date[:10] <= cutoff[:10]`), so an intraday trade
   entered on the cutoff day counts as train, as a daily one always did.
+  `examples/registry_log.example.jsonl` still chains the original 15m `"RTH"`
+  example spec, which registration now refuses; the committed example stays
+  VALID (the verifier never calls `register_strategy`), and
+  `examples/regenerate_example.py` now writes a 24x7 spec.
 - **Retired cells, multi-cell caveat:** a MULTI-cell strategy with one retired
   cell stops being recordable after that cell's last bar (quarantine records a
   strategy only when ALL its cells are recordable). Only the legacy pooled
@@ -1819,8 +1827,8 @@ unusable file is one `feed_hole` "cannot scan" item).
   (`RETIRED_CELLS` validation needs a declared cell of a declared class), so
   this cannot arise today.
 - Tests: `test_feed_health.py`, `test_crypto_refresh.py`,
-  `test_quarantine_fetch_owed.py`, `test_livegate.py`, `test_retired_cells.py`,
-  `test_registry_session_refusal.py`. Plan:
+  `test_quarantine_fetch_owed.py`, `test_livegate_intraday.py`,
+  `test_retired_cells.py`, `test_registry_session_refusal.py`. Plan:
   `docs/plans/2026-10-19-safety-rails.md`.
 
 ## Switch 1 (2b-3 plan 1, 2026-10-17): crypto goes per-cell at 1d
@@ -1872,7 +1880,10 @@ unusable file is one `feed_hole` "cannot scan" item).
   a reviewed commit that adds the cell to `RETIRED_CELLS` (and removes it from
   `ACTIVE_CELLS` in the same commit) plus the Coen-approved retirement note
   chained verbatim; the code change is the switch and the note is the record,
-  never one without the other. `note_prefix` is a review convention, not
+  never one without the other. `ACTIVE_CELLS` is an assets x timeframes
+  product, so retiring `X@<tf>` means removing asset X from EVERY timeframe of
+  the class in that commit (not just that one); fine for a delisting, which
+  kills every timeframe of the pair. `note_prefix` is a review convention, not
   code-enforced: the import check only requires a non-empty string, so the
   reviewer confirms the note is chained and its prefix matches. The refresh
   stops fetching the cell because it is no longer active, and

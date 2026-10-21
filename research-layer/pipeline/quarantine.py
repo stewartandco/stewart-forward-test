@@ -1524,13 +1524,15 @@ def _write_fetch_ledger(registry_path: Path, items: list[dict]) -> None:
     degraded.record(path, "quarantine", items, remove_unseen=True,
                     keep_sources=keep)
 
+
 def _split_unsupported(quarantined: list[str], specs: dict
                        ) -> tuple[list[str], list[dict]]:
     """2b-2 (design s3.6): every 24x7 timeframe in bars.BARS_PER_DAY_24X7 is
     recorded. An intraday spec the engine cannot simulate (a non-24x7
     session, an unknown timeframe) is skipped and reported as degraded
-    (`intraday_unsupported`) rather than crash the date; registration-time
-    refusal of such a spec belongs to 2b-3."""
+    (`intraday_unsupported`) rather than crash the date. Registration refuses
+    such a spec up front since 2b-3 C3 (`Registry.register_strategy`); this
+    split remains for specs registered before C3 or appended by hand."""
     keep, items = [], []
     for sid in quarantined:
         universe = specs.get(sid, {}).get("universe", {})

@@ -603,3 +603,28 @@ def test_the_scan_gets_the_refresh_end_cap_and_only_fetched_cells_as_stale(
     assert seen["end_ms"] == END_MS
     assert seen["stale_keys"] == {A}
     assert seen["now_ms"] == NOW_MS + 118 * MIN
+
+
+def test_a_crashing_detector_is_one_item_and_the_ledger_is_still_written(
+        tmp_path, monkeypatch, capsys):
+    # Final review: the detector runs between refresh() and degraded.record(), so
+    # an exception from it must not drop the whole ledger write (the failed-cell
+    # items included) nor fail the 08:00 task. Mirrors the quarantine guard.
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+
+    def boom(*a, **kw):
+        raise RuntimeError("scan blew up")
+
+    monkeypatch.setattr(cr.feed_health, "scan", boom)
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    items = _ledger(tmp_path / "logs")["items"]
+    failed = [i for i in items if i["source"] == cr.FETCH_SOURCE]
+    assert [i["key"] for i in failed] == [B]               # the refresh item survives
+    health = [i for i in items if i["key"] == "feed_health"]
+    assert len(health) == 1
+    assert health[0]["source"] == fh.HOLE_SOURCE
+    assert health[0]["reason"].startswith("detector failed: ")
+    assert "scan blew up" in health[0]["reason"]
+    assert "feed health detector failed" in capsys.readouterr().err
