@@ -46,7 +46,7 @@ def make_spec(card_ids):
         "strategy_id": None, "version": 1, "created_utc": "2026-08-06T04:00:00Z",
         "name": "MNQ ORB 15m structure-stop 1R", "family": "orb_breakout",
         "universe": {"assets": ["MNQ"], "asset_class": "futures",
-                     "timeframe": "15m", "session": "RTH"},
+                     "timeframe": "15m", "session": "24x7"},
         "blocks": [
             {"role": "entry", "type": "orb_breakout", "params": {"window_min": 15}},
             {"role": "stop", "type": "structure", "params": {}},

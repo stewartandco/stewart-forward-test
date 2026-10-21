@@ -730,8 +730,15 @@ def _lagging_cells(ends: dict[str, str], class_of: dict[str, str]) -> set[str]:
     through assert_cells_comparable itself (a two-cell dict) rather than
     re-deriving the allowance here; the EARLIER side of a failing pair is the
     laggard. Only called once the full set has already failed, so the cost is
-    paid on a real breach, not on every fire."""
+    paid on a real breach, not on every fire.
+
+    A RETIRED cell (cells.RETIRED_CELLS) is never a laggard: assert_cells_
+    comparable ignores it, so naming it here would park a fire on a cell the
+    comparability rule no longer counts."""
     from .screen import assert_cells_comparable
+    retired = cells.retired_cell_ids()
+    if retired:
+        ends = {cid: e for cid, e in ends.items() if cid not in retired}
     groups: dict[tuple[str, str], list[str]] = {}
     for cid, e in ends.items():
         groups.setdefault((class_of[cid], e[:10]), []).append(cid)

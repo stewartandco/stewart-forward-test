@@ -48,7 +48,7 @@ def make_strategy(card_ids):
         "strategy_id": None, "version": 1, "created_utc": "2026-08-05T00:00:00Z",
         "name": "test strat", "family": "orb_breakout",
         "universe": {"assets": ["MNQ"], "asset_class": "futures",
-                     "timeframe": "15m", "session": "RTH"},
+                     "timeframe": "15m", "session": "24x7"},
         "blocks": [
             {"role": "entry", "type": "orb_breakout", "params": {"window_min": 15}},
             {"role": "stop", "type": "structure", "params": {}},

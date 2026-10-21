@@ -30,8 +30,10 @@ def test_each_owed_cell_is_fetched_once(tmp_path):
     b = json.loads(json.dumps(a))
     b["strategy_id"] = "b" * 16
     calls = []
+    _csv(tmp_path, "BTCUSD_1h.csv", ["2026-10-05 09:00:00", "2026-10-05 10:00:00"])
     items = fetch_owed([a["strategy_id"], b["strategy_id"]], _specs(a, b), tmp_path,
-                       fetch=lambda sym, tf, d: calls.append((sym, tf)) or {})
+                       fetch=lambda sym, tf, d: calls.append((sym, tf)) or {},
+                       sleep=lambda s: None, now_ms=NOW_MS)
     assert calls == [("BTCUSD", "1h")] and items == []
 
 
@@ -48,8 +50,10 @@ def test_a_failed_fetch_is_an_item_and_the_other_cells_still_fetch(tmp_path):
             raise RuntimeError("HTTP 451")
         return {}
     items = fetch_owed([a["strategy_id"], b["strategy_id"]], _specs(a, b),
-                       tmp_path, fetch=fetch)
-    assert sorted(calls) == ["BTCUSD", "ETHUSD"]
+                       tmp_path, fetch=fetch, sleep=lambda s: None,
+                       now_ms=NOW_MS)
+    items = [i for i in items if i["source"] == FETCH_SOURCE]
+    assert sorted(set(calls)) == ["BTCUSD", "ETHUSD"]
     assert [(i["source"], i["key"]) for i in items] == [(FETCH_SOURCE, "BTCUSD@1h")]
     assert "HTTP 451" in items[0]["reason"]
 
@@ -60,7 +64,9 @@ def test_the_cli_exits_zero_and_records_the_item(tmp_path, monkeypatch):
 
     def boom(*a, **k):
         raise RuntimeError("down")
+    from . import quarantine
     monkeypatch.setattr(crypto_data, "fetch_symbol", boom)
+    monkeypatch.setattr(quarantine.time, "sleep", lambda s: None)
     assert quarantine_run(argv_for(reg, data, "--fetch-owed")) == 0
     assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [
         (FETCH_SOURCE, "BTCUSD@1h")]
@@ -85,8 +91,9 @@ def test_a_recovered_fetch_clears_its_item_only(tmp_path, monkeypatch):
     dg.record(p, "quarantine", [
         {"source": FETCH_SOURCE, "key": "BTCUSD@1h", "reason": "down"},
         {"source": "restated", "key": "EFA", "reason": "x"}], remove_unseen=False)
-    from . import crypto_data
+    from . import crypto_data, feed_health
     monkeypatch.setattr(crypto_data, "fetch_symbol", lambda *a, **k: {})
+    monkeypatch.setattr(feed_health, "scan", lambda *a, **k: [])
     assert quarantine_run(argv_for(reg, data, "--fetch-owed")) == 0
     assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [("restated", "EFA")]
 
@@ -122,7 +129,9 @@ def test_a_binance_ban_stops_the_fetch_and_owes_every_remaining_cell(tmp_path):
         calls.append(sym)
         raise BinanceBanned("418 from Binance: IP-wide ban")
     items = fetch_owed([a["strategy_id"], b["strategy_id"]], _specs(a, b),
-                       tmp_path, fetch=fetch)
+                       tmp_path, fetch=fetch, sleep=lambda s: None,
+                       now_ms=NOW_MS)
+    items = [i for i in items if i["source"] == FETCH_SOURCE]
     assert calls == ["BTCUSD"]
     assert [(i["source"], i["key"]) for i in items] == [
         (FETCH_SOURCE, "BTCUSD@1h"), (FETCH_SOURCE, "ETHUSD@1h")]
@@ -187,7 +196,8 @@ def test_a_rate_limit_stops_the_fetch_and_owes_every_remaining_cell(
     def fetch(sym, tf, d):
         calls.append(sym)
         raise RateLimited(120.0, retry_ok=False)
-    items = fetch_owed(ids, specs, tmp_path, fetch=fetch)
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, now_ms=NOW_MS)
+    items = [i for i in items if i["source"] == FETCH_SOURCE]
     assert calls == ["BTCUSD"]
     assert [(i["source"], i["key"]) for i in items] == [
         (FETCH_SOURCE, "BTCUSD@1h"), (FETCH_SOURCE, "ETHUSD@1h")]
@@ -210,5 +220,256 @@ def test_cells_are_paced_like_crypto_data(tmp_path, monkeypatch):
         if sym == "BTCUSD":
             raise RuntimeError("HTTP 451")
         return {}
-    fetch_owed(ids, specs, tmp_path, fetch=fetch)
-    assert events == [("fetch", "BTCUSD"), ("sleep", 0.2), ("fetch", "ETHUSD")]
+    fetch_owed(ids, specs, tmp_path, fetch=fetch, now_ms=NOW_MS)
+    # pass 1 (paced, the failed cell is still followed by the pause), then the
+    # two retry passes over the failed cell alone (120 s before each)
+    assert events == [("fetch", "BTCUSD"), ("sleep", 0.2), ("fetch", "ETHUSD"),
+                      ("sleep", 120), ("fetch", "BTCUSD"),
+                      ("sleep", 120), ("fetch", "BTCUSD")]
+
+
+# ---- 2b-3 C1, C2 + Coen 10-17: retry passes, hole and stale items ----------
+
+NOW_MS = 1_791_201_600_000          # 2026-10-05 12:00:00 UTC
+
+
+def _one_cell():
+    a = _twin_spec("1h")
+    return [a["strategy_id"]], _specs(a)
+
+
+def _sleeps():
+    got = []
+    return got, got.append
+
+
+def _csv(data_dir, name, dates):
+    (Path(data_dir) / name).write_text(
+        "date,open,high,low,close,volume\n"
+        + "".join(f"{d},1,1,1,1,1\n" for d in dates), encoding="utf-8")
+
+
+def test_a_failed_cell_is_retried_in_the_same_run_and_recovers(tmp_path):
+    ids, specs = _one_cell()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        if len(calls) == 1:
+            raise RuntimeError("HTTP 451")
+        return {}
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    assert calls == ["BTCUSD", "BTCUSD"]
+    assert [i for i in items if i["source"] == FETCH_SOURCE] == []
+    assert sleeps == [120]
+
+
+def test_a_cell_failing_every_pass_is_one_item_after_three_attempts(tmp_path):
+    ids, specs = _one_cell()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(len(calls) + 1)
+        raise RuntimeError(f"HTTP 5xx #{len(calls)}")
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    mine = [i for i in items if i["source"] == FETCH_SOURCE]
+    assert len(calls) == 3 and sleeps == [120, 120]
+    assert len(mine) == 1 and mine[0]["key"] == "BTCUSD@1h"
+    assert "#3" in mine[0]["reason"]                 # the LAST failure
+    assert mine[0]["reason"].endswith(" (after 3 attempts)")
+
+
+def test_only_the_cells_that_failed_are_retried(tmp_path):
+    ids, specs = _two_cells()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        if sym == "BTCUSD" and calls.count("BTCUSD") == 1:
+            raise RuntimeError("blip")
+        return {}
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    assert calls == ["BTCUSD", "ETHUSD", "BTCUSD"]
+    assert [i for i in items if i["source"] == FETCH_SOURCE] == []
+    assert sleeps == [0.2, 120]            # pacing in pass 1, one retry wait
+
+
+def test_nothing_failed_means_no_retry_sleep(tmp_path):
+    ids, specs = _two_cells()
+    sleeps, sleep = _sleeps()
+    fetch_owed(ids, specs, tmp_path, fetch=lambda *a: {}, sleep=sleep,
+               now_ms=NOW_MS)
+    assert sleeps == [0.2]
+
+
+def test_a_ban_in_a_retry_pass_stops_without_sleeping(tmp_path):
+    from .crypto_data import BinanceBanned
+    ids, specs = _two_cells()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        if sym == "BTCUSD":
+            if calls.count("BTCUSD") == 1:
+                raise RuntimeError("blip")
+            raise BinanceBanned("418 from Binance: IP-wide ban")
+        return {}
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    mine = [i for i in items if i["source"] == FETCH_SOURCE]
+    assert calls == ["BTCUSD", "ETHUSD", "BTCUSD"]
+    assert sleeps == [0.2, 120]            # no sleep after the ban
+    assert [i["key"] for i in mine] == ["BTCUSD@1h"]
+    assert "418" in mine[0]["reason"]
+
+
+def test_a_rate_limit_in_a_retry_pass_stops_without_sleeping(tmp_path):
+    from .crypto_data import RateLimited
+    ids, specs = _two_cells()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        if sym == "BTCUSD":
+            if calls.count("BTCUSD") == 1:
+                raise RuntimeError("blip")
+            raise RateLimited(120.0, retry_ok=False)
+        return {}
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    mine = [i for i in items if i["source"] == FETCH_SOURCE]
+    assert calls == ["BTCUSD", "ETHUSD", "BTCUSD"] and sleeps == [0.2, 120]
+    assert [i["key"] for i in mine] == ["BTCUSD@1h"]
+    assert "rate limit" in mine[0]["reason"].lower()
+
+
+def test_a_ban_in_pass_one_skips_the_retries_entirely(tmp_path):
+    from .crypto_data import BinanceBanned
+    ids, specs = _two_cells()
+    calls = []
+
+    def fetch(sym, tf, d):
+        calls.append(sym)
+        raise BinanceBanned("418 from Binance: IP-wide ban")
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    mine = [i for i in items if i["source"] == FETCH_SOURCE]
+    assert calls == ["BTCUSD"] and sleeps == []
+    assert [i["key"] for i in mine] == ["BTCUSD@1h", "ETHUSD@1h"]
+    assert "418" in mine[1]["reason"] and "skipped" in mine[1]["reason"]
+
+
+def test_holes_and_staleness_of_owed_cells_are_items(tmp_path):
+    ids, specs = _two_cells()
+    # BTCUSD: the fetch FAILS; its file has a hole (10-02) and an old last bar.
+    _csv(tmp_path, "BTCUSD_1h.csv", ["2026-10-01 00:00:00", "2026-10-03 00:00:00"])
+    # ETHUSD: fetch OK, no hole, but the last bar is days old: stale.
+    _csv(tmp_path, "ETHUSD_1h.csv", [f"2026-10-01 {h:02d}:00:00" for h in range(24)])
+
+    def fetch(sym, tf, d):
+        if sym == "BTCUSD":
+            raise RuntimeError("down")
+        return {}
+    sleeps, sleep = _sleeps()
+    items = fetch_owed(ids, specs, tmp_path, fetch=fetch, sleep=sleep,
+                       now_ms=NOW_MS)
+    got = sorted((i["source"], i["key"]) for i in items)
+    # no feed_stale for BTCUSD: its fetch failed, the fetch item says so
+    assert got == [("feed_hole", "BTCUSD@1h"), ("feed_stale", "ETHUSD@1h"),
+                   (FETCH_SOURCE, "BTCUSD@1h")]
+
+
+def test_an_unreadable_ack_file_is_one_item(tmp_path):
+    ids, specs = _one_cell()
+    _csv(tmp_path, "BTCUSD_1h.csv", ["2026-10-05 10:00:00", "2026-10-05 11:00:00"])
+    (tmp_path / "intraday_holes_ack.json").write_text("{nope", encoding="utf-8")
+    items = fetch_owed(ids, specs, tmp_path, fetch=lambda *a: {},
+                       sleep=lambda s: None, now_ms=NOW_MS)
+    assert [(i["source"], i["key"]) for i in items] == [
+        ("feed_hole", "intraday_holes_ack.json")]
+    assert "ack file unreadable" in items[0]["reason"]
+
+
+def test_a_detector_that_raises_never_crashes_the_step(tmp_path, monkeypatch):
+    from . import feed_health
+    ids, specs = _one_cell()
+
+    def boom(*a, **k):
+        raise ValueError("kaboom")
+    monkeypatch.setattr(feed_health, "scan", boom)
+    items = fetch_owed(ids, specs, tmp_path, fetch=lambda *a: {},
+                       sleep=lambda s: None, now_ms=NOW_MS)
+    assert len(items) == 1
+    assert items[0]["source"] == "feed_hole" and items[0]["key"] == "feed_health"
+    assert items[0]["reason"] == f"detector failed: {ValueError('kaboom')!r}"
+
+
+def test_a_failing_ack_loader_never_crashes_the_step(tmp_path, monkeypatch):
+    from . import feed_health
+
+    def boom(*a, **k):
+        raise OSError("disk")
+    monkeypatch.setattr(feed_health, "load_acks", boom)
+    ids, specs = _one_cell()
+    items = fetch_owed(ids, specs, tmp_path, fetch=lambda *a: {},
+                       sleep=lambda s: None, now_ms=NOW_MS)
+    assert [(i["source"], i["key"]) for i in items] == [("feed_hole", "feed_health")]
+
+
+def test_the_step_sources_match_feed_health():
+    """quarantine.py cannot import feed_health at module load (it imports
+    crypto_data, which is imported lazily on purpose), so the constant holds
+    literals; this pins them to the real names."""
+    from . import feed_health
+    from .quarantine import FETCH_STEP_SOURCES
+    assert FETCH_STEP_SOURCES == (FETCH_SOURCE, feed_health.HOLE_SOURCE,
+                                  feed_health.STALE_SOURCE)
+
+
+def test_the_fetch_step_owns_its_detector_items_and_catch_up_keeps_them(tmp_path):
+    from .quarantine import _write_fetch_ledger
+    from .test_intraday_statistics import _twin_bars
+    reg, data, daily, sd, sh = _twins(tmp_path, end=_twin_bars()[0][153]["date"])
+    hole = {"source": "feed_hole", "key": "BTCUSD@1h", "reason": "1 day(s) with no bars"}
+    stale = {"source": "feed_stale", "key": "BTCUSD@1h", "reason": "old"}
+    other = {"source": "restated", "key": "EFA", "reason": "x"}
+    p = reg.log_path.parent / "logs" / dg.QUARANTINE_LEDGER
+    _write_fetch_ledger(reg.log_path, [hole, stale])
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    assert {i["source"] for i in ledger(reg)["items"]} >= {"feed_hole", "feed_stale"}
+    # a later fetch run that no longer sees them removes both, keeps the rest
+    dg.record(p, "quarantine", [other], remove_unseen=False)
+    _write_fetch_ledger(reg.log_path, [])
+    assert [(i["source"], i["key"]) for i in ledger(reg)["items"]] == [
+        ("restated", "EFA")]
+
+
+def test_a_dated_record_keeps_the_detector_items(tmp_path):
+    from .quarantine import _write_fetch_ledger
+    reg, data, daily, sd, sh = _twins(tmp_path)
+    hole = {"source": "feed_hole", "key": "BTCUSD@1h", "reason": "x"}
+    _write_fetch_ledger(reg.log_path, [hole])
+    assert quarantine_run(argv_for(reg, data, "--date", daily[151]["date"])) == 0
+    assert any(i["source"] == "feed_hole" for i in ledger(reg)["items"])
+
+
+def test_no_owed_intraday_cell_means_no_scan_and_no_sleep(tmp_path, monkeypatch):
+    from . import feed_health
+
+    def no_scan(*a, **k):
+        raise AssertionError("scan must not run")
+    monkeypatch.setattr(feed_health, "scan", no_scan)
+    sd = _twin_spec("1d")
+    sleeps, sleep = _sleeps()
+    assert fetch_owed([sd["strategy_id"]], _specs(sd), tmp_path, sleep=sleep,
+                      now_ms=NOW_MS) == []
+    assert sleeps == []

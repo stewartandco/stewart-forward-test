@@ -203,8 +203,17 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `IntradayUnsupported` is reached: `load_cell_data` raises
   `FileNotFoundError` (no tradfi `*_1h.csv` exists) or the
   `data_hashes[cell_id]` lookup in `registry_series` raises `KeyError`
-  (no cell hash). Either way, registration must refuse such a spec up
-  front (2b-3).
+  (no cell hash). Registration now refuses such a spec up front (2b-3
+  C3, done: `registry.register_strategy` calls `bars.bars_per_day` on the
+  spec's universe BEFORE any write and raises a `ValueError` that starts with
+  the strategy id and ends "(2b-3 C3: intraday needs a 24x7 session)"; in
+  between is the `bars.IntradayUnsupported` text, which names the timeframe
+  and the session for a non-24x7 session, but only the timeframe for an
+  unknown one on a 24x7 session (the session check runs first, so an unknown
+  timeframe on a non-24x7 session reports the session text); every 1d spec,
+  whatever its session, passes; pinned by `test_registry_session_refusal.py`).
+  The fixture `test_pipeline.make_strategy` and `examples/regenerate_example.py` register
+  their 15m spec on session `24x7` for that reason (Coen 2026-10-20).
 - **Quarantine records intraday strategies (2b-2, 2026-10-11):** the
   recorder writes one row per CELL per UTC day. The cell key
   (`pipeline/qcells.py`) is `ASSET@TF` (`BTCUSDT@1h`) for an intraday tf
@@ -222,10 +231,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   missing hour cannot make a day owed forever; a missing hour inside a
   day that has other bars is not a hole (that day is complete and is
   recorded from the bars present), but a whole UTC day with no bars is
-  silently never owed (as for daily) and the fetcher never backfills it
-  (`crypto_data.fetch_symbol`); only a FAILED fetch raises
-  `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
-  `--fetch-owed` refetches it from scratch. The chain is append-only: a
+  never owed (as for daily) and the fetcher never backfills it
+  (`crypto_data.fetch_symbol`). Since 2b-3 C1 it is no longer silent: it
+  raises a `feed_hole` item (section "Feed health (2b-3 C1/C2)"). A FAILED
+  fetch raises `intraday_fetch_failed`. Repair = delete the cell's CSV so the
+  next `--fetch-owed` refetches it from scratch. The chain is append-only: a
   refetch leaves every chained row as it is, but it changes `bars_sha256`
   for every already-chained date at or after the hole (`hash_bars_through`
   covers all bars up to the date), so a strategy that still owes such a
@@ -249,14 +259,18 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   closed bars only. The intraday CSVs are gitignored (`data/*.csv`),
   never committed; the chain pins them by hash. A failed cell is a
   degraded item with source `intraday_fetch_failed` (key = the cell) in
-  `logs/degraded_quarantine.json`; the fetch step OWNS those items
-  (`_write_fetch_ledger`) and catch-up keeps them (`keep_sources`). A
-  Binance 418 ban stops the step at once and marks every remaining cell.
+  `logs/degraded_quarantine.json`; the fetch step OWNS those items and the
+  `feed_hole` / `feed_stale` ones (`FETCH_STEP_SOURCES`,
+  `_write_fetch_ledger`), and catch-up and `--date` keep them
+  (`keep_sources`). A generic failure is retried in the same run (2 passes,
+  see "Feed health" below). A Binance 418 ban stops the step at once and
+  marks every remaining cell.
   A fetch failure never blocks the daily record: only a crash of the
   step is carried to the task's exit code (`FETCH_RC`), after the record
   is committed. A non-24x7 intraday spec is deferred with a degraded
   item `intraday_unsupported` (`_split_unsupported`), never a crash;
-  registration-time refusal is 2b-3. The live gate's
+  registration now refuses such a spec up front (2b-3 C3), so the deferral
+  only guards a spec chained before C3. The live gate's
   `closed_forward_trades` (`pipeline/livegate.py`) SUMS `exits` on rows
   that carry them and counts `action == "exit"` on daily rows. Cost
   hazard: each date re-simulates the cell from bar 0 (measured in the
@@ -1728,8 +1742,11 @@ per window per bar; the percentile is an exact incremental one.
   no sleep: that cell gets a `crypto_refresh_failed` item and every cell not yet
   completed gets one with reason `skipped: ...`.
 - **Ledger `logs/degraded_crypto_refresh.json`, writer `crypto_refresh`:** items
-  are `crypto_refresh_failed` (key = the cell) and `crypto_admission` (first
-  bar after 2022-12-31, or CSV missing/empty). Written with `remove_unseen=True`
+  are `crypto_refresh_failed` (key = the cell), `crypto_admission` (first
+  bar after 2022-12-31, or CSV missing/empty), and `feed_hole` / `feed_stale`
+  (2b-3 C1, C2: a UTC day with no bar inside a file; a cell fetched OK whose
+  last bar is behind the newest closed bar; see "Feed health (2b-3 C1/C2)").
+  Written with `remove_unseen=True`
   (a recovered item leaves; an empty run still refreshes `ts_utc` so the
   Sentinel sees a live writer). The items ARE the alarm.
 - **Exit codes:** 0 = the run completed, stopped on a ban or stopped at the
@@ -1744,6 +1761,75 @@ per window per bar; the percentile is an exact incremental one.
   TRACKED file the task rewrites and never commits, so it shows as modified on
   the shared working tree exactly like `tradfi_snapshot_manifest.json`: that is
   expected; never `git checkout --` it from another session.
+
+## Feed health (2b-3 C1/C2, plan 3, 2026-10-21)
+Two feed failures used to pass silently: a whole UTC day missing INSIDE a
+price file (the fetcher never backfills, quarantine never owes it), and a fetch
+that succeeds but brings nothing new. `pipeline/feed_health.py` finds both and
+returns plain ledger items; it writes nothing and `scan` never raises (an
+unusable file is one `feed_hole` "cannot scan" item).
+- **Sources:** `feed_hole` (key = the cell; the reason lists up to the first 10
+  days, "N day(s) with no bars") and `feed_stale` (key = the cell). A hole is a
+  UTC day strictly between the file's first and last bar's days with no bar at
+  all (a missing hour inside a day that has other bars is NOT a hole; the first
+  and last day are never holes). Works for every cell shape: the USDT files'
+  `"YYYY-MM-DD HH:MM:SS"` open times and the legacy BTCUSD/ETHUSD bare dates.
+- **Stale rule:** the fetcher's own closed-bar rule plus a grace
+  (`STALE_GRACE_S = 60`): `cutoff = now - crypto_data.SKEW_MARGIN_MS - grace`,
+  capped by `end_ms` (the refresh passes 00:00 UTC of today) and floored to the
+  timeframe; the cell is stale iff its last bar's CLOSE is before that cutoff.
+  Staleness is only checked for a cell FETCHED OK this run (a failed or
+  skipped cell already has its own failure item), so a stale item always
+  means "the fetch ran and brought nothing newer".
+- **Ack file `data/intraday_holes_ack.json`** (tracked; committed as `{}`):
+  `{"<cell key>": {"dates": ["YYYY-MM-DD", ...], "reason": "..."}}`. Coen
+  decides which holes are real exchange gaps and edits it; nothing in code
+  writes it. An acknowledged hole is PRINTED (`<cell>  acknowledged hole(s):
+  ...`), not itemised. A malformed file (not an object, a non-list `dates`, a
+  bad date, an empty `reason`) honours NOTHING (a half-trusted ack would hide
+  a hole) and is itself ONE `feed_hole` item keyed by the file name.
+- **Owners (who raises and who clears an item):**
+  1. the `crypto_refresh` ledger (`logs/degraded_crypto_refresh.json`): holes
+     for every ACTIVE 1d cell, stale only for cells fetched OK;
+  2. the quarantine fetch-owed step (`logs/degraded_quarantine.json`): the
+     owed intraday cells, items owned via `quarantine.FETCH_STEP_SOURCES`
+     (`intraday_fetch_failed`, `feed_hole`, `feed_stale`); `--date` and
+     catch-up keep them. A detector crash becomes one `feed_hole` item keyed
+     `feed_health`, never a crashed step (a crash would turn the 08:20 task
+     red).
+  A RETIRED cell (`cells.RETIRED_CELLS`) is not scanned in either place.
+- **Alarm path:** the Ops Sentinel's `research_degraded` check turns a ledger
+  item WARN, then FAIL after 3 days. **The digest is the alert** (Coen
+  10-17): there is no new task, mail or pager; an unacknowledged hole shows up
+  in the morning digest. A repair is a deliberate, Coen-gated act (see the
+  `restated` hazard in the 2b-2 section: a refetch changes `bars_sha256` for
+  every chained date at or after the hole).
+- **Fetch-owed retries (Coen 10-17):** `quarantine.fetch_owed` retries the
+  cells that failed with a GENERIC error in the same run: 2 extra passes
+  (`FETCH_RETRY_PASSES`), 120 s apart (`FETCH_RETRY_WAIT_S`), over just the
+  failed cells, so at most about 4 minutes are added (and only on failure). A
+  `BinanceBanned` or any `RateLimited` stops the run at once with no retry
+  pass and no sleep (more calls could extend an IP-wide ban). A cell that still
+  fails after the last pass is ONE `intraday_fetch_failed` item. A retired
+  intraday cell is skipped before any fetch.
+- **C3 and C5 (same plan):** C3 = `register_strategy` refuses a non-24x7
+  intraday spec (see "24x7 only" above). C5 = the live gate's train cutoff
+  compares UTC DATES (`entry_date[:10] <= cutoff[:10]`), so an intraday trade
+  entered on the cutoff day counts as train, as a daily one always did.
+  `examples/registry_log.example.jsonl` still chains the original 15m `"RTH"`
+  example spec, which registration now refuses; the committed example stays
+  VALID (the verifier never calls `register_strategy`), and
+  `examples/regenerate_example.py` now writes a 24x7 spec.
+- **Retired cells, multi-cell caveat:** a MULTI-cell strategy with one retired
+  cell stops being recordable after that cell's last bar (quarantine records a
+  strategy only when ALL its cells are recordable). Only the legacy pooled
+  BTCUSD+ETHUSD specs are multi-cell, and those tickers are not retirable
+  (`RETIRED_CELLS` validation needs a declared cell of a declared class), so
+  this cannot arise today.
+- Tests: `test_feed_health.py`, `test_crypto_refresh.py`,
+  `test_quarantine_fetch_owed.py`, `test_livegate_intraday.py`,
+  `test_retired_cells.py`, `test_registry_session_refusal.py`. Plan:
+  `docs/plans/2026-10-19-safety-rails.md`.
 
 ## Switch 1 (2b-3 plan 1, 2026-10-17): crypto goes per-cell at 1d
 - Design: `docs/2026-10-17-crypto-grid-activation-design.md`. Switch 1 is SP5
@@ -1771,16 +1857,43 @@ per window per bar; the percentile is an exact incremental one.
 - **Per-cycle cap counts cells for every class** (`specs_per_combo =
   max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips
   `USDT`, so strategy names read `BTC`, not `BTCUSDT`.
-- **Known limit: a retired or delisted pair has no exit in code.** Once a dead
+- **Known limit: a retired or delisted pair needs a declared exit.** Once a dead
   USDT cell has registered strategies, its file stops growing, so the loop's
   freshness preflight parks every crypto fire at `stale_data`, and
   `gauntlet_stats` refuses `cells_not_comparable` REGISTRY-WIDE, for all
   classes (`pipeline/gauntlet_stats.py` ~682-691), once the vintage passes the
   cell's last bar. Nothing reads a retirement note: the grid record's
   "RETIRED by a new note" is policy, not code. Tradfi has the same latent
-  exposure (a delisted ETF or a dead FX series). Plan 3 owns an excluded-cells
-  mechanism (`comparable_cells`, the preflight and the stats honouring retired
-  cells).
+  exposure (a delisted ETF or a dead FX series). **The exit is
+  `cells.RETIRED_CELLS` (2b-3 plan 3, Task 6; empty as committed).** It maps a
+  cell key (`qcells.cell_key`: the bare asset at 1d, `ASSET@TF` otherwise) to
+  `{"retired_utc": "YYYY-MM-DD", "note_prefix": "<chain note prefix>"}`.
+  A retired cell is dropped from `screen.assert_cells_comparable`'s
+  `data_end` (so the preflight's rules 1-2, `gauntlet_stats` and the gauntlet
+  worker stop refusing over it; `loop._lagging_cells` skips it too), and the
+  `feed_health` detectors in `crypto_refresh` and the quarantine fetch step
+  skip it. It must NOT be in `ACTIVE_CELLS` (import-time check,
+  `cells.assert_retired_cells_valid`), so no new spec can name it. Its
+  strategies stay registered, counted in N, simulated on the bars that exist
+  (`comparable_cells` still lists the cell) and keep their forward record;
+  quarantine simply has no new bar to record. **Procedure to retire a cell:**
+  a reviewed commit that adds the cell to `RETIRED_CELLS` (and removes it from
+  `ACTIVE_CELLS` in the same commit) plus the Coen-approved retirement note
+  chained verbatim; the code change is the switch and the note is the record,
+  never one without the other. `ACTIVE_CELLS` is an assets x timeframes
+  product, so retiring `X@<tf>` means removing asset X from EVERY timeframe of
+  the class in that commit (not just that one); fine for a delisting, which
+  kills every timeframe of the pair. `note_prefix` is a review convention, not
+  code-enforced: the import check only requires a non-empty string, so the
+  reviewer confirms the note is chained and its prefix matches. The refresh
+  stops fetching the cell because it is no longer active, and
+  `quarantine --fetch-owed` skips a retired intraday cell (one console line,
+  no fetch, no retry wait, no `intraday_fetch_failed` item). Retiring a crypto
+  cell removes it from `ACTIVE_CELLS["crypto"]` in the same commit, which
+  changes the 76-asset count, the rotation `% n` arithmetic and the
+  `test_switch1.py` pins; all are updated in that commit. A retired cell whose
+  price file is MISSING or EMPTY still blocks via the preflight's rule 3 (a
+  different failure, alarmed on purpose). Pinned by `test_retired_cells.py`.
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy

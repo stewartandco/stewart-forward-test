@@ -45,10 +45,18 @@ sleep (more calls could extend an IP-wide ban shared with every Binance
 consumer on this box): that cell gets a failure item and every cell not yet
 completed a `skipped: ...` item.
 
-LEDGER. Items = fetch failures + `admission_problems` over the active cells,
-written with `degraded.record(..., remove_unseen=True)`: a recovered item
-leaves, and an empty run still refreshes `ts_utc` so the Sentinel sees a live
-writer.
+LEDGER. Items = fetch failures + `admission_problems` over the active cells
++ feed health (2b-3 C1, C2), written with `degraded.record(...,
+remove_unseen=True)`: a recovered item leaves, and an empty run still refreshes
+`ts_utc` so the Sentinel sees a live writer. Feed health is
+`feed_health.scan` over every active cell's file: a `feed_hole` item for a UTC
+day with no bar (unless acknowledged in `<data>/intraday_holes_ack.json`; an
+unreadable ack file is ONE `feed_hole` item keyed by the file and honours
+nothing), and a `feed_stale` item for a cell FETCHED OK this run whose last bar
+is older than the newest closed bar (the scan is given the refresh's own end
+cap). A cell with a `crypto_refresh_failed` item (failed or skipped) is not
+stale-checked, its failure item already says so; holes are scanned for every
+cell whatever the fetch did. No active cells = an empty ledger and no scan.
 
 EXIT CODES. 0 whenever the run completed, stopped on a ban, or stopped at the
 hard stop (the ledger items are the alarm; a non-zero exit would only invite
@@ -63,7 +71,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cells, degraded, screen
+from . import cells, degraded, feed_health, screen
 from . import qcells
 from .crypto_data import (BinanceBanned, RateLimited, fetch_symbol,
                           last_complete_utc_day_end_ms, update_snapshot_manifest)
@@ -254,6 +262,42 @@ def _deadline_ms(hhmm: str, now_ms: int) -> int:
     return int(local.timestamp() * 1000)
 
 
+def _feed_health_items(data_dir: Path, cell_list: list[tuple[str, str]],
+                       out: dict, now_ms: int) -> list[dict]:
+    """Hole and stale-feed ledger items (2b-3 C1, C2) for `cell_list`.
+
+    Holes are scanned for EVERY cell; only a cell fetched OK this run
+    (`out["fetched"]`, keyed `{asset}_{tf}`) is checked for staleness, with the
+    same end cap `refresh` fetched with. NEVER raises: it runs between `refresh`
+    and the ledger write, so an exception here would drop the whole write (the
+    `crypto_refresh_failed` items too) and fail the task. A detector crash is ONE
+    `feed_hole` item keyed `feed_health` (as in the quarantine fetch step).
+    """
+    try:
+        # A retired cell (cells.RETIRED_CELLS) is never scanned: its feed is
+        # dead by declaration, so a hole or stale item would be a standing alarm.
+        # The refresh iterates ACTIVE cells and retired ones are never active, so
+        # this is belt and braces for a hand-passed list.
+        keys = [k for k in (qcells.cell_key(a, tf) for a, tf in cell_list)
+                if not cells.is_retired(k)]
+        stale_keys = {qcells.cell_key(a, tf) for a, tf in cell_list
+                      if f"{a}_{tf}" in out["fetched"]
+                      and not cells.is_retired(qcells.cell_key(a, tf))}
+        acks, note = feed_health.load_acks(data_dir)
+        items: list[dict] = []
+        if note:
+            items.append({"source": feed_health.HOLE_SOURCE, "key": feed_health.ACK_FILE,
+                          "reason": f"ack file unreadable: {note}"})
+        items += feed_health.scan(data_dir, keys, now_ms=now_ms, stale_keys=stale_keys,
+                                  acks=acks, end_ms=last_complete_utc_day_end_ms(now_ms))
+        return items
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        print(f"crypto_refresh: feed health detector failed: {exc!r}",
+              file=sys.stderr)
+        return [{"source": feed_health.HOLE_SOURCE, "key": "feed_health",
+                 "reason": f"detector failed: {exc!r}"}]
+
+
 def main(argv: list[str] | None = None) -> int:
     layer = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(
@@ -289,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     out = refresh(data_dir, cell_list, now_ms=now_ms, deadline_ms=deadline_ms,
                   fetch=fetch_symbol, sleep=time.sleep, stop_ms=stop_ms)
     items = out["items"] + admission_problems(data_dir, cell_list)
+    items += _feed_health_items(data_dir, cell_list, out, now_ms)
     degraded.record(ledger, WRITER, items, remove_unseen=True)
     if out["aborted"]:
         print(f"crypto_refresh: ABORTED: {out['aborted']}")

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from . import bars
 from .blocks import RETIRED_TYPES, is_exit_rules_v7_note
 from .common import GENESIS_HASH, canonical_json, entry_hash
 from .lock import FileLock
@@ -493,6 +494,19 @@ class Registry:
         for b in spec.get("blocks", []):
             if (b["role"], b["type"]) not in registered_blocks:
                 raise ValueError(f"block type {b['role']}/{b['type']} not registered")
+        # 2b-3 C3: an intraday spec is runnable only on a 24x7 session, and an
+        # unknown timeframe is not runnable at all. bars.bars_per_day IS that
+        # rule (the engine and the gauntlet call it too); it is called here,
+        # never copied, so the two cannot drift. Refused BEFORE any write: the
+        # chain is append-only, so a spec the engine cannot run honestly would
+        # otherwise sit on it for good. Every 1d spec, whatever its session,
+        # passes untouched.
+        u = spec.get("universe", {})
+        try:
+            bars.bars_per_day(u.get("session"), u.get("timeframe", "1d"))
+        except bars.IntradayUnsupported as exc:
+            raise ValueError(f"strategy {spec.get('strategy_id')}: {exc} "
+                             f"(2b-3 C3: intraday needs a 24x7 session)") from exc
         # verify_registry.py invariant 10, enforced BEFORE the write. The
         # verifier can only report a violation once it is chained, and the
         # chain is append-only: one hand-run writer registering a version-1

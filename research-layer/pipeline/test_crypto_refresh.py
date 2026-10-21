@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ import pytest
 from pipeline import cells
 from pipeline import crypto_data as cd
 from pipeline import crypto_refresh as cr
+from pipeline import feed_health as fh
 
 NOW = "2026-10-17T00:02:00Z"                       # 08:02 Perth
 NOW_MS = int(datetime(2026, 10, 17, 0, 2, tzinfo=timezone.utc).timestamp() * 1000)
@@ -28,22 +29,40 @@ def _gate(monkeypatch, assets, tfs=("1d",)):
                         {"assets": tuple(assets), "timeframes": tuple(tfs)})
 
 
-def _write_csv(data_dir: Path, asset: str, first="2020-01-01 00:00:00", tf="1d"):
+LAST_FRESH = "2026-10-16"          # the newest bar a 00:02Z 2026-10-17 run may hold
+
+
+def _days(first: str, last: str, skip=()) -> list[str]:
+    """Daily bar open times `first`..`last` (dates), minus any `skip` dates."""
+    d, end, out = date.fromisoformat(first[:10]), date.fromisoformat(last[:10]), []
+    while d <= end:
+        if d.isoformat() not in skip:
+            out.append(f"{d.isoformat()} 00:00:00")
+        d += timedelta(days=1)
+    return out
+
+
+def _write_csv(data_dir: Path, asset: str, first="2020-01-01 00:00:00", tf="1d",
+               last=LAST_FRESH, skip=()):
+    """A real-format file (header `date,...`): one bar a day, first..last, no
+    hole unless `skip` names one, so feed_health finds it healthy."""
     data_dir.mkdir(parents=True, exist_ok=True)
+    rows = "".join(f"{d},1.0,2.0,0.5,1.5,10.0\n"
+                   for d in _days(first, last, skip))
     (data_dir / f"{asset}_{tf}.csv").write_text(
-        "open_time,open,high,low,close,volume\n"
-        f"{first},1.0,2.0,0.5,1.5,10.0\n", encoding="utf-8")
+        "date,open,high,low,close,volume\n" + rows, encoding="utf-8")
 
 
 class Fake:
     """A scripted fetch: per-symbol list of outcomes (exception or None).
     The last outcome repeats once the list is down to one entry."""
 
-    def __init__(self, data_dir: Path, script=None, on_call=None):
+    def __init__(self, data_dir: Path, script=None, on_call=None, csv=None):
         self.data_dir = data_dir
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.calls = []                            # (symbol, tf, now_ms, end_ms)
         self.on_call = on_call
+        self.csv = csv or {}                       # symbol -> _write_csv kwargs
 
     def __call__(self, symbol, tf, data_dir, now_ms=None, end_ms=None):
         self.calls.append((symbol, tf, now_ms, end_ms))
@@ -54,7 +73,7 @@ class Fake:
             out = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
             if out is not None:
                 raise out
-        _write_csv(Path(data_dir), symbol, tf=tf)
+        _write_csv(Path(data_dir), symbol, tf=tf, **self.csv.get(symbol, {}))
         return {"rows": 1, "sha256": "ab" * 32, "first_date": "2020-01-01 00:00:00",
                 "last_date": "2020-01-01 00:00:00"}
 
@@ -442,3 +461,170 @@ def test_stop_local_is_today_in_utc_plus_8_and_defaults_to_none(tmp_path, monkey
     _main(tmp_path, monkeypatch, Fake(tmp_path / "data"))
     _main(tmp_path, monkeypatch, Fake(tmp_path / "data"), extra=["--stop-local", "08:12"])
     assert seen == [None, END_MS + 12 * MIN]       # 08:12 Perth = 00:12Z
+
+
+# ---- feed health in the ledger (2b-3 C1, C2) --------------------------------
+
+def _health_items(tmp_path):
+    return [(i["source"], i["key"]) for i in _ledger(tmp_path / "logs")["items"]
+            if i["source"] in (fh.HOLE_SOURCE, fh.STALE_SOURCE)]
+
+
+def test_a_hole_in_an_active_cell_is_a_ledger_item(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data", csv={B: {"skip": ("2026-10-10",)}})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert _health_items(tmp_path) == [(fh.HOLE_SOURCE, B)]
+    item = next(i for i in _ledger(tmp_path / "logs")["items"]
+                if i["source"] == fh.HOLE_SOURCE)
+    assert "2026-10-10" in item["reason"]
+
+
+def test_a_cell_fetched_ok_but_unchanged_is_stale(tmp_path, monkeypatch):
+    # B "fetches" fine but its last bar is still the one from before yesterday's
+    # close: at 00:02Z 2026-10-17 the newest closed bar is 2026-10-16.
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data", csv={B: {"last": "2026-10-15"}})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert _health_items(tmp_path) == [(fh.STALE_SOURCE, B)]
+    assert f"{B}_1d" in _manifest(tmp_path / "data")
+
+
+def test_the_newest_closed_bar_is_not_stale(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A])
+    (tmp_path / "data").mkdir()
+    assert _main(tmp_path, monkeypatch, Fake(tmp_path / "data")) == 0
+    assert _health_items(tmp_path) == []
+
+
+def test_a_failed_cell_is_not_also_stale(tmp_path, monkeypatch):
+    # B's fetch fails; its file is still yesterday's. The failure item says so,
+    # a feed_stale item would only repeat it.
+    _gate(monkeypatch, [A, B])
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_csv(data, B, last="2026-10-15")
+    fake = Fake(data, {B: [urllib.error.URLError("boom")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    items = _ledger(tmp_path / "logs")["items"]
+    assert [(i["source"], i["key"]) for i in items] == [(cr.FETCH_SOURCE, B)]
+
+
+def test_holes_are_scanned_for_every_active_cell_even_after_a_ban(tmp_path, monkeypatch):
+    # A is banned (418): A fails, B and C are skipped. None is stale-checked,
+    # but the file scan runs for all three, so every hole is still reported.
+    _gate(monkeypatch, [A, B, C])
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_csv(data, A, last="2026-10-15", skip=("2026-03-03",))
+    _write_csv(data, B, skip=("2026-04-04",))
+    _write_csv(data, C)
+    fake = Fake(data, {A: [cd.BinanceBanned("418")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert fake.symbols() == [A]
+    assert sorted(_health_items(tmp_path)) == [(fh.HOLE_SOURCE, A), (fh.HOLE_SOURCE, B)]
+    fetch_keys = {i["key"] for i in _ledger(tmp_path / "logs")["items"]
+                  if i["source"] == cr.FETCH_SOURCE}
+    assert fetch_keys == {A, B, C}
+
+
+def test_a_cell_with_no_file_is_one_cannot_scan_hole_item(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    holes = [i for i in _ledger(tmp_path / "logs")["items"] if i["source"] == fh.HOLE_SOURCE]
+    assert [i["key"] for i in holes] == [B]
+    assert holes[0]["reason"].startswith("cannot scan: ")
+
+
+def test_detector_items_leave_the_ledger_when_fixed(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+    bad = Fake(tmp_path / "data", csv={A: {"skip": ("2026-10-10",)},
+                                       B: {"last": "2026-10-15"}})
+    assert _main(tmp_path, monkeypatch, bad) == 0
+    assert sorted(_health_items(tmp_path)) == [(fh.HOLE_SOURCE, A), (fh.STALE_SOURCE, B)]
+    assert _main(tmp_path, monkeypatch, Fake(tmp_path / "data")) == 0
+    assert _ledger(tmp_path / "logs")["items"] == []
+
+
+def test_the_exit_code_is_unchanged_by_detector_items(tmp_path, monkeypatch, capsys):
+    _gate(monkeypatch, [A, B, C])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data", {C: [urllib.error.URLError("boom")]},
+                csv={A: {"skip": ("2026-10-10",)}, B: {"last": "2026-10-15"}})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert len(_health_items(tmp_path)) == 3                 # hole A, stale B, no file C
+    assert "degraded item(s)" in capsys.readouterr().out
+
+
+def test_an_acknowledged_hole_is_not_an_item(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A, B])
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / fh.ACK_FILE).write_text(json.dumps(
+        {A: {"dates": ["2026-10-10"], "reason": "exchange maintenance"}}), encoding="utf-8")
+    fake = Fake(data, csv={A: {"skip": ("2026-10-10",)}, B: {"skip": ("2026-10-11",)}})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert _health_items(tmp_path) == [(fh.HOLE_SOURCE, B)]
+
+
+def test_an_unreadable_ack_file_is_one_item_and_honours_nothing(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A])
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / fh.ACK_FILE).write_text("{not json", encoding="utf-8")
+    fake = Fake(data, csv={A: {"skip": ("2026-10-10",)}})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    items = [i for i in _ledger(tmp_path / "logs")["items"] if i["source"] == fh.HOLE_SOURCE]
+    ack = [i for i in items if i["key"] == fh.ACK_FILE]
+    assert len(ack) == 1 and ack[0]["reason"].startswith("ack file unreadable: ")
+    assert [i["key"] for i in items if i["key"] == A]          # the hole still reports
+
+
+def test_the_scan_gets_the_refresh_end_cap_and_only_fetched_cells_as_stale(
+        tmp_path, monkeypatch):
+    # A hand run at 02:00Z must not expect a bar the fetch was forbidden to write.
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+    seen = {}
+    real = fh.scan
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cr.feed_health, "scan", spy)
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom")]})
+    assert _main(tmp_path, monkeypatch, fake, now="2026-10-17T02:00:00Z") == 0
+    assert seen["end_ms"] == END_MS
+    assert seen["stale_keys"] == {A}
+    assert seen["now_ms"] == NOW_MS + 118 * MIN
+
+
+def test_a_crashing_detector_is_one_item_and_the_ledger_is_still_written(
+        tmp_path, monkeypatch, capsys):
+    # Final review: the detector runs between refresh() and degraded.record(), so
+    # an exception from it must not drop the whole ledger write (the failed-cell
+    # items included) nor fail the 08:00 task. Mirrors the quarantine guard.
+    _gate(monkeypatch, [A, B])
+    (tmp_path / "data").mkdir()
+
+    def boom(*a, **kw):
+        raise RuntimeError("scan blew up")
+
+    monkeypatch.setattr(cr.feed_health, "scan", boom)
+    fake = Fake(tmp_path / "data", {B: [urllib.error.URLError("boom")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    items = _ledger(tmp_path / "logs")["items"]
+    failed = [i for i in items if i["source"] == cr.FETCH_SOURCE]
+    assert [i["key"] for i in failed] == [B]               # the refresh item survives
+    health = [i for i in items if i["key"] == "feed_health"]
+    assert len(health) == 1
+    assert health[0]["source"] == fh.HOLE_SOURCE
+    assert health[0]["reason"].startswith("detector failed: ")
+    assert "scan blew up" in health[0]["reason"]
+    assert "feed health detector failed" in capsys.readouterr().err

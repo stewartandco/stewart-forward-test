@@ -1349,24 +1349,82 @@ def _write_quarantine_ledger(registry_path: Path, report: DateReport, *,
 
 FETCH_SOURCE = "intraday_fetch_failed"
 FETCH_PACING_S = 0.2                    # crypto_data.main's pause between cells
+FETCH_RETRY_PASSES = 2                  # extra passes over generic failures
+FETCH_RETRY_WAIT_S = 120                # pause before each retry pass
+# The sources the --fetch-owed step OWNS: it re-derives all of them every run,
+# so a recovered fetch, hole or stale feed leaves the ledger, and every OTHER
+# ledger write (--date, --catch-up) must keep them. The last two are
+# feed_health.HOLE_SOURCE / STALE_SOURCE: literals here because feed_health
+# imports crypto_data at load, which this module imports lazily on purpose
+# (test_the_step_sources_match_feed_health pins them).
+FETCH_STEP_SOURCES = (FETCH_SOURCE, "feed_hole", "feed_stale")
+
+
+def _feed_health_items(data_dir: Path, cells_owed: list[str],
+                       fetched_ok: set[str], now_ms: int) -> list[dict]:
+    """Hole and stale-feed items (2b-3 C1, C2) for the owed cells: holes in
+    every one, staleness only for a cell fetched OK this run. NEVER raises: an
+    uncaught exception here would crash the step and fail the whole 08:20
+    task (the wrapper maps it to FETCH_RC=1)."""
+    try:
+        from . import feed_health
+        acks, note = feed_health.load_acks(data_dir)
+        items: list[dict] = []
+        if note:
+            items.append({"source": feed_health.HOLE_SOURCE,
+                          "key": feed_health.ACK_FILE,
+                          "reason": f"ack file unreadable: {note}"})
+        # A retired cell (cells.RETIRED_CELLS) is not scanned: its feed is dead
+        # by declaration, so a hole or stale item would be a standing alarm.
+        scan_keys = [k for k in cells_owed if not cells.is_retired(k)]
+        scan_stale = {k for k in fetched_ok if not cells.is_retired(k)}
+        # No end cap: this fetch has none, only the closed-bar rule.
+        items += feed_health.scan(Path(data_dir), scan_keys, now_ms=now_ms,
+                                  stale_keys=scan_stale, acks=acks)
+        return items
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        print(f"fetch-owed: feed health detector failed: {exc!r}",
+              file=sys.stderr)
+        return [{"source": "feed_hole", "key": "feed_health",
+                 "reason": f"detector failed: {exc!r}"}]
 
 
 def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
-               fetch=None) -> list[dict]:
-    """Fetch every intraday cell a quarantined strategy trades, once each
-    (2b-2 design s3.5): incremental, closed bars only, atomic write, into
-    `data_dir`. Nothing is owed while no intraday strategy is quarantined.
-    A cell whose fetch raises is a degraded item; the step never fails for
-    it -- its days stay owed and catch-up records them after a later
-    successful fetch.
+               fetch=None, *, sleep=None, now_ms: int | None = None
+               ) -> list[dict]:
+    """Fetch every intraday cell a quarantined strategy trades (2b-2 design
+    s3.5): incremental, closed bars only, atomic write, into `data_dir`.
+    Nothing is owed while no intraday strategy is quarantined.
+
+    A cell whose fetch raises a generic error is retried in the SAME run
+    (Coen 10-17): up to FETCH_RETRY_PASSES more passes over just the failed
+    cells, FETCH_RETRY_WAIT_S (120 s) before each. That adds at most 4 minutes
+    to the 08:20 task, and only when a cell fails; a run where every cell
+    fetches never sleeps. A cell that still fails after the last pass is ONE
+    degraded item (the last failure's reason, "(after 3 attempts)"); the step
+    never fails for it -- its days stay owed and catch-up records them after a
+    later successful fetch.
 
     Binance safety follows crypto_data.main: cells are paced FETCH_PACING_S
     apart, and a ban (418) or a rate limit that reaches this loop (retries
-    exhausted, or a Retry-After beyond the cap) stops the fetch at once and
-    owes every cell left. No long back-off sleep inside the 08:20 task: the
-    next day's run retries."""
+    exhausted, or a Retry-After beyond the cap) stops the fetch at once, in
+    ANY pass: no retry pass, no back-off sleep, every cell not yet fetched is
+    owed and the next day's run retries.
+
+    Afterwards the owed cells are scanned for holes (all of them) and stale
+    feeds (cells fetched OK this run); see `_feed_health_items`.
+
+    `sleep` (default time.sleep, looked up at call time) and `now_ms` (default
+    the clock) are injectable for tests."""
     cells_owed = sorted({k for sid in quarantined if sid in specs
                          for k in spec_cells(specs[sid]) if is_intraday_key(k)})
+    # A retired (delisted) cell (cells.RETIRED_CELLS) is never fetched: a
+    # raising fetch would cost two 120 s retry passes and leave a standing
+    # intraday_fetch_failed item every day. Its strategies keep their record.
+    for key in [k for k in cells_owed if cells.is_retired(k)]:
+        print(f"fetch-owed: {key} retired "
+              f"({cells.RETIRED_CELLS[key]['retired_utc']}); not fetched")
+        cells_owed.remove(key)
     if not cells_owed:
         print("fetch-owed: no intraday cell owed")
         return []
@@ -1375,55 +1433,94 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
     from .crypto_data import BinanceBanned, RateLimited
     if fetch is None:
         from .crypto_data import fetch_symbol as fetch
-    items = []
-    for n, key in enumerate(cells_owed):
-        if n:
-            time.sleep(FETCH_PACING_S)    # the IP budget is shared with every
-                                          # Binance consumer on this box
-        asset, tf = split_cell_key(key)
-        try:
-            fetch(asset, tf, Path(data_dir))
-            print(f"fetch-owed: {key} fetched")
-        except BinanceBanned as exc:
-            # An IP-wide ban shared by every Binance consumer on this box:
-            # stop at once (more calls can extend it) and owe every cell left.
-            print(f"fetch-owed: {key} FAILED: {exc!r}; Binance IP ban, "
-                  f"stopping", file=sys.stderr)
-            items.append({"source": FETCH_SOURCE, "key": key,
-                          "reason": f"fetch of {asset} {tf} failed: {exc!r}"})
-            for rest in cells_owed[n + 1:]:
-                items.append({"source": FETCH_SOURCE, "key": rest,
-                              "reason": "skipped: Binance IP ban (418) on "
-                                        f"{key}; not fetched this run"})
-            break
-        except RateLimited as exc:
-            # crypto_data.main aborts its whole run here: the next call would
-            # keep hammering the shared IP and invite a 418. Record and stop;
-            # no back-off sleep in the 08:20 task (the next run retries).
-            print(f"fetch-owed: {key} FAILED: {exc!r}; Binance rate limit "
-                  f"(retry_after {exc.retry_after}s), stopping", file=sys.stderr)
-            items.append({"source": FETCH_SOURCE, "key": key,
-                          "reason": f"fetch of {asset} {tf} failed: Binance "
-                                    f"rate limit: {exc!r}"})
-            for rest in cells_owed[n + 1:]:
-                items.append({"source": FETCH_SOURCE, "key": rest,
-                              "reason": "skipped: Binance rate limit (429) on "
-                                        f"{key}; not fetched this run"})
-            break
-        except Exception as exc:          # one dead cell must not stop the rest
-            print(f"fetch-owed: {key} FAILED: {exc!r}")
-            items.append({"source": FETCH_SOURCE, "key": key,
-                          "reason": f"fetch of {asset} {tf} failed: {exc!r}"})
+    if sleep is None:
+        sleep = time.sleep
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    fetched_ok: set[str] = set()
+    failed: dict[str, str] = {}          # key -> last generic failure reason
+    attempts: dict[str, int] = {}
+    stopped: dict[str, str] = {}         # key -> reason, the cell that stopped it
+    skipped: dict[str, str] = {}         # key -> reason, never reached
+    pending = list(cells_owed)
+    for pass_no in range(1 + FETCH_RETRY_PASSES):
+        if pass_no:
+            if not pending:
+                break
+            sleep(FETCH_RETRY_WAIT_S)
+        retry: list[str] = []
+        for n, key in enumerate(pending):
+            if n:
+                sleep(FETCH_PACING_S)    # the IP budget is shared with every
+                                         # Binance consumer on this box
+            asset, tf = split_cell_key(key)
+            attempts[key] = attempts.get(key, 0) + 1
+            try:
+                fetch(asset, tf, Path(data_dir))
+                print(f"fetch-owed: {key} fetched")
+                fetched_ok.add(key)
+                failed.pop(key, None)
+            except (BinanceBanned, RateLimited) as exc:
+                if isinstance(exc, BinanceBanned):
+                    # An IP-wide ban shared by every Binance consumer on this
+                    # box: stop at once (more calls can extend it).
+                    print(f"fetch-owed: {key} FAILED: {exc!r}; Binance IP "
+                          f"ban, stopping", file=sys.stderr)
+                    stopped[key] = f"fetch of {asset} {tf} failed: {exc!r}"
+                    why = f"Binance IP ban (418) on {key}"
+                else:
+                    # crypto_data.main aborts its whole run here: the next
+                    # call would keep hammering the shared IP and invite a
+                    # 418. Record and stop; no back-off sleep.
+                    print(f"fetch-owed: {key} FAILED: {exc!r}; Binance rate "
+                          f"limit (retry_after {exc.retry_after}s), stopping",
+                          file=sys.stderr)
+                    stopped[key] = (f"fetch of {asset} {tf} failed: Binance "
+                                    f"rate limit: {exc!r}")
+                    why = f"Binance rate limit (429) on {key}"
+                failed.pop(key, None)
+                for rest in cells_owed:
+                    if rest not in fetched_ok and rest not in stopped \
+                            and rest not in failed:
+                        skipped[rest] = f"skipped: {why}; not fetched this run"
+                retry = []
+                break
+            except Exception as exc:      # one dead cell must not stop the rest
+                print(f"fetch-owed: {key} FAILED: {exc!r}")
+                failed[key] = f"fetch of {asset} {tf} failed: {exc!r}"
+                retry.append(key)
+        else:
+            pending = retry
+            continue
+        break                             # a ban / rate limit: no more passes
+
+    items: list[dict] = []
+    for key in cells_owed:
+        if key in stopped:
+            reason = stopped[key]
+        elif key in failed:
+            reason = failed[key]
+            if attempts[key] > 1:
+                reason += f" (after {attempts[key]} attempts)"
+        elif key in skipped:
+            reason = skipped[key]
+        else:
+            continue
+        items.append({"source": FETCH_SOURCE, "key": key, "reason": reason})
+    items += _feed_health_items(Path(data_dir), cells_owed, fetched_ok, now_ms)
     return items
 
 
 def _write_fetch_ledger(registry_path: Path, items: list[dict]) -> None:
-    """The fetch step is the only authority on FETCH_SOURCE items: it drops
-    a cell's item once that cell fetches, and keeps every other source."""
+    """The fetch step is the only authority on FETCH_STEP_SOURCES items (its
+    fetch failures, holes and stale feeds): it drops one once the cell is
+    clean, and keeps every other source."""
     from . import degraded
     path = Path(registry_path).parent / "logs" / degraded.QUARANTINE_LEDGER
     previous, _ = degraded.read_items(path)
-    keep = tuple(sorted({i["source"] for i in previous} - {FETCH_SOURCE}))
+    keep = tuple(sorted({i["source"] for i in previous}
+                        - set(FETCH_STEP_SOURCES)))
     degraded.record(path, "quarantine", items, remove_unseen=True,
                     keep_sources=keep)
 
@@ -1433,8 +1530,9 @@ def _split_unsupported(quarantined: list[str], specs: dict
     """2b-2 (design s3.6): every 24x7 timeframe in bars.BARS_PER_DAY_24X7 is
     recorded. An intraday spec the engine cannot simulate (a non-24x7
     session, an unknown timeframe) is skipped and reported as degraded
-    (`intraday_unsupported`) rather than crash the date; registration-time
-    refusal of such a spec belongs to 2b-3."""
+    (`intraday_unsupported`) rather than crash the date. Registration refuses
+    such a spec up front since 2b-3 C3 (`Registry.register_strategy`); this
+    split remains for specs registered before C3 or appended by hand."""
     keep, items = [], []
     for sid in quarantined:
         universe = specs.get(sid, {}).get("universe", {})
@@ -1548,7 +1646,7 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
             try:
                 _write_quarantine_ledger(args.registry, report,
                                          remove_unseen=recovered_is_provable,
-                                         keep_sources=(FETCH_SOURCE,))
+                                         keep_sources=FETCH_STEP_SOURCES)
             except OSError as exc:
                 print(f"degraded_ledger_error: {exc}", file=sys.stderr)
         return rc
@@ -1567,7 +1665,8 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
             # cycle).
             try:
                 _write_quarantine_ledger(args.registry, report,
-                                         remove_unseen=False)
+                                         remove_unseen=False,
+                                         keep_sources=FETCH_STEP_SOURCES)
             except OSError as exc:
                 print(f"degraded_ledger_error: {exc}", file=sys.stderr)
 
