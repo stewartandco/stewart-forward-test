@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWY,long,2002-07-29 00:00:00,20.35,2002-08-15 00:00:00,21.2,signal:zscore_revert,0.04136904176904173

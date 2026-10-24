@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+QQQ,long,2001-12-13 00:00:00,40.71,2002-01-30 00:00:00,36.9662,stop,-0.09236266273642839
+QQQ,long,2003-03-18 00:00:00,26.8,2008-11-21 00:00:00,25.052,stop,-0.065623880597015

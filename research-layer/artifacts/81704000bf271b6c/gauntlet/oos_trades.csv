@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+AUD,long,2024-05-09 00:00:00,0.6606,2024-05-10 00:00:00,0.6607,signal:ma_crossunder,-0.00014862246442629544,1.0
+AUD,long,2024-08-21 00:00:00,0.6753,2024-08-22 00:00:00,0.6708,signal:ma_crossunder,-0.0069637050199912506,1.0
+AUD,long,2025-06-06 00:00:00,0.6496,2025-11-10 00:00:00,0.6522,signal:ma_crossunder,0.0037024630541872775,1.0

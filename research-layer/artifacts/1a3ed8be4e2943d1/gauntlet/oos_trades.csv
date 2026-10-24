@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EFA,short,2024-11-13 00:00:00,77.4,2024-12-06 00:00:00,80.39,stop,-0.0393479512735325,1.0
+EFA,short,2024-12-17 00:00:00,77.43,2025-01-30 00:00:00,79.88,stop,-0.03259703818502708,1.0
+EFA,short,2025-02-04 00:00:00,78.785,2025-02-07 00:00:00,80.42,signal:tstat_decay,-0.021212205157496177,1.0

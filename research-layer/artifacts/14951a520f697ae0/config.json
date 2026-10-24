@@ -1,0 +1,88 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "GLD_1d": "2023-12-29 00:00:00",
+  "SLV_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "GLD_1d": "3a1d2790d0246864531f0274290bea2966e030b9eaf5048a5d389ee0ff1ee0d2",
+  "SLV_1d": "1e315d462e6b4740a7c46843acb4da46f29c867ff3cef42ed73dd4050e25da26"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 75,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.0075,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-02T12:11:07Z",
+  "family": "metal_tstat_trend_two_sided",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-02-120032-loop-metal_etf"
+  },
+  "name": "SLV 1d metal_tstat_trend_two_sided dboth ml75 tm2.5 ml90 te0.5 al14 m3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "181cf0b84de7cae4",
+    "1c11d61fbf10b3a0",
+    "3d4db3693d78d717",
+    "5e05bd28ab90f9ed",
+    "a81e453c981f0c9d",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "metal_tstat_trend_two_sided-2026-10-02-120032-loop-metal_etf:SLV_1d"
+  },
+  "strategy_id": "14951a520f697ae0",
+  "universe": {
+   "asset_class": "metal_etf",
+   "assets": [
+    "SLV"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

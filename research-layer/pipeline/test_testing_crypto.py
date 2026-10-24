@@ -1,0 +1,40 @@
+"""active_crypto() sets and restores what it claims to.
+
+Run: python -m pytest pipeline/test_testing_crypto.py -q
+"""
+from __future__ import annotations
+
+import pytest
+
+from . import cells, composer
+from .testing_crypto import active_crypto
+
+
+def test_narrows_the_active_cells_then_restores():
+    gate = cells.ACTIVE_CELLS["crypto"]
+    with active_crypto():
+        assert cells.active_cells("crypto") == [("BTCUSDT", "1d"), ("ETHUSDT", "1d")]
+        # routing is the real per-cell dispatch since Switch 1; the helper
+        # no longer touches it
+        assert composer.expander_for("crypto") is composer.expand_family_for_class
+    assert cells.ACTIVE_CELLS["crypto"] is gate
+    assert len(cells.active_cells("crypto")) == 76
+
+
+def test_restores_on_exception():
+    gate = cells.ACTIVE_CELLS["crypto"]
+    with pytest.raises(RuntimeError):
+        with active_crypto(("BTCUSDT",)):
+            raise RuntimeError("boom")
+    assert cells.ACTIVE_CELLS["crypto"] is gate
+
+
+@pytest.mark.parametrize("assets", [("ETHUSDT", "BTCUSDT"),       # out of order
+                                    ("BTCUSDT", "BTCUSDT"),       # repeat
+                                    ("BTCUSD",)])                 # not declared
+def test_refuses_a_gate_the_import_check_would_refuse(assets):
+    gate = cells.ACTIVE_CELLS["crypto"]
+    with pytest.raises(AssertionError):
+        with active_crypto(assets):
+            pass
+    assert cells.ACTIVE_CELLS["crypto"] is gate

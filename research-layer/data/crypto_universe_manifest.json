@@ -1,0 +1,2372 @@
+{
+  "admitted": [
+    {
+      "binance_symbol": "BTCUSDT",
+      "first_1d_utc": "2017-08-17",
+      "id": "bitcoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1592894985474,
+      "rank": 1,
+      "symbol": "btc"
+    },
+    {
+      "binance_symbol": "ETHUSDT",
+      "first_1d_utc": "2017-08-17",
+      "id": "ethereum",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 302315356952,
+      "rank": 2,
+      "symbol": "eth"
+    },
+    {
+      "binance_symbol": "BNBUSDT",
+      "first_1d_utc": "2017-11-06",
+      "id": "binancecoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 93523209724,
+      "rank": 4,
+      "symbol": "bnb"
+    },
+    {
+      "binance_symbol": "XRPUSDT",
+      "first_1d_utc": "2018-05-04",
+      "id": "ripple",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 89141756985,
+      "rank": 5,
+      "symbol": "xrp"
+    },
+    {
+      "binance_symbol": "SOLUSDT",
+      "first_1d_utc": "2020-08-11",
+      "id": "solana",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 61542839639,
+      "rank": 7,
+      "symbol": "sol"
+    },
+    {
+      "binance_symbol": "TRXUSDT",
+      "first_1d_utc": "2018-06-11",
+      "id": "tron",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 32306403075,
+      "rank": 8,
+      "symbol": "trx"
+    },
+    {
+      "binance_symbol": "ZECUSDT",
+      "first_1d_utc": "2019-03-21",
+      "id": "zcash",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 13617099350,
+      "rank": 11,
+      "symbol": "zec"
+    },
+    {
+      "binance_symbol": "DOGEUSDT",
+      "first_1d_utc": "2019-07-05",
+      "id": "dogecoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 13541224306,
+      "rank": 12,
+      "symbol": "doge"
+    },
+    {
+      "binance_symbol": "LINKUSDT",
+      "first_1d_utc": "2019-01-16",
+      "id": "chainlink",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 8768708735,
+      "rank": 16,
+      "symbol": "link"
+    },
+    {
+      "binance_symbol": "ADAUSDT",
+      "first_1d_utc": "2018-04-17",
+      "id": "cardano",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 7815834472,
+      "rank": 19,
+      "symbol": "ada"
+    },
+    {
+      "binance_symbol": "XLMUSDT",
+      "first_1d_utc": "2018-05-31",
+      "id": "stellar",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 6306551438,
+      "rank": 20,
+      "symbol": "xlm"
+    },
+    {
+      "binance_symbol": "BCHUSDT",
+      "first_1d_utc": "2019-11-28",
+      "id": "bitcoin-cash",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 5084207926,
+      "rank": 21,
+      "symbol": "bch"
+    },
+    {
+      "binance_symbol": "LTCUSDT",
+      "first_1d_utc": "2017-12-13",
+      "id": "litecoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 3802002687,
+      "rank": 27,
+      "symbol": "ltc"
+    },
+    {
+      "binance_symbol": "HBARUSDT",
+      "first_1d_utc": "2019-09-29",
+      "id": "hedera-hashgraph",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 3381397090,
+      "rank": 28,
+      "symbol": "hbar"
+    },
+    {
+      "binance_symbol": "AVAXUSDT",
+      "first_1d_utc": "2020-09-22",
+      "id": "avalanche-2",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 3192994786,
+      "rank": 30,
+      "symbol": "avax"
+    },
+    {
+      "binance_symbol": "SHIBUSDT",
+      "first_1d_utc": "2021-05-10",
+      "id": "shiba-inu",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 3118956150,
+      "rank": 31,
+      "symbol": "shib"
+    },
+    {
+      "binance_symbol": "SUIUSDT",
+      "first_1d_utc": "2023-05-03",
+      "id": "sui",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 3104192326,
+      "rank": 32,
+      "symbol": "sui"
+    },
+    {
+      "binance_symbol": "UNIUSDT",
+      "first_1d_utc": "2020-09-17",
+      "id": "uniswap",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 2852435914,
+      "rank": 34,
+      "symbol": "uni"
+    },
+    {
+      "binance_symbol": "NEARUSDT",
+      "first_1d_utc": "2020-10-14",
+      "id": "near",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 2428029525,
+      "rank": 39,
+      "symbol": "near"
+    },
+    {
+      "binance_symbol": "TAOUSDT",
+      "first_1d_utc": "2024-04-11",
+      "id": "bittensor",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 2351298064,
+      "rank": 41,
+      "symbol": "tao"
+    },
+    {
+      "binance_symbol": "PAXGUSDT",
+      "first_1d_utc": "2020-08-28",
+      "id": "pax-gold",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1969642584,
+      "rank": 45,
+      "symbol": "paxg"
+    },
+    {
+      "binance_symbol": "AAVEUSDT",
+      "first_1d_utc": "2020-10-15",
+      "id": "aave",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1920988396,
+      "rank": 46,
+      "symbol": "aave"
+    },
+    {
+      "binance_symbol": "ENAUSDT",
+      "first_1d_utc": "2024-04-02",
+      "id": "ethena",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1658920506,
+      "rank": 53,
+      "symbol": "ena"
+    },
+    {
+      "binance_symbol": "PEPEUSDT",
+      "first_1d_utc": "2023-05-05",
+      "id": "pepe",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1592207060,
+      "rank": 55,
+      "symbol": "pepe"
+    },
+    {
+      "binance_symbol": "DOTUSDT",
+      "first_1d_utc": "2020-08-18",
+      "id": "polkadot",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1477420624,
+      "rank": 58,
+      "symbol": "dot"
+    },
+    {
+      "binance_symbol": "WLDUSDT",
+      "first_1d_utc": "2023-07-24",
+      "id": "worldcoin-wld",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1431797645,
+      "rank": 59,
+      "symbol": "wld"
+    },
+    {
+      "binance_symbol": "ICPUSDT",
+      "first_1d_utc": "2021-05-11",
+      "id": "internet-computer",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1341598974,
+      "rank": 61,
+      "symbol": "icp"
+    },
+    {
+      "binance_symbol": "ETCUSDT",
+      "first_1d_utc": "2018-06-12",
+      "id": "ethereum-classic",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 1211018240,
+      "rank": 66,
+      "symbol": "etc"
+    },
+    {
+      "binance_symbol": "QNTUSDT",
+      "first_1d_utc": "2021-07-29",
+      "id": "quant-network",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 905541103,
+      "rank": 73,
+      "symbol": "qnt"
+    },
+    {
+      "binance_symbol": "NEXOUSDT",
+      "first_1d_utc": "2022-04-29",
+      "id": "nexo",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 854714847,
+      "rank": 78,
+      "symbol": "nexo"
+    },
+    {
+      "binance_symbol": "ALGOUSDT",
+      "first_1d_utc": "2019-06-22",
+      "id": "algorand",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 803321531,
+      "rank": 81,
+      "symbol": "algo"
+    },
+    {
+      "binance_symbol": "ATOMUSDT",
+      "first_1d_utc": "2019-04-29",
+      "id": "cosmos",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 796478644,
+      "rank": 83,
+      "symbol": "atom"
+    },
+    {
+      "binance_symbol": "JSTUSDT",
+      "first_1d_utc": "2020-08-11",
+      "id": "just",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 792741156,
+      "rank": 84,
+      "symbol": "jst"
+    },
+    {
+      "binance_symbol": "RENDERUSDT",
+      "first_1d_utc": "2024-07-26",
+      "id": "render-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 773877844,
+      "rank": 85,
+      "symbol": "render"
+    },
+    {
+      "binance_symbol": "JUPUSDT",
+      "first_1d_utc": "2024-01-31",
+      "id": "jupiter-exchange-solana",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 771752220,
+      "rank": 86,
+      "symbol": "jup"
+    },
+    {
+      "binance_symbol": "ARBUSDT",
+      "first_1d_utc": "2023-03-23",
+      "id": "arbitrum",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 601548757,
+      "rank": 93,
+      "symbol": "arb"
+    },
+    {
+      "binance_symbol": "VETUSDT",
+      "first_1d_utc": "2018-07-25",
+      "id": "vechain",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 593174794,
+      "rank": 94,
+      "symbol": "vet"
+    },
+    {
+      "binance_symbol": "FILUSDT",
+      "first_1d_utc": "2020-10-15",
+      "id": "filecoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 582564052,
+      "rank": 96,
+      "symbol": "fil"
+    },
+    {
+      "binance_symbol": "CAKEUSDT",
+      "first_1d_utc": "2021-02-19",
+      "id": "pancakeswap-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 553891841,
+      "rank": 99,
+      "symbol": "cake"
+    },
+    {
+      "binance_symbol": "ETHFIUSDT",
+      "first_1d_utc": "2024-03-18",
+      "id": "ether-fi",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 545331410,
+      "rank": 101,
+      "symbol": "ethfi"
+    },
+    {
+      "binance_symbol": "INJUSDT",
+      "first_1d_utc": "2020-10-21",
+      "id": "injective-protocol",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 538286525,
+      "rank": 102,
+      "symbol": "inj"
+    },
+    {
+      "binance_symbol": "STXUSDT",
+      "first_1d_utc": "2019-10-25",
+      "id": "blockstack",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 495389907,
+      "rank": 106,
+      "symbol": "stx"
+    },
+    {
+      "binance_symbol": "DASHUSDT",
+      "first_1d_utc": "2019-03-28",
+      "id": "dash",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 494639364,
+      "rank": 107,
+      "symbol": "dash"
+    },
+    {
+      "binance_symbol": "CRVUSDT",
+      "first_1d_utc": "2020-08-15",
+      "id": "curve-dao-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 491054226,
+      "rank": 109,
+      "symbol": "crv"
+    },
+    {
+      "binance_symbol": "APTUSDT",
+      "first_1d_utc": "2022-10-19",
+      "id": "aptos",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 477946604,
+      "rank": 111,
+      "symbol": "apt"
+    },
+    {
+      "binance_symbol": "ZROUSDT",
+      "first_1d_utc": "2024-06-20",
+      "id": "layerzero",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 400114825,
+      "rank": 116,
+      "symbol": "zro"
+    },
+    {
+      "binance_symbol": "PYTHUSDT",
+      "first_1d_utc": "2024-02-02",
+      "id": "pyth-network",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 375427999,
+      "rank": 117,
+      "symbol": "pyth"
+    },
+    {
+      "binance_symbol": "FETUSDT",
+      "first_1d_utc": "2019-02-28",
+      "id": "fetch-ai",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 362603247,
+      "rank": 119,
+      "symbol": "fet"
+    },
+    {
+      "binance_symbol": "TIAUSDT",
+      "first_1d_utc": "2023-10-31",
+      "id": "celestia",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 337440304,
+      "rank": 122,
+      "symbol": "tia"
+    },
+    {
+      "binance_symbol": "SUNUSDT",
+      "first_1d_utc": "2020-09-21",
+      "id": "sun-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 324065401,
+      "rank": 127,
+      "symbol": "sun"
+    },
+    {
+      "binance_symbol": "GNOUSDT",
+      "first_1d_utc": "2021-08-30",
+      "id": "gnosis",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 316676015,
+      "rank": 129,
+      "symbol": "gno"
+    },
+    {
+      "binance_symbol": "SEIUSDT",
+      "first_1d_utc": "2023-08-15",
+      "id": "sei-network",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 315048720,
+      "rank": 130,
+      "symbol": "sei"
+    },
+    {
+      "binance_symbol": "LDOUSDT",
+      "first_1d_utc": "2022-05-09",
+      "id": "lido-dao",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 305926310,
+      "rank": 132,
+      "symbol": "ldo"
+    },
+    {
+      "binance_symbol": "PENDLEUSDT",
+      "first_1d_utc": "2023-07-03",
+      "id": "pendle",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 302947562,
+      "rank": 133,
+      "symbol": "pendle"
+    },
+    {
+      "binance_symbol": "LUNCUSDT",
+      "first_1d_utc": "2022-09-09",
+      "id": "terra-luna",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 294562336,
+      "rank": 135,
+      "symbol": "lunc"
+    },
+    {
+      "binance_symbol": "BONKUSDT",
+      "first_1d_utc": "2023-12-15",
+      "id": "bonk",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 267896900,
+      "rank": 142,
+      "symbol": "bonk"
+    },
+    {
+      "binance_symbol": "JTOUSDT",
+      "first_1d_utc": "2023-12-07",
+      "id": "jito-governance-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 252300384,
+      "rank": 145,
+      "symbol": "jto"
+    },
+    {
+      "binance_symbol": "FLOKIUSDT",
+      "first_1d_utc": "2023-05-05",
+      "id": "floki",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 251390215,
+      "rank": 146,
+      "symbol": "floki"
+    },
+    {
+      "binance_symbol": "XTZUSDT",
+      "first_1d_utc": "2019-09-24",
+      "id": "tezos",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 245507793,
+      "rank": 150,
+      "symbol": "xtz"
+    },
+    {
+      "binance_symbol": "ENSUSDT",
+      "first_1d_utc": "2021-11-10",
+      "id": "ethereum-name-service",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 245118133,
+      "rank": 151,
+      "symbol": "ens"
+    },
+    {
+      "binance_symbol": "CFXUSDT",
+      "first_1d_utc": "2021-03-29",
+      "id": "conflux-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 244710728,
+      "rank": 152,
+      "symbol": "cfx"
+    },
+    {
+      "binance_symbol": "DCRUSDT",
+      "first_1d_utc": "2020-07-30",
+      "id": "decred",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 243984886,
+      "rank": 153,
+      "symbol": "dcr"
+    },
+    {
+      "binance_symbol": "JASMYUSDT",
+      "first_1d_utc": "2021-11-22",
+      "id": "jasmycoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 238261781,
+      "rank": 156,
+      "symbol": "jasmy"
+    },
+    {
+      "binance_symbol": "RAYUSDT",
+      "first_1d_utc": "2021-08-10",
+      "id": "raydium",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 222345714,
+      "rank": 161,
+      "symbol": "ray"
+    },
+    {
+      "binance_symbol": "CVXUSDT",
+      "first_1d_utc": "2021-12-23",
+      "id": "convex-finance",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 217390300,
+      "rank": 162,
+      "symbol": "cvx"
+    },
+    {
+      "binance_symbol": "WIFUSDT",
+      "first_1d_utc": "2024-03-05",
+      "id": "dogwifcoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 213414145,
+      "rank": 165,
+      "symbol": "wif"
+    },
+    {
+      "binance_symbol": "OPUSDT",
+      "first_1d_utc": "2022-06-01",
+      "id": "optimism",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 211523110,
+      "rank": 168,
+      "symbol": "op"
+    },
+    {
+      "binance_symbol": "IOTAUSDT",
+      "first_1d_utc": "2018-05-31",
+      "id": "iota",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 191642491,
+      "rank": 175,
+      "symbol": "iota"
+    },
+    {
+      "binance_symbol": "COMPUSDT",
+      "first_1d_utc": "2020-06-25",
+      "id": "compound-governance-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 189625607,
+      "rank": 176,
+      "symbol": "comp"
+    },
+    {
+      "binance_symbol": "TWTUSDT",
+      "first_1d_utc": "2021-01-27",
+      "id": "trust-wallet-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 187509078,
+      "rank": 177,
+      "symbol": "twt"
+    },
+    {
+      "binance_symbol": "GRTUSDT",
+      "first_1d_utc": "2020-12-17",
+      "id": "the-graph",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 184172166,
+      "rank": 178,
+      "symbol": "grt"
+    },
+    {
+      "binance_symbol": "THETAUSDT",
+      "first_1d_utc": "2019-04-10",
+      "id": "theta-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 176776959,
+      "rank": 185,
+      "symbol": "theta"
+    },
+    {
+      "binance_symbol": "STRKUSDT",
+      "first_1d_utc": "2024-02-20",
+      "id": "starknet",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 176444963,
+      "rank": 186,
+      "symbol": "strk"
+    },
+    {
+      "binance_symbol": "RUNEUSDT",
+      "first_1d_utc": "2020-09-04",
+      "id": "thorchain",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 163346806,
+      "rank": 191,
+      "symbol": "rune"
+    },
+    {
+      "binance_symbol": "AXSUSDT",
+      "first_1d_utc": "2020-11-04",
+      "id": "axie-infinity",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 160445064,
+      "rank": 194,
+      "symbol": "axs"
+    },
+    {
+      "binance_symbol": "NEOUSDT",
+      "first_1d_utc": "2017-11-20",
+      "id": "neo",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 152002301,
+      "rank": 201,
+      "symbol": "neo"
+    },
+    {
+      "binance_symbol": "CHZUSDT",
+      "first_1d_utc": "2019-09-06",
+      "id": "chiliz",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 145950586,
+      "rank": 206,
+      "symbol": "chz"
+    },
+    {
+      "binance_symbol": "MANAUSDT",
+      "first_1d_utc": "2020-08-06",
+      "id": "decentraland",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 145449304,
+      "rank": 207,
+      "symbol": "mana"
+    },
+    {
+      "binance_symbol": "APEUSDT",
+      "first_1d_utc": "2022-03-17",
+      "id": "apecoin",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 140327666,
+      "rank": 209,
+      "symbol": "ape"
+    },
+    {
+      "binance_symbol": "XECUSDT",
+      "first_1d_utc": "2021-09-03",
+      "id": "ecash",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 140141363,
+      "rank": 210,
+      "symbol": "xec"
+    },
+    {
+      "binance_symbol": "ARUSDT",
+      "first_1d_utc": "2021-05-14",
+      "id": "arweave",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 140037063,
+      "rank": 211,
+      "symbol": "ar"
+    },
+    {
+      "binance_symbol": "SFPUSDT",
+      "first_1d_utc": "2021-02-08",
+      "id": "safepal",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 131693926,
+      "rank": 220,
+      "symbol": "sfp"
+    },
+    {
+      "binance_symbol": "SNXUSDT",
+      "first_1d_utc": "2020-07-09",
+      "id": "havven",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 126742191,
+      "rank": 224,
+      "symbol": "snx"
+    },
+    {
+      "binance_symbol": "1INCHUSDT",
+      "first_1d_utc": "2020-12-25",
+      "id": "1inch",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 126134765,
+      "rank": 226,
+      "symbol": "1inch"
+    },
+    {
+      "binance_symbol": "SANDUSDT",
+      "first_1d_utc": "2020-08-14",
+      "id": "the-sandbox",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 116678650,
+      "rank": 237,
+      "symbol": "sand"
+    },
+    {
+      "binance_symbol": "IMXUSDT",
+      "first_1d_utc": "2022-01-10",
+      "id": "immutable-x",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 113463298,
+      "rank": 243,
+      "symbol": "imx"
+    },
+    {
+      "binance_symbol": "GLMUSDT",
+      "first_1d_utc": "2023-03-17",
+      "id": "golem",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 112689733,
+      "rank": 245,
+      "symbol": "glm"
+    },
+    {
+      "binance_symbol": "EGLDUSDT",
+      "first_1d_utc": "2020-09-03",
+      "id": "elrond-erd-2",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 108840303,
+      "rank": 249,
+      "symbol": "egld"
+    },
+    {
+      "binance_symbol": "BATUSDT",
+      "first_1d_utc": "2019-03-04",
+      "id": "basic-attention-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 107323381,
+      "rank": 254,
+      "symbol": "bat"
+    },
+    {
+      "binance_symbol": "DYDXUSDT",
+      "first_1d_utc": "2021-09-09",
+      "id": "dydx-chain",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 95357065,
+      "rank": 274,
+      "symbol": "dydx"
+    },
+    {
+      "binance_symbol": "ZENUSDT",
+      "first_1d_utc": "2020-07-06",
+      "id": "zencash",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 94320426,
+      "rank": 275,
+      "symbol": "zen"
+    },
+    {
+      "binance_symbol": "PROMUSDT",
+      "first_1d_utc": "2023-03-17",
+      "id": "prometeus",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 94055637,
+      "rank": 276,
+      "symbol": "prom"
+    },
+    {
+      "binance_symbol": "RSRUSDT",
+      "first_1d_utc": "2020-08-27",
+      "id": "reserve-rights-token",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 92034357,
+      "rank": 281,
+      "symbol": "rsr"
+    },
+    {
+      "binance_symbol": "GALAUSDT",
+      "first_1d_utc": "2021-09-13",
+      "id": "gala",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 90367989,
+      "rank": 286,
+      "symbol": "gala"
+    },
+    {
+      "binance_symbol": "QTUMUSDT",
+      "first_1d_utc": "2018-03-19",
+      "id": "qtum",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 88401824,
+      "rank": 291,
+      "symbol": "qtum"
+    },
+    {
+      "binance_symbol": "DGBUSDT",
+      "first_1d_utc": "2020-07-20",
+      "id": "digibyte",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 88221459,
+      "rank": 293,
+      "symbol": "dgb"
+    },
+    {
+      "binance_symbol": "ZKUSDT",
+      "first_1d_utc": "2024-06-17",
+      "id": "zksync",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 87167496,
+      "rank": 296,
+      "symbol": "zk"
+    },
+    {
+      "binance_symbol": "ORDIUSDT",
+      "first_1d_utc": "2023-11-07",
+      "id": "ordinals",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 86110818,
+      "rank": 298,
+      "symbol": "ordi"
+    },
+    {
+      "binance_symbol": "YFIUSDT",
+      "first_1d_utc": "2020-08-10",
+      "id": "yearn-finance",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 84050338,
+      "rank": 304,
+      "symbol": "yfi"
+    },
+    {
+      "binance_symbol": "GASUSDT",
+      "first_1d_utc": "2023-03-17",
+      "id": "gas",
+      "last_1d_utc": "2026-08-28",
+      "market_cap": 84028123,
+      "rank": 305,
+      "symbol": "gas"
+    }
+  ],
+  "excluded": [
+    {
+      "id": "tether",
+      "rank": 3,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usdt"
+    },
+    {
+      "id": "usd-coin",
+      "rank": 6,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usdc"
+    },
+    {
+      "binance_symbol": "FIGR_HELOCUSDT",
+      "id": "figure-heloc",
+      "rank": 9,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "figr_heloc"
+    },
+    {
+      "binance_symbol": "HYPEUSDT",
+      "id": "hyperliquid",
+      "rank": 10,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "hype"
+    },
+    {
+      "binance_symbol": "RAINUSDT",
+      "id": "rain",
+      "rank": 13,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "rain"
+    },
+    {
+      "id": "usds",
+      "rank": 14,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usds"
+    },
+    {
+      "binance_symbol": "XMRUSDT",
+      "first_1d_utc": "2019-03-15",
+      "id": "monero",
+      "last_1d_utc": "2024-02-20",
+      "rank": 15,
+      "reason": "Binance pair inactive (delisted)",
+      "symbol": "xmr"
+    },
+    {
+      "binance_symbol": "LEOUSDT",
+      "id": "leo-token",
+      "rank": 17,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "leo"
+    },
+    {
+      "binance_symbol": "WBTUSDT",
+      "id": "whitebit",
+      "rank": 18,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "wbt"
+    },
+    {
+      "id": "dai",
+      "rank": 22,
+      "reason": "stablecoin (declared list)",
+      "symbol": "dai"
+    },
+    {
+      "binance_symbol": "CCUSDT",
+      "id": "canton-network",
+      "rank": 23,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cc"
+    },
+    {
+      "id": "usd1-wlfi",
+      "rank": 24,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usd1"
+    },
+    {
+      "id": "ethena-usde",
+      "rank": 25,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usde"
+    },
+    {
+      "binance_symbol": "GRAMUSDT",
+      "first_1d_utc": "2026-07-02",
+      "id": "the-open-network",
+      "rank": 26,
+      "reason": "history < 2y",
+      "symbol": "gram"
+    },
+    {
+      "id": "global-dollar",
+      "rank": 29,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdg"
+    },
+    {
+      "binance_symbol": "CROUSDT",
+      "id": "crypto-com-chain",
+      "rank": 33,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cro"
+    },
+    {
+      "id": "blackrock-usd-institutional-digital-liquidity-fund",
+      "rank": 35,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "buidl"
+    },
+    {
+      "id": "paypal-usd",
+      "rank": 36,
+      "reason": "stablecoin (declared list)",
+      "symbol": "pyusd"
+    },
+    {
+      "binance_symbol": "XAUTUSDT",
+      "first_1d_utc": "2026-03-26",
+      "id": "tether-gold",
+      "rank": 37,
+      "reason": "history < 2y",
+      "symbol": "xaut"
+    },
+    {
+      "binance_symbol": "USYCUSDT",
+      "id": "hashnote-usyc",
+      "rank": 38,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "usyc"
+    },
+    {
+      "binance_symbol": "OKBUSDT",
+      "id": "okb",
+      "rank": 40,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "okb"
+    },
+    {
+      "binance_symbol": "MUSDT",
+      "id": "memecore",
+      "rank": 42,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "m"
+    },
+    {
+      "id": "ripple-usd",
+      "rank": 43,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "rlusd"
+    },
+    {
+      "binance_symbol": "USDYUSDT",
+      "id": "ondo-us-dollar-yield",
+      "rank": 44,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "usdy"
+    },
+    {
+      "binance_symbol": "PUMPUSDT",
+      "first_1d_utc": "2025-09-11",
+      "id": "pump-fun",
+      "rank": 47,
+      "reason": "history < 2y",
+      "symbol": "pump"
+    },
+    {
+      "binance_symbol": "ASTERUSDT",
+      "first_1d_utc": "2025-10-06",
+      "id": "aster-2",
+      "rank": 48,
+      "reason": "history < 2y",
+      "symbol": "aster"
+    },
+    {
+      "binance_symbol": "WLFIUSDT",
+      "first_1d_utc": "2025-09-01",
+      "id": "world-liberty-financial",
+      "rank": 49,
+      "reason": "history < 2y",
+      "symbol": "wlfi"
+    },
+    {
+      "binance_symbol": "ONDOUSDT",
+      "first_1d_utc": "2025-04-11",
+      "id": "ondo-finance",
+      "rank": 50,
+      "reason": "history < 2y",
+      "symbol": "ondo"
+    },
+    {
+      "binance_symbol": "MNTUSDT",
+      "id": "mantle",
+      "rank": 51,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "mnt"
+    },
+    {
+      "binance_symbol": "MORPHOUSDT",
+      "first_1d_utc": "2025-10-03",
+      "id": "morpho",
+      "rank": 52,
+      "reason": "history < 2y",
+      "symbol": "morpho"
+    },
+    {
+      "binance_symbol": "SKYUSDT",
+      "first_1d_utc": "2025-09-17",
+      "id": "sky",
+      "rank": 54,
+      "reason": "history < 2y",
+      "symbol": "sky"
+    },
+    {
+      "binance_symbol": "HTXUSDT",
+      "id": "htx-dao",
+      "rank": 56,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "htx"
+    },
+    {
+      "id": "usdd",
+      "rank": 57,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usdd"
+    },
+    {
+      "binance_symbol": "BGBUSDT",
+      "id": "bitget-token",
+      "rank": 60,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bgb"
+    },
+    {
+      "id": "falcon-finance",
+      "rank": 62,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdf"
+    },
+    {
+      "id": "bfusd",
+      "rank": 63,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "bfusd"
+    },
+    {
+      "binance_symbol": "UUSDT",
+      "first_1d_utc": "2026-01-13",
+      "id": "united-stables",
+      "rank": 64,
+      "reason": "history < 2y",
+      "symbol": "u"
+    },
+    {
+      "id": "usdgo",
+      "rank": 65,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdgo"
+    },
+    {
+      "binance_symbol": "EURSAFOUSDT",
+      "id": "spiko-amundi-overnight-swap-fund-eur",
+      "rank": 67,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "eursafo"
+    },
+    {
+      "binance_symbol": "POLUSDT",
+      "first_1d_utc": "2024-09-13",
+      "id": "polygon-ecosystem-token",
+      "rank": 68,
+      "reason": "history < 2y",
+      "symbol": "pol"
+    },
+    {
+      "binance_symbol": "BTWUSDT",
+      "id": "bitway",
+      "rank": 69,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "btw"
+    },
+    {
+      "binance_symbol": "PIUSDT",
+      "id": "pi-network",
+      "rank": 70,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pi"
+    },
+    {
+      "binance_symbol": "KCSUSDT",
+      "id": "kucoin-shares",
+      "rank": 71,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "kcs"
+    },
+    {
+      "binance_symbol": "BCAPUSDT",
+      "id": "blockchain-capital",
+      "rank": 72,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bcap"
+    },
+    {
+      "binance_symbol": "EUTBLUSDT",
+      "id": "eutbl",
+      "rank": 74,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "eutbl"
+    },
+    {
+      "binance_symbol": "JTRSYUSDT",
+      "id": "janus-henderson-anemoy-treasury-fund",
+      "rank": 75,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "jtrsy"
+    },
+    {
+      "binance_symbol": "LITUSDT",
+      "first_1d_utc": "2021-02-04",
+      "id": "lighter",
+      "last_1d_utc": "2025-02-10",
+      "rank": 76,
+      "reason": "Binance pair inactive (delisted)",
+      "symbol": "lit"
+    },
+    {
+      "binance_symbol": "GTUSDT",
+      "id": "gatechain-token",
+      "rank": 77,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "gt"
+    },
+    {
+      "binance_symbol": "USTBUSDT",
+      "id": "superstate-short-duration-us-government-securities-fund-ustb",
+      "rank": 79,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ustb"
+    },
+    {
+      "binance_symbol": "VVVUSDT",
+      "id": "venice-token",
+      "rank": 80,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "vvv"
+    },
+    {
+      "binance_symbol": "KASUSDT",
+      "id": "kaspa",
+      "rank": 82,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "kas"
+    },
+    {
+      "binance_symbol": "TRUMPUSDT",
+      "first_1d_utc": "2025-01-19",
+      "id": "official-trump",
+      "rank": 87,
+      "reason": "history < 2y",
+      "symbol": "trump"
+    },
+    {
+      "binance_symbol": "JAAAUSDT",
+      "id": "janus-henderson-anemoy-aaa-clo-fund",
+      "rank": 88,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "jaaa"
+    },
+    {
+      "binance_symbol": "GHOUSDT",
+      "id": "gho",
+      "rank": 89,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "gho"
+    },
+    {
+      "binance_symbol": "STABLEUSDT",
+      "id": "stable-2",
+      "rank": 90,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "stable"
+    },
+    {
+      "binance_symbol": "YLDSUSDT",
+      "id": "ylds",
+      "rank": 91,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ylds"
+    },
+    {
+      "binance_symbol": "BDXUSDT",
+      "id": "beldex",
+      "rank": 92,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bdx"
+    },
+    {
+      "binance_symbol": "PENGUUSDT",
+      "first_1d_utc": "2024-12-17",
+      "id": "pudgy-penguins",
+      "rank": 95,
+      "reason": "history < 2y",
+      "symbol": "pengu"
+    },
+    {
+      "binance_symbol": "XDCUSDT",
+      "id": "xdce-crowd-sale",
+      "rank": 97,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "xdc"
+    },
+    {
+      "binance_symbol": "FLRUSDT",
+      "id": "flare-networks",
+      "rank": 98,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "flr"
+    },
+    {
+      "id": "usual-usd",
+      "rank": 100,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usd0"
+    },
+    {
+      "binance_symbol": "SPXUSDT",
+      "id": "spx6900",
+      "rank": 103,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "spx"
+    },
+    {
+      "binance_symbol": "AEROUSDT",
+      "first_1d_utc": "2026-07-17",
+      "id": "aerodrome-finance",
+      "rank": 104,
+      "reason": "history < 2y",
+      "symbol": "aero"
+    },
+    {
+      "binance_symbol": "\u5e01\u5b89\u4eba\u751fUSDT",
+      "id": "bianrensheng",
+      "rank": 105,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "\u5e01\u5b89\u4eba\u751f"
+    },
+    {
+      "id": "true-usd",
+      "rank": 108,
+      "reason": "stablecoin (declared list)",
+      "symbol": "tusd"
+    },
+    {
+      "id": "usdtb",
+      "rank": 110,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdtb"
+    },
+    {
+      "binance_symbol": "VIRTUALUSDT",
+      "first_1d_utc": "2025-04-11",
+      "id": "virtual-protocol",
+      "rank": 112,
+      "reason": "history < 2y",
+      "symbol": "virtual"
+    },
+    {
+      "binance_symbol": "EURCUSDT",
+      "id": "euro-coin",
+      "rank": 113,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "eurc"
+    },
+    {
+      "binance_symbol": "HASHUSDT",
+      "id": "hash-2",
+      "rank": 114,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "hash"
+    },
+    {
+      "binance_symbol": "A7A5USDT",
+      "id": "a7a5",
+      "rank": 115,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "a7a5"
+    },
+    {
+      "binance_symbol": "OUSGUSDT",
+      "id": "ousg",
+      "rank": 118,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ousg"
+    },
+    {
+      "binance_symbol": "KAUUSDT",
+      "id": "kinesis-gold",
+      "rank": 120,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "kau"
+    },
+    {
+      "binance_symbol": "UBUSDT",
+      "id": "unibase",
+      "rank": 121,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ub"
+    },
+    {
+      "binance_symbol": "BSVUSDT",
+      "id": "bitcoin-cash-sv",
+      "rank": 123,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bsv"
+    },
+    {
+      "id": "first-digital-usd",
+      "rank": 124,
+      "reason": "stablecoin (declared list)",
+      "symbol": "fdusd"
+    },
+    {
+      "binance_symbol": "NIGHTUSDT",
+      "first_1d_utc": "2026-03-11",
+      "id": "midnight-3",
+      "rank": 125,
+      "reason": "history < 2y",
+      "symbol": "night"
+    },
+    {
+      "binance_symbol": "MONUSDT",
+      "id": "monad",
+      "rank": 126,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "mon"
+    },
+    {
+      "binance_symbol": "APXUSDUSDT",
+      "id": "apxusd",
+      "rank": 128,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "apxusd"
+    },
+    {
+      "id": "sofiusd",
+      "rank": 131,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "sofid"
+    },
+    {
+      "binance_symbol": "KITEUSDT",
+      "first_1d_utc": "2025-11-03",
+      "id": "kite-2",
+      "rank": 134,
+      "reason": "history < 2y",
+      "symbol": "kite"
+    },
+    {
+      "binance_symbol": "BTTUSDT",
+      "first_1d_utc": "2019-01-31",
+      "id": "bittorrent",
+      "last_1d_utc": "2022-01-17",
+      "rank": 136,
+      "reason": "Binance pair inactive (delisted)",
+      "symbol": "btt"
+    },
+    {
+      "binance_symbol": "FFUSDT",
+      "first_1d_utc": "2025-09-29",
+      "id": "falcon-finance-ff",
+      "rank": 137,
+      "reason": "history < 2y",
+      "symbol": "ff"
+    },
+    {
+      "binance_symbol": "TIBBIRUSDT",
+      "id": "ribbita-by-virtuals",
+      "rank": 138,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "tibbir"
+    },
+    {
+      "binance_symbol": "ONYCUSDT",
+      "id": "onyc",
+      "rank": 139,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "onyc"
+    },
+    {
+      "binance_symbol": "PIEVERSEUSDT",
+      "id": "pieverse",
+      "rank": 140,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pieverse"
+    },
+    {
+      "binance_symbol": "OHMUSDT",
+      "id": "olympus",
+      "rank": 141,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ohm"
+    },
+    {
+      "id": "crvusd",
+      "rank": 143,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "crvusd"
+    },
+    {
+      "binance_symbol": "KAGUSDT",
+      "id": "kinesis-silver",
+      "rank": 144,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "kag"
+    },
+    {
+      "binance_symbol": "NFTUSDT",
+      "id": "apenft",
+      "rank": 147,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "nft"
+    },
+    {
+      "binance_symbol": "USXUSDT",
+      "id": "usx",
+      "rank": 148,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "usx"
+    },
+    {
+      "binance_symbol": "REALUSDT",
+      "id": "reallink",
+      "rank": 149,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "real"
+    },
+    {
+      "binance_symbol": "REUSDUSDT",
+      "id": "re-protocol-reusd",
+      "rank": 154,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "reusd"
+    },
+    {
+      "binance_symbol": "XPLUSDT",
+      "first_1d_utc": "2025-09-25",
+      "id": "plasma",
+      "rank": 155,
+      "reason": "history < 2y",
+      "symbol": "xpl"
+    },
+    {
+      "binance_symbol": "APEPEUSDT",
+      "id": "ape-and-pepe",
+      "rank": 157,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "apepe"
+    },
+    {
+      "binance_symbol": "GRASSUSDT",
+      "id": "grass",
+      "rank": 158,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "grass"
+    },
+    {
+      "id": "agora-dollar",
+      "rank": 159,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "ausd"
+    },
+    {
+      "id": "usdai",
+      "rank": 160,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdai"
+    },
+    {
+      "id": "frax",
+      "rank": 163,
+      "reason": "stablecoin (declared list)",
+      "symbol": "frax"
+    },
+    {
+      "binance_symbol": "KOGEUSDT",
+      "id": "bnb48-club-token",
+      "rank": 164,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "koge"
+    },
+    {
+      "binance_symbol": "SYRUPUSDT",
+      "first_1d_utc": "2025-05-06",
+      "id": "syrup",
+      "rank": 166,
+      "reason": "history < 2y",
+      "symbol": "syrup"
+    },
+    {
+      "binance_symbol": "ZBCNUSDT",
+      "id": "zebec-network",
+      "rank": 167,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "zbcn"
+    },
+    {
+      "binance_symbol": "CASHCATUSDT",
+      "id": "cash-cat",
+      "rank": 169,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cashcat"
+    },
+    {
+      "binance_symbol": "FARTCOINUSDT",
+      "id": "fartcoin",
+      "rank": 170,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "fartcoin"
+    },
+    {
+      "binance_symbol": "KAIAUSDT",
+      "first_1d_utc": "2024-10-31",
+      "id": "kaia",
+      "rank": 171,
+      "reason": "history < 2y",
+      "symbol": "kaia"
+    },
+    {
+      "binance_symbol": "PC0000031USDT",
+      "id": "tradable-na-rent-financing-platform-sstn",
+      "rank": 172,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000031"
+    },
+    {
+      "binance_symbol": "2ZUSDT",
+      "first_1d_utc": "2025-10-02",
+      "id": "doublezero",
+      "rank": 173,
+      "reason": "history < 2y",
+      "symbol": "2z"
+    },
+    {
+      "binance_symbol": "ULTIMAUSDT",
+      "id": "ultima",
+      "rank": 174,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ultima"
+    },
+    {
+      "binance_symbol": "USATUSDT",
+      "id": "usa",
+      "rank": 179,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "usat"
+    },
+    {
+      "binance_symbol": "APYUSDUSDT",
+      "id": "apyusd",
+      "rank": 180,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "apyusd"
+    },
+    {
+      "binance_symbol": "EURCVUSDT",
+      "id": "societe-generale-forge-eurcv",
+      "rank": 181,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "eurcv"
+    },
+    {
+      "binance_symbol": "BORGUSDT",
+      "id": "swissborg",
+      "rank": 182,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "borg"
+    },
+    {
+      "binance_symbol": "AKEUSDT",
+      "id": "akedo",
+      "rank": 183,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ake"
+    },
+    {
+      "binance_symbol": "TELUSDT",
+      "id": "telcoin",
+      "rank": 184,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "tel"
+    },
+    {
+      "binance_symbol": "EIGENUSDT",
+      "first_1d_utc": "2024-10-01",
+      "id": "eigenlayer",
+      "rank": 187,
+      "reason": "history < 2y",
+      "symbol": "eigen"
+    },
+    {
+      "binance_symbol": "DRVUSDT",
+      "id": "derive",
+      "rank": 188,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "drv"
+    },
+    {
+      "binance_symbol": "COCOUSDT",
+      "id": "coco-2",
+      "rank": 189,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "coco"
+    },
+    {
+      "binance_symbol": "CARDSUSDT",
+      "id": "collector-crypt",
+      "rank": 190,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cards"
+    },
+    {
+      "binance_symbol": "PC0000033USDT",
+      "id": "tradable-apac-diversified-finance-provider-sstn",
+      "rank": 192,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000033"
+    },
+    {
+      "binance_symbol": "MXUSDT",
+      "id": "mx-token",
+      "rank": 193,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "mx"
+    },
+    {
+      "binance_symbol": "ANSEMUSDT",
+      "id": "the-black-bull",
+      "rank": 195,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ansem"
+    },
+    {
+      "binance_symbol": "AKTUSDT",
+      "id": "akash-network",
+      "rank": 196,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "akt"
+    },
+    {
+      "binance_symbol": "STRCXUSDT",
+      "id": "strategy-pp-variable-xstock",
+      "rank": 197,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "strcx"
+    },
+    {
+      "binance_symbol": "HUSDT",
+      "id": "humanity",
+      "rank": 198,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "h"
+    },
+    {
+      "binance_symbol": "USTBLUSDT",
+      "id": "spiko-us-t-bills-money-market-fund",
+      "rank": 199,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ustbl"
+    },
+    {
+      "binance_symbol": "VSNUSDT",
+      "id": "vision-3",
+      "rank": 200,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "vsn"
+    },
+    {
+      "id": "gusd",
+      "rank": 202,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "gusd"
+    },
+    {
+      "binance_symbol": "TRACUSDT",
+      "id": "origintrail",
+      "rank": 203,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "trac"
+    },
+    {
+      "binance_symbol": "SAFOUSDT",
+      "id": "safo",
+      "rank": 204,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "safo"
+    },
+    {
+      "binance_symbol": "METAUSDT",
+      "id": "meta-2-2",
+      "rank": 205,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "meta"
+    },
+    {
+      "binance_symbol": "KMNOUSDT",
+      "first_1d_utc": "2025-05-06",
+      "id": "kamino",
+      "rank": 208,
+      "reason": "history < 2y",
+      "symbol": "kmno"
+    },
+    {
+      "binance_symbol": "EDGEUSDT",
+      "id": "edgex",
+      "rank": 212,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "edge"
+    },
+    {
+      "binance_symbol": "XCNUSDT",
+      "id": "chain-2",
+      "rank": 213,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "xcn"
+    },
+    {
+      "binance_symbol": "SHFLUSDT",
+      "id": "shuffle-2",
+      "rank": 214,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "shfl"
+    },
+    {
+      "binance_symbol": "GOMININGUSDT",
+      "id": "gmt-token",
+      "rank": 215,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "gomining"
+    },
+    {
+      "binance_symbol": "BUSDT",
+      "id": "build-on",
+      "rank": 216,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "b"
+    },
+    {
+      "id": "avant-usd",
+      "rank": 217,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "avusd"
+    },
+    {
+      "binance_symbol": "PC0000097USDT",
+      "id": "tradable-latam-fintech-sstn",
+      "rank": 218,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000097"
+    },
+    {
+      "binance_symbol": "NPCUSDT",
+      "id": "non-playable-coin",
+      "rank": 219,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "npc"
+    },
+    {
+      "binance_symbol": "ZANOUSDT",
+      "id": "zano",
+      "rank": 221,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "zano"
+    },
+    {
+      "binance_symbol": "AUSDT",
+      "first_1d_utc": "2025-05-28",
+      "id": "vaulta",
+      "rank": 222,
+      "reason": "history < 2y",
+      "symbol": "a"
+    },
+    {
+      "binance_symbol": "SAFEUSDT",
+      "id": "safecoin",
+      "rank": 223,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "safe"
+    },
+    {
+      "binance_symbol": "RAILUSDT",
+      "id": "railgun",
+      "rank": 225,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "rail"
+    },
+    {
+      "binance_symbol": "GRXUSDT",
+      "id": "grx-chain",
+      "rank": 225,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "grx"
+    },
+    {
+      "binance_symbol": "RLBUSDT",
+      "id": "rollbit-coin",
+      "rank": 227,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "rlb"
+    },
+    {
+      "binance_symbol": "OZOUSDT",
+      "id": "ozone-chain",
+      "rank": 228,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ozo"
+    },
+    {
+      "binance_symbol": "JPYSCUSDT",
+      "id": "jpysc",
+      "rank": 229,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "jpysc"
+    },
+    {
+      "binance_symbol": "DOGUSDT",
+      "id": "dog-go-to-the-moon-rune",
+      "rank": 230,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "dog"
+    },
+    {
+      "binance_symbol": "CASHUSDT",
+      "id": "cash-4",
+      "rank": 231,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cash"
+    },
+    {
+      "binance_symbol": "BTSEUSDT",
+      "id": "btse-token",
+      "rank": 232,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "btse"
+    },
+    {
+      "binance_symbol": "AWEUSDT",
+      "first_1d_utc": "2025-05-21",
+      "id": "stp-network",
+      "rank": 233,
+      "reason": "history < 2y",
+      "symbol": "awe"
+    },
+    {
+      "binance_symbol": "SUSDT",
+      "first_1d_utc": "2025-01-16",
+      "id": "sonic-3",
+      "rank": 234,
+      "reason": "history < 2y",
+      "symbol": "s"
+    },
+    {
+      "binance_symbol": "METUSDT",
+      "first_1d_utc": "2025-11-13",
+      "id": "meteora",
+      "rank": 235,
+      "reason": "history < 2y",
+      "symbol": "met"
+    },
+    {
+      "binance_symbol": "THBILLUSDT",
+      "id": "theo-short-duration-us-treasury-fund",
+      "rank": 236,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "thbill"
+    },
+    {
+      "binance_symbol": "MELANIAUSDT",
+      "id": "melania-meme",
+      "rank": 238,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "melania"
+    },
+    {
+      "binance_symbol": "ZAMAUSDT",
+      "first_1d_utc": "2026-02-02",
+      "id": "zama",
+      "rank": 239,
+      "reason": "history < 2y",
+      "symbol": "zama"
+    },
+    {
+      "binance_symbol": "ALFWUSDT",
+      "id": "alpha-bulgaria-warrants",
+      "rank": 240,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "alfw"
+    },
+    {
+      "id": "frax-usd",
+      "rank": 241,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "frxusd"
+    },
+    {
+      "id": "astherus-usdf",
+      "rank": 242,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "usdf"
+    },
+    {
+      "binance_symbol": "CRCLONUSDT",
+      "id": "circle-internet-group-ondo-tokenized-stock",
+      "rank": 244,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "crclon"
+    },
+    {
+      "binance_symbol": "FLUIDUSDT",
+      "id": "instadapp",
+      "rank": 246,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "fluid"
+    },
+    {
+      "binance_symbol": "CHEEMSUSDT",
+      "id": "cheems-token",
+      "rank": 247,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cheems"
+    },
+    {
+      "binance_symbol": "BPUSDT",
+      "id": "backpack",
+      "rank": 248,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bp"
+    },
+    {
+      "binance_symbol": "NXMUSDT",
+      "id": "nxm",
+      "rank": 250,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "nxm"
+    },
+    {
+      "binance_symbol": "CAPUSDT",
+      "id": "cap-4",
+      "rank": 251,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cap"
+    },
+    {
+      "binance_symbol": "DGAIUSDT",
+      "id": "dgrid-ai",
+      "rank": 252,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "dgai"
+    },
+    {
+      "binance_symbol": "SN64USDT",
+      "id": "chutes",
+      "rank": 253,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "sn64"
+    },
+    {
+      "binance_symbol": "BCUSDT",
+      "id": "bc-token",
+      "rank": 255,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bc"
+    },
+    {
+      "binance_symbol": "SOSOUSDT",
+      "id": "sosovalue",
+      "rank": 256,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "soso"
+    },
+    {
+      "binance_symbol": "UPUSDT",
+      "id": "unitas",
+      "rank": 257,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "up"
+    },
+    {
+      "binance_symbol": "PC0000015USDT",
+      "id": "tradable-na-third-party-online-merchant-sstn",
+      "rank": 258,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000015"
+    },
+    {
+      "binance_symbol": "DAIUSDT",
+      "first_1d_utc": "2020-07-23",
+      "id": "dai-on-pulsechain",
+      "last_1d_utc": "2020-08-12",
+      "rank": 259,
+      "reason": "Binance pair inactive (delisted)",
+      "symbol": "dai"
+    },
+    {
+      "binance_symbol": "QUSDT",
+      "id": "quack-ai",
+      "rank": 260,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "q"
+    },
+    {
+      "id": "usda-2",
+      "rank": 260,
+      "reason": "stablecoin (declared list)",
+      "symbol": "usda"
+    },
+    {
+      "binance_symbol": "CYSUSDT",
+      "id": "cysic",
+      "rank": 261,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "cys"
+    },
+    {
+      "binance_symbol": "WEMIXUSDT",
+      "id": "wemix-token",
+      "rank": 262,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "wemix"
+    },
+    {
+      "binance_symbol": "STACUSDT",
+      "id": "securitize-tokenized-aaa-clo-fund",
+      "rank": 263,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "stac"
+    },
+    {
+      "binance_symbol": "GEODUSDT",
+      "id": "geodnet",
+      "rank": 264,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "geod"
+    },
+    {
+      "id": "unity-usd",
+      "rank": 265,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "uusd"
+    },
+    {
+      "binance_symbol": "PC0000085USDT",
+      "id": "tradable-latam-middle-market-lender-sstl",
+      "rank": 266,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000085"
+    },
+    {
+      "binance_symbol": "PC0000077USDT",
+      "id": "tradable-singapore-fintech-ssl",
+      "rank": 267,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pc0000077"
+    },
+    {
+      "binance_symbol": "PONSUSDT",
+      "id": "pons",
+      "rank": 268,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "pons"
+    },
+    {
+      "binance_symbol": "SHORTUSDT",
+      "id": "bermuda-shorts",
+      "rank": 269,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "short"
+    },
+    {
+      "binance_symbol": "ATHUSDT",
+      "id": "aethir",
+      "rank": 270,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ath"
+    },
+    {
+      "binance_symbol": "ABUSDT",
+      "id": "newton-project",
+      "rank": 271,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ab"
+    },
+    {
+      "binance_symbol": "EXODUSDT",
+      "id": "exod",
+      "rank": 272,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "exod"
+    },
+    {
+      "binance_symbol": "ACREDUSDT",
+      "id": "apollo-diversified-credit-securitize-fund",
+      "rank": 273,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "acred"
+    },
+    {
+      "binance_symbol": "CHIPUSDT",
+      "first_1d_utc": "2026-04-21",
+      "id": "chip-2",
+      "rank": 277,
+      "reason": "history < 2y",
+      "symbol": "chip"
+    },
+    {
+      "binance_symbol": "GENIUSUSDT",
+      "first_1d_utc": "2026-05-22",
+      "id": "genius-3",
+      "rank": 278,
+      "reason": "history < 2y",
+      "symbol": "genius"
+    },
+    {
+      "binance_symbol": "SN51USDT",
+      "id": "celium",
+      "rank": 279,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "sn51"
+    },
+    {
+      "binance_symbol": "BSPXUSDT",
+      "id": "bending-spoons-xstock",
+      "rank": 280,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "bspx"
+    },
+    {
+      "binance_symbol": "FORMUSDT",
+      "first_1d_utc": "2025-03-19",
+      "id": "four",
+      "rank": 282,
+      "reason": "history < 2y",
+      "symbol": "form"
+    },
+    {
+      "binance_symbol": "SENTUSDT",
+      "first_1d_utc": "2026-01-22",
+      "id": "sentient",
+      "rank": 283,
+      "reason": "history < 2y",
+      "symbol": "sent"
+    },
+    {
+      "binance_symbol": "GGBRUSDT",
+      "id": "goldfish-gold",
+      "rank": 284,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "ggbr"
+    },
+    {
+      "id": "cap-usd",
+      "rank": 285,
+      "reason": "stablecoin (peg heuristic)",
+      "symbol": "cusd"
+    },
+    {
+      "binance_symbol": "NEXUSDT",
+      "id": "nexus-4",
+      "rank": 287,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "nex"
+    },
+    {
+      "binance_symbol": "ANTFUNUSDT",
+      "id": "antfun",
+      "rank": 288,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "antfun"
+    },
+    {
+      "binance_symbol": "MAG7.SSIUSDT",
+      "id": "mag7-ssi",
+      "rank": 289,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "mag7.ssi"
+    },
+    {
+      "binance_symbol": "PLUMEUSDT",
+      "first_1d_utc": "2025-08-18",
+      "id": "plume",
+      "rank": 290,
+      "reason": "history < 2y",
+      "symbol": "plume"
+    },
+    {
+      "binance_symbol": "TAGUSDT",
+      "id": "tagger",
+      "rank": 292,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "tag"
+    },
+    {
+      "binance_symbol": "BANANAS31USDT",
+      "first_1d_utc": "2025-03-27",
+      "id": "banana-for-scale-2",
+      "rank": 294,
+      "reason": "history < 2y",
+      "symbol": "bananas31"
+    },
+    {
+      "binance_symbol": "YZYUSDT",
+      "id": "yzy",
+      "rank": 295,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "yzy"
+    },
+    {
+      "binance_symbol": "DBRUSDT",
+      "id": "debridge",
+      "rank": 297,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "dbr"
+    },
+    {
+      "binance_symbol": "BEAMUSDT",
+      "first_1d_utc": "2019-09-21",
+      "id": "beam-2",
+      "last_1d_utc": "2023-01-26",
+      "rank": 299,
+      "reason": "Binance pair inactive (delisted)",
+      "symbol": "beam"
+    },
+    {
+      "binance_symbol": "XPRUSDT",
+      "id": "proton",
+      "rank": 300,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "xpr"
+    },
+    {
+      "binance_symbol": "CRCLBUSDT",
+      "first_1d_utc": "2026-06-11",
+      "id": "circle-internet-group-bstock",
+      "rank": 301,
+      "reason": "history < 2y",
+      "symbol": "crclb"
+    },
+    {
+      "binance_symbol": "MAGMAUSDT",
+      "id": "magma-finance",
+      "rank": 302,
+      "reason": "no Binance USDT spot pair",
+      "symbol": "magma"
+    },
+    {
+      "id": "wrappedm-by-m0",
+      "rank": 303,
+      "reason": "wrapped/staked/bridged (pattern)",
+      "symbol": "wm"
+    }
+  ],
+  "rule": "Top-100 crypto assets by CoinGecko market cap on the selection date, walked in ascending market-cap-rank order. Excluded, with each exclusion recorded and reasoned: declared stablecoins (fixed id list), wrapped/staked/bridged/restaked derivatives (marker substrings of the CoinGecko id or symbol), and undeclared USD-peg suspects (price within 0.02 of 1.0 with 'usd' in the id or symbol). Admission additionally requires a Binance USDT spot pair with at least 730 days (2 years) of daily history at selection time, AND the pair must be actively trading: its latest daily bar must fall within 7 days of selection, which excludes delisted pairs and ticker collisions with dead pairs. HONESTY LIMIT: this universe is selected by today's outcomes - assets that died or fell out of the top-100 before today were never candidates, so any backtest over this universe inherits survivorship bias. That bias is documented here, not corrected; the forward quarantine period is the honest arbiter. Re-selection is a new declared event with its own manifest, never a silent refresh of this one.",
+  "selected_utc": "2026-08-28T15:19:44Z",
+  "source": "coingecko /coins/markets keyless + binance /api/v3/klines first/last-bar probe"
+}

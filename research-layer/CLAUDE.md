@@ -1,0 +1,1827 @@
+# research-layer -- pipeline notes
+
+## Chain lock (logs/chain.lock) - manual sessions MUST honour it
+Before any batch of chain writes (generation, backfill, hand-run gauntlet):
+check logs/chain.lock. If present, another writer (scanner card batch,
+25_PipelineLoop stage, quarantine daily, or another session) is mid-window --
+wait or defer. To hold it for a manual working session:
+python -c "from pipeline.chainlock import ChainLock; import time; l=ChainLock('logs','session','manual work'); l.acquire(); input('release?'); l.release()"
+Never delete a fresh chain.lock; a stale one (>3h) with a LIVE (or
+unreadable) holder pid is broken by the loop's two-strike rule, but a stale
+lock whose holder pid is provably DEAD (a hard-killed loop, crash) is broken
+on the first sighting -- same dead-pid fast path loop.lock uses.
+- **Locks name their holder by (pid, start time) (2026-09-30).** Every lock file
+  (chain.lock, loop.lock, gauntlet_worker.lock) records `pid_start_utc` beside
+  the pid, and `holder_alive()` treats a LIVE pid whose start time differs as
+  DEAD: Windows reuses pids, and on 2026-09-28 a reused pid made a dead
+  holder look alive and wedged loop.lock and chain.lock. A lock written before
+  this change has no start time and keeps the plain pid rule. A holder whose
+  start time cannot be read counts as alive (conservative).
+- **The gauntlet worker holds chain.lock only for a tail read plus ONE append
+  (~16 ms), once per candidate, and never waits for it.** If another writer
+  holds it the worker KEEPS that candidate's evaluated result in memory (no
+  bundle written yet) and retries the write later in the SAME run: once after
+  each chunk, before the next is dispatched, then in a final drain pass of
+  non-blocking attempts every `DRAIN_INTERVAL_S` (5 s) inside a reserved
+  `DRAIN_RESERVE_S` (75 s) that the chunk loop holds back, never past the
+  deadline (2026-10-02; before that every such result was discarded). The
+  measurement that motivated the change: overnight runs on 2026-10-01/02
+  wrote 0 verdicts each while evaluating 48-120. **The retries rescue only
+  SHORT holds** (scanner/inbox card batches and similar). Until 2026-10-08
+  the loop's screen stage held chain.lock for hours overnight; a quarantine
+  date holds it for TWO tail reads (the re-plan before the append and the
+  read over its own entries after it) plus ONE append since 2026-10-16 (max
+  0.33 s measured on the 2026-10-16 replay). Before that fast path, holds of
+  minutes per date. Holds of minutes or hours (the pre-fast-path quarantine
+  catch-up and the pre-2026-10-08 screen; neither is current behaviour) leave
+  whole runs with `deferred_lock` equal to their evaluated count; the
+  results are discarded at the end of the run and the next run re-evaluates
+  those candidates. So the retries alone did NOT fix the overnight
+  zero-write runs; screen's per-batch holds (next bullet) did. Each retry
+  re-checks on the advanced snapshot exactly what the first write does; a
+  candidate another writer moved or judged meanwhile is dropped unwritten
+  (`dropped_stale`). Results still unwritten at the end stay queued
+  (`deferred_lock`, exit 0) and are NEVER persisted: the next run re-evaluates
+  them. It never sleep-polls inside, waits on, or breaks a lock.
+  HAZARD: a hand-run writer that appends to registry_log.jsonl WITHOUT taking
+  chain.lock inside that ~16 ms window makes the worker see a chain that moved
+  under it. It then writes nothing for that candidate, leaves it queued and
+  counts it as an ERROR, so the run exits 1 and the Ops Sentinel FAILs the
+  digest. That is an alarm on purpose (an unlocked writer is the defect), not a
+  flake. Take chain.lock for every hand-run chain write, as above.
+- **Screen holds chain.lock only for each BATCH write, not for the stage
+  (2026-10-08, Coen's decision; design `docs/2026-10-08-screen-lock-release-design.md`).**
+  `pipeline.screen` evaluates every chunk with NO lock, then flushes the
+  verdicts under ONE non-blocking acquire (holder `screen`) per batch of at
+  most `SCREEN_BATCH_MAX` (200) specs per hold. A hold is normally one
+  chunk (workers x 8 = 56 specs at 7 workers), but after a held lock the
+  pending specs flush back to back in successive holds of up to 200 specs
+  (about 8 s each), with no gap between them. Measured 2026-10-09 on a copy
+  of the live 103,626-entry chain (200 specs, 78 pass / 122 fail): the write
+  costs 0.04 s per spec, so a hold ran 1.1 to 2.5 s (median 2.3 s, max
+  2.5 s); a full 200-spec batch would hold about 8 s. Under
+  the lock it advances the snapshot, re-checks each spec is still `proposed`
+  (one that is not is dropped unwritten and counted `dropped_stale`), writes
+  the bundles, and appends each spec's three entries (screened, verdict,
+  gauntlet/graveyard) in ONE write, so a crash cannot leave a `screened`
+  orphan. Before this the stage held the lock for its whole write phase
+  (5.3 s per spec measured 2026-10-08, 6.8 s on the 2026-10-09 copy, hours
+  overnight) and the worker wrote nothing meanwhile. A batch that meets a held lock is KEPT and
+  retried at the next chunk, then by a final drain of non-blocking attempts
+  every `DRAIN_INTERVAL_S` (5 s) inside `DRAIN_RESERVE_S` (75 s), never past
+  the deadline; the reserve is subtracted from the deadline budget only
+  while a batch is pending. Specs still unwritten stay `proposed` (the next
+  run re-screens them), the exit is 0, and `screen_result.json` counts them
+  in `deferred` and `deferred_lock` (a deadline-stopped flush reports
+  `stopped_at_deadline` instead, and counts in `deferred` only). The
+  loop no longer wraps screen in chain.lock, and a held lock at screen no
+  longer defers the cycle. Same hazard as the worker: an unlocked hand-run
+  writer that moves the chain inside a batch's hold makes that batch write
+  nothing (`ChainMoved`/`UnstableEntry`), exit 1; batches already written
+  stay. That exit, like a `CellError` crash, writes NO `screen_result.json`
+  (the loop unlinked the old one before the run, so none exists). A
+  crashing spec (`CellError`) keeps the earlier batches; it and every later
+  spec stay `proposed`.
+
+## Chain mirror: git tracks registry_log.d/, never registry_log.jsonl (2026-10-09)
+- **Why:** GitHub blocks any file over 100 MiB anywhere in pushed history; the
+  live chain passed 81 MB on 2026-10-09 at ~2.9 MB/day. Design:
+  `docs/2026-10-09-registry-segments-design.md`; vault note
+  `project_registry_log_size_2026-10-09`.
+- **The live file is unchanged** (one CRLF file, every writer and reader as
+  before). `pipeline/chain_mirror.py` `sync()` copies its complete lines
+  (CRLF -> LF) into `registry_log.d/000001.jsonl ...`: a segment seals at 40
+  MiB on an entry boundary and is NEVER rewritten; `MANIFEST.json` records
+  each sealed one (lines, bytes, sha256, first/last entry hash). Joined, the
+  segments equal the live file with LF endings. `.gitattributes` stores them
+  verbatim (`-text`).
+- **All four committers sync first and stage `research-layer/registry_log.d`:**
+  `loop.commit_cycle`, `run_gauntlet_worker.bat`, `run_gauntlet_stats.bat`,
+  `run_quarantine.bat`. They detect change with `git status --porcelain` (new
+  segments are untracked; `git diff` misses them). Only sync's exit 0 stages
+  the mirror; a refusal (exit 3) or any other code leaves it out, everything
+  else still commits, exit codes are unchanged. Refusals are items in
+  `logs/degraded_commit.json` (writer `commit`, source `chain_mirror`), read
+  by the Sentinel's `research_degraded` check (manifest key `commit_ledger`).
+- **A refusal is a chain incident, not weather:** "prefix mismatch" / "not a
+  prefix" means the live file was rewritten or truncated. Coen's call; never
+  delete registry_log.d or hand-edit the manifest to make a sync pass.
+- **Verify:** `python verify_registry.py registry_log.d` (manifest + boundary
+  checks, then the normal walk; with NO path argument it reads
+  `registry_log.jsonl`, or `registry_log.d` when only that exists, as in a
+  public clone); `python -m pipeline.chain_mirror check` says
+  MATCH / BEHIND / MISMATCH against the live file, read-only.
+- **⚠ NEVER check out a commit from before the switch in the LIVE tree**
+  (`checkout`/`switch`/`reset`/rebase): moving onto a commit that tracks
+  registry_log.jsonl OVERWRITES the live chain with the old copy, and moving
+  back DELETES it. A hand commit of the chain = `python -m pipeline.chain_mirror
+  sync` then stage `research-layer/registry_log.d`; never `git add -f
+  registry_log.jsonl`.
+- **⚠ NEVER merge into the LIVE tree a branch that touched
+  `registry_log.jsonl`.** Git sees a modify/delete conflict, writes the
+  branch's copy over the (now untracked) live chain, and `git merge --abort`
+  then DELETES the live file (reproduced 2026-10-09). Before ANY merge into
+  live run `git diff --name-only $(git merge-base HEAD <branch>) <branch> --
+  research-layer/registry_log.jsonl`: it must print NOTHING. Pipeline
+  branches never touch it; one that does is never merged in the live tree.
+  If the live file is ever lost, the recovery sources are the pre-switch
+  backup `E:\Users\Coen\Claude\_backups\registry_log.jsonl.bak-<date>-pre-segments`
+  and the segments: joined in order they are the live content, as of the last
+  sync, with LF endings (LF -> CRLF gives the live bytes back).
+- **⚠ NEVER run `git clean -x` or `git clean -X` in the LIVE tree.** Since the
+  switch the live chain is an IGNORED file (as is all of `logs/`), and
+  `-x`/`-X` delete ignored files.
+- **⚠ NEVER revert or reset the switch commit** ("chain: git tracks
+  registry_log.d segments; registry_log.jsonl is local"): while the ignore
+  rule is active git overwrites the ignored live file with the switch-time
+  blob. The rollback order is in the design doc s6: revert the MERGE, never
+  the switch commit.
+- **Sync refuses with "sealed segment ... on disk is missing or differs from
+  the manifest":** restore that file, never delete the mirror. First `git
+  checkout -- research-layer/registry_log.d/<seg>`; if the next sync still
+  refuses, HEAD's copy was never the sealed one, so rebuild it from the live
+  file, from `research-layer/` (the one-liner asserts the manifest's sha256
+  before it writes), then sync again:
+  `python -c "from pipeline import chain_mirror as cm; import hashlib, pathlib; m = cm.load_manifest('registry_log.d'); r = next(x for x in m['sealed'] if x['file'] == '<seg>'); L = cm.split_lines(cm.read_live('registry_log.jsonl')); d = b''.join(L[r['first_line'] - 1:r['last_line']]); assert hashlib.sha256(d).hexdigest() == r['sha256']; pathlib.Path('registry_log.d', r['file']).write_bytes(d)"`.
+  Cause: a sync stalled more than 600 s (`LOCK_STALE_S`) lost a lock race and
+  overwrote a segment another sync had just sealed. Rare, and it does NOT
+  clear by itself: every later sync refuses until the file is restored.
+- **Segment size has a hard ceiling, `HARD_MAX_BYTES` = 50 MiB**, that no
+  manifest can raise: sync refuses a `segment_max_bytes` over it and
+  `check_layout` (so the verifier) flags it and any segment over it.
+- **Unpushed history still holds full-file `registry_log.jsonl` blobs up to
+  81.5 MB.** They are under GitHub's 100 MiB limit, so the push works, and they
+  stay in history forever. That is expected; never "fix" it with a history
+  rewrite.
+- The commit lists carry `research-layer/artifacts/` paths only (a line with a
+  `..` segment or a backslash is dropped too: git resolves
+  `artifacts/../registry_log.jsonl` to the live file), and the
+  worker never hands git an empty pathspec file (`git commit
+  --pathspec-from-file=<empty>` commits the WHOLE index). Wrappers test exit
+  codes for EXACTLY 0 (a crash's NTSTATUS code is negative).
+- Tests: `test_chain_mirror.py`, `test_verify_registry_segments.py`,
+  `test_loop_commit_mirror.py`, `test_chain_mirror_wrappers.py` (RUNS copies
+  of the three .bat files under cmd.exe against a scratch repo; Windows only).
+
+## Intraday: bar mechanics per bar, statistics on daily marks (2b-1, 2026-10-10)
+- **The rule:** an intraday strategy (timeframe below 1d, session 24x7)
+  is SIMULATED per bar but MEASURED on the equity curve marked once per
+  UTC day. Mechanics use the bar size: the engine's vol-target sizing
+  annualises with bars per year, short financing accrues per bar
+  (`short_financing_per_year / periods_per_year`), and `gate_mask`'s
+  vol_percentile window is 365 x bars per day bars. Every recorded or
+  gated statistic uses daily marks, so the pipeline's 365-based formulas
+  stay correct at every timeframe. A 1d strategy's bars ARE its daily
+  marks: every daily number is unchanged. Design:
+  `docs/2026-10-10-intraday-correctness-design.md`.
+- **`pipeline/bars.py` is the one home of the arithmetic.**
+  `BARS_PER_DAY_24X7` = 15m 96, 30m 48, 1h 24, 4h 6, 12h 2, 1d 1;
+  `bars_per_day(session, tf)`; `bars_per_year` = `cells.SESSION_PERIODS`
+  [session] (default 365) x bars per day. `daily_marks(series)` keeps the
+  LAST (date, value) of each UTC date (key `date[:10]`) and RAISES on
+  out-of-order input; `daily_bars(rows)` is the same for bar dicts.
+  `engine.run_spec` resolves bars per year with `bars.bars_per_year`
+  (vol-target sizing, per-bar financing) and passes bars per day to
+  `gate_mask`.
+- **Statistics on daily marks:** `plateau.annualized_sharpe`,
+  `gauntlet_core.daily_returns_with_dates`,
+  `gauntlet.daily_returns_from_curve`, `window_vol` (over `daily_bars`),
+  `train_dates` for the walk-forward, `regime_by_date` on `daily_bars`
+  of the regime asset (`BTCUSD` if the spec's bars hold it, else the first
+  asset sorted -- a per-cell spec, tradfi or crypto since Switch 1, is bucketed
+  by its OWN asset, no BTC lookup; recorded, never gated; `[:10]` keys), and
+  `engine.run_spec`'s `max_dd` metric (the screen's recorded max drawdown).
+  The simcache key uses
+  `gauntlet._resolved_periods(spec)`. `ENGINE_REV` stays "e2" (a 1d
+  strategy's results are bit-identical, so no cached sim is invalidated).
+  Trade-based gates (edge per trade, edge decay, MC p05, ruin, cost stress)
+  are unchanged.
+- **24x7 only:** any non-24x7 session with tf != "1d" raises
+  `bars.IntradayUnsupported` (a `ValueError`), as does an unknown tf.
+  Hazard for 2b-3: a NON-24x7 intraday spec reaching `registry_series`
+  aborts the whole gauntlet/stats pass. In practice it fails BEFORE
+  `IntradayUnsupported` is reached: `load_cell_data` raises
+  `FileNotFoundError` (no tradfi `*_1h.csv` exists) or the
+  `data_hashes[cell_id]` lookup in `registry_series` raises `KeyError`
+  (no cell hash). Either way, registration must refuse such a spec up
+  front (2b-3).
+- **Quarantine records intraday strategies (2b-2, 2026-10-11):** the
+  recorder writes one row per CELL per UTC day. The cell key
+  (`pipeline/qcells.py`) is `ASSET@TF` (`BTCUSDT@1h`) for an intraday tf
+  and the bare asset for 1d; `"X@1d"` is never valid. The key names the
+  row's `asset`, the snapshot's digest key and the price file
+  (`data/<ASSET>_<TF>.csv`). An intraday row has 9 fields: the 7 daily
+  ones plus `entries` and `exits` (non-negative ints, never bool;
+  `registry.QUARANTINE_INTRADAY_KEYS`); a daily row is the 7-field
+  shape, byte for byte. Price, position and equity are the book at the
+  day's LAST bar, rebased at the entry day's last bar, and `action` =
+  the day's LAST event (enter/exit/hold). `observe_day` passes
+  `bars_per_year` and `bars_per_day` to the engine. Completeness: a day
+  is recordable for a cell when its last slot (D 00:00 + (bars_per_day -
+  1) x tf) is on disk OR any later bar is (`qcells.complete_days`), so a
+  missing hour cannot make a day owed forever; a missing hour inside a
+  day that has other bars is not a hole (that day is complete and is
+  recorded from the bars present), but a whole UTC day with no bars is
+  silently never owed (as for daily) and the fetcher never backfills it
+  (`crypto_data.fetch_symbol`); only a FAILED fetch raises
+  `intraday_fetch_failed`. Repair = delete the cell's CSV so the next
+  `--fetch-owed` refetches it from scratch. The chain is append-only: a
+  refetch leaves every chained row as it is, but it changes `bars_sha256`
+  for every already-chained date at or after the hole (`hash_bars_through`
+  covers all bars up to the date), so a strategy that still owes such a
+  date on that cell is deferred as `restated` (rule 2), every run, until a
+  human resolves it -- so a repair is a deliberate, Coen-gated act, not
+  routine. A restated-only deferral exits 0, not 1 (`deferred_only`), so a
+  repair-stalled date does not turn the task red; it records a `restated`
+  item keyed by the cell in `logs/degraded_quarantine.json`, which the
+  Sentinel's `research_degraded` check turns WARN, then FAIL after 3 days.
+  While the CSV is absent its strategies are deferred (missing price file,
+  addendum rule 3); step 1b fetches before recording, so a normal run is
+  unaffected, but if the refetch fails (e.g. a 418 ban) they stay deferred
+  until a fetch succeeds, and a day where nothing records and no eligible
+  strategy is already fully chained for that date (`n_present == 0`) exits
+  1 (the total-stall rule). Owed days,
+  catch-up and `--review` stay day-based on complete UTC days. Fetch:
+  step 1b of `tasks/run_quarantine.bat` runs `python -m
+  pipeline.quarantine --fetch-owed`: only the intraday cells of
+  quarantined strategies (nothing while none is quarantined;
+  `crypto_data` is imported only when a cell is owed), incremental,
+  closed bars only. The intraday CSVs are gitignored (`data/*.csv`),
+  never committed; the chain pins them by hash. A failed cell is a
+  degraded item with source `intraday_fetch_failed` (key = the cell) in
+  `logs/degraded_quarantine.json`; the fetch step OWNS those items
+  (`_write_fetch_ledger`) and catch-up keeps them (`keep_sources`). A
+  Binance 418 ban stops the step at once and marks every remaining cell.
+  A fetch failure never blocks the daily record: only a crash of the
+  step is carried to the task's exit code (`FETCH_RC`), after the record
+  is committed. A non-24x7 intraday spec is deferred with a degraded
+  item `intraday_unsupported` (`_split_unsupported`), never a crash;
+  registration-time refusal is 2b-3. The live gate's
+  `closed_forward_trades` (`pipeline/livegate.py`) SUMS `exits` on rows
+  that carry them and counts `action == "exit"` on daily rows. Cost
+  hazard: each date re-simulates the cell from bar 0 (measured in the
+  2026-10-15 rehearsal, before 2026-10-17 engine perf: ~145 s pure
+  simulation per 1h vol-percentile strategy-day, ~175 s per strategy-day
+  including chain I/O, at the then O(n x 365 x bars_per_day) percentile;
+  chain I/O removed from that figure by the 2026-10-16 fast path;
+  simulation still runs per date, now outside chain.lock). Since the
+  2026-10-17 engine perf (section "Engine series cache") the percentile is
+  an exact incremental one and the series are cached across runs: the
+  catch-up of date 2026-10-14 went 2,857 s to 286 s cold / 201 s warm, and
+  `--date` plus the catch-up of the 10-18 morning 1,810 s to 259 s (single
+  process, measured 2026-10-19). The whole intraday file is still read per
+  strategy per catch-up or review and once per date per cell
+  (`_load_cell_bars`); cost it before activating. Proof:
+  `tools/quarantine_parity.py` (`dump` before and after a change, then
+  `compare`) recomputes a seeded sample of chained daily quarantine days
+  and compares snapshot digests and rows exactly, old code vs new;
+  re-run it after any change to the recorder. The `quarantine`
+  subcommand of `tools/intraday_rehearsal.py` runs the whole stage end
+  to end on a scratch chain COPY and refuses the live chain. Tests:
+  `test_quarantine_intraday.py`, `test_quarantine_fetch_owed.py`.
+  Design: `docs/2026-10-11-intraday-paper-stage-design.md`.
+- **Parity guarantee:** `tools/daily_parity.py` (`dump` before and after a
+  change, then `compare`) fingerprints registered 1d strategies. On
+  2026-10-10, 200 registered 1d strategies (167 of them vol-target or
+  vol-percentile) were bit-identical across the change, 0 errors.
+  `compare` fails on a meta mismatch (seed, cutoff, sample size, registry
+  sha), a sample-list mismatch, any per-strategy fingerprint mismatch,
+  empty results, or ANY error, so it cannot pass vacuously. Re-run
+  it after any change to `bars.py`, the engine's sizing/financing/gate
+  code, or the statistics above.
+- **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
+  twins of real crypto strategies on a COPY of the chain, runs the real
+  screen and gauntlet on the copy and reads the outcomes side by side.
+  `quarantine` moves 1h twins to quarantine on the copy by a synthetic
+  gauntlet transition, then runs the real recorder with a REAL Binance
+  fetch into its scratch data dir. Both `register` and `quarantine`
+  REFUSE the live chain, and `quarantine` also refuses the live data dir
+  (exit 2, nothing written).
+- **The intraday path is dormant (crypto is ACTIVE at 1d only since Switch 1,
+  2026-10-17):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets x `("1d",)`;
+  the five intraday timeframes stay declared and unswept until Switch 2 (a
+  later plan, its own cost sign-off and Coen gate), so no scheduled task
+  registers an intraday strategy.
+- **Switch 2 hazards (cost these before activating intraday; Switch 1 is 1d
+  only):** `vol_percentile` in
+  `gate_mask` was O(n x 365 x bars_per_day), about 940 s per 1h
+  vol_percentile candidate under perturbation, and
+  `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) was ~47x too low for 1h, so the
+  cycle budget would have been misjudged (both before 2026-10-17 engine
+  perf). Now one 1h gauntlet candidate (vol_percentile + trend_scan) takes
+  ~70 s cold / ~16 s warm (measured 2026-10-19), and the priors are per
+  timeframe (`PRIOR_S_BY_TF`, `SCREEN_PRIOR_S_BY_TF`; section "Engine series
+  cache"); 1h still costs about 22-25x a 1d candidate, so cost the grid
+  before activating. Artifact storage: screen writes the
+  per-bar `equity.csv` into each bundle, and bundles are committed to the
+  PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
+  tens of KB for 1d, so grid scale means tens of GB. Two explicit Switch 2
+  gates: `gauntlet_stats` has never run end to end on an intraday spec,
+  and `tools/intraday_rehearsal.pick_originals`' selection rules (the
+  vol_target/vol_percentile picks, one per family) are untested (only
+  its crypto/1d filter is); both must be exercised in Switch 2's activation
+  rehearsal before any intraday verdict is chained.
+- **The protocol note is a DRAFT and is NOT chained until Switch 2:**
+  `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
+  approves the exact text; it is chained VERBATIM at Switch 2 activation,
+  before the first intraday verdict (the v6.1-amendment pattern). Since
+  2b-2 it has a second paragraph, "Quarantine and the live gate" (the
+  cell key, entries/exits, the completeness rule, the live gate's sum of
+  exits). Do not chain it, edit its wording, or treat intraday daily-mark
+  verdicts as protocol-covered before then.
+
+## Pipeline loop (25_PipelineLoop)
+- **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs
+  `pipeline.screen` with `--logs-dir <logs>` and WITHOUT `_lock_and_run`:
+  screen takes chain.lock itself, per batch (Chain lock section). A one-time
+  `ChainLock.info()` probe before it logs a holder and never defers the
+  cycle (a probe, not an acquire). Triage and the composer's real run keep
+  `_lock_and_run`, so a held lock there still defers the cycle.
+- **Screen bundles reach git through a commit list (2026-10-09).** After
+  each batch write, screen appends that batch's chained bundles
+  (`research-layer/artifacts/<sid>/{config.json,equity.csv,trades.csv}`) to
+  `logs/screen_commit_paths.txt`, only when `--artifacts-dir` and
+  `--logs-dir` are the registry's own (a scratch run is never listed). The
+  loop's `commit_cycle` takes the list (rename to `.taking`; leftover
+  `.taking` / `.merging` segments are folded back in first), commits it with
+  the chain delta by `--pathspec-from-file`, and deletes it ONLY after the
+  commit succeeds; on any failure it is folded back onto the list for the
+  next commit. Listed files missing on disk are skipped with a WARNING. Take
+  and settle never raise. Why: commit_cycle used to commit only bundles of
+  strategies registered in the same cycle, and 14 cycles (08-31..09-28) died
+  between screen and commit, so 8,627 screen bundles (plus 2,195 v6 gauntlet
+  bundles judged cross-cycle) were never committed; all hash-matched their
+  chained `artifacts_hash` and were committed by hand in per-day scoped
+  commits on 2026-10-09. Never hand-write the list from PowerShell 5.1
+  (UTF-16): it is read as UTF-8, so garbled lines are skipped with a WARNING.
+- **The loop STOPS AT SCREEN (Build 2a, 2026-09-30).** A cycle runs triage,
+  composer and screen; screen moves passers into state `gauntlet` and the
+  standalone gauntlet worker (section below) takes them from there. The
+  loop's own gauntlet stage and its `GAUNTLET_IN_LOOP` rollback flag were
+  REMOVED at cutover step 8 (2026-10-07), after a clean week of the worker:
+  there is no flag any more, and the only way back to in-loop judging is a
+  code revert. The loop never reads or writes `gauntlet_result.json`, so
+  `deferred_gauntlet` is absent from the status (absence is not a claim); it
+  still runs the 4f post-screen chain verify. The old `pipeline.gauntlet`
+  module stays (the stats job imports from it, and a hand run is still
+  possible): it labels its verdicts v6 and reruns the registry-wide
+  clustering. Since Ruling 23
+  (2026-10-01) it applies NO family kill once a `gauntlet-protocol-v6.1:` note
+  is on the chain (`pbo_family_kill` false on every verdict, never a reason),
+  because `verify_registry.py` invariant 12 rejects one after the note: the
+  loop's verify would return `chain_invalid` and, the chain being append-only,
+  every later fire would fail too. Before the note it still applies the kill,
+  which is why the cutover merges the code BEFORE chaining the note. Do not
+  hand-run `python -m pipeline.gauntlet` without Coen's say-so.
+- python -m pipeline.loop --once from the layer root; --dry-run reports the
+  trigger decision and runs no METERED stage; stage 0 (tradfi snapshot into
+  data/) still runs, so a dry run in the live tree refreshes the cells;
+  --seed-watermarks initialises
+  every class watermark to the current corpus (ACTIVATION step -- prevents a
+  whole-corpus generation on first fire).
+- **DO NOT run --seed-watermarks after the 2026-08-29 trigger fix.** It seeds
+  every watermark to the CURRENT triggerable count, which today includes the
+  539-card pending backlog. Seeding now banks that backlog as "already seen",
+  so no class fires until 25 genuinely NEW cards arrive -- the loop would look
+  exactly like the deadlock it just escaped (no_trigger, exit 0, healthy) while
+  the whole backlog sits stranded behind the watermark. --seed-watermarks is
+  an ACTIVATION-only step, for a fresh loop_state.json.
+- **D38's activation checklist step 1 (run --seed-watermarks) is now
+  CONDITIONAL, not unconditional:** it applies only to a loop_state.json that
+  has never been seeded. The live file was seeded 2026-08-28 and must be left
+  as it is.
+- **Trigger basis (amended Coen 2026-08-29 -- do not revert):** a class fires
+  on its TRIGGERABLE count minus its watermark, where triggerable = routable
+  cards that are accepted OR pending, never rejected. NOT accepted-only:
+  cards are only accepted by the triage panel the loop runs INSIDE a cycle,
+  after the trigger decision, and nothing else triages -- so an accepted-only
+  trigger can never move between fires. That was a live deadlock (every fire
+  no_trigger, 539 pending cards stranded). The watermark is banked on that
+  SAME basis; changing one side without the other re-breaks the loop in one
+  direction or the other. loop.py `_triggerable_counts` decides;
+  `_routable_counts` (accepted-only) is reported, never compared.
+- **Stage 0 snapshot + freshness preflight (2026-09-12, `docs/2026-09-12-loop-snapshot-stage-design.md`).**
+  Every fire that gets past the lock probes first runs
+  `python -m pipeline.tradfi_data snapshot --classes fx,equity_etf,bond_etf,metal_etf --out <layer> --ts-root <producer>`
+  (loop.SNAPSHOT_CLASSES) BEFORE the first chain read -- on `no_trigger` and budget parks too,
+  so the 08:20 quarantine daily always finds fresh cells. Skipped (printed + `snapshot_skipped=1`)
+  only when the trading-systems producer root does not exist (tests, a fresh clone). A non-zero
+  exit is `snapshot_failed` (FAIL, exit 1, escalation `run_aborted`, task retry, zero spend). Then,
+  after the orphan check and before triage, `_freshness_preflight` reads each registered cell's
+  LAST bar (and first row) and runs the gauntlet's own `assert_cells_comparable`. **Rule:** it BLOCKS
+  (`stale_data`: FAIL, exit 1, `run_aborted`, zero spend; `stale_detail` names the cells,
+  `stale_fired_cells` the fired class's lagging cells, `data_end_by_class` the classes) when (1) the
+  FIRED class's cells are not mutually comparable, or (2) the fired class is stale AGAINST the rest
+  (the lagging side of a cross-class breach) -- both Coen, 2026-10-08 -- or (3) a price file is
+  MISSING, EMPTY (header only) or ENDS before screen's train cutoff (`screen.DEFAULT_CUTOFF`) for a
+  fired-class cell or any cell a `proposed` spec of any class names (cell-exact, the set screen
+  loads; controller Rulings 38-41), or STARTS after the cutoff for a cell a `proposed` spec names
+  (screen keeps a bar iff its date[:10] <= the cutoff, so a first bar ON the cutoff day passes; a
+  fired-class cell with a late start and no proposed spec does NOT block, because a re-fetch can
+  never fix it and the park would never end -- Ruling 41; it is silent, not a WARN): screen would
+  fail after spend on a missing file; an empty or late-starting file loads no bars, `run_spec`
+  returns 0 trades and screen buries the spec with an irreversible `trade_count` fail; a file ending
+  before the cutoff shortens the train window. The late-start message says a re-fetch cannot fix it:
+  exclude the cell upstream or deal with the spec by hand.
+  ALL OTHER staleness is a WARN, never a block: a stale cell past the cutoff in another class, or a
+  missing/empty/short file no proposed spec names. The cycle runs, the
+  status carries `stale_other_cells` / `stale_other_classes` / `stale_other_missing`, the run log
+  prints one `WARN stale_data_report` line, and an otherwise-OK cycle's overall is WARN (exit stays
+  0, so the Sentinel, which reads only the task's exit code, stays green). A fired class with no
+  registered spec has no cells here and cannot block. The preflight derives its cells from `screen.comparable_cells`, the same implementation
+  the gauntlet worker uses (stage 0's classes are `SNAPSHOT_CLASSES`). Successful fires carry `snapshot_utc` in the status. `--dry-run` runs stage 0
+  but returns at the trigger report, before the chain verify, the orphan check and this preflight.
+  **A hand `tradfi_data snapshot` is now a REPAIR, never a routine** -- the 2026-09-11 22:30 cycle
+  failed in the gauntlet after USD 1.90 because the last hand snapshot was 11 days old and fx
+  (FRED, ~1 week lag) sat 20 days behind crypto against a 13-day allowance. Staleness is now
+  SYMMETRIC: crypto's legacy BTCUSD/ETHUSD come from the 08:20 QuarantineDaily and its 76 USDT cells from
+  the 08:02 33_CryptoGridRefresh (Switch 1; both end on the last complete UTC day), so if EITHER stalls,
+  crypto goes stale against fresh tradfi. Since 2026-10-08 that no longer parks every fire: a fire of a tradfi
+  class runs with `stale_other_cells` / WARN, while a fire of the stale class itself (crypto, with
+  BTCUSD and ETHUSD stopped together, is stale against the rest) parks at `stale_data` (zero spend,
+  Sentinel FAIL) -- read `data_end_by_class` and the `stale_*` items in the status to see which class. The preflight covers only cells that already carry a registered spec: a class with no
+  registrations yet (metal_etf today) gets its FIRST generation checked by the gauntlet worker, not the preflight.
+  **Since step 8 (2026-10-07) the preflight's original purpose is gone.** It was written to stop the in-loop
+  gauntlet stage refusing after every metered stage had run; that stage no longer exists. Screen never
+  calls `assert_cells_comparable` and fences bars at its train cutoff, so a stale feed is invisible
+  to it (only a missing, empty or late-starting file trips it; a pre-cutoff-ending file just trains on a shorter window); the gauntlet worker, which loads full
+  history, defers non-comparable candidates (`deferred_not_comparable`) rather than refusing. It is
+  now a data-health alarm. Coen decided 2026-10-08: narrowed to the fired class, which also blocks
+  if it is stale against the rest; all other staleness is a WARN (status items, one WARN log line,
+  overall WARN). The cell-exact block on proposed specs' missing/empty/late-starting/short files is
+  the controller's Rulings 38-41, not Coen's.
+  **Since 2026-10-08 (per-asset isolation, `docs/2026-10-08-per-asset-isolation-design.md`):**
+  stage 0 SKIPS a bad series (verdict fail, sha mismatch, shrunk history, not
+  pinned, no parquet) and writes the rest; the manifest's `skipped` map names
+  them, the status carries `snapshot_skipped_series`, and a skipped series'
+  CSV and record are left exactly as they were. Zero series written is still
+  `snapshot_failed`. Every non-dry fire then writes `logs/degraded_loop.json`
+  (stage 0 skips + a report-only freshness pass over every registered cell,
+  run BEFORE the trigger decision so no_trigger nights count). The Ops
+  Sentinel's `research_degraded` reads it: WARN, FAIL after 3 days. The
+  preflight's blocking rules above are unchanged.
+- State: logs/loop_state.json (per-class watermarks + thresholds, Coen-editable).
+- **Watermark re-bank (Coen, 2026-09-04): a TARGETED hand edit, never --seed-watermarks.** After the 09-02 and 09-04 rejections every class's triggerable count sat BELOW its watermark (a deficit the loop had to repay with genuinely new cards before firing: bond 41 / crypto 26 / equity 77 / fx 43 / metal 45 needed). Coen ruled the rejection drift undone: each class whose delta was NEGATIVE had its watermark set to its live triggerable count (crypto 1197->1196, fx 462->444, equity_etf 952->900, bond_etf 581->565, metal_etf 488->468; deltas now 0, 25 new cards fire a class). Rule: NEVER lower a class's headroom -- a class at or above its watermark is left alone. Script pattern: read _triggerable_counts live, edit only between fires (no loop.lock, no chain.lock), back the file up, preserve its CRLF/indent, re-read after every chain write. Moves GATE 1 only; gate 2 (no_new_accepted_cards) still needs acceptances since the last swept generation.
+- Status: logs/pipeline_status.json (NOT status.json -- that file belongs to the
+  reader agent); run log logs/pipeline-loop-run.log; instance guard logs/loop.lock.
+  Items carry BOTH routable_<cls> (accepted-only) and triggerable_<cls>
+  (accepted+pending) per class -- a large gap between them is an undrained
+  pending backlog. Present on every path that has read the chain (no_trigger,
+  dry_run, cycle_complete, stage_failed, the budget/lock defers); the paths
+  that run BEFORE the chain read -- the two startup lock probes,
+  snapshot_failed, and loop_crashed -- legitimately omit them.
+  `data/tradfi_snapshot_manifest.json` is a TRACKED file that stage 0
+  rewrites on every fire, and the loop's own scoped commit never includes it
+  -- so it shows as modified on a shared working tree. That is expected;
+  never `git checkout --` it from another session. (The tradfi CSVs under data/ are gitignored; BTCUSD/ETHUSD are tracked and committed
+  by the quarantine daily.)
+- `budget_state` item: ok | hard_cap (D41 removed the 80% batch_stop value). Written on
+  EVERY status path, not just the budget-blocked ones, so "ok" is a value
+  that actually appears. A budget park also stamps `last_park_ts_utc` in
+  loop_state.json, which rotates that class to the back of pick_class's
+  queue. Parks bank NO watermark (no work was done); the stamp exists only so
+  one parked class cannot monopolise every fire and starve the others.
+- `routable_at_last_generation` (per class, loop_state.json): the accepted-only
+  routable count as of the last cycle whose composer ACTUALLY SWEPT. Written
+  only on cycle_complete, and it is the baseline the no_new_accepted_cards
+  guard compares against -- scoping that guard to a single cycle stranded
+  cards that a failed composer had never consumed. Absent key -> falls back to
+  the pre-triage count.
+
+## Task guard: a stopped task leaves nothing running (incident 2026-10-10/11)
+- **Why:** at a task's ExecutionTimeLimit Task Scheduler terminates ONLY the
+  process it launched, the wrapper's `cmd.exe` (TaskScheduler event 329,
+  action result 0x8007042B). Windows never kills children with their parent.
+  On 2026-10-10 the 16:00 worker's python outlived its PT28M wrapper by over
+  an hour holding `gauntlet_worker.lock`; on 2026-10-11 the 01:00 stats run's
+  python outlived PT6H by 45 min with 5.8 GB committed. Worse, cmd opens a
+  `>>` target WITHOUT write sharing and the orphan kept the inherited
+  handle, so the 16:30/17:00/17:30 fires could not open the run log: cmd
+  skipped every redirected command, python never started, ERRORLEVEL stayed
+  0, and each fire exited 0 having done nothing (reproduced in scratch).
+- **Mechanism (`pipeline/taskguard.py`, stdlib + ctypes):**
+  `run_gauntlet_worker.bat` and `run_gauntlet_stats.bat` re-run themselves
+  under `"%PY%" -m pipeline.taskguard ... -- cmd /d /c "%~f0"`
+  (`RL_TASKGUARD=1` marks the inner copy). The inner cmd and everything it
+  starts sit in one job object with KILL_ON_JOB_CLOSE, and the guard's tree
+  is that job PLUS every descendant of the inner cmd by parent pid. The
+  guard ends the tree (a) at its wall, exit 124; (b) when the outer cmd Task
+  Scheduler kills dies, exit 125; (c) if the guard itself is killed (the
+  job's last handle closes). It also ends anything a NORMAL run leaves
+  behind (log line `the run left N process(es) running`) and returns the
+  inner wrapper's exit code unchanged. The wall counts from the outer
+  cmd.exe's creation (the task's start), clamped to at most 10 min before
+  the guard started, so a hand run from an old console is not killed at
+  once. Walls: worker 1600 s + 45 s grace inside PT28M (a held append/index
+  lock may stretch the kill to 150 s); stats 21300 s + 60 s inside PT6H (up
+  to 240 s). The worker's 150 s can run PAST PT28M (1600 + 150 + up to 30 s
+  for the tree to go = ~1780 s): Task Scheduler then stops the outer cmd and
+  the task result is 267014, not 124, but the guard is not stopped with it
+  and still ends the tree before the next :00/:30 fire. A hand run of a
+  wrapper typed into an ALREADY-OPEN cmd console runs inside that console's
+  cmd.exe, so its clock starts the 10-min clamp back (wall ~16.7 min, worker
+  deadline ~15 min); run it as `cmd /c tasks\run_gauntlet_worker.bat` or
+  from PowerShell for the full window. **Change a task's
+  ExecutionTimeLimit and its wrapper's `--wall-s` together.**
+- **⚠ `%PY%` is the interpreter by ABSOLUTE path, never bare `python`
+  (cold review 2026-10-11, reproduced).** On this box bare `python`
+  resolves to the WindowsApps PythonManager alias first (User PATH lists
+  WindowsApps before Python\bin). It is a packaged app: it and the runtime it
+  starts BREAK OUT of the job, and the guard's parent would be the alias, not
+  the cmd. `Python\bin\python.exe` is the PyManager SHIM (not a link: its
+  `python.exe.__target__` names `pythoncore-3.14-64\python.exe`), measured
+  2026-10-11 as one process that stays in the job and passes the exit code
+  through. A PyManager reinstall or default change rewrites `__target__` and
+  so changes the interpreter silently; after one, re-run
+  `test_taskguard.py` and `test_chain_mirror_wrappers.py`. The guard backs this up (it watches the nearest
+  non-launcher ancestor and sweeps escaped descendants, logging `N had
+  escaped the job`), but an escape line in the log means a wrapper is
+  calling a launcher again: fix the wrapper. A new wrapper uses `%PY%` too.
+- **Never mid-write.** Before a kill the guard suspends the whole tree and
+  checks the locks it was given: `--lock` (logs\chain.lock,
+  registry_log.d.lock) is waited for up to `--grace-s`; `--hard-lock`
+  (registry_log.jsonl.lock, the chain's append FileLock) and an in-tree
+  git.exe holding `.git\index.lock` up to `--hard-grace-s`. Between checks
+  the tree is resumed so the holder can finish; past the grace it kills
+  anyway and says `killed while busy`. A kill inside an append leaves a torn
+  tail every later writer refuses (ChainMoved); a dead git leaves an
+  index.lock that blocks all git. A lock file that has named nobody for
+  over 5 s is not waited on. After a kill (and once the tree is gone, so
+  nothing holds the log) it writes its log line, then removes a lock ONLY
+  when it names a pid the guard just killed (provably dead, the loop's
+  dead-pid fast path): the `--release-lock` instance lock
+  (gauntlet_worker.lock / gauntlet_stats.lock) always; a `--lock`
+  (chain.lock, the mirror lock) only when no killed pid also held a
+  `--hard-lock`. Why (round-2 review): only the 20:00 loop breaks a dead
+  holder's chain.lock, so one left by a kill would stall every chain writer
+  (worker `deferred_lock` and no commit, stats, quarantine) for up to a day,
+  mostly silently. If the killed tree DID hold the append lock the log says
+  `LEFT chain.lock in place ... check the chain`: run `verify_registry.py`
+  before removing it by hand. A `--hard-lock` is never removed.
+- **Known gap:** a process that escaped the job (only a packaged launcher
+  does) AND whose parent then died is not reachable by the parent-pid sweep.
+  Nothing in the pipeline does that today; `%PY%` keeps everything in the
+  job.
+- **What a guard kill looks like:** the run log's last line is
+  `taskguard: wall Ns reached; ended the task's process tree (exit 124)` (or
+  `parent process exited ...`), with NO `==== ... exit N ====` line for that
+  run, and the task result is 124. Treat a `taskguard:` line as that run's
+  terminator in the pre-merge checklist below. A 124 is a defect to read (the
+  job's own deadline should have ended it first), never weather.
+- **Wrapper exit 4 = the run log is locked** by another process: nothing
+  ran, a line went to `logs\gauntlet-worker-run.locked.log` (or
+  `gauntlet-stats-run.locked.log`). With the guard this should never happen;
+  if it does, find the holder (scoped, never by image name) before anything.
+- **The worker's git block uses `|| goto :keep`**, never `if errorlevel 1`,
+  after a redirected git: a failed `>>` leaves ERRORLEVEL unchanged, so the
+  old test fell through and deleted the bundle list with nothing committed.
+- **The task clock.** The guard always sets (overwrites)
+  `RL_TASK_STARTED_UTC` to the task's start as above; the worker's 25-minute
+  deadline and the stats job's `--deadline-hours` count from it
+  (`taskguard.task_started`), so python's startup counts (3 min 19 s on
+  2026-10-10 under memory pressure). A missing, future or over-a-day-old
+  stamp means "now" (hand runs and tests are unchanged).
+- **Fail open:** if the job object cannot be made the command still runs
+  under the wall, the parent watch and the descendant sweep, with a
+  `taskguard: WARNING no job object` line.
+- **Proof on the real S4U path** (Interactive tasks do NOT show the bug:
+  stopping one sends Ctrl+C to its console): `tools/taskguard_s4u_check.ps1`,
+  run by hand ELEVATED. It registers two throwaway S4U tasks with a PT1M
+  limit (the old wrapper shape as a control, the guarded shape), reads
+  heartbeats, prints PASS/FAIL and unregisters them.
+- Tests: `test_taskguard.py` (real process trees: wall, parent death, a
+  killed guard, the lock waits, stragglers, a python escaping the job via the
+  WindowsApps alias, and a CONTROL proving the orphan survives without the
+  guard) and the guard tests at the end of
+  `test_chain_mirror_wrappers.py` (the real .bat: kill the outer cmd, wall
+  then a clean next fire, locked log -> 4).
+
+## Gauntlet worker + recorded statistics (Build 2a, 2026-09-30)
+Design: `docs/2026-09-30-gauntlet-at-scale-design.md`. Why: the gauntlet's first
+phase re-simulated and clustered EVERY registered strategy before judging any
+candidate, was not deadline-aware, and stopped completing as the registry grew.
+Nothing the clustering produces is an input to any gate, so verdicts moved out
+of it.
+- **Protocol records.** `docs/notes/gauntlet-protocol-v6.1.md` (the addendum)
+  and `docs/notes/correction-2026-09-30-pbo-family-kill.md` are chained
+  VERBATIM, and only after Coen approves the exact text, BEFORE the first v6.1
+  verdict. Once chained the chain is the record: never edit the files to
+  "fix" a chained note. The addendum's first line starts
+  `gauntlet-protocol-v6.1: `, and BOTH the worker's refusal check and
+  verifier invariant 12 key on that prefix. With no such note the worker exits
+  1 (`refused_no_protocol_note`) and writes nothing.
+- **Worker: `python -m pipeline.gauntlet_worker --max-workers 6`**, wrapper
+  `tasks/run_gauntlet_worker.bat`, task `\Morpheus\27_GauntletWorker` every 30
+  minutes, 25-minute deadline per run. It judges queued candidates cheapest
+  first with the six standalone gates in `pipeline/gauntlet_core.py`
+  (sharpe_floor 0.4, oos_negative, edge_decay -25%, mc_p05 1.0, p_ruin 0.05,
+  cost_stress; order and thresholds unchanged) and chains each verdict plus its
+  state change as soon as it exists. Its import graph has no clustering or PBO
+  module (a test pins it). Verdicts carry `metrics.protocol
+  gauntlet-protocol-v6.1` and NO registry-wide statistics. The family kill is
+  NOT applied. After each verdict write the worker appends the judged bundle's
+  repo-relative path to `logs/gauntlet_worker_commit_paths.txt`; the wrapper
+  commits `registry_log.jsonl` plus those bundles best-effort in ONE commit,
+  scoped by `--pathspec-from-file` (never argv, never anything another session
+  staged), and clears the list only after that commit succeeds. It skips the
+  commit while chain.lock exists (the list is kept) and never pushes.
+- **⚠ NEVER run `git merge`, `checkout`, `switch`, `reset` or `stash` in the
+  LIVE tree while a worker run is in its git step (incident 2026-10-02 12:21).**
+  `logs/gauntlet_worker.lock` is released when the python process exits, but
+  `run_gauntlet_worker.bat` runs `git add` / `git commit` AFTER that. A merge
+  started in that gap collided with the wrapper's commit ("unable to unlink old
+  'research-layer/registry_log.jsonl': Invalid argument"), and the chain file
+  was left at HEAD: the run's 48 uncommitted verdicts vanished from disk. The
+  chain stayed VALID (a clean truncation) and the next run re-judged the same
+  48 to identical verdicts on unchanged data, but on a day the data refreshed
+  in between the re-judgement could differ. Before any such git command in the
+  live tree, ALL of: the last line of `logs/gauntlet-worker-run.log` is the
+  current run's `==== ... exit N ====` line (or its `taskguard:` kill
+  line); no `.git/index.lock`,
+  `logs/gauntlet_worker.lock` or `logs/chain.lock`; `git diff --cached` is
+  empty; and the next :00/:30 fire is more than a few minutes away.
+- **Run order and failure rules.** (1) Orphan repair: a v6.1 verdict with no
+  following state change gets the change it implies (fail -> graveyard with the
+  gate as the reason, pass -> quarantine); a verdict is NEVER re-evaluated.
+  (2) The queue. A candidate that raises gets NO verdict, stays queued, and the
+  run exits 1; nothing is skipped or buried because of a crash. A v6.1 orphan
+  is caught ONLY by the worker's own repair at the start of each run: the
+  loop's `gauntlet_orphan` pre-spend check (`loop._gauntlet_orphans`)
+  deliberately EXCLUDES v6.1 verdicts, so the 20:00 loop never sees one, and
+  an orphan is judged, so it is not counted in the status `queued` or
+  `oldest_queued_age_hours`. If the repair itself raises (a chain or disk
+  failure, or a chain that moved under chain.lock) the run exits 1 with
+  `exit_reason` `crashed`, and the Sentinel FAILs both the task result and the
+  `gauntlet_queue` check. If chain.lock is held the repair is deferred to the
+  next run with only a log line (`orphan repair deferred` in
+  `logs/gauntlet-worker-run.log`, `repaired` 0); nothing alarms on a deferral
+  alone. (A hand run of `pipeline.gauntlet` refuses on any orphan, v6.1
+  included, and exits 1; the loop no longer runs it, so no loop path creates a
+  v6 orphan, and the `gauntlet_orphan` pre-spend check stays only as the alarm
+  for one that already exists or that a hand run leaves.)
+- **Locks.** The worker's own instance lock is `logs/gauntlet_worker.lock`
+  (stale after one hour, broken only when stale AND its holder is dead). A
+  second instance defers (exit 0) and NEVER writes the status file, so a wedged
+  holder's status goes stale and the Sentinel catches it. chain.lock rules are
+  in the Chain lock section: held for a tail read plus one append, never
+  waited for, never broken; a write that finds it held is kept and retried
+  within the same run (between chunks, then a <= 75 s final drain inside the
+  deadline), never carried to the next run; an unlocked hand-run writer in
+  that window turns into an exit-1 alarm.
+- **Statistics job: `python -m pipeline.gauntlet_stats`**, wrapper
+  `tasks/run_gauntlet_stats.bat`, task `\Morpheus\28_GauntletStats` daily
+  01:00. It computes effective trials, the deflated Sharpe, PBO (recorded only),
+  plateau_ok and the haircut for every v6.1 verdict that has none, on a WEEKLY
+  data vintage (bars truncated at the most recent Sunday, so the simulation
+  cache keys hold all week and each night resumes where the last stopped), and
+  with `--chain` appends ONE `gauntlet_stats` entry per verdict, linked by
+  `verdict_entry_hash`. It records and never changes a strategy's state. It
+  carries the multi-gigabyte work, which is why it runs at 01:00: the worker is
+  memory-light and safe by day. Entries carry `data_vintage`, `data_digest` and
+  `data_end_by_cell`; the vintage names a Sunday but does NOT pin the bars, so
+  compare digests, never vintages. A clustering pass starts only when the
+  time left covers its estimate (the last measured duration, `cluster_s` in
+  its status file, else a 2 h prior), and each PBO null only when the time
+  left covers the measured mean (`pbo_null_mean_s`, else 60 s); a pass that
+  does not fit is a deadline stop. **Since 2026-10-11 the clustering
+  estimate is `cluster_s` x (n / `cluster_n`)^2** (`cluster_n` = the series
+  count it was measured at, carried forward with it), **and the pass starts
+  only when AVAILABLE PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (14) x
+  n^2 bytes** (`gauntlet_core.available_phys_mb`; unknown = no block; 14
+  covers step 7's "+2.4 GB at 13,730" read as GB or GiB). The
+  merge loop touches every page of its n x n matrix on every merge, so a
+  partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
+  with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
+  PT6H. Short of memory = **exit 3** `deferred_memory` (status
+  `cluster_need_mb`, `avail_phys_mb`; the series stay cached; the next run
+  retries). **Nonzero on purpose (Coen, 2026-10-11, option b): task 28 is
+  `daily` in the Sentinel with no tolerated codes, so a memory deferral
+  FAILs the 09:15 digest the same morning** instead of surfacing only as
+  the 7-day stats-lag WARN. n grows with the registry, so a
+  repeating `deferred_memory` is a capacity question for Coen, not a
+  constant to raise. **Expect it to defer often on this 16,324 MB box:**
+  the need is ~4.9 GB at today's 19,092 series and ~6.5 GB at 22,000,
+  against 4.4-4.7 GB seen available by day (night is unmeasured); each
+  deferral comes only after the full series pass and FAILs that morning's
+  digest (exit 3). A digest FAIL whose task-28 result is 3 means "not
+  enough RAM to cluster", not a crash: read the `MEMORY:` line in
+  `logs/gauntlet-stats-run.log`. Repeated nights are the RAM-upgrade
+  signal. One instance at a time
+  (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
+  the 01:00 task, defers with exit 0 and never touches the status file.
+  The status reports `trials_n_raw` (this run's argmax) and
+  `trials_n_effective` (the floored N the entries use).
+- **Step 7 (2026-10-03): the clustering takes ~2 min, not 4 h.** 95% of the
+  old 4.1 h was a Python tie loop in `cluster._agglomerate_np`, driven by the
+  all-zero return rows (79 at 13,730; distance exactly sqrt(0.5) to
+  everything). The bookkeeping is now array-based and the distance
+  arithmetic in place (one n x n matrix at a time; +2.4 GB commit at
+  13,730), with the METHOD UNCHANGED: `tools/verify_cluster_identity.py`
+  (read-only, never scheduled; run it on a registry COPY) proved merge
+  history, k, labels, `trials_sr_var` and SR* bit-identical to the old code
+  at n = 1k/2k/4k/8k on real data. Measured on a copy: 117.7 s, k = 560 at
+  13,730. Any future change to `cluster.py` re-runs that proof first.
+  `test_cluster_np.py` asserts the per-row cache against a fresh re-scan
+  after EVERY merge (the O(1) tie-only update is invisible to history
+  comparisons).
+- **SR* is floored (step 7, Coen option a, Ruling 35).** `expected_max_sharpe`
+  on an entry = max(`expected_max_sharpe_raw`, `expected_max_sharpe_floor`);
+  raw is v6.1's own `expected_max_sharpe(trials_n, trials_sr_var)`, the floor
+  the highest SR* on the chain (v3-v6 verdicts' `metrics.expected_max_sharpe`
+  via the SAME `FLOOR_PROTOCOLS`, plus `expected_max_sharpe_raw` on earlier
+  stats entries), named by `expected_max_sharpe_floor_entry_hash`. The DSR
+  uses the floored SR*; the haircut reads `trials_n` only. Why: SR* scales
+  with sqrt(`trials_sr_var`), which moves ~400x between the silhouette
+  curve's two peaks. On a copy (10-03) the chain floor was 0.06883 (entry
+  9829) and the night's raw SR* 0.0665, so the floor binds.
+- **`--chain` REFUSES until `docs/notes/gauntlet-protocol-v6.1-amendment-1.md`
+  is chained** (exit 1, `exit_reason` `refused_no_amendment_note`; first-line
+  prefix `gauntlet-protocol-v6.1-amendment-1:`, first occurrence). The note
+  is chained (line 81246). A note like it is chained verbatim (the git
+  blob is LF: check the bytes are LF before chaining, `core.autocrlf` is on).
+  Report-only runs are unaffected. The Sentinel does not read the stats
+  `exit_reason`; an exit 1 on task 28 would reach the digest as a task result.
+- **PBO scope (step 7, amendment-1).** The null is built for EVERY family with
+  a v6.1 verdict needing stats whenever it is measurable (observed PBO, >= 4
+  distinct configs), passing verdict or not; before, only for a family with a
+  pass in the batch, so siblings statted on different nights could differ.
+  Each result is cached in `logs/gauntlet_stats_pbo_cache.json` per (family,
+  vintage, data_digest, inputs sha, `pbo_code_sha()` = PBO code + constants
+  + `PBO_CACHE_REV`); only the current vintage is kept, a failed write is
+  logged and the run continues uncached, and an
+  unreadable file is an empty cache. Measured on a copy: the 10-03 backlog
+  (2,193 verdicts, 286 families) needs ~32,300 s of nulls, about two nights.
+- **chain.lock held at a flush (step 7, T7):** the computed entries are KEPT
+  and retried in the same run (next full-batch flush, then a final drain of
+  non-blocking attempts every `DRAIN_INTERVAL_S` 5 s inside
+  `DRAIN_RESERVE_S` 75 s, never past the deadline; after a hold the family
+  loop holds that reserve back). Still held at the end: exit 0
+  `deferred_lock`, nothing written for them, the next run recomputes. Never
+  waits on, polls inside, or breaks the lock.
+- **`--chain` on task 28 is ON since 2026-10-04 (Coen's say-so, the plan's
+  cutover step 7).** It was enabled only after a `--chain` run against a COPY
+  of the chain wrote 16 entries that `verify_registry.py` read VALID. Never
+  remove it, or re-add it after a code-revert rollback (the
+  `GAUNTLET_IN_LOOP` flag no longer exists), without Coen's say-so; the job
+  itself refuses to chain until `gauntlet-protocol-v6.1-amendment-1` is on the
+  chain (it is, line 81246). Coen's
+  effective-trials decision (2026-10-01, option 1) is in the v6.1 addendum and
+  IS implemented and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is
+  the larger of the clustering's argmax (`trials_n_raw`) and the highest cluster
+  count already on the chain (`trials_n_floor`, source named by
+  `trials_n_floor_entry_hash`). Reason: the argmax moved 302 -> 480 -> 44 on a
+  registry that only grew, and a falling N flatters the deflated Sharpe. Chain
+  the entries only after the 480 -> 44 explanation is on record. A
+  `gauntlet_stats` entry is append-only and cannot be corrected, only superseded
+  by a note.
+- **`FLOOR_PROTOCOLS` in `gauntlet_stats.py` is an explicit v3-v6 whitelist**
+  of the protocols whose `trials_n` counts as a cluster count (an unknown
+  protocol string may be a registration count, so the floor is not inferred).
+  Any FUTURE gauntlet protocol that records cluster counts MUST add itself to
+  `FLOOR_PROTOCOLS` in the same change, or its higher k silently fails to raise
+  the floor and the recorded deflated Sharpe is flattered.
+- **Status files (the Ops Sentinel reads both).** `logs/gauntlet_worker_status.json`:
+  `evaluated`, `deferred_lock`, `queued`, `oldest_queued_age_hours`,
+  `exit_reason`, `ts_utc` (the Sentinel's fields). Their meanings since
+  2026-10-02: `evaluated` = verdicts CHAINED this run, first attempt or retry;
+  `retried_written` = of those, the ones written on a retry after chain.lock
+  was held at the first attempt; `dropped_stale` = kept results dropped
+  unwritten because another writer moved or judged the candidate before the
+  retry; `deferred_lock` = evaluated results STILL unwritten at the end of the
+  run (they stay queued; `exit_reason` `deferred_lock` when nothing worse
+  happened). No new `exit_reason` value was added.
+  `logs/gauntlet_stats_status.json`: `stats_written`,
+  `verdicts_without_stats`, `oldest_unstatted_verdict_age_hours`,
+  `stopped_at_deadline`; since step 7 also `retried_written` /
+  `deferred_lock` (T7 flush), `pbo_nulls_computed` / `pbo_nulls_cached` (PBO
+  scope) and `expected_max_sharpe_raw` / `expected_max_sharpe_effective` (SR*
+  floor). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
+  status is missing or stale, when `exit_reason` is `crashed`,
+  `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
+  48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
+  the Sentinel's `hourly` list (267009, still running at the 09:15 digest, is
+  tolerated for it alone), `28_GauntletStats` in `daily`. Do not rename
+  these fields without changing `sc-ops-sentinel` in the same change.
+- **Wrapper exit codes (both tasks, 2026-10-11):** 124 = the task guard's
+  wall ended the run, 125 = the guard saw the task's cmd.exe die and ended
+  the tree (normally masked by Task Scheduler's own 267014), 4 = the run log
+  was locked so nothing ran (Task guard section). Otherwise the python step's code, as below.
+- **Worker idle path (2026-10-11):** with nothing queued at the start the
+  end-of-run full chain read is skipped (`queued` 0); on 2026-10-10 under
+  memory pressure that one read took ~90 min (2.3 s normally).
+- **Exit codes.** Worker: 0 = drained, deadline stop, or deferred on a lock
+  (routine); 1 = a candidate raised, the run crashed, or setup was refused.
+  Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
+  instance running; 1 = the data or the chain refused the run, or `--chain`
+  without the amendment-1 note (`refused_no_amendment_note`), or the
+  clustering refused (`cluster_refused`), or the run crashed (`crashed`);
+  2 = argparse usage error; 3 = not
+  enough free physical memory to cluster (`deferred_memory`, FAILs the
+  digest on purpose).
+- **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
+  v6.1 gauntlet verdict of the same strategy, at most one per verdict.
+  Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry
+  `pbo_family_kill` true and no state change may cite it. The five v6 burials
+  before the note stay valid history.
+- **The five** (b09adeb0be6faf4e, 9acf68e5a2ef607d, 7ecf180b7e8b05ce,
+  6aebc4b7f051baba, 15595642e7a2caaa) were buried by the family kill under v6
+  verdicts although v6 retired it. Their graveyard entries STAND. All five are
+  version 1 with `exit/time_stop`, so after exit-rules-v7 (chain line 32897)
+  the buried compositions themselves can never be registered again (invariant
+  10; `register_strategy` refuses them). From the
+  `correction-2026-10-02-retrial-path` note (`docs/notes/`; chained at line
+  79228) each is re-tried inside the D8/D9 unified
+  re-run, in exit-rules-v7's D15(b) form: a version-2 composition with a
+  permitted exit set, a NEW strategy id charged to N in full, screened and
+  then judged by all six gates from scratch. That replaces the old "once the
+  worker is live" trigger. Never move one out of the graveyard by hand.
+- **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6 verdicts with
+  the standalone battery on bars truncated at each verdict's recorded
+  `data_end` and compares ELEVEN gate metrics exactly (is_edge_per_trade,
+  oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin,
+  cost_stress_net_pnl, train_sharpe, is_edge_raw, oos_edge_raw, is_vol,
+  oos_vol). It does NOT compare walkforward, era_summary, regime or
+  perturbation, so "bit-identical" means those eleven only. Read-only; never
+  scheduled. Parity rule: identical verdicts, and metrics bit-identical when
+  compared under the same engine revision. Observed: in the 17 pre-change
+  verdicts compared (of 818 pre-change v6 verdicts on the chain at the time of
+  writing, "pre-change" = dated before the 2026-08-26T23:19Z engine change,
+  commit 74b9703b), the eleven metrics differed by at most 17 ulps (train_sharpe);
+  six of the 17 were bit-identical on them. All 48 compared verdicts after the
+  change were bit-identical on them.
+
+## Sweep rotation, sibling queues, re-trials (SP5 P2-T4: D6 / D10 / D9)
+- **D6 rotation.** `loop.ROTATION_SIZE` = 12 (spec s5); `loop.ROTATION_CLASSES`
+  = `("crypto",)`. A rotating class sweeps a window of 12 of its ACTIVE assets
+  per generation, cursor `rotation_cursor` per class in loop_state.json,
+  advanced ONLY on cycle_complete. **The small-set rule:** an active set of
+  <= ROTATION_SIZE assets is returned WHOLE and the cursor never moves, so no
+  `rotation_cursor` key is written for a class that does not rotate.
+  ROTATION_CLASSES is a DECLARATION, never inferred from the asset count:
+  equity_etf's active set is 16 assets (above the window), so an inferred
+  "bigger than the window" rule would silently window it 12-of-16 and break
+  the Phase 2 sweep freeze. Rotation is a SCHEDULE, never a selection --
+  every active cell is swept with equal frequency and N accounting is
+  untouched. The loop passes `--assets` only when the window differs from the
+  full active list, so the four tradfi classes' composer argv is
+  byte-identical to pre-D6.
+- **Crypto rotates since Switch 1 (2026-10-17): 76 assets, 12 per window, the
+  window WRAPS.** `loop_state.rotation_window` reads `items[(cursor + i) % n]`
+  and `advance_rotation` sets `cursor = (cursor + 12) % 76`, so EVERY window is
+  exactly 12 wide (never a short last one) and the cursor advances 12 per
+  completed cycle. All 76 are reached in 7 windows: windows 1-6 are
+  ADMITTED[0:12] .. ADMITTED[60:72]; after 6 advances the cursor is 72 and the
+  7th window is ADMITTED[72:] + ADMITTED[:8] (the last 4 assets, then the first
+  8 again). The next pass therefore starts 8 assets on (cursor 8), and the
+  schedule closes after 19 windows (19 x 12 = 3 x 76): each asset is swept
+  exactly 3 times per 19 completed cycles. (The Switch 1 plan's wording "7
+  windows, the last 4 wide" was wrong; the code and `test_switch1.py` are the
+  record.) A parked or failed cycle leaves the cursor where it was.
+- **The D6 "second gate" is GONE (Switch 1).** It read the routing dispatch
+  (`expander_for(cls) is expand_family`) in both `loop._sweep_window` and the
+  composer's `--assets` refusal, because the legacy POOLED crypto expander had
+  no active cells and could not accept a window. Switch 1 deleted that path
+  (`composer.expand_family`, `ALLOWED_ASSETS`, `UNIVERSE_BASE`, `COST_MODEL`)
+  and the refusal in the commit that activated crypto, so every class's
+  composer accepts a window and rotation is gated ONLY by `ROTATION_CLASSES`.
+  The advance in `_run_locked_cycle` is keyed on `rotates` (a window was
+  emitted), not on class membership. Pinned by `test_switch1.py` and
+  `test_phase2_freeze.py`.
+- **Ruling 41 -- DONE at Switch 1: the admission line is 365 days (Coen,
+  2026-10-17).** An active crypto cell needs at least 365 days of history
+  before `screen.DEFAULT_CUTOFF` (2023-12-31), i.e. first bar on or before
+  2022-12-31. 76 of the 100 declared assets pass; the 24 excluded stay
+  declared but unswept: ENA ETHFI JUP PYTH RENDER STRK TAO WIF ZK ZRO (first
+  bar 2024) and GAS GLM PROM ARB SUI FLOKI PEPE PENDLE WLD SEI TIA ORDI JTO
+  BONK (first bar 2023-03-17..2023-12-15). (The older ">= 730 days" rule in
+  cells.py admitted all of them and is superseded.) Why it matters: a spec on
+  a late-starting cell is screened with zero train bars and buried, or, if left
+  `proposed` (a screen deadline deferral does this), parks EVERY fire of every
+  class at `stale_data` (a re-fetch cannot fix it). Enforced three ways: the
+  `ACTIVE_CELLS["crypto"]` literal (import-time check: a subset of the
+  declared assets in declaration order), `crypto_refresh.admission_problems`
+  (item `crypto_admission` in the refresh ledger if a cell's first bar slips
+  past the floor, or its file is missing/empty), and the crypto-grid-record-v1
+  note.
+- **`docs/2026-08-28-market-data-universe-design.md` s5 is STALE in this
+  worktree** on the rotation rule (as is s4 on crypto's benchmark and s7b on
+  the resurrection chaining). Trust the code, `docs/notes/family-openness-v1.md`
+  and this file.
+- **D10 sibling queues.** `validate_family`'s "exceeds cap, rejected, not
+  clipped" refusal is GONE (chained pre-declaration:
+  `docs/notes/family-openness-v1.md`). Overflow now splits via
+  `composer.split_for_cycle` and queues in loop_state.json as
+  `sibling_queue` per class; depth is reported as `queue_<cls>` in
+  pipeline_status.json. **The composer writes that queue as a SUBPROCESS**, so
+  `loop_state.refresh_queues(state, path)` runs right after the composer stage
+  or the loop's own save clobbers it. A cycle whose class has a non-empty
+  queue DRAINS instead of proposing -- that STAGE makes no metered model call
+  (the cycle's triage panel still runs and still costs). Invariant,
+  test-pinned: no proposed variation is ever dropped without either a gauntlet
+  verdict or a queue entry.
+- **A queue is its own trigger, at BOTH gates.** `pick_class` treats
+  `queue_depth > 0` as over-threshold, and the `no_new_accepted_cards` stop
+  exempts a queued class. Queued work is already proposed and already counted;
+  it needs capacity, not new cards. With only one of the two, a class whose
+  card flow goes quiet parks its queue forever -- the silent drop D10 removes,
+  moved one gate earlier. The trigger BASIS itself is untouched.
+- **The drain runs BEFORE the "no accepted cards" refusal**, which is a
+  proposal precondition, not a drain one. Revoke the last accepted card with
+  that check first and every cycle exits 1 without ever looking at the queue.
+- **`sibling_queue_dead`** holds queued specs the registry refuses outright --
+  a queued spec can outlive its cited card, because `review_card` may revoke
+  an acceptance at any time and `register_strategy` then refuses forever. The
+  drain catches `ValueError` PER SPEC (never a bare except -- chain IO errors
+  must still abort), parks the offender with the registry's own reason, and
+  keeps going. Depth shows as `queue_dead_<cls>` in pipeline_status.json,
+  emitted only when non-zero, and it is **a human action item, not a level to
+  watch drain** -- it never re-triggers its class.
+- **⚠ KNOWN HARM (F5), declared not fixed: a split sweep can manufacture
+  `edge_of_grid` plateau failures at the cut.** `plateau.qualifies` reads what
+  is on the chain when the gauntlet runs, and the queued combos are not there
+  yet, so siblings adjacent to the cut can be failed for a capacity reason
+  wearing a statistical costume -- the very thing family-openness-v1 condemns,
+  one layer down. Draining later does NOT repair it: those verdicts are
+  already written. No PARTITION avoids it (a cartesian product cannot be split
+  without severing an axis; cutting on the outer axis makes the window size
+  vary with family shape, trading a visible harm for a hidden one) -- but that
+  is exhaustive only over ways to CUT the sweep. Three open options, Coen's
+  call: (1) accept it as shipped; (2) queue at FAMILY granularity so no sweep
+  is cut, which the chained note's wording forecloses; (3) HOLD a split
+  sibling group out of the gauntlet until its queue drains, which costs
+  latency rather than correctness and does not touch the note at all (the note
+  governs the composer's admission, not the gauntlet's batching). Only
+  reachable for families that TODAY are refused outright, so nothing
+  regresses.
+- **D9 re-trials.** `composer.RETRIAL_WINDOW_DAYS` = 183. A composition whose
+  fingerprint matches a registered strategy is still dropped UNLESS that
+  registration is currently BURIED and its burying verdict's cutoff is >= 183
+  days behind the target cell's CURRENT data end. **A composition with no
+  burying verdict (quarantine or live) has no expiry and stays permanently
+  excluded** -- that half is a tightening. The cutoff is not on the chain; it
+  is read from `artifacts/<sid>/gauntlet/config.json` (or the screen bundle's
+  `config.json`), so anything unreadable closes the window -- which is also
+  why no tmp-registry test opens it. In-run/in-cycle duplicates are still
+  malformed/dropped: those ARE same-data. Every re-trial is a NEW strategy id
+  entering N honestly. **More registrations and more survivors at a fixed bar
+  is arithmetic about the denominator, NEVER evidence of edge** -- see the
+  chained note's own wording before reporting any of it.
+- **D9 ends chain-wide fingerprint uniqueness on purpose.** All 2,775 pre-D9
+  registrations carried distinct composition fingerprints; a re-trial is by
+  definition a second registration of one. The surviving invariant is PER RUN:
+  no single run may register a composition twice. That is why
+  `screen_siblings` checks `fp not in run_fps` before admitting a re-trial --
+  without it, family A's re-trial and family B's copy of it both chain, same
+  run, same data.
+- **`verify_registry.py` invariant 8 enforces that SAME rule, through the same
+  function.** `composer.retrial_verdict` is the one implementation; the
+  verifier and `retrial_oracle` are both thin readers of it, and a second copy
+  of the rule anywhere is a defect. They differ ONLY in how they read a window
+  they cannot establish: the composer is deciding, so unreadable = refuse; the
+  verifier is checking with strictly less evidence, so unreadable = report
+  `window not verifiable` and PASS. A verifier that failed there would call
+  the chain corrupt every time an artifact bundle was pruned.
+- **`Registry.register_strategy` enforces invariant 10 at WRITE time
+  (2026-10-02).** Once the chain holds the exit-rules-v7 note (detected by
+  `blocks.is_exit_rules_v7_note`, the verifier's own rule) it raises
+  `ValueError` before any write for a spec that is not version 2 or carries a
+  `blocks.RETIRED_TYPES` block. Why: the verifier only reports a violation
+  after it is chained, so a hand-run writer (e.g. re-registering one of the
+  five's version-1 `exit/time_stop` compositions) would leave the append-only
+  chain INVALID for good. Verifier tests that need such an entry write it with
+  a raw `reg.append`.
+- **The window leg is not a chain fact.** The verifier reads the cutoff from
+  `artifacts/` and the data end from `data/`, defaulting to beside the log and
+  overridable with `--artifacts-dir`/`--data-dir` (the loop passes both). Run
+  it against a COPY of the chain without those dirs and it still says VALID,
+  but it has only checked the buried-priors and same-run legs -- read the
+  NOTE line before concluding a re-trial was verified.
+- **⚠ THE 183-DAY WINDOW DOES NOT CURRENTLY BITE. Known protocol gap,
+  measured 2026-09-01, behaviour deliberately UNCHANGED -- Coen's call.** The
+  cutoff `burying_cutoff` reads is the fixed train/OOS split constant, not a
+  per-verdict date: **all 4,065 `config.json` bundles carry
+  `cutoff = 2023-12-31`, zero exceptions, zero missing.** So the window is
+  OPEN for all 2,702 burials and SHUT for none; the narrowest margin is 964
+  days against a 183-day requirement. The first two live re-trials
+  (`50f48ae9a07d01cc`, `4f8d2fc81c27f76e`, chain lines 16183/16184) are
+  therefore **9-day re-tests** -- buried 2026-08-22, re-registered 2026-08-31,
+  gauntlet `data_end` 2026-08-21 against bars ending 2026-08-30 -- on a chain
+  that is 26 days old. As shipped, D9 reads as "any buried composition is
+  re-triable", and every re-trial charges N in full. **Do not report re-trial
+  survivor counts as edge** (the chained note says so itself).
+- **If that clock is ever fixed, the fix is NOT uniform across burial
+  stages.** The gauntlet bundle's per-cell `data_end` IS an honest clock
+  (1175/1218 carry it, all > cutoff) and would have shut the window on both
+  live re-trials. But **screen** bundles' `data_end` is train-truncated
+  (2767/2767 have `data_end <= cutoff`), so it carries no information -- and
+  **1,629 of the 2,702 burials came from `screened`, not `gauntlet`**. A
+  re-screen runs a fixed train window and is deterministic, so it returns the
+  identical verdict however much new data arrives: whether a screen-buried
+  composition should be re-triable at all before the CUTOFF itself moves is an
+  open protocol question.
+  `test_a_buried_composition_uses_the_screen_cutoff_when_it_never_reached_gauntlet`
+  currently asserts that it should. Leave that test alone until the question
+  is decided on the chain.
+
+## ⚠ Composer hazards for HAND RUNS in the live tree
+- `--loop-state` defaults to `logs/loop_state.json` next to `--registry`, so a
+  real (non-dry) `python -m pipeline.composer` in the live tree now READS AND
+  DRAINS THE LIVE SIBLING QUEUE and can write to the loop's state file. The
+  composer never touched that file before P2-T4. Pass an explicit
+  `--loop-state` (or `--dry-run`, which never mutates it) for a hand run you
+  do not want interacting with the loop's queue.
+- `--data-dir` likewise defaults next to `--registry`; it is read-only (D9
+  cell dating) but it means a hand run against a tmp registry silently gets a
+  tmp data dir, which is the intended test isolation.
+
+## Cycle deadline (Phase 3 steps 1-3, 2026-09-03) -- no stage may run into the PT4H wall
+- **Why:** 2026-09-01 21:30 the loop cycle was hard-killed by Task Scheduler at
+  exactly the PT4H ExecutionTimeLimit -- work discarded, composer spend not,
+  and a hard kill leaves no terminator in any log. TRIAGE_LIMIT bounds triage
+  only; the gauntlet was ~150 of that cycle's 237 min with no bound at all.
+- **Mechanism (`pipeline/deadline.py`, one helper shared by all three).** The
+  loop derives `deadline = cycle start + live task window - SAFETY_MARGIN_S
+  (15 min)` -- ONLY when the window is known; no registered task means no
+  deadline and byte-identical stage argv -- and passes `--deadline-utc` to
+  screen and gauntlet. Each stage evaluates in chunks and asks
+  `DeadlineBudget.fits(n, rate)` BEFORE each chunk: a conservative prior until
+  the first chunk has run (gauntlet 20 s/candidate, screen 2 s/spec), the
+  measured rate after. **Nothing is abandoned mid-flight; what is not started
+  is simply not started.**
+- **Resumable states, and why the orphan preflights stay green.** A deferred
+  screen spec stays `proposed` (screen's orphan rule fires only on
+  `screened`). A deferred gauntlet candidate stays in state `gauntlet` WITH NO
+  VERDICT -- that is the normal pre-run state (screen advances a passer to
+  `gauntlet`; only the gauntlet's own verdict moves it on), and
+  `_gauntlet_orphans` fires only on `gauntlet` PLUS a verdict. Deferral is
+  protocol-legal at candidate granularity: protocol-v6 judges every edge
+  standalone, PBO family series come from the registry-wide simulation, and
+  the null is seeded off the group id, so a sibling judged next pass sees the
+  same family, same null, same verdict.
+- **Reporting.** Every completed non-dry stage run writes
+  `logs/<stage>_result.json` (`evaluated`, `deferred`, `deadline_utc`,
+  `stopped_at_deadline`) -- the triage_result.json convention; an absent file
+  means "did not report", never "deferred nothing". **Screen's meanings
+  changed 2026-10-08 (design `docs/2026-10-08-screen-lock-release-design.md`):
+  `evaluated` = specs CHAINED (written), no longer specs merely evaluated;
+  `deferred` = specs not started PLUS specs evaluated but unwritten. Three
+  counters are new (via `deadline.write_result(extra=...)`): `deferred_lock`
+  (evaluated, unwritten because chain.lock stayed held; a lock leftover sets
+  no stop flag by itself, but `stopped_at_deadline` can still be true in the
+  same run when unstarted specs trip the chunk loop's deadline break),
+  `retried_written` (written on a retry after a held lock) and
+  `dropped_stale` (no longer `proposed` when the write came).** The loop UNLINKS the
+  screen's before it runs and reads it on cycle_complete into status items
+  `deferred_screen` and `stopped_at_deadline=<stage>` (screen is the loop's only
+  deadline-aware stage since 2026-10-07; `deferred_gauntlet` is gone).
+  **`stopped_at_deadline` is an OK outcome** (overall OK, cycle_complete): a
+  cycle that chose to stop is routine; one killed at the wall is the defect.
+  When the Sentinel is pointed at pipeline_status.json, treat it so.
+- **PBO is deadline-aware too (2026-09-03 evening).** The 15:30 cycle was
+  killed by the PT4H wall at PBO family 325 of 366 with every verdict unwritten:
+  the 25% reserve (~36 min) was nowhere near a ~2 h pass of permutation nulls.
+  Now the PBO loop only visits families that have a candidate this run, and
+  asks the budget before EACH live family's null (`PBO_NULL_PRIOR_S` = 60 s
+  until the first null is timed, the measured mean after). A family whose
+  null does not fit is `deferred_deadline`: its candidates are removed from
+  the verdict write and stay in `gauntlet` state with no verdict, counted in
+  `deferred` / `stopped_at_deadline`, and the next run re-evaluates them (a
+  family is judged in one pass or not at all -- no verdict is ever written
+  against an unmeasured null). Measured families' verdicts are written.
+- **Known approximation, stated.** The registry-wide simulation and clustering
+  still run BEFORE any candidate and are not chunked (simcache-bounded after
+  the first pass; arrays since 2026-09-03). The candidate reserve (25% of what
+  is left when candidates begin, floor 60 s) now only has to cover the
+  verdict/artifact writes plus however many nulls the loop chooses to run.
+  `t_pbo` is printed every run. The PT4H task limit remains the backstop --
+  hitting it is evidence of a bug, not weather.
+- Tuning constants: `gauntlet.GAUNTLET_PRIOR_S_PER_CANDIDATE / _CHUNK_PER_WORKER /
+  _RESERVE_FRAC / _RESERVE_MIN_S`, `gauntlet_core.PRIOR_S_BY_TF` (with
+  `prior_s_for`), `screen.SCREEN_PRIOR_S_PER_SPEC / SCREEN_PRIOR_S_BY_TF`
+  (with `screen_prior_s_for`) `/ _CHUNK_PER_WORKER`, `loop.SAFETY_MARGIN_S`. Tests: `pipeline/test_deadline.py`
+  (fake-clock unit tests + both stages end to end) and the four
+  `*deadline*` / `stale_stage` tests in test_loop.py.
+
+## Gauntlet worker pool must fit the box (2026-09-03 BrokenProcessPool)
+
+The 2026-09-03 10:30 cycle died in the gauntlet after 2h26m:
+`OpenBLAS error: Memory allocation still failed after 10 retries, giving up`
+in a worker, surfacing as `BrokenProcessPool` in the parent, exit 1, cycle
+aborted (chain untouched: verdicts are written only at the end). Windows'
+Resource-Exhaustion-Detector had logged the parent at **9.6 GB of commit
+during clustering** (the per-strategy return series of ~6,000 registered
+strategies as Python tuples, from the 1.5 GB JSON `simcache/`), on a box that
+sits at ~52 GB of a 64 GB commit limit at rest (desktop apps; pagefile already
+at its 48 GB maximum). The parent then kept all of that across the spawn of
+`cpu_count - 2 = 6` workers, each committing ~280 MB at import for an
+8-thread OpenBLAS pool it never uses. The 09-01 run survived only because it
+ran at 02:30 with the desktop idle.
+
+Three defences in `pipeline/gauntlet.py`, pinned by `test_gauntlet_pool.py`:
+
+- **Workers get one BLAS thread** (`worker_env()` sets `OPENBLAS/OMP/MKL_NUM_THREADS=1`
+  around the executor; spawned children read it at their numpy import,
+  measured 54 MB vs 279 MB at import). The parent's own BLAS is unaffected.
+- **Worker count is bounded by available commit**, not only cores:
+  `worker_count(n_cpu, available_commit_mb())` = `min(cpu-2, (avail - 2048 MB) // 512 MB)`,
+  floor 1 (the serial reference path). The run prints when it reduces.
+- **The clustering inputs are released before the pool spawns** (`dated_returns_by_sid`,
+  `returns_by_id`, `equity_len_by_sid`, `full_results`, `bars_by_cell` cleared +
+  `gc.collect()`; every payload already carries what its candidate needs).
+  PBO still walks EVERY family after the pool through `train_returns()`, so the
+  train-window float slices are cached for every strategy first (`train_cache`,
+  ~1/10th of the dated pairs) -- the first attempt cleared without that and
+  12 gauntlet tests said KeyError.
+  The run prints `[gauntlet] clustering inputs released before the pool (parent
+  commit N MB, M MB available on the box)` -- read that line on the next fire.
+
+Also fixed: the progress line now reports the whole run (`evaluated 480/974`),
+not the chunk (`24/24` twenty times over hid the real count).
+
+**The parent's 9.6 GB itself was fixed the same evening** (`simcache.Series`,
+`docs/plans/2026-09-03-simcache-arrays.md`): the registry-wide series are int32
+day ordinals + float64 returns (12 B/point) in `<key>.npz`, not `[date, ret]`
+Python pairs (~150 B/point; a live entry holds up to 11,450 points, 1981->2026).
+Measured on 200 live entries: 17 MB vs 205 MB. Values are the same float64s,
+verdicts byte-identical (test_simcache's hit-vs-miss proof). Legacy `.json`
+entries migrate on read; run `python -m pipeline.simcache migrate simcache`
+once after deploying (minutes). The 15:30 re-run's "released" line printed
+`parent commit 9008 MB` AFTER the release -- the pairs' floats were pinned by
+PBO's train cache -- which is why the representation, not the release, is the
+fix; the release block now only drops what the pool phase no longer needs.
+
+## Re-extract shadow run (tools/, NOT a pipeline stage)
+
+`python -m tools.reextract_shadow [--dry-run] [--layer DIR] [--seed N] [--sample N] [--model M] [--panel-model M]`
+measures whether today's extractor beats August's on documents we already own.
+Design: `docs/2026-09-06-reextract-shadow-design.md`; plan: `docs/plans/2026-09-06-reextract-shadow.md`.
+
+- **It lives in `tools/`, never `pipeline/`, and must never be scheduled.** It is a
+  measurement, not a stage.
+- **Always run `--dry-run` first.** It selects and prints the seeded ten-document
+  sample (five whose cards mostly passed, five that mostly stalled) with no model
+  call, no spend, no lock and no file written. The sample is deterministic for a
+  seed within one Python version, so the dry run shows exactly what the live run
+  will read.
+- **Run it from the LIVE tree, and only the live tree.** Every path derives from
+  `--layer` (default: this directory): the chain, `logs/chain.lock`, the ledger and
+  `docs/runs/`. A missing `logs/budget_ledger.jsonl` is a REFUSAL (exit 2), never
+  "zero spend this month" - in a worktree `logs/` is gitignored and absent, and an
+  unguarded run there would have passed the cycle guard, locked the wrong tree and
+  metered nothing.
+- **It never writes to the chain, and proves it:** size + sha256 before and after,
+  on every exit path. It HOLDS `chain.lock` (holder `reextract-shadow`) for its
+  duration so the resident scanner and the quarantine daily defer politely instead
+  of appending mid-run; run it clear of 20:00-07:00 (the loop: one 20:00 fire,
+  PT11H window, ending 07:00), 08:20 (quarantine daily) and 09:00-09:15 (Reader,
+  Sentinel). The cycle guard refuses (exit 2) while `logs/loop.lock` OR
+  `logs/chain.lock` exists: the loop holds loop.lock for the whole cycle, while
+  screen takes chain.lock only per batch write (2026-10-08), so chain.lock alone
+  no longer shows a running cycle. If the chain still moves, the report
+  records it as a field and names the legitimate writers - read that before
+  blaming the harness.
+- **Money.** Pilot ceiling USD 3, checked before each document (the last document
+  can overshoot by its own cost - cents); the monthly pipeline cap is checked
+  before every extraction call and inside the panel. Spend is real and lands in the
+  shared monthly pipeline cap under agent `pipeline`; a stop is reported as which
+  ceiling stopped it.
+- **The panel runs on `--panel-model` (default `claude-sonnet-5`, the model that
+  judged every card in the chain), never on the extractor's model.** Judging with a
+  different panel would change the measuring instrument inside the measurement.
+  Both models are recorded in the report. `DEFAULT_PANEL_MODEL` is a hand-synced
+  copy of `triage_batch.run`'s argparse default - change both or the comparison
+  silently drifts.
+- **The verdict is decided BEFORE the run** (design doc): green >= 2 novel accepted
+  per document with a novel accept rate no worse than the old one, red < 0.5,
+  amber between, NO RESULT when zero documents completed (exit 3). Both accept
+  rates are over JUDGED cards: old excludes still-pending, new excludes cards a
+  budget-stopped panel never reached (`novel_unjudged`).
+- **The report survives an abort** (Ctrl-C, a crash, the chain moving): it is written
+  from a `finally`, to `docs/runs/<date>-reextract-shadow-seed<seed>.md` plus a JSON
+  sidecar, so paid work is never lost and a same-day re-run cannot overwrite it.
+- **Duplicate detection is two-stage** (step 5b, added after the first pilot on
+  2026-09-06 returned 0 fingerprint duplicates in 41 claims from documents holding 22
+  cards): `claim_fingerprint` (normalised, not semantic) against EVERY chain card,
+  then one call on the panel model per survivor asking whether it restates a card
+  held from the SAME document. Restatements are counted (`restated_existing`) and
+  never reach the panel. **Read `judge failures N` in the claims line first:** a
+  failed judge call keeps the claim novel (fail open toward measuring) but is counted
+  and WARNED, so an inert dedupe cannot masquerade as "0 restatements". Cross-document
+  paraphrase remains the stated gap. An empty or missing quote is a guard FAILURE
+  (`""` is a substring of everything), deliberately stricter than the Reader's
+  crash-on-missing-key.
+- Exit codes: 0 measured, 2 refused (lock held, no ledger), 3 no result.
+
+## Triage cost controls (loop stage 4a)
+- **`--limit` is DERIVED each cycle from the spend allowance (Phase 3 step 5,
+  2026-09-03), clamped to `loop.TRIAGE_CEILING` = 200 (`TRIAGE_LIMIT` is its
+  alias; the Gate-2 window test governs the ceiling).** `pipeline/allowance.py`:
+  `expected_cycles = max(10, cycles completed in the trailing 30 days)`
+  (state["cycles"]); `allowance = PIPELINE_CAP_USD x (1 - 0.15) / expected`;
+  `triage_count = clamp(floor((allowance - composer_pair_usd) / usd_per_card), 1, ceiling)`.
+  The two unit costs are the loop's OWN measured spend deltas (trailing means
+  in state["calibration"]; priors 0.018/card and 0.64/pair from 2026-09-01/02).
+  At USD 40 and 20 cycles/month that was ~USD 1.70 a cycle, ~58 cards -- the
+  intended effect of the cap, stated in the plan. **Since D41 raised the cap to
+  200 the derivation saturates: the allowance buys more than `TRIAGE_CEILING`
+  at every cycle count, so the limit passed is ALWAYS 200 and the cap no longer
+  shapes cycle size.** Never hand-type a card count into the loop; change
+  `TRIAGE_CEILING` (now the binding constraint), the cap, or the reserve.
+- **Two parks after triage, both BANK the reviewed cards.** `deferred_budget`
+  = the MONTHLY hard-cap line (WARN, budget_cap semantics; since D41 there is
+  no earlier batch-stop line),
+  checked first; `deferred_cycle_budget` = this cycle's own allowance would be
+  exceeded by the composer pair (overall OK -- Coen: a park counts as a clean
+  day). Before 2026-09-03 the monthly park recorded a park and never banked,
+  so the cards triage had just paid for were re-paid on the next fire.
+- Status items on every path that reaches triage: `cycle_usd_allowance`,
+  `expected_cycles`, `triage_limit_used`, `usd_per_card`, `composer_pair_usd`,
+  `cycle_spent`. The digest can say WHY a cycle was the size it was.
+- **ExecutionTimeLimit lives in TWO places and the second one wins.**
+  `morpheus-hub/tasks/xml/25_PipelineLoop.xml` declares it, but
+  `morpheus-hub/tasks/apply_retry_settings.ps1` re-stamps every `$RETRY_TASKS`
+  entry from its per-task limit table, and 25_PipelineLoop is on that list.
+  Change it in BOTH places or the override wins (that mismatch is how the
+  live task once sat at PT1H while its XML said PT2H). Current values: XML
+  PT11H + override PT11H.
+- The loop WARNs at startup (never refuses -- a nonzero exit would FAIL the
+  Sentinel digest) when the LIVE task's window is under PT2H, naming the
+  elevated fix command. Reading the task setting is fully defensive: not
+  registered, no schtasks, odd duration -> silent no-op, so manual runs and
+  tests behave identically.
+- **D44 (Coen, 2026-09-26): triage decides EVERY card; nothing waits for Coen.**
+  A full panel of three unanimous accepts -> accepted. ANY dissent, or a panel
+  still short after bounded in-call re-asks (`MAX_VOTE_ATTEMPTS`), -> rejected
+  `claim_not_supported`, provenance `auto-d44`. A majority rule was offered and
+  rejected (D31's reason: one reviewer spotting overreach must never be
+  outvoted). The escalation skip-set (`logs/triage_escalated.json`), its
+  `--escalated-state` / `--no-skip-escalated` / `--queue` flags and Coen's T3
+  card queue are GONE; the 261 cards it held were resolved under the new rule
+  on 2026-09-26. Each rejection's dissent reasons are appended to
+  `logs/triage_rejections.jsonl` (the chain only records the reason code), so
+  a rejected card can still be audited and revoked. `triage_result.json`
+  still carries `skipped_escalated` (always 0) because loop.py reads it.
+- **Resolving cards OUTSIDE a cycle moves the trigger basis -- re-bank.** The
+  retired skip-set's cards were PENDING (so triggerable) and already banked in
+  every class watermark. Rejecting them out of cycle (the D44 backfill) dropped
+  every class BELOW its watermark (crypto -95 .. equity_etf -142) and would have
+  stalled the loop. Fixed the same day under loop.lock: each watermark lowered
+  by the retired cards routable to that class (crypto 261, fx 67, equity_etf
+  205, bond_etf 78, metal_etf 80), restoring the pre-backfill gaps exactly;
+  backup `logs/loop_state.json.bak-2026-09-26-pre-d44-rebank`. Any future
+  out-of-cycle disposition of pending cards needs the same re-bank.
+- **D44 sources: accepted by default.** D27 case 3's AI source screen
+  (`relevance.screen_source`, one Sonnet call per discovered source that could
+  BLOCK it on content) is REMOVED, not unwired -- `process_admissions` has no
+  `screen`/`can_spend` parameter (test-guarded). A discovered source that passes
+  the mechanical prefilter (reachable, has articles, not a store/login
+  subdomain) goes straight onto probation and its YIELD decides. The per-item
+  relevance screen still filters its articles. The 97 domains the old screen
+  had blocked were reopened to `proposed` on 2026-09-26 so they re-enter
+  through the prefilter. Code changes reach the RESIDENT scanner only after it
+  is restarted (`run_scanner.ps1`).
+- `no_new_accepted_cards` outcome: triage ran but accepted nothing new for a
+  class that fired on pending cards, so the composer would see an unchanged
+  corpus. Exits 0 before any metered composer call and still advances the
+  watermark (those cards were seen). Spec Decision 2, "no new information, no
+  new trials".
+- `gauntlet_orphan` outcome (exit 1, FAIL): a strategy sits in state
+  'gauntlet' with a non-v6.1 gauntlet verdict already chained -- a hand run of
+  gauntlet.py refuses on this unconditionally. Since step 8 (2026-10-07) the
+  loop no longer runs gauntlet.py, so this is an alarm for an orphan that
+  already exists or that a hand run left, detected next to the pre-spend chain
+  verify. Repair the chain manually.
+- Fires ONCE at 20:00 local with a PT11H window, ending 07:00 (Coen 2026-09-28:
+  PT4H killed every cycle 09-25..27 once the registry passed ~10k strategies --
+  the gauntlet's registry-wide clustering is not deadline-aware -- and the 02:30
+  fire never ran behind the killed 22:30 instance). Was 22:30/02:30 PT4H from
+  2026-09-04 (night: a cycle needs ~9 GB of commit the desktop does not leave
+  free by day -- WATCH the 20:00 start for that; the gauntlet's commit-bounded
+  worker count is the defence). No window may reach 08:20 QuarantineDaily.
+  morpheus-hub/tasks/xml/25_PipelineLoop.xml + apply_retry_settings.ps1's
+  $TIME_LIMIT_OVERRIDES carry it -- change BOTH once \Morpheus\25_PipelineLoop (moved from \StewartCo\ on 2026-09-13; the loop's TASK_NAME follows it) is
+  registered (activation Coen-gated per D29); exit 0 covers no_trigger and
+  polite deferrals (distinguished in status items.outcome); nonzero = real
+  defect (Sentinel FAILs the digest).
+
+## Quarantine daily catch-up (23_QuarantineDaily, 2026-09-28)
+- **Why:** the daily records ONE date and DEFERS a class whose bar is not
+  published yet (equity ETFs are always a day behind at 08:20: their only
+  refresh is loop stage 0 at 20:00, before the US close; FRED fx lags about a
+  week). Deferred dates were meant to be backfilled by hand `--date` runs and
+  never were: by 2026-09-28 all 253 equity_etf + 19 fx strategies had ZERO
+  forward days (4,764 strategy-days owed). A prose-only rule, now a stage.
+- `run_quarantine.bat` ends with `python -m pipeline.quarantine --catch-up`:
+  every OWED date (a deferred class, a missed day, a `deferred_lock` skip) is
+  recorded through the unchanged `--date` path, oldest first, at most
+  `MAX_CATCHUP_DATES` (10) per run; a deferred-only date (every owing strategy
+  deferred for a restated asset or a failed simulation, 2026-10-17) is not
+  counted against it. A date counts as owed only when EVERY asset
+  of the strategy has a bar on it -- the `--date` path's own readiness rule --
+  so a calendar-gap date is never retried forever.
+- A failed date never strands later ones (exceptions included) but makes the
+  run exit 1; the wrapper STILL commits what was recorded, then exits 1.
+- Cost: measured in the 2026-10-16 replay on a copy of the live chain (cut at
+  129,001 entries, just before that day's 08:20 daily): a `--date` pass of
+  196 rows now takes about 2.5 min (148 s, chain.lock held 0.08 s; was 1,244 s
+  with the lock held 1,230 s). A `--catch-up` date can still take tens of
+  minutes: 490 rows took 2,308 s with the lock held 0.33 s (was 3,954 s / 3,818
+  s), because the remaining ~4.7 s per row is strategy simulation and
+  price-file reads, not chain I/O. Whole replay 86.6 min old, 40.9 min new;
+  old and new appended identical entries (688: 686 rows, 1 base snapshot, 1
+  supplement) and both chains are VALID. Only strategies that still owe a row
+  are simulated (rule 1). Steady state is one or two dates a day. Since the
+  2026-10-16 fast path (`docs/2026-10-16-quarantine-fastpath-design.md`) a run
+  reads the chain ONCE (`pipeline/quarantine_view.py`, `QuarantineView`) and
+  catch-up shares that read across its dates; each date simulates BEFORE
+  taking chain.lock and holds it for two tail reads (the re-plan before the
+  append, the read over its own entries after it) plus one append (measured
+  max hold 0.33 s on the 2026-10-16 replay, against 4 h 27 min for the
+  2026-10-15 daily, 382 rows). `Registry.advance(snap, on_entry=None)` gained
+  the callback that keeps the view current. A chain.lock already held by a
+  live holder is probed BEFORE simulation (`ChainLock.info()` plus
+  `holder_alive()`): the date defers with exit 0 and the unchanged
+  `deferred_lock` line, without simulating; the acquire-time check stays as
+  the backstop.
+- **A date is all or nothing for the strategies that record (2026-10-16;
+  per-strategy follow-up approved by Coen the same day; narrowed 2026-10-17).**
+  A `ChainMoved` (an unlocked writer, or a rewritten log: `CHAIN MOVED:` on
+  stderr) or any exception other than `SimulationDataError` in simulation or
+  row validation (a code bug, a plain `ValueError` included: a malformed row,
+  an unpacking mismatch, `max([])`) writes NOTHING for the date; it stays owed
+  and the run exits 1. Only `quarantine.SimulationDataError` (a `ValueError`
+  subclass, raised at the data-shaped sites: `observe_day`'s and
+  `_observe_intraday`'s missing bar, `_rebase_index` / `_rebase_index_day`'s no
+  zero point, and the two non-positive equity baselines) DEFERS ONE strategy:
+  it gets no rows and stays owed (catch-up retries it every run),
+  stdout says `<sid>  deferred: simulation failed: <error>`, and a
+  `simulation_failed` item keyed by the strategy reaches
+  `logs/degraded_quarantine.json` (the Sentinel's `research_degraded`: WARN,
+  then FAIL after 3 days); the others record and the run exits 0. If NOTHING
+  records, nothing is already chained for the date and every ready strategy's
+  simulation failed, it is a total stall: `REFUSED: nothing recorded ...` on
+  stderr, exit 1, chain.lock never taken (that stalled date is still
+  `deferred_only`, below). A strategy that left quarantine
+  while the run simulated (a live-gate move) is SKIPPED, not a failure:
+  `<sid>  skipped: left quarantine (<state>) while this run simulated`, no
+  degraded item, the others record, exit 0. The old `PARTIAL WRITE` path is
+  gone. The date's provenance plan under the lock covers only the strategies
+  that will record (ready minus the simulation failures and the strategies
+  that left quarantine, digests filtered to their cells): such a strategy's
+  assets are NOT in the date's snapshot, so its retry records with a
+  `quarantine_data_snapshot_supplement` instead of being pinned `restated` by
+  a later bar correction. A date where no decision row is queued (every owing
+  strategy left quarantine or failed simulation) appends NOTHING, not even provenance: provenance vouches for
+  rows. In catch-up a `ChainMoved` date
+  rebuilds the view with a fresh read and the later dates still run; that
+  includes a ChainMoved from the advance at the START of a catch-up date
+  (outside the lock), which fails that date with a traceback and the date is
+  not attempted. A supplement that lands while the run simulates is ordinary
+  coverage (rule 2 if it disagrees), not a refusal. As built: a `ChainMoved`
+  BEFORE the date's single append prints `CHAIN MOVED: ...; nothing written
+  for <date>` and exits 1. A `ChainMoved` from the tail read right AFTER a
+  successful append prints the row lines and summary, then `CHAIN MOVED after
+  the write for <date>: the N decision row(s) above [plus the date's
+  provenance snapshot/supplement] WERE chained ...`, and exits 1 (the date IS
+  recorded). A row already on the chain at the date's pre-lock read (in
+  catch-up, the shared view after its advance at the start of that date) is
+  skipped without comparison, as before; a row that lands while the run
+  simulates is compared (identical: skipped and counted; different:
+  `DuplicateQuarantineDecision`, nothing written). A supplement that LANDS
+  WHILE THE RUN SIMULATES and disagrees with this run's bars defers the
+  owing strategies, exit 0 (only that mid-run race was refused, exit 1,
+  before; one already on the chain was a rule-2 deferral then too; behaviour
+  change accepted by Coen 2026-10-16).
+- Tools and tests: `tools/quarantine_replay.py` (subcommands `prefix`, `run`,
+  `compare`) replays the daily and catch-up on a COPY of the chain cut at a
+  prefix; read-only against the live chain, never scheduled (`run` refuses,
+  exit 2, an argv with no `--registry`, one naming the code root's or this
+  layer's `registry_log.jsonl`, and `--fetch-owed` without a scratch
+  `--data-dir`). Tests:
+  `test_quarantine_fastpath.py`, `tools/test_quarantine_replay.py`.
+- Backfilled rows stay visible as backfills in `--review` (write time vs bar
+  date); catch-up records every owed strategy alike, so it is a schedule,
+  never a selection.
+- The Ops Sentinel health-asserts `23_QuarantineDaily` (`daily`) since
+  2026-09-28 (Coen), so an exit 1 reaches the 09:15 digest; 267009 ("still
+  running" -- a long catch-up) is tolerated for it alone.
+- **Per-strategy isolation (2026-10-08 addendum, `docs/2026-10-08-quarantine-isolation-addendum.md`).**
+  Only strategies that still OWE a row are simulated and guarded (rule 1), so a
+  restated asset whose strategies are fully recorded blocks nobody. A restated
+  asset or a missing price file defers only the owing strategies that trade it
+  (rules 2-3); every owing strategy missing a bar or a file, with no row
+  already chained for the date, is still a total stall (exit 1). A date where
+  every ready strategy was deferred (restated asset OR failed simulation, any
+  mix) uses no catch-up slot (Coen 2026-10-17): `DateReport.deferred_only` is
+  true when nothing was appended, at least one ready strategy was deferred and
+  every ready strategy still owing the date was; a strategy that left
+  quarantine mid-run no longer owes it and is not counted. It holds for the
+  all-simulation-failed total stall too (rc stays 1, REFUSED, but no slot), so
+  a strategy whose simulation ALWAYS fails (a non-positive baseline at its
+  entry rebase is date-independent) can no longer starve every other
+  strategy's lagged backfill. **Accepted cost (Coen):** such a strategy's dates
+  are re-simulated on every run, like restated dates; the `simulation_failed`
+  item (WARN, FAIL after 3 days) forces a human fix.
+- **Degraded ledger `logs/degraded_quarantine.json`** (read by the Ops
+  Sentinel's `research_degraded`: WARN, FAIL after 3 days). `--date` only adds
+  or refreshes items; `--catch-up` also removes recovered ones, and only when
+  it reached every owed date, no attempted date failed, and none was skipped
+  on chain.lock (a date that returned before its provenance check reports
+  nothing, which is not recovery). Deferrals exit 0.
+
+## Engine series cache (2026-10-17, measured 2026-10-19)
+Design: `docs/2026-10-17-engine-perf-design.md`. The engine got faster without
+changing a bit: `pipeline/series_cache.py` (`SeriesCache`) caches the trend
+t-stat, realized vol and vol percentile series; the t-stat is computed once
+per window per bar; the percentile is an exact incremental one.
+- **Location:** `<registry dir>/seriescache/`. Gitignored and safe to delete,
+  at the cost of one cold run.
+- **Key:** `(kind, params, ENGINE_REV, cell)`. An `ENGINE_REV` bump orphans
+  every entry (never served); prune removes them.
+- **Validity rule: exact input bytes.** A request for a prefix of the stored
+  input is served from the store; a longer input that extends the stored one
+  extends it; ANY other difference (a restated bar, -0.0 vs 0.0, a NaN)
+  recomputes from bar 0. Never relax this to a hash or a float `==`.
+- **Prune:** once per quarantine recorder run, before the first date. It
+  removes `.tmp` files older than 1 h, stale-rev entries and corrupt entries,
+  leaves an entry a writer replaced mid-prune alone, and never raises.
+- **Who uses it:** the quarantine recorder and the gauntlet worker WRITE it;
+  the signal service is read-only and imports the cache lazily (it must not
+  write `seriescache/`); screen and `run_spec` callers pass none, so they use
+  per-call (memory-only) caches.
+- **Bit-identical by rule.** Any change to a cached kind or to the engine
+  needs `tools/daily_parity dump --twins-1h N` against the pre-change commit,
+  plus `tools/quarantine_replay`. The 2026-10-19 proofs: daily_parity 220/220
+  (200 1d + 20 1h twins), 0 mismatches; quarantine replay 800/800 MATCH and
+  2,251 rows equal to live.
+- **Figures** (2026-10-19, single process):
+  - catch-up date 2026-10-14: 2,857 s to 286 s cold / 201 s warm (realistic);
+  - one 1h gauntlet candidate (vol_percentile + trend_scan): ~940 s to 70 s
+    cold / 16 s warm;
+  - quarantine `--date` plus the catch-up of the 10-18 morning: 1,810 s to
+    259 s;
+  - the 1h/1d cost ratio is about 22-25x for screen, gauntlet and quarantine.
+- **Deadline priors are per timeframe, and so are the measured rates.**
+  - `gauntlet_core.PRIOR_S_BY_TF` = {"1d": 20.0, "1h": 70.0} plus
+    `prior_s_for(tf)` (an unlisted timeframe = the 1h prior scaled by bars per
+    day, floored at the 1d prior). The 1h value is the HEAVIEST class
+    measured, rounded up to 10 s.
+  - `screen.SCREEN_PRIOR_S_BY_TF` = {"1d": 2.0, "1h": 30.0} plus
+    `screen_prior_s_for(tf)`. The 1h value is the MEAN measurement (20.38 s)
+    rounded up to 10 s, deliberately, unlike the gauntlet's.
+  - Both are conservative on purpose: the budget charges chunk wall / n
+    across a pool, and a prior is judged only until a chunk of that
+    timeframe has run. `DeadlineBudget` keeps its rates per timeframe
+    (`key=tf`); gauntlet and screen chunks never mix timeframes.
+  - **The FIRST gauntlet chunk of a timeframe with no measured rate is ONE
+    pool round (`max_workers` candidates; `gauntlet_worker._walk_chunks`,
+    `DeadlineBudget.has_rate`), then chunks return to the normal size
+    (2026-10-19 final review).** A prior is a single-process seconds per
+    candidate and `fits` charges it un-amortised, so the full production
+    chunk (6 workers x `GAUNTLET_CHUNK_PER_WORKER` 4 = 24 at the 70 s 1h
+    prior, plus the 75 s reserve = 1,755 s) exceeded the whole 25-minute
+    budget: a 1h chunk could never start and no 1h rate was ever measured.
+    One round (6 x 70 + 75 = 495 s) fits and records the pool's real rate.
+    No candidate is reordered. The same cap applies to an unmeasured first
+    1d chunk (24 becomes 6 once per run). A registry
+    that alternates timeframes shrinks chunks toward 1 spec: slower, chain
+    unchanged. The screen's early "not even one spec fits" exit uses the
+    CHEAPEST prior in the registry (min, never max).
+- **Switch 2 gates (2026-10-19 final review).** None is a defect at 1d; all
+  four are costs or edge cases that arrive with 1h scale:
+  - **Prune reads and sha-checks every entry on each recorder run**, and the
+    morning wrapper may run it twice. At 1h scale that is GBs of reads per
+    morning on E:. Before Switch 2, make prune read only the key/rev, or cap
+    the cache size.
+  - **Each key stores its own copy of the closes** (about half the bytes of an
+    entry). Measure the disk at 1h and decide on a cap before activation.
+  - **In-process entries are never evicted**, in the quarantine process or on
+    the serial worker path (`worker_count` == 1, which is exactly the
+    low-commit case). Evict per cell or per payload before 1h load.
+  - **Exit-only trend windows are now computed over all n bars on per-call
+    caches** (screen). The values are identical, but a pathological series
+    (overflow, or a standard-error underflow) could now raise on bars the old
+    path never visited.
+- **Still uncached (follow-up candidate, Coen's call):** vol_target sizing's
+  realized vol (about 66 s of the warm 201 s), channel_breakout
+  highest/lowest (about 25 s), and the sma/stdev series and `atr_wilder`.
+
+## Quarantine -> live gate runs unattended (26_LiveGateWeekly, 2026-09-03)
+- `python -m pipeline.livegate` judges BOTH arms of the chained
+  `quarantine-live-protocol-v1` and, when not `--dry-run`, chains a
+  `live_gate` verdict plus a state change for every strategy it moves
+  (quarantine -> live, or -> graveyard); a HOLD writes nothing. It takes
+  `logs/chain.lock` only when there is a verdict to chain and defers politely
+  (`deferred_lock`, exit 0) when it is held -- the quarantine daily's rule.
+- `--report DIR` writes `<UTC date>-livegate-assessment.md` (every quarantined
+  strategy, cohort size, verdicts) -- Coen's quarterly read. Written on a dry
+  run too; it is not a chain write.
+- `tasks/run_livegate.bat` = `\Morpheus\26_LiveGateWeekly` (in `\StewartCo\` until 2026-09-13), **Sunday 09:10**,
+  exit code load-bearing. Weekly, not daily: the note charges
+  Benjamini-Hochberg over "the eligible strategies at each assessment" and
+  fixes no cadence; weekly keeps the kill arm prompt without re-asking a
+  barely-changed record daily. Change the cadence here AND in
+  `morpheus-hub/tasks/xml/26_LiveGateWeekly.xml` in the same pass.
+- **LIVE is a lifecycle state, not capital** (the note's own words). Money at
+  risk stays Coen's separate decision; nothing here can construct a
+  `RouterConfig(mode="live")` in trading-systems, and nothing should;
+  `pipeline/signal_service.py` (build 4a) only writes next-bar targets to
+  logs/signals/ for the trading-systems executor (section below).
+- Reachability, from the note: graduation is a MULTI-YEAR proposition
+  (Sharpe 1.3 ~ 587 days best case). Do not read a slow record as a weak
+  strategy; it may be a large cohort.
+
+## Signal service (build 4a, 31_SignalService)
+- `python -m pipeline.signal_service` (wrapper `tasks/run_signal_service.bat`, task
+  `\Morpheus\31_SignalService`, daily 08:45, after the 08:20 quarantine
+  daily) writes `logs/signals/targets-<bar_end>.json` for every crypto 1d
+  strategy in state `quarantine` or `live`: `{bar_end, engine_rev,
+  data_digest {asset: sha256 of data/<asset>_1d.csv, for the assets the
+  published strategies trade}, written_utc, strategies {sid: {spec_sha, max_dd
+  (the screened verdict's, or null), assets {asset: {side long|short|flat,
+  frac}}}}, deferred {sid: reason}}` (`deferred` is always present, `{}` when
+  nothing is deferred; the executor ignores it). The trading-systems executor
+  reads exactly this shape; change it only together with the executor.
+- **READ-ONLY.** One `Registry.snapshot()` read (complete lines only), never
+  an append, never `logs/chain.lock`, never data/, never git. The file is
+  published by `os.replace` from a `.json.tmp`, so the executor never reads a
+  torn file. logs/ is gitignored: a targets file is never committed.
+- **P1, the synthetic next bar:** entries (and time / declared exits) fill at
+  the NEXT open from the last close's decision, so a plain run cannot see a
+  decision taken on the last close. `next_bar_position` appends one flat bar
+  (open = high = low = close = the last close) and reads the engine's own
+  position after it, with periods per year and version derived exactly as
+  `quarantine.observe_day` does. An intrabar stop/target on the next bar is
+  by construction not foreseen. Edge case: the engine checks barriers only
+  after the entry bar, so a position entered at D's open whose stop/target
+  D's close already crossed is predicted FLAT (the synthetic open gaps
+  through the level); the real D+1 could still hold if it gapped back
+  without touching the level. That is not in the parity check's excused
+  class (stop/target exits) and was not observed there (3656 compared,
+  2026-10-16). Tests: `test_signal_service.py`.
+- **Freshness is per strategy (fix round 1; minors item 1, 2026-10-16).** Each
+  `data/<asset>_1d.csv` is read ONCE; `data_digest` is the sha256 of exactly
+  the bytes the bars were parsed from (`parse_daily_csv` = `screen.load_bars`'
+  parse, test-pinned). bar_end is the latest last-bar date across every
+  served asset. A strategy is published only if EVERY asset it trades has a
+  price file, is non-empty and ends on bar_end; any other strategy is
+  DEFERRED: listed under `deferred` with the reason (`<asset>: no price file
+  ...`, `<asset> EMPTY`, `<asset> behind: last bar D, bar_end E`), printed,
+  and absent from `strategies` -- never a flat or omitted asset under a fresh
+  bar_end. The executor (`bot/execution/runner.py`) reads a strategy absent
+  from a fresh file exactly like a stale signal: it holds that edge's last
+  valid contribution <= 26 h from its bar's close ("signal stale, holding"),
+  then flat ("signal stale"). When NO strategy can be published the run
+  prints every asset's last date and every deferral, writes NOTHING and
+  exits 2, and the Sentinel sees task 31 fail. **Today every served strategy
+  trades BTCUSD+ETHUSD, so one lagging asset still refuses the whole run**
+  (test-pinned).
+- **bar_end must be EXACTLY the bar that closed at the start of the run's UTC
+  day (fix wave I2; minors item 2).** `--as-of` - 1 day; `--as-of YYYY-MM-DD`
+  defaults to the UTC date today and exists for tests. OLDER = stale:
+  uniformly stale data (every asset on the same old bar) refuses instead of
+  rewriting an old targets file and exiting 0. NEWER = a bar dated the run
+  day or later, i.e. a still-open (partial) bar; `data_fetch` drops the open
+  kline, so that is bad data and refuses (`partial:`). A missing registry
+  file refuses too: `Registry.snapshot` reads a missing file as an empty
+  chain, which used to print "nothing written" and exit 0. An existing chain
+  with nothing in quarantine/live still exits 0.
+- **Per-cell USDT strategies are served (Switch 1).** A crypto 1d strategy in
+  quarantine/live is now a ONE-asset book on a USDT cell (`BTCUSDT`, file
+  `data/BTCUSDT_1d.csv`, written by 33_CryptoGridRefresh); the pre-switch
+  pooled BTCUSD+ETHUSD books are served as before. With per-strategy
+  deferral (above), one lagging USDT file defers only the strategies that
+  trade it; the rest publish. A MALFORMED CSV still refuses the whole run,
+  which is why `crypto_data.fetch_symbol` validates the whole merged CSV
+  with the same rules before it replaces a file (2b-3 plan 1 Task 13). The
+  refresh's end cap (last complete UTC day) is what puts the USDT files on
+  the same `bar_end` as the 08:20 BTCUSD/ETHUSD. The Sentinel channel for
+  deferrals is `logs/signals/status.json` (bullet below; 2b-3 plan 1 Task 14,
+  a Switch 1 merge precondition).
+- **A malformed price CSV refuses the whole run (minors item 3 + review
+  follow-up).** A header without every column (a BOM-prefixed `date`
+  included), a short row, a row LONGER than the header (csv.DictReader files
+  the extras under the `None` key), a non-numeric or non-finite price, a
+  non-positive open/high/low/close (volume may be 0), a date that is not
+  `YYYY-MM-DD` (Python 3.11+ `fromisoformat` alone would take `20260102`), a
+  second row for the same day (time part ignored; the message names the
+  first row), or bytes that are not UTF-8 raise `DataRefused` naming the file
+  and the row (the physical line, header = row 1): exit 2, nothing written,
+  never a traceback.
+- **Deferrals reach the Ops Sentinel through `logs/signals/status.json`
+  (2b-3 plan 1 Task 14).** Deferrals alone still exit 0 (the task result is
+  green), so the status file is their channel. EVERY run that gets past
+  argument parsing writes it, atomically (`status.json.tmp` + `os.replace`
+  with the targets publish's PermissionError retry), after the targets
+  publish: `{written_utc, bar_end (null when none was determined),
+  exit_code (0 or 2), published (strategies in the targets file), deferred
+  {sid: reason} (as computed; {} on a refusal that never got that far),
+  deferred_since {sid: first-seen UTC date}}`. `deferred_since` keeps the
+  previous status's date for a sid still deferred, gives a newly deferred
+  sid the run's UTC day (the `--as-of` date, default today UTC: the
+  `deferred_since` dates are `--as-of` dates, not `written_utc` dates), and
+  drops a sid no longer deferred (it also restarts at an unreadable date for
+  one sid). A missing previous
+  status is silent; a malformed one (bad bytes/JSON, not an object,
+  `deferred_since` not an object) counts as empty and prints a `WARNING`
+  line, so every clock restarts. Refusals write it too (`exit_code` 2). A
+  refusal BEFORE the deferral step (stale or partial `bar_end`, malformed
+  CSV, missing registry) cannot compute deferrals, so it carries the previous
+  status's `deferred` and `deferred_since` forward unchanged and sets
+  `"deferrals_not_computed": true` (the key is `false` on every run that
+  computed them, including an exit 2 for "nothing publishable"); a refusal
+  day therefore never resets a sid's clock, and the next normal run
+  recomputes and drops recovered sids. A status write that FAILS (a reader
+  holding `status.json` past the retries, a full disk) prints `WARNING:
+  could not write status.json: ...` and leaves the exit code alone (a good
+  publish stays 0, a refusal stays 2); the Sentinel's 20 h staleness FAIL is
+  the backstop. A crash (exit 1) writes NOTHING, so staleness is the
+  signal. It lives beside
+  the targets files but is not matched by the executor's `targets-*.json`
+  glob or by retention. **Sentinel side** (sc-ops-sentinel,
+  `sentinel/checks/signal_status.py`, manifest block `signal_status`
+  `{path, max_age_hours: 20, warn_after_days: 2}`): FAIL when the file is
+  missing, unreadable, older than 20 h by `written_utc`, or `exit_code` is not
+  0 (2 = refused). 20, not 26: the 08:45 write is about 0.5 h old at the
+  09:15 digest and yesterday's is 24.5 h old, so 26 h would pass a day on
+  which the service wrote nothing (31_SignalService is only `observing`, its
+  exit code is not read); a hand Sentinel run before 08:45 FAILs on
+  yesterday's status, expected. WARN for any sid deferred on its 2nd
+  calendar day or later (the first day counts: `(written_utc date -
+  deferred_since).days + 1 >= 2`, so first deferred on D and still deferred
+  on D+1 WARNs at the D+1 run); OK otherwise. **Merge order:** the Sentinel branch must
+  merge only AFTER the first signal-service run on this code has written
+  `status.json`, else the check FAILs "missing" (same ordering as the
+  `crypto_refresh` ledger).
+- **Retention (minors item 4).** After a successful publish,
+  `targets-<YYYY-MM-DD>.json` files beyond the newest `KEEP_TARGETS` (30) by
+  the date in the name are deleted. Never the file just written (even if a
+  re-run for an older day left newer names); a name without a date and the
+  `.json.tmp` are never touched; a file that cannot be deleted (a reader holds
+  it) is printed (`could not prune ...`) and skipped. A refusal prunes nothing.
+- **Exit codes (M8):** 0 written (or nothing served; deferrals alone are
+  still 0, carried to the Sentinel by `status.json`, see above); **2 = REFUSED** (no strategy publishable, stale or partial
+  bar_end, a malformed CSV row, missing registry), no targets file written
+  (only `status.json`, `exit_code` 2); 1 = an
+  unhandled crash (Python's own); 4 = the wrapper could not open its run log;
+  124 / 125 = the task guard ended the run (wall / the task's cmd.exe
+  stopped). The publish's `os.replace` is retried up to 8 times (0.25 s
+  apart) on PermissionError, which Windows raises while a reader holds the
+  target open, then raises (exit 1).
+- **The wrapper runs under the task guard (minors item 5).**
+  `tasks/run_signal_service.bat` re-runs itself under `python -m
+  pipeline.taskguard --wall-s 1500 --log ...` (`RL_TASKGUARD=1` marks the
+  inner copy; the run_gauntlet_worker.bat pattern), so an overrun is ended
+  with its python and the run log handle is released for the next fire. No
+  `--lock`/`--release-lock`/`--git-dir`: the service takes no lock and runs
+  no git, so nothing delays the kill, which lands inside the task's PT30M.
+  Any other exit code passes through unchanged. CRLF, `%PY%` by absolute
+  path, no git (test-pinned).
+- **The module is `signal_service.py`, NEVER `signal.py` (fix wave, C1).**
+  A script run BY PATH puts its own directory first on sys.path, and
+  trading-systems' `run_executor.bat` runs `pipeline\taskguard.py` by path:
+  a `pipeline/signal.py` shadowed the stdlib `signal` that `subprocess`
+  imports, so the guard died (ImportError) before it started. No
+  `pipeline/*.py` may share a name with a stdlib module
+  (`sys.stdlib_module_names`); `test_signal_service.py` pins it and runs
+  `taskguard.py --help` by path.
+
+## Crypto grid refresh (33_CryptoGridRefresh, Switch 1, 2026-10-17)
+- `python -m pipeline.crypto_refresh` (wrapper `tasks/run_crypto_refresh.bat`,
+  task `\Morpheus\33_CryptoGridRefresh`; number 33 because 30/31 are build 4a's
+  and 32 is build 5's), daily **08:02 Perth**, `ExecutionTimeLimit` PT15M, NO
+  StartWhenAvailable, no retry by design. Registered on MERGE DAY (Task 12 of
+  the plan, Coen-gated), not before. The Sentinel will watch its ledger (label
+  `crypto_refresh`, 30 h proposed, pending Coen) and list 33 as "observing";
+  that lands at merge (sc-ops-sentinel `feat/crypto-refresh-ledger`).
+- **What it fetches:** every cell of `cells.active_cells("crypto")` (76 USDT
+  assets at 1d), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
+  it only APPENDS, never repairs or trims rows. **End cap:** every fetch is
+  capped at 00:00 UTC of today's UTC date (`crypto_data.
+  last_complete_utc_day_end_ms`), so no bar dated "today UTC" is ever written,
+  however late or hand-run. Why: the loop preflight's same-day rule needs all
+  of crypto's cells (these plus the legacy BTCUSD/ETHUSD that `data_fetch`
+  refreshes at 08:20) to end on one day, and the signal service serves every
+  asset on a single `bar_end`.
+- **Timing:** Binance's 1d bar closes 00:00 UTC = 08:00 Perth. Pass 1 is not
+  deadline-gated (only the hard stop below gates it); retry passes
+  (max 2) never START at or after `--deadline-local` (default 08:15 Perth,
+  UTC+8), so the run is over before the **08:20** quarantine daily (which reads
+  the same 1d files) and the 08:45 signal service. The wrapper's task guard is
+  `--wall-s 780 --grace-s 30` inside the PT15M limit: change them together.
+- **Hard stop (final review I1):** the guard holds no lock, so no grace
+  applies: it KILLS the run at 08:15:00, and a killed run writes neither the
+  ledger nor the manifest (yesterday's ledger, still under the Sentinel's
+  30 h, would read all clear on exactly the morning every cell timed out:
+  ~96 s per cell, 3 tries x 30 s + backoff). So the wrapper passes
+  `--deadline-local 08:11 --stop-local 08:12`: no retry starts at or after
+  08:11, and NO attempt, pass 1 included, at or after 08:12. Every cell not
+  yet fetched (and not already failed) gets a `crypto_refresh_failed` item
+  `skipped: past the stop time 08:12; not fetched this run`, the ledger and
+  the manifest (completed cells) are still written, exit 0; the worst single
+  attempt plus the ledger write lands well before the 08:15 wall.
+  `--stop-local` defaults to none, so `python -m pipeline.crypto_refresh` by
+  hand stays ungated; a hand run of the WRAPPER after 08:12 fetches nothing
+  and marks every cell skipped.
+- **Ban / rate limit:** `BinanceBanned` (418) or ANY `RateLimited` that reaches
+  the module (fetch_symbol has already retried a 429) stops the run AT ONCE with
+  no sleep: that cell gets a `crypto_refresh_failed` item and every cell not yet
+  completed gets one with reason `skipped: ...`.
+- **Ledger `logs/degraded_crypto_refresh.json`, writer `crypto_refresh`:** items
+  are `crypto_refresh_failed` (key = the cell) and `crypto_admission` (first
+  bar after 2022-12-31, or CSV missing/empty). Written with `remove_unseen=True`
+  (a recovered item leaves; an empty run still refreshes `ts_utc` so the
+  Sentinel sees a live writer). The items ARE the alarm.
+- **Exit codes:** 0 = the run completed, stopped on a ban or stopped at the
+  hard stop (failed/skipped cells are ledger items, not a non-zero exit: a
+  retry would hit Binance again); 2 = `--data-dir` missing, nothing written;
+  1 = crash; 4 = the wrapper could not open its run log
+  (`logs\crypto-refresh-run.log`); 124/125 = the task guard's wall / the outer
+  cmd died.
+- **Touches:** the cell CSVs (gitignored `data/*.csv`), the ledger, and
+  `data/crypto_snapshot_manifest.json` (key-wise merge, COMPLETED cells only).
+  Never the chain, git or `chain.lock`. `crypto_snapshot_manifest.json` is a
+  TRACKED file the task rewrites and never commits, so it shows as modified on
+  the shared working tree exactly like `tradfi_snapshot_manifest.json`: that is
+  expected; never `git checkout --` it from another session.
+
+## Switch 1 (2b-3 plan 1, 2026-10-17): crypto goes per-cell at 1d
+- Design: `docs/2026-10-17-crypto-grid-activation-design.md`. Switch 1 is SP5
+  Phase 3 as planned (the trial-denominator event): `ACTIVE_CELLS["crypto"]` =
+  76 USDT assets x `("1d",)`; crypto routes per cell through
+  `expand_family_for_class` with `benchmark: "self"` (flipped in the SAME commit,
+  see the cells.py comment block for why neither half is safe alone); the
+  composer's pooled path (`expand_family`, `ALLOWED_ASSETS`, `UNIVERSE_BASE`,
+  `COST_MODEL`) is DELETED and `cells.CLASSES["crypto"]["cost_model"]` is the
+  one source (10 bps commission + 5 bps slippage per side). Switch 2
+  (intraday) is a later plan.
+- **The pooled path is retired.** Every pre-switch crypto strategy (533 at
+  2026-10-17: 431 graveyard, 102 quarantine) is a pooled `[BTCUSD, ETHUSD]`
+  spec; they stay on the chain and re-simulate forever; nothing about them is
+  re-judged. A pooled spec that still needs the GAUNTLET after the switch RAISES
+  there (`_benchmark_relative` wants exactly one asset per cell), which is why
+  merge day gates on the preflight below. The two parity tools
+  (`tools/daily_parity.py`, `tools/gauntlet_parity.py`) call
+  `evaluate_standalone(record_benchmark=False)` for a legacy pooled crypto spec
+  only, so they can re-run registered pooled specs; the hand-run
+  `pipeline.gauntlet` registry pass would still raise on a pooled spec in
+  `gauntlet` state (hand runs already need Coen's say-so).
+  Every other 1d result (tradfi expansion, every registered spec's
+  re-simulation, every quarantine row) is byte-identical across the switch.
+- **Per-cycle cap counts cells for every class** (`specs_per_combo =
+  max(1, len(sweep_cells(...)))`, never 1 for crypto). `_short_asset` strips
+  `USDT`, so strategy names read `BTC`, not `BTCUSDT`.
+- **Known limit: a retired or delisted pair has no exit in code.** Once a dead
+  USDT cell has registered strategies, its file stops growing, so the loop's
+  freshness preflight parks every crypto fire at `stale_data`, and
+  `gauntlet_stats` refuses `cells_not_comparable` REGISTRY-WIDE, for all
+  classes (`pipeline/gauntlet_stats.py` ~682-691), once the vintage passes the
+  cell's last bar. Nothing reads a retirement note: the grid record's
+  "RETIRED by a new note" is policy, not code. Tradfi has the same latent
+  exposure (a delisted ETF or a dead FX series). Plan 3 owns an excluded-cells
+  mechanism (`comparable_cells`, the preflight and the stats honouring retired
+  cells).
+- **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
+  1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
+     <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy
+     pooled crypto spec still proposed / screened / in `gauntlet` or waiting in
+     the crypto sibling queue (exit 1), and refuses missing paths (exit 2).
+  2. The grid record (`docs/notes/crypto-grid-record-v1.md`, DRAFT until Coen
+     approves the exact text; LF bytes enforced by a narrow `.gitattributes` rule)
+     is chained with `python -m tools.grid_switch chain-note --registry <live
+     registry> --note docs/notes/crypto-grid-record-v1.md --prefix
+     "crypto-grid-record-v1:"` BEFORE the first per-cell crypto verdict. It refuses
+     (exit 2, nothing written) a CR byte, a wrong prefix, a prefix already on the
+     chain (re-checked under chain.lock) and ANY existing `logs/chain.lock`; it
+     appends once under chain.lock, runs verify_registry and exits 0 only on
+     VALID. `--dry-run` runs the guards and writes nothing.
+  3. Register `33_CryptoGridRefresh` the same day (section above).
+  4. `CRYPTO_SYSTEM_PROMPT` (composer) is a DRAFT pending Coen; the plan itself
+     makes no composer or triage model call (zero metered spend).
+
+## Triage escalations -- REMOVED by D44 (2026-09-26)
+- The 2026-09-03 `--queue` view and the skip-set's `dissent_reasons` are gone
+  with the queue itself. Dissent reasons now live in
+  `logs/triage_rejections.jsonl`, one row per rejected card.
+
+## Budget lines (D41, 2026-09-18): pipeline 200, Reader 20, one constant, NO batch-stop
+- `pipeline/budget.py` `PIPELINE_CAP_USD` is THE pipeline cap;
+  `pipeline_budget.MONTHLY_USD` imports it. The Reader's default meter cap and
+  `scanner --cap` default are 20. Tests derive every threshold from the
+  constants -- never pin a literal dollar figure.
+- **D41 (Coen): the 80% batch-stop is GONE and the cap went 40 -> 200.** The
+  batch-stop made the last fifth of every month unusable and skipped good
+  candidates; work now runs right up to the hard cap. `may_start_batch` is
+  kept as a named call site but is now the same line as `may_spend`.
+- **⚠ 200 EXCEEDS the old D28 pool of 100 and no longer fits the Reader 20 /
+  pipeline 40 band split. That band is superseded, not stretched.**
+- **⚠⚠ AT 200 THE ALLOWANCE NO LONGER BINDS -- `TRIAGE_CEILING` (200 cards)
+  does.** Measured: at 10/20/30 cycles a month the derived triage limit is 200
+  every time, so each cycle costs a flat ~USD 4.24 and MONTHLY SPEND NOW SCALES
+  WITH CYCLE COUNT (~42 / ~85 / ~127) instead of self-regulating to ~34 at any
+  cadence. Two fires a day that all run full cycles would reach the 200 cap
+  around day 23 and then park hard, with no glide path now the 80% stop is
+  gone. **If that is not wanted, the lever is `TRIAGE_CEILING`, not the cap.**
+- `BudgetMeter.state()` judges the CURRENT calendar month. A test that
+  stamps rows in a fixed month goes silent when the month turns (that is what
+  broke test_pipeline_budget on 2026-09-01); use a this-month timestamp.
