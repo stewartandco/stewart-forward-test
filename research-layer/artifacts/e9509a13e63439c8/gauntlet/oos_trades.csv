@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWC,long,2025-01-27 00:00:00,41.12,2025-03-04 00:00:00,39.77838325564659,stop,-0.033026866351007086,1.0
+EWC,long,2025-04-28 00:00:00,42.05,2026-03-23 00:00:00,53.7,signal:channel_exit,0.2766511296076101,0.6309108539433025
