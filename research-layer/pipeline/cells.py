@@ -453,7 +453,9 @@ def class_cells(asset_class: str) -> list[tuple[str, str]]:
 
 def active_cells(asset_class: str) -> list[tuple[str, str]]:
     """The cells a generation MAY sweep for this class: class_cells()
-    restricted to the ACTIVE_CELLS subsets. Declaration (CLASSES) is a space;
+    restricted to the ACTIVE_CELLS subsets, less any EXCLUDED_CELLS (a
+    per-cell exclusion, design D-d1; empty as committed, so then identical to
+    the plain assets x timeframes product). Declaration (CLASSES) is a space;
     this is the decision to search part of it."""
     spec = _class_spec(asset_class)
     if asset_class not in ACTIVE_CELLS:
@@ -464,7 +466,8 @@ def active_cells(asset_class: str) -> list[tuple[str, str]]:
     gate = ACTIVE_CELLS[asset_class]
     assets = spec["assets"] if gate["assets"] == "all" else gate["assets"]
     tfs = spec["timeframes"] if gate["timeframes"] == "all" else gate["timeframes"]
-    return [(a, tf) for a in assets for tf in tfs]
+    return [(a, tf) for a in assets for tf in tfs
+            if _cell_key(a, tf) not in EXCLUDED_CELLS]
 
 
 def class_of_asset(asset: str) -> str:
@@ -524,23 +527,52 @@ def validate_cell(asset: str, timeframe: str, asset_class: str | None = None) ->
 # ---------------------------------------------------------------------------
 RETIRED_CELLS: dict[str, dict] = {}
 
+# ---------------------------------------------------------------------------
+# EXCLUDED_CELLS (2b-3 plan 4, Task 7; design D-d1).
+#
+# A per-cell exclusion: an intraday cell below the admission line is dropped
+# from the sweep WITHOUT dropping its asset (SUNUSDT@1h out, SUNUSDT at 4h,
+# 12h and 1d stay). RETIRED_CELLS is a different thing: it removes every
+# timeframe of an asset and means delisting. Keys are quarantine cell keys
+# (qcells.cell_key: the bare asset at 1d, "ASSET@TF" otherwise).
+#
+# `active_cells` omits them, so everything that sweeps (the composer's
+# sweep_cells / expand_family_for_class, crypto_refresh, the loop's window)
+# follows. Declared cells stay declared (CLASSES is untouched); only the
+# sweep, and so the trial denominator, shrinks. Growing this set is a
+# denominator event in Coen's own reviewed commit (plan 5 fills it from the
+# admission rows in the Switch 2 commit). Empty today: with it empty
+# active_cells is byte-for-byte what it was.
+# ---------------------------------------------------------------------------
+EXCLUDED_CELLS: frozenset[str] = frozenset()
+
 # qcells.SEP, copied: qcells imports bars, which imports this module, so
 # cells.py cannot import qcells at load. test_retired_cells pins the two equal.
 _KEY_SEP = "@"
 
 
-def _parse_retired_key(key: str) -> tuple[str, str]:
+def _parse_cell_key(key: str, label: str) -> tuple[str, str]:
     """(asset, timeframe) of a quarantine cell key; the same grammar as
     qcells.split_cell_key (bare asset = 1d, "ASSET@TF" otherwise, "@1d"
-    never valid). Raises AssertionError on a malformed key."""
+    never valid). Raises AssertionError, naming `label`, on a malformed key."""
     if not isinstance(key, str) or not key:
-        raise AssertionError(f"RETIRED_CELLS: bad cell key {key!r}")
+        raise AssertionError(f"{label}: bad cell key {key!r}")
     if _KEY_SEP not in key:
         return key, "1d"
     asset, tf = key.split(_KEY_SEP, 1)
     if not asset or not tf or _KEY_SEP in tf or tf == "1d":
-        raise AssertionError(f"RETIRED_CELLS: bad cell key {key!r}")
+        raise AssertionError(f"{label}: bad cell key {key!r}")
     return asset, tf
+
+
+def _parse_retired_key(key: str) -> tuple[str, str]:
+    return _parse_cell_key(key, "RETIRED_CELLS")
+
+
+def _cell_key(asset: str, timeframe: str) -> str:
+    """The quarantine cell key (qcells.cell_key) of a cell: the bare asset
+    at 1d, "ASSET@TF" otherwise. Copied for the reason _KEY_SEP is."""
+    return asset if timeframe == "1d" else f"{asset}{_KEY_SEP}{timeframe}"
 
 
 def is_retired(cell_key: str) -> bool:
@@ -596,3 +628,26 @@ def assert_retired_cells_valid(retired: dict | None = None) -> None:
 
 
 assert_retired_cells_valid()
+
+
+def assert_excluded_cells_valid(excluded=None, retired=None) -> None:
+    """Import-time check for EXCLUDED_CELLS (callable with crafted input):
+    every key is a well-formed cell key naming a DECLARED cell of a declared
+    class, and none is in RETIRED_CELLS (a retired cell is already out of the
+    sweep, for a different reason; the two declarations must not overlap)."""
+    declared = EXCLUDED_CELLS if excluded is None else excluded
+    retired = RETIRED_CELLS if retired is None else retired
+    for key in declared:
+        asset, tf = _parse_cell_key(key, "EXCLUDED_CELLS")
+        try:
+            validate_cell(asset, tf, class_of_asset(asset))
+        except ValueError as exc:
+            raise AssertionError(f"EXCLUDED_CELLS[{key!r}]: {exc}") from None
+        if key in retired:
+            raise AssertionError(
+                f"EXCLUDED_CELLS[{key!r}] is also in RETIRED_CELLS: a cell is "
+                f"excluded (one timeframe, the asset stays) or retired "
+                f"(delisted), never both")
+
+
+assert_excluded_cells_valid()

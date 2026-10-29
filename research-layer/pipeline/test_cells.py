@@ -434,3 +434,109 @@ def test_bond_and_metal_etf_disjoint_from_every_other_class():
         assert cells.class_of_asset(a) == "bond_etf"
     for a in cells.CLASSES["metal_etf"]["assets"]:
         assert cells.class_of_asset(a) == "metal_etf"
+
+
+# ---------------- EXCLUDED_CELLS (2b-3 plan 4, Task 7, design D-d1) ----------------
+#
+# A per-cell exclusion: an intraday cell below the admission line is dropped
+# without dropping its asset. RETIRED_CELLS removes EVERY timeframe of an
+# asset and means delisting, a different thing. Keys are qcells.cell_key form
+# (bare asset = 1d, "ASSET@TF" otherwise).
+
+SWITCH2_TIMEFRAMES = ("1h", "4h", "12h", "1d")
+
+
+def test_excluded_cells_is_empty_as_committed():
+    assert cells.EXCLUDED_CELLS == frozenset()
+    assert isinstance(cells.EXCLUDED_CELLS, frozenset)
+
+
+def test_an_excluded_cell_is_not_active_but_its_asset_is(monkeypatch):
+    monkeypatch.setitem(cells.ACTIVE_CELLS["crypto"], "timeframes", SWITCH2_TIMEFRAMES)
+    full = cells.active_cells("crypto")
+    assert ("SUNUSDT", "1h") in full
+    monkeypatch.setattr(cells, "EXCLUDED_CELLS", frozenset({"SUNUSDT@1h"}))
+    got = cells.active_cells("crypto")
+    assert ("SUNUSDT", "1h") not in got
+    assert [c for c in got if c[0] == "SUNUSDT"] == [
+        ("SUNUSDT", "4h"), ("SUNUSDT", "12h"), ("SUNUSDT", "1d")]
+    # exactly that one cell went, the rest keep their order
+    assert got == [c for c in full if c != ("SUNUSDT", "1h")]
+    assert len(got) == len(full) - 1
+    # other classes are untouched
+    assert cells.active_cells("fx") == cells.class_cells("fx")
+
+
+def test_a_bare_key_excludes_the_1d_cell_only(monkeypatch):
+    monkeypatch.setitem(cells.ACTIVE_CELLS["crypto"], "timeframes", SWITCH2_TIMEFRAMES)
+    monkeypatch.setattr(cells, "EXCLUDED_CELLS", frozenset({"SUNUSDT"}))
+    got = [c for c in cells.active_cells("crypto") if c[0] == "SUNUSDT"]
+    assert got == [("SUNUSDT", "1h"), ("SUNUSDT", "4h"), ("SUNUSDT", "12h")]
+
+
+def test_empty_exclusions_change_nothing():
+    gate = cells.ACTIVE_CELLS["crypto"]
+    assert cells.EXCLUDED_CELLS == frozenset()
+    expected = [(a, tf) for a in gate["assets"] for tf in gate["timeframes"]]
+    assert cells.active_cells("crypto") == expected
+    assert len(expected) == 76 and {tf for _, tf in expected} == {"1d"}
+    for cls in ("fx", "equity_etf", "bond_etf", "metal_etf"):
+        assert cells.active_cells(cls) == cells.class_cells(cls)
+
+
+@pytest.mark.parametrize("key,needle", [
+    ("NOTACELLUSDT@1h", "declared"),         # undeclared asset
+    ("BTCUSDT@7m", "timeframe"),             # undeclared timeframe
+    ("BTCUSDT@1d", "bad cell key"),          # "@1d" is never a valid key
+    ("@1h", "bad cell key"),
+    ("", "bad cell key"),
+])
+def test_an_undeclared_excluded_cell_is_refused(key, needle):
+    with pytest.raises(AssertionError, match=needle):
+        cells.assert_excluded_cells_valid(frozenset({key}))
+
+
+def test_a_retired_cell_cannot_also_be_excluded():
+    entry = {"retired_utc": "2026-10-20", "note_prefix": "cell-retirement-v1"}
+    with pytest.raises(AssertionError, match="RETIRED_CELLS"):
+        cells.assert_excluded_cells_valid(frozenset({"BTCUSDT@1h"}),
+                                          retired={"BTCUSDT@1h": entry})
+    # a retired cell elsewhere does not matter
+    cells.assert_excluded_cells_valid(frozenset({"BTCUSDT@1h"}),
+                                      retired={"ETHUSDT@1h": entry})
+
+
+def test_a_declared_excluded_cell_is_accepted():
+    cells.assert_excluded_cells_valid(frozenset({"SUNUSDT@1h", "SUNUSDT@4h", "BTCUSDT"}))
+    cells.assert_excluded_cells_valid(frozenset())
+    cells.assert_excluded_cells_valid()                 # the committed (empty) value
+
+
+def test_an_undeclared_or_retired_excluded_cell_fails_the_import_check():
+    """The check runs AT IMPORT: execute cells.py's own source, with the
+    declaration swapped, in a throwaway namespace (the real module is left
+    alone) and see the import itself raise."""
+    from pathlib import Path
+    src = Path(cells.__file__).read_text(encoding="utf-8")
+    decl = "EXCLUDED_CELLS: frozenset[str] = frozenset()"
+    assert src.count(decl) == 1
+
+    def import_with(value: str, retired: str | None = None):
+        text = src.replace(decl, f"EXCLUDED_CELLS: frozenset[str] = {value}")
+        if retired is not None:
+            old = "RETIRED_CELLS: dict[str, dict] = {}"
+            assert text.count(old) == 1
+            text = text.replace(old, f"RETIRED_CELLS: dict[str, dict] = {retired}")
+        exec(compile(text, str(cells.__file__), "exec"),
+             {"__name__": "pipeline._cells_probe", "__package__": "pipeline"})
+
+    import_with("frozenset()")                                   # control: clean
+    import_with('frozenset({"SUNUSDT@1h"})')                     # control: a good one
+    with pytest.raises(AssertionError, match="declared"):
+        import_with('frozenset({"NOTACELLUSDT@1h"})')
+    with pytest.raises(AssertionError, match="timeframe"):
+        import_with('frozenset({"BTCUSDT@7m"})')
+    with pytest.raises(AssertionError, match="RETIRED_CELLS"):
+        import_with('frozenset({"ENAUSDT@1h"})',
+                    retired='{"ENAUSDT@1h": {"retired_utc": "2026-10-20", '
+                            '"note_prefix": "cell-retirement-v1"}}')
