@@ -19,15 +19,28 @@ before the 1d file's first day, writes `.tmp`, `os.replace`s it with the
 signal service's retry (8 retries, 0.25 s apart, on PermissionError) and then
 RE-STAMPS the cell's `crypto_snapshot_manifest.json` entry, because refresh
 stamped sha256/rows/first_date before the clip. A file that needs no clip is
-not touched (and not re-stamped). A clip that fails (locked file, no 1d
-anchor, a malformed file) is a FAILED cell: the file and its manifest entry
-are left exactly as refresh wrote them.
+not touched (and not re-stamped). A clip that fails BEFORE the replace
+(locked file, no 1d anchor, a malformed file) is a FAILED cell: the file and
+its manifest entry are left exactly as refresh wrote them. One failure is
+different: if the file WAS replaced and the manifest re-stamp then raises, the
+file is clipped (its true row count is reported, `clipped` names it) but its
+manifest entry is stale (still refresh's pre-clip sha256/rows/first_date);
+that cell is `clipped_manifest_stale` and a `failed` row, and a re-run fixes
+nothing by itself (the clip finds nothing to drop), so the entry must be
+re-stamped by hand or the file refetched.
 
 THE MORNING WINDOW. `refresh` is given `stop_ms` = 07:58 Perth of the run day
 (the next day's when the run starts at or after 08:40): no attempt starts at
 or after it, so a long run stops cleanly before the 08:02 `33_CryptoGridRefresh`,
 which shares the IP and read-merge-writes the same tracked manifest. The cells
 not reached are `aborted` report rows and a re-run resumes incrementally.
+The local tail obeys the same stop: a cell that NEEDS a clip checks the clock
+right before it writes, and at or after 07:58 it writes nothing (no `.tmp`, no
+replace, no manifest write: the tracked manifest is read-merge-written by the
+live refresh at 08:02). That cell is `clip_deferred` and a `failed` row ("clip
+skipped: past the stop time 07:58"); its file is still unclipped, so a re-run
+(after 08:40) fetches nothing new and clips it. A cell that needs no clip is
+only read, never written, and is unaffected.
 The CLI refuses (exit 2) to START between 07:58 and 08:40 Perth unless `--now`
 is given (tests); the zone is fixed UTC+8 as in `crypto_refresh`.
 
@@ -42,12 +55,14 @@ not call `degraded.record`), the chain, git or any lock.
 
 REPORT (`run`'s dict, JSON-serialisable):
   cells        one row per cell in run order (coarsest timeframe first per
-               asset): {cell, status fetched|failed|clip_failed|aborted,
+               asset): {cell, status fetched|failed|clip_failed|clip_deferred|
+               clipped_manifest_stale|aborted,
                attempts (fetch calls; each pages 1000 klines per request),
                seconds (time in fetch), rows, first_date, last_date, clipped,
                reason}
   fetched      {cell: {rows, first_date, last_date}} for every cell refresh
-               completed (a clip_failed cell is in here AND in `failed`)
+               completed (a clip_failed, clip_deferred or clipped_manifest_stale
+               cell is in here AND in `failed`)
   failed       [{cell, reason}]: fetch failures (incl. the ban cell) and clip
                failures
   clipped      {cell: rows dropped} for cells that needed a clip
@@ -108,6 +123,8 @@ def cells_for(timeframes, assets=None) -> list[tuple[str, str]]:
         if tf == "1d" or tf not in cells.TIMEFRAMES:
             raise ValueError(f"timeframe {tf!r} is not a prefetch target "
                              f"(declared {cells.TIMEFRAMES}, never 1d)")
+    if not tfs:
+        raise ValueError("no timeframes given")
     tfs.sort(key=lambda t: -TF_MS[t])
     if assets is not None:
         unknown = [a for a in assets if a not in admitted]
@@ -115,6 +132,8 @@ def cells_for(timeframes, assets=None) -> list[tuple[str, str]]:
             raise ValueError(f"not admitted assets: {unknown}")
         want = set(assets)
         admitted = tuple(a for a in admitted if a in want)
+        if not admitted:
+            raise ValueError("no assets given")
     return [(a, tf) for a in admitted for tf in tfs]
 
 
@@ -170,7 +189,24 @@ def _replace_with_retry(tmp: Path, path: Path, sleep) -> None:
             sleep(REPLACE_SLEEP_S)
 
 
-def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep) -> int:
+class ManifestStale(Exception):
+    """The CSV was clipped and replaced but re-stamping its manifest entry
+    raised: the file is right, the manifest entry is stale. Carries the rows
+    dropped and the rows now in the file."""
+
+    def __init__(self, dropped: int, rows: int, cause: BaseException):
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.dropped = dropped
+        self.rows = rows
+        self.cause = cause
+
+
+class ClipDeferred(Exception):
+    """`past_stop()` said the stop time has passed: nothing was written."""
+
+
+def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep,
+                        past_stop=None) -> int:
     """Drop the rows of `<asset>_<tf>.csv` dated before the first bar of
     `<asset>_1d.csv` (compared on `date[:10]`); returns the rows dropped.
 
@@ -179,7 +215,10 @@ def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep
     the cell's manifest entry (sha256 / rows / first_date / last_date of the
     file now on disk). Any failure leaves the CSV as it was and no `.tmp`.
     Raises FileNotFoundError when there is no 1d anchor, ValueError when the
-    clip would empty the file."""
+    clip would empty the file (both before any write), and ManifestStale when
+    the file was replaced but the re-stamp failed (the clip DID happen).
+    `past_stop()` (optional) is asked right before the first write; True raises
+    ClipDeferred with nothing written."""
     data_dir = Path(data_dir)
     anchor = cr._first_bar(data_dir / f"{asset}_1d.csv")
     if anchor is None:
@@ -198,6 +237,8 @@ def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep
         raise ValueError(f"{path.name}: every bar is before the 1d start {first_day}; "
                          f"refusing to empty the file")
 
+    if past_stop is not None and past_stop():
+        raise ClipDeferred()
     tmp = Path(str(path) + ".tmp")
     try:
         with tmp.open("w", encoding="utf-8", newline="") as f:
@@ -209,11 +250,14 @@ def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep
         tmp.unlink(missing_ok=True)             # never leave a .tmp masquerading as data
         raise
 
-    update_snapshot_manifest(data_dir, {f"{asset}_{tf}": {
-        "rows": len(keep),
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "first_date": keep[0]["date"],
-        "last_date": keep[-1]["date"]}})
+    try:
+        update_snapshot_manifest(data_dir, {f"{asset}_{tf}": {
+            "rows": len(keep),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "first_date": keep[0]["date"],
+            "last_date": keep[-1]["date"]}})
+    except Exception as exc:
+        raise ManifestStale(dropped, len(keep), exc) from exc
     return dropped
 
 
@@ -240,9 +284,14 @@ def run(data_dir: Path, timeframes, *, now_ms: int, assets=None, fetch=fetch_sym
         finally:
             spent[(symbol, tf)] += time.monotonic() - t
 
+    stop_ms = stop_ms_for(now_ms)
+    if clock is None:                       # refresh's own default, shared with the clip tail
+        def clock() -> int:
+            return now_ms + int((time.monotonic() - t0) * 1000)
+    stop_hhmm = _local(stop_ms).strftime("%H:%M")
+
     out = cr.refresh(data_dir, cell_list, now_ms=now_ms, deadline_ms=None,
-                     fetch=counting_fetch, sleep=sleep, clock=clock,
-                     stop_ms=stop_ms_for(now_ms))
+                     fetch=counting_fetch, sleep=sleep, clock=clock, stop_ms=stop_ms)
 
     reasons: dict[str, str] = {}
     failed: list[dict] = []
@@ -253,16 +302,31 @@ def run(data_dir: Path, timeframes, *, now_ms: int, assets=None, fetch=fetch_sym
         (aborted if item["reason"].startswith("skipped:") else failed).append(row)
 
     clipped: dict[str, int] = {}
-    clip_failed: dict[str, str] = {}
+    clip_failed: dict[str, tuple[str, str]] = {}      # cell -> (status, reason)
     for cell in cell_list:
         if f"{cell[0]}_{cell[1]}" not in out["fetched"]:
             continue
         key = key_of[cell]
         try:
-            n = clip_to_daily_start(data_dir, cell[0], cell[1], sleep=sleep)
+            n = clip_to_daily_start(data_dir, cell[0], cell[1], sleep=sleep,
+                                    past_stop=lambda: clock() >= stop_ms)
+        except ClipDeferred:
+            # past the stop: no clip, so no manifest write (the live 08:02
+            # refresh read-merge-writes the same file)
+            reason = f"clip skipped: past the stop time {stop_hhmm}; file left unclipped"
+            clip_failed[key] = ("clip_deferred", reason)
+            failed.append({"cell": key, "reason": reason})
+        except ManifestStale as exc:
+            reason = (f"clipped, manifest stale: dropped {exc.dropped} row(s), "
+                      f"file now {exc.rows} rows, but the manifest re-stamp "
+                      f"failed ({exc})")
+            clipped[key] = exc.dropped
+            clip_failed[key] = ("clipped_manifest_stale", reason)
+            failed.append({"cell": key, "reason": reason})
+            print(f"intraday_prefetch: {key}: {reason}")
         except Exception as exc:                # one cell's clip must not stop the rest
             reason = f"clip failed: {type(exc).__name__}: {exc}"
-            clip_failed[key] = reason
+            clip_failed[key] = ("clip_failed", reason)
             failed.append({"cell": key, "reason": reason})
             print(f"intraday_prefetch: {key}: {reason}")
         else:
@@ -287,9 +351,9 @@ def run(data_dir: Path, timeframes, *, now_ms: int, assets=None, fetch=fetch_sym
                     "first_date": first, "last_date": res["last_date"]}
             fetched[key] = info
             row.update(info)
-            row["status"] = "clip_failed" if key in clip_failed else "fetched"
+            row["status"] = "fetched"
             if key in clip_failed:
-                row["reason"] = clip_failed[key]
+                row["status"], row["reason"] = clip_failed[key]
         elif key in reasons and not reasons[key].startswith("skipped:"):
             row.update(status="failed", reason=reasons[key])
         else:
@@ -346,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
 
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
     assets = ([a.strip() for a in args.assets.split(",") if a.strip()]
-              if args.assets else None)
+              if args.assets is not None else None)       # "" is an empty list, never "all"
     try:
         cells_for(timeframes, assets)           # fail on a bad argument before any fetch
     except ValueError as exc:

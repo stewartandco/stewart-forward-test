@@ -396,3 +396,76 @@ def test_the_cli_writes_the_report_and_prints_a_summary(tmp_path, monkeypatch, c
     assert rep["clipped"] == {"BTCUSDT@1h": 96}
     text = capsys.readouterr().out
     assert "2 cells" in text and "1 clipped" in text and str(out) in text
+
+
+# ---------------------------------------------------------------- fix round 1
+
+def test_no_clip_or_manifest_write_after_the_stop(tmp_path, monkeypatch):
+    t = {"ms": _ms(2021, 7, 10, 23, 50)}                  # 07:50 Perth; stop 07:58
+    fake = Fake(default_start="2021-06-10 00:00:00")       # both cells need a clip
+    data = tmp_path / "data"
+    _write_1d(data, "BTCUSDT", now_ms=t["ms"])
+    real_clip, real_stamp = ip.clip_to_daily_start, ip.update_snapshot_manifest
+    stamps = []
+
+    def clip_then_time_passes(*a, **k):
+        try:
+            return real_clip(*a, **k)
+        finally:
+            t["ms"] += 10 * MIN                            # the first clip ends at 08:00
+
+    def counting_stamp(d, results):
+        stamps.append(sorted(results))
+        return real_stamp(d, results)
+
+    monkeypatch.setattr(ip, "clip_to_daily_start", clip_then_time_passes)
+    monkeypatch.setattr(ip, "update_snapshot_manifest", counting_stamp)
+    rep = ip.run(data, ("1h", "4h"), now_ms=t["ms"], assets=["BTCUSDT"], fetch=fake,
+                 sleep=lambda s: None, clock=lambda: t["ms"])
+    assert rep["clipped"] == {"BTCUSDT@4h": 8 * 6}
+    assert stamps == [["BTCUSDT_4h"]]                      # no manifest write after the stop
+    assert [f["cell"] for f in rep["failed"]] == ["BTCUSDT@1h"]
+    assert "past the stop time 07:58" in rep["failed"][0]["reason"]
+    row = next(r for r in rep["cells"] if r["cell"] == "BTCUSDT@1h")
+    assert row["status"] == "clip_deferred" and row["clipped"] == 0
+    path = data / "BTCUSDT_1h.csv"                          # untouched: unclipped, entry matches
+    assert path.read_text().splitlines()[1].startswith("2021-06-10 00:00:00")
+    assert not list(data.glob("*.tmp"))
+    assert _manifest(data)["BTCUSDT_1h"]["sha256"] == _sha(path)
+
+
+def test_a_restamp_failure_is_clipped_manifest_stale_with_the_true_row_count(tmp_path, monkeypatch):
+    fake = Fake(starts={("BTCUSDT", "1h"): "2021-06-14 00:00:00"})
+    data = tmp_path / "data"
+    _write_1d(data, "BTCUSDT")
+
+    def boom(d, results):
+        raise OSError("manifest locked")
+
+    monkeypatch.setattr(ip, "update_snapshot_manifest", boom)     # the clip's, not refresh's
+    rep = ip.run(data, ("1h",), now_ms=NOW, assets=["BTCUSDT"], fetch=fake, sleep=lambda s: None)
+    path = data / "BTCUSDT_1h.csv"
+    lines = path.read_text().splitlines()[1:]
+    assert lines[0].startswith("2021-06-18 00:00:00")             # the file IS clipped
+    assert rep["clipped"] == {"BTCUSDT@1h": 96}
+    row = next(r for r in rep["cells"] if r["cell"] == "BTCUSDT@1h")
+    assert row["status"] == "clipped_manifest_stale"
+    assert row["rows"] == len(lines) and row["first_date"] == "2021-06-18 00:00:00"
+    assert rep["fetched"]["BTCUSDT@1h"]["rows"] == len(lines)
+    assert [f["cell"] for f in rep["failed"]] == ["BTCUSDT@1h"]
+    assert "clipped, manifest stale" in rep["failed"][0]["reason"]
+    assert "manifest locked" in rep["failed"][0]["reason"]
+    assert _manifest(data)["BTCUSDT_1h"]["sha256"] != _sha(path)  # stale, and reported as such
+
+
+@pytest.mark.parametrize("flag,value", [("--timeframes", ""), ("--timeframes", " , ,"),
+                                        ("--assets", ""), ("--assets", ",")])
+def test_an_empty_timeframes_or_assets_argument_exits_2(tmp_path, monkeypatch, flag, value):
+    data = tmp_path / "data"
+    data.mkdir()
+    out = tmp_path / "report.json"
+    fake = Fake()
+    monkeypatch.setattr(ip, "fetch_symbol", fake)
+    rc = ip.main(["--data-dir", str(data), "--out", str(out), flag, value,
+                  "--now", "2021-07-10T10:00:00Z"])
+    assert rc == 2 and not out.exists() and fake.calls == []
