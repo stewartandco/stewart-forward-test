@@ -326,10 +326,16 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   ~70 s cold / ~16 s warm (measured 2026-10-19), and the priors are per
   timeframe (`PRIOR_S_BY_TF`, `SCREEN_PRIOR_S_BY_TF`; section "Engine series
   cache"); 1h still costs about 22-25x a 1d candidate, so cost the grid
-  before activating. Artifact storage: screen writes the
-  per-bar `equity.csv` into each bundle, and bundles are committed to the
-  PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
-  tens of KB for 1d, so grid scale means tens of GB. Two explicit Switch 2
+  before activating. Artifact storage (2b-3 D-i3, 2026-10-29): an intraday
+  bundle's committed `equity.csv` holds the UTC DAILY MARKS (`bars.daily_marks`,
+  stamps `YYYY-MM-DD 23:00:00`); the per-bar curve (1.7-2.1 MB each at 1h, against
+  tens of KB for 1d) goes to `equity_bars.csv`, gitignored
+  (`artifacts/*/equity_bars.csv`), never in `commit_list.BUNDLE_FILES`, never in
+  `bundle_hash`'s three names, and pinned by `config.json["equity_bars_sha256"]`
+  (LF-normalised sha, so `artifacts_hash` still binds it). A 1d bundle is byte
+  identical (no new key, no new file; `universe.timeframe` read with `.get`).
+  Readers of `equity.csv` that compare the `date` column must compare `d[:10]`
+  (the diagnose_* scripts do). Two explicit Switch 2
   gates: `gauntlet_stats` has never run end to end on an intraday spec,
   and `tools/intraday_rehearsal.pick_originals`' selection rules (the
   vol_target/vol_percentile picks, one per family) are untested (only

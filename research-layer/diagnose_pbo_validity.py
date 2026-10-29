@@ -73,7 +73,7 @@ def analytic_null(n_configs: int) -> float:
 def train_returns(artifacts_dir: Path, sid: str, cutoff: str) -> list[float]:
     rows = list(csv.reader(
         (artifacts_dir / sid / "equity.csv").open(encoding="utf-8")))[1:]
-    return daily_returns_from_curve([(d, float(e)) for d, e in rows if d <= cutoff])
+    return daily_returns_from_curve([(d, float(e)) for d, e in rows if d[:10] <= cutoff[:10]])
 
 
 def families_of_run(registry: Path, run_id: str) -> dict[str, list[str]]:

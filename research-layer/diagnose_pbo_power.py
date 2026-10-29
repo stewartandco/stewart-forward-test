@@ -74,7 +74,7 @@ def families_of_run(registry: Path, run_id: str) -> dict[str, list[str]]:
 def train_curve(artifacts_dir: Path, sid: str, cutoff: str):
     rows = list(csv.reader(
         (artifacts_dir / sid / "equity.csv").open(encoding="utf-8")))[1:]
-    return [(d, float(x)) for d, x in rows if d <= cutoff]
+    return [(d, float(x)) for d, x in rows if d[:10] <= cutoff[:10]]
 
 
 def main() -> int:

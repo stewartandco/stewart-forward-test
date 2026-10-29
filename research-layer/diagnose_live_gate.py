@@ -73,6 +73,18 @@ def quarantined_with_gauntlet_inputs(registry: Path) -> dict[str, dict]:
     return {s: metrics.get(s, {}) for s, st in state.items() if st == "quarantine"}
 
 
+def train_curve(artifacts_dir: Path, sid: str,
+                cutoff: str) -> list[tuple[str, float]]:
+    """The committed equity.csv up to and including the cutoff DATE. The compare
+    is on the date part: an intraday bundle's daily-mark stamps read
+    'YYYY-MM-DD 23:00:00' (2b-3 D-i3), and as a whole string
+    '2023-12-31 23:00:00' <= '2023-12-31' is False, which dropped the cutoff
+    day. A 1d row is 10 characters, so every 1d result is unchanged."""
+    rows = list(csv.reader(
+        (artifacts_dir / sid / "equity.csv").open(encoding="utf-8")))[1:]
+    return [(d, float(x)) for d, x in rows if d[:10] <= cutoff[:10]]
+
+
 def fmt(t: int | None) -> str:
     return f"{t} d ({t / TRADING_DAYS:.1f}y)" if t else ">40000 d"
 
@@ -95,10 +107,8 @@ def main() -> int:
         # gen-3 verdicts PREDATE the train_sharpe metric, which protocol-v4
         # added, so it is recomputed from the committed equity curve rather
         # than read off the verdict, where it is absent.
-        rows = list(csv.reader(
-            (args.artifacts_dir / sid / "equity.csv").open(encoding="utf-8")))[1:]
         train[sid] = annualized_sharpe(
-            [(d, float(x)) for d, x in rows if d <= args.cutoff])
+            train_curve(args.artifacts_dir, sid, args.cutoff))
     for sid, m in sorted(q.items()):
         star = m.get("expected_max_sharpe")
         print(f"  {sid}  train_sharpe={train[sid]:.4f} (recomputed)  "

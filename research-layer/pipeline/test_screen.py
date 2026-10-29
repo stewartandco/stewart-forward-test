@@ -873,7 +873,9 @@ def test_runner_loads_the_specs_timeframe_not_the_daily_file(tmp_path):
     assert cfg["data_sha256"] == {
         cell_id("ETHUSDT", "4h"): sha256_of(data / "ETHUSDT_4h.csv")}
     # the equity calendar proves which bars were actually simulated
-    rows = list(csv.reader((bundle / "equity.csv").read_text().splitlines()))
+    # (an intraday bundle's equity.csv is daily marks since D-i3; the per-bar
+    # curve is equity_bars.csv)
+    rows = list(csv.reader((bundle / "equity_bars.csv").read_text().splitlines()))
     assert rows[1][0] == four_h[0]["date"]
 
 

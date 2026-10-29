@@ -45,7 +45,7 @@ for line in (ROOT / "registry_log.jsonl").open(encoding="utf-8"):
 
 def train_returns(sid):
     rows = list(csv.reader((ROOT / "artifacts" / sid / "equity.csv").open(encoding="utf-8")))[1:]
-    return daily_returns_from_curve([(d, float(x)) for d, x in rows if d <= CUTOFF])
+    return daily_returns_from_curve([(d, float(x)) for d, x in rows if d[:10] <= CUTOFF[:10]])
 
 
 print(f"protocol-v5 as BUILT: min_distinct={PBO_MIN_DISTINCT} "

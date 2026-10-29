@@ -13,6 +13,13 @@ __pycache__/
 # file here ever genuinely belongs in history.
 data/*.csv
 
+# 2b-3 D-i3: an intraday screen bundle's per-bar equity curve (1.7-2.1 MB each at
+# 1h; the committed equity.csv holds the daily marks). Derived from the pinned
+# data and the engine, and config.json carries its sha256 (equity_bars_sha256),
+# so it is verifiable and regenerable, never the record. Not in
+# commit_list.BUNDLE_FILES, so the loop never stages it either.
+artifacts/*/equity_bars.csv
+
 # SP4 Task P1: content-addressed sim cache for gauntlet's registry-wide
 # clustering re-simulations (pipeline/simcache.py). Purely derived -- every
 # entry is reproducible from the registry, the pinned data and engine.py's
