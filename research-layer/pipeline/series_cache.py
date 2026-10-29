@@ -180,8 +180,9 @@ def _checksum(inputs_b: bytes, values: array, none_prefix: int) -> str:
 def _parse_blob(blob: bytes) -> tuple[str, _Entry] | None:
     """(stored key repr, entry) when `blob` is a well-formed entry, else None
     for ANY doubt: a parse error, a missing field, a wrong dtype/shape, a
-    length inconsistency or a checksum mismatch. The one parse behind both
-    `_load` (a None is a miss) and `prune` (a None is a corrupt file)."""
+    length inconsistency or a checksum mismatch. `_load`'s parse (a None is a
+    miss); `prune` no longer calls it (it reads an entry's key only, via
+    `_read_key`)."""
     try:
         with np.load(io.BytesIO(blob), allow_pickle=False) as z:
             inputs = z["inputs"]

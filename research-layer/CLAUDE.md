@@ -333,15 +333,32 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   then CLIPS each completed file so it never starts before the asset's 1d
   file (SUN's starts 2021-06-18) and re-stamps that cell's snapshot-manifest
   entry; it reports admission rows, feed health, holes, failures and timing
-  per cell (`--out`). The stop is 07:58 Perth INCLUDING the clip tail (a cell
-  that needs a clip writes nothing at or after 07:58: `clip_deferred`, a
-  re-run after 08:40 clips it), and it refuses to START 07:58-08:40 (exit 2;
-  `--now` is for tests). A 418 or a RateLimited stops it at once (the rest are
-  `aborted` rows). A `clip_failed` cell (file still starts before the 1d
-  file) is a report row, not a stop: re-run until there are zero before the
-  data is used. A clip whose manifest re-stamp fails is
-  `clipped_manifest_stale` (file clipped, entry stale: re-stamp by hand or
-  refetch). It DELIBERATELY reads `cells.ACTIVE_CELLS` assets, not
+  per cell (`--out`). The stop is the EARLIER of the next 07:58 Perth and
+  20:00 Perth of the run day, INCLUDING the clip tail (a cell that needs a clip
+  writes nothing at or after the stop: `clip_deferred`, a re-run after 08:40
+  clips it), and it refuses to START 07:58-08:40 (exit 2; `--now` is for
+  tests). A cold full run takes about 45 min (2,542 s measured): on the live
+  tree START IT BY 18:30 (the tool stops at 20:00 whatever the clock, and a
+  start at or after 20:00 does nothing and reports every cell `aborted`). A 418
+  or a RateLimited stops it at once (the rest are `aborted` rows). A
+  `clip_failed` cell (file still starts before the 1d file) is a report row,
+  not a stop: re-run until there are zero before the data is used. A clip
+  whose manifest re-stamp fails is `clipped_manifest_stale` (file clipped,
+  entry stale): a plain re-run HEALS it, because `refresh` re-stamps every cell
+  it completes from the file on disk (`fetch_symbol` returns the on-disk
+  sha256/rows/first_date even when it adds no bar) and the clip then finds
+  nothing to drop; check the re-run's report shows the cell `fetched`, and
+  never hand-edit the manifest or refetch to repair it. **A deleted intraday
+  file is recreated ONLY with `tools.intraday_prefetch`, never with
+  `crypto_refresh` (the 08:02 `33_CryptoGridRefresh` after Switch 2),
+  `crypto_data fetch` or `quarantine --fetch-owed`:** `fetch_symbol` on a
+  missing file starts at bar 0, so those bring SUN's pre-2021-06-18 bars back,
+  and only this tool enforces "an intraday file never starts before its 1d
+  file" (the clip); neither admission nor feed health detects a violation.
+  Plan 5 adds a guard (a clip in the refresh path, or an admission rule).
+  The report's `attempts` are FETCH CALLS, not HTTP requests (a cold cell costs
+  about ceil(rows/1000) requests). It DELIBERATELY reads `cells.ACTIVE_CELLS`
+  assets, not
   `active_cells()`, so an `EXCLUDED_CELLS` cell is still fetched: the
   admission rows it produces are what decides the exclusions. A hand run
   leaves the tracked manifest modified on the shared tree, as
@@ -360,8 +377,13 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   evictions, bars and files held) after a run; hit rate and peak RSS at scale
   are (Task 10 measures). Daily cells never use it (`_daily_bars` rewrites
   dates in place). Residual: a same-size rewrite inside one filesystem
-  timestamp tick in the same process would be served stale; production files
-  are written by another process earlier. Tests: `test_quarantine_intraday.py`.
+  timestamp tick in the same process would be served stale. The NTFS mtime
+  comes from the system clock tick (up to about 15 ms), not 100 ns, so the
+  window is wider than it looks; it is safe because the only writer of an
+  intraday file, `fetch_symbol`, only APPENDS and never re-serves a bar, so a
+  same-size rewrite is a byte-identical rewrite (and production files are
+  written by another process earlier). Anyone adding a second writer of
+  intraday files must re-read this. Tests: `test_quarantine_intraday.py`.
 - **The intraday path is dormant (crypto is ACTIVE at 1d only since Switch 1,
   2026-10-17):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets x `("1d",)`;
   the five intraday timeframes stay declared and unswept until Switch 2 (a
@@ -378,8 +400,10 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   timeframe (`PRIOR_S_BY_TF`, `SCREEN_PRIOR_S_BY_TF`; section "Engine series
   cache"); 1h still costs about 22-25x a 1d candidate, so cost the grid
   before activating. Artifact storage (2b-3 D-i3, 2026-10-29): an intraday
-  bundle's committed `equity.csv` holds the UTC DAILY MARKS (`bars.daily_marks`,
-  stamps `YYYY-MM-DD 23:00:00`); the per-bar curve (size per bundle at 1h:
+  bundle's committed `equity.csv` holds the UTC DAILY MARKS (`bars.daily_marks`;
+  each row keeps the day's LAST bar's stamp: `YYYY-MM-DD 23:00:00` at 1h,
+  `20:00:00` at 4h, `12:00:00` at 12h, an earlier stamp on a partial last day;
+  the `[:10]` date compares are right for all three); the per-bar curve (size per bundle at 1h:
   (Task 10 measures); tens of KB for 1d) goes to `equity_bars.csv`, gitignored
   (`artifacts/*/equity_bars.csv`), never in `commit_list.BUNDLE_FILES`, never in
   `bundle_hash`'s three names, and pinned by `config.json["equity_bars_sha256"]`
@@ -1527,7 +1551,9 @@ per window per bar; the percentile is an exact incremental one.
   possible (a locked file on Windows survives the failed unlink; the cost is a
   recompute). It then CAPS the disk: if the survivors exceed `MAX_DISK_BYTES`
   (20 GiB) it deletes the oldest by mtime until at or under, with the same
-  re-stat guard for a replaced file. The 08:20 recorder run prints
+  re-stat guard for a replaced file. The cap orders by WRITE mtime: a read does
+  not refresh it, so it removes the least recently WRITTEN entries, not the
+  least recently used. The 08:20 recorder run prints
   `seriescache: pruned N tmp, N stale-rev, N corrupt, N capped (K kept)`
   when anything was removed, so a cap hit is visible there
   (`capped_removed`); `kept` and `bytes_kept` are POST-cap. Disk used at 1h
@@ -2003,8 +2029,10 @@ unusable file is one `feed_hole` "cannot scan" item).
   loop's window) follows; `CLASSES` is untouched (the cell stays declared) and
   only the sweep, hence the trial denominator, shrinks. With it empty
   `active_cells` is byte-for-byte the plain assets x timeframes product.
-  Import check (`assert_excluded_cells_valid`, run at import, declared BEFORE
-  `assert_retired_cells_valid` because that calls `active_cells`): each key
+  Import check (`assert_excluded_cells_valid`, run at import AFTER
+  `assert_retired_cells_valid`; what must be declared BEFORE that one is the
+  `EXCLUDED_CELLS` constant, because it calls `active_cells`, which reads the
+  constant): each key
   well-formed, a DECLARED cell of a declared class, and not also in
   `RETIRED_CELLS`. It accepts ANY declared cell, including one outside the
   current gate (`X@1h` while the gate is 1d only is a silent no-op); plan 5 may

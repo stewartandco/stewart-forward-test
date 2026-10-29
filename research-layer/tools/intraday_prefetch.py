@@ -25,22 +25,36 @@ its manifest entry are left exactly as refresh wrote them. One failure is
 different: if the file WAS replaced and the manifest re-stamp then raises, the
 file is clipped (its true row count is reported, `clipped` names it) but its
 manifest entry is stale (still refresh's pre-clip sha256/rows/first_date);
-that cell is `clipped_manifest_stale` and a `failed` row, and a re-run fixes
-nothing by itself (the clip finds nothing to drop), so the entry must be
-re-stamped by hand or the file refetched.
+that cell is `clipped_manifest_stale` and a `failed` row. A plain re-run
+HEALS it: `refresh` re-stamps every cell it completes from the file on disk
+(`fetch_symbol` returns the on-disk sha256/rows/first_date even when it adds no
+bar, and refresh writes them to the manifest in its `finally`), and the clip
+then finds nothing to drop. Check that the re-run's report shows the cell
+`fetched`. Never hand-edit the tracked manifest and never refetch to repair it.
 
-THE MORNING WINDOW. `refresh` is given `stop_ms` = 07:58 Perth of the run day
-(the next day's when the run starts at or after 08:40): no attempt starts at
-or after it, so a long run stops cleanly before the 08:02 `33_CryptoGridRefresh`,
-which shares the IP and read-merge-writes the same tracked manifest. The cells
-not reached are `aborted` report rows and a re-run resumes incrementally.
+CELLS. The admitted assets are read from `cells.ACTIVE_CELLS["crypto"]`,
+DELIBERATELY not from `cells.active_cells()`: a cell in `EXCLUDED_CELLS` is
+still fetched, because the admission rows it produces are what decides the
+exclusion. Do not "fix" this to `active_cells()`: that would silently stop
+fetching exactly the cells the exclusion decision needs.
+
+THE STOP TIMES. `refresh` is given `stop_ms` = the EARLIEST of the next 07:58
+Perth (the run day's, or the next day's when the run starts at or after 08:40)
+and 20:00 Perth of the run day (the evening stop: no live-tree write
+20:00-07:00): no attempt starts at or after it, so a long run stops cleanly
+before the 08:02 `33_CryptoGridRefresh`, which shares the IP and
+read-merge-writes the same tracked manifest, and never runs on into the night.
+A cold full run takes about 45 minutes (2,542 s measured), so on the live tree
+start it by 18:30. A start at or after 20:00 has no window left: it fetches and
+writes nothing and reports every cell `aborted`. The cells not reached are
+`aborted` report rows and a re-run resumes incrementally.
 The local tail obeys the same stop: a cell that NEEDS a clip checks the clock
-right before it writes, and at or after 07:58 it writes nothing (no `.tmp`, no
-replace, no manifest write: the tracked manifest is read-merge-written by the
-live refresh at 08:02). That cell is `clip_deferred` and a `failed` row ("clip
-skipped: past the stop time 07:58"); its file is still unclipped, so a re-run
-(after 08:40) fetches nothing new and clips it. A cell that needs no clip is
-only read, never written, and is unaffected.
+right before it writes, and at or after the stop (07:58 or 20:00) it writes
+nothing (no `.tmp`, no replace, no manifest write: the tracked manifest is
+read-merge-written by the live refresh at 08:02). That cell is `clip_deferred`
+and a `failed` row ("clip skipped: past the stop time HH:MM"); its file is still
+unclipped, so a re-run (after 08:40) fetches nothing new and clips it. A cell
+that needs no clip is only read, never written, and is unaffected.
 The CLI refuses (exit 2) to START between 07:58 and 08:40 Perth unless `--now`
 is given (tests); the zone is fixed UTC+8 as in `crypto_refresh`.
 
@@ -57,7 +71,9 @@ REPORT (`run`'s dict, JSON-serialisable):
   cells        one row per cell in run order (coarsest timeframe first per
                asset): {cell, status fetched|failed|clip_failed|clip_deferred|
                clipped_manifest_stale|aborted,
-               attempts (fetch calls; each pages 1000 klines per request),
+               attempts (FETCH CALLS, not HTTP requests: each call pages 1000
+               klines per request, so a cold cell costs about ceil(rows/1000)
+               requests),
                seconds (time in fetch), rows, first_date, last_date, clipped,
                reason}
   fetched      {cell: {rows, first_date, last_date}} for every cell refresh
@@ -69,7 +85,8 @@ REPORT (`run`'s dict, JSON-serialisable):
   admission    crypto_refresh.admission_problems over the cell list
   feed_health  feed_hole / feed_stale items (holes for every cell with a file,
                stale only for cells fetched OK)
-  aborted      [{cell, reason}] cells never attempted (ban, rate limit, 07:58)
+  aborted      [{cell, reason}] cells never attempted (ban, rate limit, the
+               07:58 or 20:00 stop)
   elapsed_s    wall seconds
   bytes_by_tf  {tf: total file bytes of that timeframe's files after the run}
 
@@ -220,7 +237,8 @@ def clip_to_daily_start(data_dir: Path, asset: str, tf: str, *, sleep=time.sleep
     Nothing to drop = the file is not touched and the manifest not re-stamped.
     Otherwise: validate, write `.tmp`, replace (with the retry), then re-stamp
     the cell's manifest entry (sha256 / rows / first_date / last_date of the
-    file now on disk). Any failure leaves the CSV as it was and no `.tmp`.
+    file now on disk). Any failure BEFORE the replace leaves the CSV as it was and
+    no `.tmp` (a failed re-stamp comes after the replace: the CSV WAS replaced).
     Raises FileNotFoundError when there is no 1d anchor, ValueError when the
     clip would empty the file (both before any write), and ManifestStale when
     the file was replaced but the re-stamp failed (the clip DID happen).

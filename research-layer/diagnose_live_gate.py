@@ -76,10 +76,11 @@ def quarantined_with_gauntlet_inputs(registry: Path) -> dict[str, dict]:
 def train_curve(artifacts_dir: Path, sid: str,
                 cutoff: str) -> list[tuple[str, float]]:
     """The committed equity.csv up to and including the cutoff DATE. The compare
-    is on the date part: an intraday bundle's daily-mark stamps read
-    'YYYY-MM-DD 23:00:00' (2b-3 D-i3), and as a whole string
-    '2023-12-31 23:00:00' <= '2023-12-31' is False, which dropped the cutoff
-    day. A 1d row is 10 characters, so every 1d result is unchanged."""
+    is on the date part: an intraday bundle's daily-mark stamp is the day's
+    LAST bar's stamp (2b-3 D-i3: 'YYYY-MM-DD 23:00:00' at 1h, 20:00:00 at 4h,
+    12:00:00 at 12h), and as a whole string '2023-12-31 23:00:00' <=
+    '2023-12-31' is False, which dropped the cutoff day. A 1d row is 10
+    characters, so every 1d result is unchanged."""
     rows = list(csv.reader(
         (artifacts_dir / sid / "equity.csv").open(encoding="utf-8")))[1:]
     return [(d, float(x)) for d, x in rows if d[:10] <= cutoff[:10]]
