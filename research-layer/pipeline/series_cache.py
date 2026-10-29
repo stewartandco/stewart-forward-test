@@ -78,10 +78,15 @@ PRUNE (`prune`, ledger ruling, design s3.3 "size bounded and prunable"): the
 quarantine recorder calls it ONCE per process run, on the cache it builds,
 before the first date is simulated. It removes `*.tmp` files older than an hour
 (a writer killed between write and `os.replace`), entries stored under another
-ENGINE_REV (unreachable, never served) and files `_load` would call corrupt
-(`_parse_blob`, the one parse; `_load` treats those as a MISS and the next write
-heals them). It does nothing on a read-only cache or an absent directory and
-never raises (a per-file error leaves that file alone).
+ENGINE_REV (unreachable, never served) and entries whose `key` member cannot be
+read as a 4-tuple literal. Since 2b-3 D-i (Switch 2 gates 1-2) it reads the
+`key` member ONLY (`_read_key`), never an entry's payload or checksum: at 1h
+scale a payload read per entry per run is GBs of I/O. A bit flip in the values
+therefore survives prune; `_load` still verifies the checksum, treats it as a
+MISS and the next write heals the file. After that it caps the disk: if the
+surviving entries exceed `max_bytes` (`MAX_DISK_BYTES`, 20 GiB) it deletes the
+oldest by mtime until at or under. It does nothing on a read-only cache or an
+absent directory and never raises (a per-file error leaves that file alone).
 
 IMPORT DIRECTION: this module takes ENGINE_REV from the engine; `engine.py`
 imports SeriesCache only lazily, inside `simulate_asset` (and under
@@ -105,6 +110,10 @@ import numpy as np
 from .engine import ENGINE_REV  # noqa: F401  (a copy at import; see the KEY paragraph above)
 
 CACHE_DIRNAME = "seriescache"
+
+# Disk cap applied by prune (Switch 2 gate 2). E: has 1.3 TB free; the final
+# value is proposed by the sign-off 2 report after the 1h measurement.
+MAX_DISK_BYTES = 20 * 2**30
 
 # One warning line per process, however many caches or writes fail.
 _write_warned = False
@@ -178,6 +187,20 @@ def _parse_blob(blob: bytes) -> tuple[str, _Entry] | None:
             return None
         return stored_key, _Entry(n, inputs_b, none_prefix, vals)
     except Exception:                   # any parse error is a miss, never a raise
+        return None
+
+
+def _read_key(path: Path) -> str | None:
+    """The stored key repr of the entry at `path`, reading ONLY the `key`
+    member of the zip (the zip directory plus that one small member; never
+    `inputs`, `values` or the checksum). None on any error. The file is closed
+    before this returns: a handle left open would make a writer's `os.replace`
+    onto it fail on Windows."""
+    try:
+        with open(path, "rb") as fh:
+            with np.load(fh, allow_pickle=False) as z:
+                return str(z["key"])
+    except Exception:
         return None
 
 
@@ -268,7 +291,8 @@ class SeriesCache:
     # ---------------------------------------------------------------- prune
 
     def prune(self, *, now: float | None = None,
-              tmp_max_age_s: float = 3600.0) -> dict:
+              tmp_max_age_s: float = 3600.0,
+              max_bytes: int | None = MAX_DISK_BYTES) -> dict:
         """Housekeeping (ledger ruling, design s3.3 "size bounded and
         prunable"). Under the cache directory it deletes
           (a) `*.tmp` files older than `tmp_max_age_s` by mtime: leftovers of
@@ -277,21 +301,30 @@ class SeriesCache:
           (b) entry files (`*.npz`) stored under a different ENGINE_REV than
               the current one (read at call time): a bumped revision makes
               them unreachable, never served;
-          (c) entry files that cannot be parsed as an entry. `_load` treats
-              the same file as a MISS and the next write heals it by
-              replacement; prune removes it sooner. Same parse (`_parse_blob`).
+          (c) entry files whose `key` member cannot be read, or is not a
+              4-tuple literal. Only the key is read (`_read_key`): never an
+              entry's payload, never its checksum (2b-3 D-i, Switch 2 gate 1).
+              A bit flip in the values survives prune; `_load` still verifies
+              the checksum, treats the entry as a MISS and the next write
+              heals it;
+          (d) after (a)-(c), if the kept entries total more than `max_bytes`
+              (None disables the cap), the oldest by `st_mtime_ns` until the
+              total is at or under it (2b-3 D-i, Switch 2 gate 2).
         Returns {"tmp_removed", "stale_rev_removed", "corrupt_removed",
-        "kept"}. A no-op returning zeros on a read-only cache or an absent
-        directory. A per-file error (vanished, sharing violation, unreadable
-        right now) is swallowed and that file is left alone; prune never
-        raises. An entry whose (mtime_ns, size) changed between the read and
-        the unlink was replaced by a writer and is left alone too. A key whose
-        repr is not a Python literal (e.g. nan/inf in params) cannot be read
-        back by `_stored_rev`, so it is treated as corrupt (counted under
+        "capped_removed", "kept", "bytes_kept"}; `kept` and `bytes_kept`
+        describe the entries left on disk AFTER the cap. A no-op returning
+        zeros on a read-only cache or an absent directory. A per-file error
+        (vanished, sharing violation, unreadable right now) is swallowed and
+        that file is left alone; prune never raises. An entry whose
+        (mtime_ns, size) changed between the scan and the unlink was replaced
+        by a writer and is left alone too (for the cap it then counts at its
+        new size, and is not a candidate again). A key whose repr is not a
+        Python literal (e.g. nan/inf in params) cannot be read back by
+        `_stored_rev`, so it is treated as corrupt (counted under
         stale_rev_removed) and pruned on every run; all current params are
         ints and strings."""
         out = {"tmp_removed": 0, "stale_rev_removed": 0, "corrupt_removed": 0,
-               "kept": 0}
+               "capped_removed": 0, "kept": 0, "bytes_kept": 0}
         if self.read_only or self.directory is None:
             return out
         try:
@@ -299,6 +332,7 @@ class SeriesCache:
         except Exception:
             return out
         t_now = time.time() if now is None else now
+        survivors: list = []            # (mtime_ns, name, path, size)
         for name in names:
             path = self.directory / name
             try:
@@ -308,14 +342,14 @@ class SeriesCache:
                         out["tmp_removed"] += 1
                 elif name.endswith(".npz"):
                     st0 = path.stat()
-                    blob = path.read_bytes()
-                    parsed = _parse_blob(blob)
-                    if parsed is None:
+                    key_repr = _read_key(path)
+                    rev = _stored_rev(key_repr) if key_repr is not None else None
+                    if key_repr is None or rev is None:
                         reason = "corrupt_removed"
-                    elif _stored_rev(parsed[0]) != ENGINE_REV:
+                    elif rev != ENGINE_REV:
                         reason = "stale_rev_removed"
                     else:
-                        out["kept"] += 1
+                        survivors.append((st0.st_mtime_ns, name, path, st0.st_size))
                         continue
                     # a writer may have replaced the file since it was read;
                     # the verdict is about the old bytes, so a changed file
@@ -327,6 +361,28 @@ class SeriesCache:
                     out[reason] += 1
             except Exception:           # vanished, sharing violation, ...
                 continue
+        total = sum(sv[3] for sv in survivors)
+        kept = len(survivors)
+        if max_bytes is not None and total > max_bytes:
+            for mtime_ns, name, path, size in sorted(survivors):
+                if total <= max_bytes:
+                    break
+                try:
+                    st1 = path.stat()
+                    if (st1.st_mtime_ns, st1.st_size) != (mtime_ns, size):
+                        total += st1.st_size - size   # replaced: new size, kept
+                        continue
+                    path.unlink()
+                except Exception:       # vanished (gone: no longer counted)
+                    if not path.exists():
+                        total -= size
+                        kept -= 1
+                    continue
+                total -= size
+                kept -= 1
+                out["capped_removed"] += 1
+        out["kept"] = kept
+        out["bytes_kept"] = total
         return out
 
     # ----------------------------------------------------------------- disk
