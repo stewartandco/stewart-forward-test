@@ -95,7 +95,9 @@ therefore survives prune; `_load` still verifies the checksum, treats it as a
 MISS and the next write heals the file. After that it caps the disk: if the
 surviving entries exceed `max_bytes` (`MAX_DISK_BYTES`, 20 GiB) it deletes the
 oldest by mtime until at or under. It does nothing on a read-only cache or an
-absent directory and never raises (a per-file error leaves that file alone).
+absent directory and never raises (a file that vanishes or whose stat or unlink
+fails is left alone; an entry whose key cannot be read for any reason is treated
+as corrupt and unlinked if possible).
 
 IMPORT DIRECTION: this module takes ENGINE_REV from the engine; `engine.py`
 imports SeriesCache only lazily, inside `simulate_asset` (and under
