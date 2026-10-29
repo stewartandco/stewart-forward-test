@@ -87,6 +87,23 @@ def test_an_intraday_bundle_carries_daily_marks(tmp_path):
     assert [(r[0], float(r[1])) for r in rows[1:]] == daily_marks(eq)
 
 
+def test_out_of_order_intraday_equity_raises_before_equity_bars_is_written(tmp_path):
+    """T5 deferred minor: the daily marks are computed BEFORE any equity file is
+    written, so a daily_marks ValueError leaves no equity_bars.csv, no
+    equity.csv and no config.json behind (a bundle with a per-bar file and no
+    config pin is the partial state this prevents)."""
+    eq = _hourly_equity(2)
+    eq[30], eq[31] = eq[31], eq[30]                            # out of time order
+    with pytest.raises(ValueError, match="out of order"):
+        screen.write_artifacts(tmp_path, _intraday_spec(),
+                               {"trades": [], "equity": eq}, "2023-12-31",
+                               {"BTCUSDT_1h": "d"}, {"BTCUSDT_1h": "e"})
+    bundle = tmp_path / "bbbbbbbbbbbbbbbb"
+    assert not (bundle / "equity_bars.csv").exists()
+    assert not (bundle / "equity.csv").exists()
+    assert not (bundle / "config.json").exists()
+
+
 def test_equity_bars_holds_todays_per_bar_rows_and_the_config_pins_it(tmp_path):
     eq = _hourly_equity(3)
     b = screen.write_artifacts(tmp_path, _intraday_spec(),

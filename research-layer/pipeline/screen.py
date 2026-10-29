@@ -432,9 +432,12 @@ def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
     # key. `.get`, not ["timeframe"]: an older spec carries no timeframe.
     intraday = spec["universe"].get("timeframe", "1d") != "1d"
     if intraday:
+        # the marks first: a daily_marks ValueError (out-of-order input) must
+        # leave no equity_bars.csv behind
+        marks = _daily_marks(result["equity"])
         _write_equity(bundle / "equity_bars.csv", result["equity"])
         config["equity_bars_sha256"] = _lf_sha256(bundle / "equity_bars.csv")
-        _write_equity(bundle / "equity.csv", _daily_marks(result["equity"]))
+        _write_equity(bundle / "equity.csv", marks)
     else:
         _write_equity(bundle / "equity.csv", result["equity"])
     (bundle / "config.json").write_text(json.dumps(
