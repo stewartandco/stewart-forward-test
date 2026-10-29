@@ -485,29 +485,44 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     decisions_before = _n_decisions(registry)
     catchup_secs = 0.0
     date_secs: dict[str, float] = {}
+    picked_set = set(picked)
+    # Seconds per strategy-day PER TIMEFRAME (final review I1): each picked
+    # twin's observe_day call is timed on its own and filed under its spec's
+    # timeframe, so the figure is measured, never apportioned from a date
+    # pass that mixes timeframes. The hook is undone before anything else runs.
+    tf_secs: dict[str, list[float]] = {t: [] for t in used_tfs}
+    real_observe = q.observe_day
+
+    def timed_observe(spec, *a, **kw):
+        t0 = time.perf_counter()
+        result = real_observe(spec, *a, **kw)
+        if spec.get("strategy_id") in picked_set:
+            tf_secs.setdefault(spec["universe"].get("timeframe", "1d"),
+                               []).append(time.perf_counter() - t0)
+        return result
     if not blocked:
-        for k in range(MAX_CATCHUP_RUNS):
-            rc, text, secs = _captured(q.run, base + ["--catch-up"], date_secs)
-            catchup_secs += secs
-            catchup_rcs.append(rc)
-            log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
-                       f"{secs:.1f}s)\n{text}")
-            if "catch-up: nothing owed" in text:
-                nothing_owed = True
-                break
-            if rc != 0:
-                break
+        q.observe_day = timed_observe
+        try:
+            for k in range(MAX_CATCHUP_RUNS):
+                rc, text, secs = _captured(q.run, base + ["--catch-up"], date_secs)
+                catchup_secs += secs
+                catchup_rcs.append(rc)
+                log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
+                           f"{secs:.1f}s)\n{text}")
+                if "catch-up: nothing owed" in text:
+                    nothing_owed = True
+                    break
+                if rc != 0:
+                    break
+        finally:
+            q.observe_day = real_observe
     new_rows = _decisions(registry)[decisions_before:]
     strategy_days = len(new_rows)
-    picked_set = set(picked)
     twin_by_date: dict[str, int] = {}
     other_by_date: dict[str, int] = {}
     for r in new_rows:
         book = twin_by_date if r["strategy_id"] in picked_set else other_by_date
         book[r["date"]] = book.get(r["date"], 0) + 1
-    only_twins = sorted(d for d in twin_by_date if d not in other_by_date)
-    only_secs = sum(date_secs.get(d, 0.0) for d in only_twins)
-    only_rows = sum(twin_by_date[d] for d in only_twins)
 
     rc_rev, review_text, _ = _captured(q.run, base + ["--review"])
     rc_gate, gate_text, _ = _captured(livegate.run, [
@@ -610,12 +625,12 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
           f"strategy-day(s) chained (every quarantined strategy on the copy)",
           f"- seconds per strategy-day: {per_day} (wall clock including chain "
           f"reads and snapshots, so an upper bound)",
-          f"- {tf} only: {len(only_twins)} date(s) on which ONLY the picked {tf} "
-          f"twins recorded took {only_secs:.1f}s for {only_rows} {tf} "
-          f"strategy-day(s) = "
-          + (f"{only_secs / only_rows:.1f}" if only_rows else "n/a")
-          + f" seconds per {tf} strategy-day (per-date pass time, chain reads "
-          "included)",
+          *[f"- {t} timed: {len(tf_secs[t])} strategy-day(s), "
+            f"{sum(tf_secs[t]):.3f}s total, "
+            + (f"{sum(tf_secs[t]) / len(tf_secs[t]):.3f}" if tf_secs[t] else "n/a")
+            + f"s mean per strategy-day (each picked {t} twin's simulation "
+            "timed on its own; chain reads and snapshots excluded)"
+            for t in used_tfs],
           f"- rows chained by OTHER quarantined strategies on the copy: "
           f"{sum(other_by_date.values())} over {len(other_by_date)} date(s) "
           f"({', '.join(f'{d}: {n}' for d, n in sorted(other_by_date.items())) or 'none'})",

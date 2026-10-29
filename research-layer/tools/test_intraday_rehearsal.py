@@ -229,7 +229,7 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
     assert f"| 12 | 12 | {n_entries} | {n_exits} |" in row
     assert "catch-up: nothing owed" in text
     assert "catch-up runs: 3 " in text                       # 10 + 2 + nothing owed
-    assert "1h only: 12 date(s)" in text and "for 12 1h strategy-day(s)" in text
+    assert "- 1h timed: 12 strategy-day(s)" in text
     for d in owed:                                           # timed per date
         assert any(l.startswith(f"- {d}: ") and l.endswith(", 1, 0")
                    for l in text.splitlines())
@@ -409,7 +409,7 @@ def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
     assert {r["strategy_id"] for r in rows} == {sid1}
     assert sorted(r["date"] for r in rows) == [daily[i]["date"] for i in range(151, 163)]
     assert all(r["asset"] == "ETHUSD" for r in rows)
-    assert "1 1d twin(s)" in text and "1d only: 12 date(s)" in text
+    assert "1 1d twin(s)" in text and "- 1d timed: 12 strategy-day(s)" in text
     exits = sum(1 for r in rows if r["action"] == "exit")   # daily rows: action
     assert exits > 0                                         # the gate check bites
     entries = sum(1 for r in rows if r["action"] in ("enter_long", "enter_short"))
@@ -619,6 +619,48 @@ def test_quarantine_moves_twins_of_every_requested_timeframe(tmp_path, monkeypat
     for tf in ("1h", "4h", "12h"):
         assert f"| `{by_tf[tf]}`" in text
     assert f"| `{by_tf['1d']}`" not in text
+
+
+def test_quarantine_report_times_each_timeframe_separately(tmp_path, monkeypatch):
+    """Final review I1: seconds per strategy-day come out PER TIMEFRAME, each
+    measured around that timeframe's own simulations (never one pooled or
+    apportioned figure). A slow 4h simulation must not leak into the 1h line."""
+    import re
+    import time
+    from pipeline import crypto_data
+    from pipeline import quarantine as q
+    reg, twins_path, data, entered, owed, fake_fetch, calls, _ = _multi_tf_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    real = q.observe_day
+
+    def slow_4h(spec, *a, **kw):
+        if spec["universe"]["timeframe"] == "4h":
+            time.sleep(0.2)
+        return real(spec, *a, **kw)
+    monkeypatch.setattr(q, "observe_day", slow_4h)
+    twins = json.loads(twins_path.read_text())
+    by_tf = {t["tf"]: s for s, t in twins.items()}
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", entered, "--n", "1", "--timeframes", "1h,4h",
+                  "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert rc == 0, text
+    assert q.observe_day is slow_4h                          # the timing hook is undone
+    line = re.compile(r"^- (\S+) timed: (\d+) strategy-day\(s\), ([\d.]+)s total, "
+                      r"([\d.]+)s mean per strategy-day", re.M)
+    got = {m.group(1): (int(m.group(2)), float(m.group(3)), float(m.group(4)))
+           for m in line.finditer(text)}
+    assert set(got) == {"1h", "4h"}                          # one line per timeframe
+    rows = [e["payload"] for e in Registry(reg.log_path).entries()
+            if e["entry_type"] == "quarantine_decision"]
+    for tf in ("1h", "4h"):
+        n_rows = len([r for r in rows if r["strategy_id"] == by_tf[tf]])
+        assert got[tf][0] == n_rows == len(owed), tf         # counts add up
+    assert got["4h"][2] >= 0.2 and got["4h"][1] >= 0.2 * len(owed)
+    assert got["1h"][2] < got["4h"][2]                       # measured, not apportioned
+    assert "12h/4h/1h only" not in text and " only: " not in text   # pooled line gone
 
 
 def test_quarantine_timeframes_flag_picks_just_those(tmp_path, monkeypatch):
