@@ -51,6 +51,15 @@ paper over it). Values live in an `array('d')`, so reading them back as Python
 floats gives exactly the stored bits (inf included), and 8 bytes a bar instead
 of a boxed float.
 
+IN-PROCESS BOUND (2b-3 D-i, Switch 2 gate 3): `_mem` is an OrderedDict used as
+an LRU, bounded in bytes per process (`MEM_MAX_BYTES`, 1 GiB; an entry weighs
+`len(inputs_b) + 8 * len(values)`). Every `get` moves its key to the end; after
+an insert the oldest entries are evicted until the total fits, never the one
+just inserted. Eviction changes only what is resident: an evicted key is
+adopted back from disk (counted a hit, as any disk adopt) or recomputed, and
+the values served are the same bits either way. `stats["evictions"]` counts
+them.
+
 DISK FORMAT (builder's choice, 2026-10-17): one `<sha256(repr(key))>.npz` per
 key under `directory`, the simcache.py precedent. Fields: `inputs` (float64),
 `values` (float64), `none_prefix` (int64), `key` (the key's repr, checked on
@@ -102,6 +111,7 @@ import sys
 import time
 import uuid
 from array import array
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -114,6 +124,10 @@ CACHE_DIRNAME = "seriescache"
 # Disk cap applied by prune (Switch 2 gate 2). E: has 1.3 TB free; the final
 # value is proposed by the sign-off 2 report after the 1h measurement.
 MAX_DISK_BYTES = 20 * 2**30
+
+# In-process store budget per process (Switch 2 gate 3): the worker's 6
+# processes may hold up to 6 GiB between them; the sign-off 2 report states it.
+MEM_MAX_BYTES = 2**30
 
 # One warning line per process, however many caches or writes fail.
 _write_warned = False
@@ -217,15 +231,45 @@ def _stored_rev(key_repr: str):
 
 
 class SeriesCache:
-    def __init__(self, directory: Path | None = None, *, read_only: bool = False):
+    def __init__(self, directory: Path | None = None, *, read_only: bool = False,
+                 mem_max_bytes: int | None = MEM_MAX_BYTES):
         self.directory = Path(directory) if directory is not None else None
         self.read_only = read_only
-        self._mem: dict = {}
-        self._stats = {"hits": 0, "extends": 0, "misses": 0, "write_errors": 0}
+        self._mem_max_bytes = mem_max_bytes     # None = unbounded
+        self._mem: OrderedDict = OrderedDict()  # LRU: oldest use first
+        self._mem_bytes = 0                     # sum of _entry_size over _mem
+        self._stats = {"hits": 0, "extends": 0, "misses": 0, "write_errors": 0,
+                       "evictions": 0}
 
     @property
     def stats(self) -> dict:
         return dict(self._stats)
+
+    # ------------------------------------------------------- in-process LRU
+
+    @staticmethod
+    def _entry_size(entry: _Entry) -> int:
+        return len(entry.inputs_b) + 8 * len(entry.values)
+
+    def _mem_put(self, key: tuple, entry: _Entry) -> None:
+        """Store `entry` as the most recently used under `key`, REPLACING any
+        entry already there (its size leaves the total first), then evict
+        least-recently-used entries until the total is within the budget. The
+        entry just stored is never evicted, even alone over budget. Eviction
+        only decides what stays in memory: get() returns the same values on
+        every path (an evicted key is re-adopted from disk or recomputed,
+        both exact)."""
+        old = self._mem.pop(key, None)
+        if old is not None:
+            self._mem_bytes -= self._entry_size(old)
+        self._mem[key] = entry
+        self._mem_bytes += self._entry_size(entry)
+        if self._mem_max_bytes is None:
+            return
+        while self._mem_bytes > self._mem_max_bytes and len(self._mem) > 1:
+            _, victim = self._mem.popitem(last=False)
+            self._mem_bytes -= self._entry_size(victim)
+            self._stats["evictions"] += 1
 
     # ------------------------------------------------------------------ get
 
@@ -241,6 +285,8 @@ class SeriesCache:
         req = memoryview(inputs).cast("B")
 
         best = self._mem.get(key)
+        if best is not None:
+            self._mem.move_to_end(key)          # every get is a use
         if best is not None and not self._valid(best, n, req):
             best = None
         if (best is None or best.n < n) and persist:
@@ -248,7 +294,7 @@ class SeriesCache:
             if disk is not None and self._valid(disk, n, req) \
                     and (best is None or disk.n > best.n):
                 best = disk
-                self._mem[key] = disk   # adopt what another process wrote
+                self._mem_put(key, disk)   # adopt what another process wrote
 
         if best is not None and n <= best.n:
             self._stats["hits"] += 1
@@ -264,7 +310,7 @@ class SeriesCache:
             k, vals = _split(compute(0, n), n, had_values=False)
             entry = _Entry(n, inputs.tobytes(), k, vals)
             self._stats["misses"] += 1
-        self._mem[key] = entry
+        self._mem_put(key, entry)
         if persist and not self.read_only:
             self._store(key, entry)
         return self._slice(entry, n)

@@ -811,3 +811,120 @@ def test_max_bytes_none_disables_the_cap(tmp_path):
     out = SeriesCache(d).prune(max_bytes=None)
     assert out["capped_removed"] == 0 and out["kept"] == 3
     assert out["bytes_kept"] == total and all(p.exists() for p in paths)
+
+
+# --------------------------------------- in-process store: byte-bounded LRU
+# 2b-3 D-i, Switch 2 gate 3: `_mem` is an OrderedDict bounded in bytes.
+
+def _entry_bytes(n: int, none_prefix: int = 5) -> int:
+    # the cache's own size rule: len(inputs_b) + 8 * len(values)
+    return 8 * n + 8 * (n - none_prefix)
+
+
+def _mem_key(params):
+    return (KIND, tuple(params), series_cache.ENGINE_REV, CELL)
+
+
+def _tracked_total(cache) -> int:
+    return sum(len(e.inputs_b) + 8 * len(e.values) for e in cache._mem.values())
+
+
+def test_the_memory_budget_default_is_1_gib():
+    assert series_cache.MEM_MAX_BYTES == 2**30
+    assert SeriesCache()._mem_max_bytes == 2**30
+
+
+def test_memory_stays_under_budget(tmp_path):
+    sz = _entry_bytes(100)
+    budget = 2 * sz
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=budget)
+    inputs = make_inputs(100)
+    worst = 0
+    for i in range(6):                          # 6 x sz = 3 x budget
+        get(cache, inputs, params=(10 + i,))
+        worst = max(worst, cache._mem_bytes)
+        assert cache._mem_bytes == _tracked_total(cache)   # the books balance
+    assert worst <= budget + sz                 # the brief's bound
+    assert cache._mem_bytes <= budget           # equal-size entries: tight
+    assert len(cache._mem) == 2
+    assert cache.stats["evictions"] == 4
+
+
+def test_an_evicted_entry_comes_back_bit_identical(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    cache = SeriesCache(d, mem_max_bytes=_entry_bytes(100))   # room for ONE
+    first, _ = get(cache, inputs, params=(10,))
+    get(cache, inputs, params=(20,))            # evicts (10,)
+    assert _mem_key((10,)) not in cache._mem and cache.stats["evictions"] == 1
+    again, spy = get(cache, inputs, params=(10,))
+    assert spy.calls == []                      # adopted from disk, not computed
+    # An adopt from disk is counted exactly as before this change: a hit.
+    assert cache.stats["hits"] == 1 and cache.stats["misses"] == 2
+    assert cache.stats["extends"] == 0
+    assert array("d", [x for x in again if x is not None]).tobytes() \
+        == array("d", [x for x in first if x is not None]).tobytes()
+    assert same(again, first) and same(again, cold(inputs))
+    # Without a directory the evicted entry is simply recomputed, equal.
+    mem_only = SeriesCache(mem_max_bytes=_entry_bytes(100))
+    a1, _ = get(mem_only, inputs, params=(10,))
+    get(mem_only, inputs, params=(20,))
+    a2, spy = get(mem_only, inputs, params=(10,))
+    assert spy.calls == [(0, 100)] and mem_only.stats["misses"] == 3
+    assert same(a1, a2) and same(a2, cold(inputs))
+
+
+def test_lru_order_follows_use(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=2 * _entry_bytes(100))
+    inputs = make_inputs(100)
+    get(cache, inputs, params=(10,))            # A
+    get(cache, inputs, params=(20,))            # B
+    get(cache, inputs, params=(10,))            # touch A: B is now the oldest
+    get(cache, inputs, params=(30,))            # C: evicts B, not A
+    assert list(cache._mem) == [_mem_key((10,)), _mem_key((30,))]
+    assert cache.stats["evictions"] == 1
+
+
+def test_a_single_oversize_entry_is_kept(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=10)
+    inputs = make_inputs(100)
+    out, _ = get(cache, inputs, params=(10,))
+    assert list(cache._mem) == [_mem_key((10,))]          # never evicted alone
+    assert cache._mem_bytes == _entry_bytes(100) > 10
+    assert cache.stats["evictions"] == 0
+    again, spy = get(cache, inputs, params=(10,))
+    assert spy.calls == [] and same(again, out)
+    get(cache, inputs, params=(20,))                      # the newer one stays
+    assert list(cache._mem) == [_mem_key((20,))]
+    assert cache.stats["evictions"] == 1
+
+
+def test_replacing_a_key_does_not_double_count():
+    cache = SeriesCache(mem_max_bytes=None)
+    longest = make_inputs(140)
+    for n in (100, 110, 120, 130, 140):         # the extend path replaces a key
+        get(cache, longest[:n])
+        assert cache._mem_bytes == _entry_bytes(n) == _tracked_total(cache)
+    assert cache.stats["extends"] == 4 and cache.stats["evictions"] == 0
+    assert len(cache._mem) == 1
+
+
+def test_a_disk_adopt_that_replaces_a_key_does_not_double_count(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    longest = make_inputs(140)
+    cache = SeriesCache(d, mem_max_bytes=None)
+    get(cache, longest[:100])                    # memory holds the 100-bar entry
+    get(SeriesCache(d), longest)                 # another process writes 140 bars
+    out, spy = get(cache, longest)               # adopts the longer disk entry
+    assert spy.calls == [] and same(out, cold(longest))
+    assert cache.stats["hits"] == 1
+    assert cache._mem_bytes == _entry_bytes(140) == _tracked_total(cache)
+    assert len(cache._mem) == 1
+
+
+def test_no_budget_means_no_eviction(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=None)
+    inputs = make_inputs(100)
+    for i in range(5):
+        get(cache, inputs, params=(10 + i,))
+    assert len(cache._mem) == 5 and cache.stats["evictions"] == 0
