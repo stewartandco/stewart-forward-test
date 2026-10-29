@@ -3,12 +3,21 @@ intraday spec is refused (degraded intraday_unsupported). The supported path
 is tested in test_quarantine_record_intraday.py."""
 from __future__ import annotations
 
+import copy
 import json
+import os
 
+import pytest
+
+from . import quarantine as quarantine_mod
 from .common import content_id
+from .qcells import complete_days
 from .quarantine import run as quarantine_run
+from .screen import load_bars as _real_load_bars
 from .test_gen3b import argv_for, decisions
+from .test_intraday_statistics import _twin_bars, _twin_spec
 from .test_quarantine_isolation import _quarantine, btc_and_eth_solo, ledger
+from .test_quarantine_record_intraday import _register_quarantined, _write
 
 
 def _unsupported_clone(spec):
@@ -37,16 +46,6 @@ def test_a_non_24x7_intraday_spec_is_skipped_and_reported(tmp_path, capsys):
 
 
 # ---- 2b-3 D-i Task 4: each intraday file is parsed once per process ----
-import copy
-import os
-
-import pytest
-
-from . import quarantine as quarantine_mod
-from .qcells import complete_days
-from .screen import load_bars as _real_load_bars
-from .test_intraday_statistics import _twin_bars, _twin_spec
-from .test_quarantine_record_intraday import _register_quarantined, _write
 
 
 @pytest.fixture(autouse=True)

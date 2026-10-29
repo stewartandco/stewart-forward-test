@@ -600,6 +600,57 @@ def test_other_bars_are_bit_identical(window, exc):
             _bits(_best_tstat(closes, i, [w], None)), i
 
 
+@pytest.mark.parametrize("windows,first_exc", [
+    ([5, 9], ZeroDivisionError),
+    ([9, 5], OverflowError),
+])
+def test_two_faulting_windows_at_one_bar_raise_the_earlier_ones_exception(windows, first_exc):
+    """T3 deferred minor: windows 5 and 9 both fault at the same bar, with
+    DIFFERENT exception types (the last five closes underflow the standard
+    error; the nine-close window also holds four 1e200 closes, so its squared
+    deviation overflows). The reference loop raises the first window's
+    exception in `windows` order; the series path must raise the same one."""
+    closes = _PAD + [1e200, 3e200, 2e200, 5e200] + FAULT_ZDE5 + _PAD
+    i = len(_PAD) + 4 + len(FAULT_ZDE5) - 1
+    assert all(math.isfinite(c) and c > 0 for c in closes)
+    assert _direct(closes, i, 5) == ("exc", ZeroDivisionError)
+    assert _direct(closes, i, 9) == ("exc", OverflowError)
+    cache = SeriesCache()
+    series = [trend_tstat_series(closes, w, cache, None) for w in windows]
+    assert all(_is_nan_bits(s[i]) for s in series)          # both defer to the direct call
+    ref = _raised(lambda: _best_tstat(closes, i, windows, None))
+    new = _raised(lambda: _best_tstat(closes, i, windows, series))
+    assert ref[0] is first_exc
+    assert new == ref
+
+
+def test_a_nan_marker_round_trips_the_disk_bit_identical_and_survives_prune(tmp_path):
+    """T3 deferred minor: the rollback hazard is about a PERSISTED NaN. A cell
+    entry written by one SeriesCache is re-read by a fresh instance as a disk
+    hit (no recompute), the marker bit-identical, and prune keeps it."""
+    closes, i = _padded(FAULT_ZDE5)
+    w = len(FAULT_ZDE5)
+    directory = tmp_path / "seriescache"
+    first = SeriesCache(directory)
+    written = trend_tstat_series(closes, w, first, "BTCUSDT@1h")
+    assert _is_nan_bits(written[i]) and first.stats["misses"] == 1
+    assert any(directory.rglob("*")), "the entry must have been persisted"
+
+    def reread():
+        fresh = SeriesCache(directory)
+        got = trend_tstat_series(closes, w, fresh, "BTCUSDT@1h")
+        assert fresh.stats["hits"] == 1 and fresh.stats["misses"] == 0   # a disk hit
+        return got
+
+    again = reread()
+    assert [_bits(x) for x in again] == [_bits(x) for x in written]
+    assert _is_nan_bits(again[i])
+    report = SeriesCache(directory).prune()
+    assert report["capped_removed"] == 0
+    after_prune = reread()                                   # still there after prune
+    assert [_bits(x) for x in after_prune] == [_bits(x) for x in written]
+
+
 def test_a_true_nan_tstat_is_served_as_nan():
     closes, i = _padded(NAN5)
     w = len(NAN5)
