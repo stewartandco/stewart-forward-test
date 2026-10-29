@@ -359,9 +359,14 @@ class SeriesCache:
         Returns {"tmp_removed", "stale_rev_removed", "corrupt_removed",
         "capped_removed", "kept", "bytes_kept"}; `kept` and `bytes_kept`
         describe the entries left on disk AFTER the cap. A no-op returning
-        zeros on a read-only cache or an absent directory. A per-file error
-        (vanished, sharing violation, unreadable right now) is swallowed and
-        that file is left alone; prune never raises. An entry whose
+        zeros on a read-only cache or an absent directory. A file that
+        vanishes, or whose stat or unlink fails (a sharing violation on a
+        locked file), is swallowed and left alone; prune never raises. An
+        entry whose key cannot be read for ANY reason, an open error included,
+        is treated as corrupt and unlinked if possible (`_read_key` returns
+        None on any error): a file locked on Windows fails the unlink and
+        survives, anywhere else it goes. The cost is a recompute, never a
+        wrong value. An entry whose
         (mtime_ns, size) changed between the scan and the unlink was replaced
         by a writer and is left alone too (for the cap it then counts at its
         new size, and is not a candidate again). A key whose repr is not a

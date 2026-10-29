@@ -690,7 +690,17 @@ def test_prune_never_reads_entry_payloads(tmp_path, monkeypatch):
 
     monkeypatch.setattr(series_cache, "_parse_blob", boom)
     monkeypatch.setattr(Path, "read_bytes", boom)
+    members = []
+    real_getitem = np.lib.npyio.NpzFile.__getitem__
+
+    def spy(self, name):                         # every npz member read
+        members.append(name)
+        return real_getitem(self, name)
+
+    monkeypatch.setattr(np.lib.npyio.NpzFile, "__getitem__", spy)
     out = SeriesCache(d).prune()
+    # the ONLY member prune may touch is "key" (never inputs/values/sha256)
+    assert members and set(members) == {"key"}
     assert (out["stale_rev_removed"], out["corrupt_removed"], out["kept"]) == (1, 1, 1)
     assert out["capped_removed"] == 0
     assert [p.name for p in d.iterdir()] == [_entry_for(d, (20,)).name]

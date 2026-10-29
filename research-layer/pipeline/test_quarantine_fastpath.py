@@ -1414,3 +1414,30 @@ def test_the_finite_price_guard_itself():
     guard([{"date": "d", "close": 1.0}], "X", "2023-01-02")             # absent
     guard([{"date": "d", "open": None, "high": None, "low": None,
             "close": 1.0}], "X", "2023-01-02")                          # None
+
+
+def test_the_recorder_prints_the_prune_line_when_only_the_cap_removed_something(
+        tmp_path, monkeypatch, fresh_series_caches, capsys):
+    """2b-3 D-i: a disk-cap removal must reach the run log even when no tmp,
+    stale-rev or corrupt file went (Task 13 watches `capped_removed`)."""
+    from array import array
+    from .series_cache import SeriesCache
+    bars = _trend_bars()
+    reg, spec, data = _trend_quarantined(tmp_path, bars[-5]["date"])
+    cache_dir = reg.log_path.parent / CACHE_DIRNAME
+    inputs = array("d", [100.0 + i for i in range(30)])
+    SeriesCache(cache_dir).get(
+        "tstat", (20,), "ZZZUSDT@1h", inputs,
+        lambda a, b: [None if i < 5 else float(i) for i in range(a, b)])
+    (entry,) = list(cache_dir.iterdir())
+    real_prune = SeriesCache.prune
+
+    def tight(self, **kw):                      # a 1-byte cap: the entry goes
+        return real_prune(self, max_bytes=1, **kw)
+
+    monkeypatch.setattr(SeriesCache, "prune", tight)
+    assert _catch_up(reg, data) == 0
+    assert not entry.exists()
+    out = capsys.readouterr().out
+    assert out.count("seriescache: pruned") == 1
+    assert "0 tmp, 0 stale-rev, 0 corrupt, 1 capped" in out

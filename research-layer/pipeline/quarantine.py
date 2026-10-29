@@ -179,11 +179,14 @@ def _series_cache(registry_path: Path) -> SeriesCache:
         # drop dead writers' temp files and entries under an old ENGINE_REV.
         # Never raises; says something only when it removed something.
         removed = cache.prune()
+        # capped_removed (the 2b-3 D-i disk cap) is shown too: a cap hit must
+        # be visible in the 08:20 run log.
         if any(removed[k] for k in ("tmp_removed", "stale_rev_removed",
-                                    "corrupt_removed")):
+                                    "corrupt_removed", "capped_removed")):
             print(f"seriescache: pruned {removed['tmp_removed']} tmp, "
                   f"{removed['stale_rev_removed']} stale-rev, "
-                  f"{removed['corrupt_removed']} corrupt "
+                  f"{removed['corrupt_removed']} corrupt, "
+                  f"{removed['capped_removed']} capped "
                   f"({removed['kept']} kept)", flush=True)
     return cache
 
