@@ -288,15 +288,22 @@ def test_a_transient_lock_on_the_clip_is_retried_then_clips(tmp_path, monkeypatc
 
 # ---------------------------------------------------------------- the morning window
 
-def test_stop_ms_is_0758_perth_of_the_run_day_or_the_next_after_0840():
+def test_stop_ms_is_the_earliest_of_2000_today_and_the_next_0758():
+    """Final review M8: 07:58 as before, plus an evening stop at 20:00 Perth of
+    the run day (plan Global Constraints: no live-tree write 20:00-07:00)."""
     def stop(y, mo, d, h, mi):
         now = int(datetime(y, mo, d, h, mi, tzinfo=PERTH).timestamp() * 1000)
         return datetime.fromtimestamp(ip.stop_ms_for(now) / 1000, tz=PERTH)
 
     assert stop(2026, 10, 29, 3, 0) == datetime(2026, 10, 29, 7, 58, tzinfo=PERTH)
     assert stop(2026, 10, 29, 8, 39) == datetime(2026, 10, 29, 7, 58, tzinfo=PERTH)
-    assert stop(2026, 10, 29, 8, 40) == datetime(2026, 10, 30, 7, 58, tzinfo=PERTH)
-    assert stop(2026, 10, 29, 16, 20) == datetime(2026, 10, 30, 7, 58, tzinfo=PERTH)
+    assert stop(2026, 10, 29, 8, 40) == datetime(2026, 10, 29, 20, 0, tzinfo=PERTH)
+    assert stop(2026, 10, 29, 16, 20) == datetime(2026, 10, 29, 20, 0, tzinfo=PERTH)
+    assert stop(2026, 10, 29, 19, 59) == datetime(2026, 10, 29, 20, 0, tzinfo=PERTH)
+    # a start at or after 20:00 has no window left: it stops at once (a clean
+    # all-aborted report), never runs on into the night
+    assert stop(2026, 10, 29, 20, 0) == datetime(2026, 10, 29, 20, 0, tzinfo=PERTH)
+    assert stop(2026, 10, 29, 22, 30) == datetime(2026, 10, 29, 20, 0, tzinfo=PERTH)
 
 
 def test_the_morning_window_is_0758_to_0840_perth():
@@ -352,6 +359,55 @@ def test_a_run_reaching_0758_stops_and_reports_the_rest(tmp_path):
     assert [a["cell"] for a in rep["aborted"]] == ["BTCUSDT@1h", "ETHUSDT@12h", "ETHUSDT@4h", "ETHUSDT@1h"]
     assert all("07:58" in a["reason"] for a in rep["aborted"])
     assert rep["failed"] == []
+
+
+def test_a_run_reaching_2000_stops_and_reports_the_rest(tmp_path):
+    t = {"ms": _ms(2021, 7, 10, 11, 50)}                  # 19:50 Perth, 2021-07-10
+
+    def advance(asset, tf):
+        t["ms"] += 6 * MIN
+
+    fake = Fake(on_call=advance)
+    data = tmp_path / "data"
+    _write_1d(data, "BTCUSDT", now_ms=t["ms"])
+    _write_1d(data, "ETHUSDT", now_ms=t["ms"])
+    rep = ip.run(data, ("1h", "4h", "12h"), now_ms=t["ms"], assets=["BTCUSDT", "ETHUSDT"],
+                 fetch=fake, sleep=lambda s: None, clock=lambda: t["ms"])
+    # attempts start at 19:50 and 19:56; the third would start at 20:02 and does not
+    assert [(c[0], c[1]) for c in fake.calls] == [("BTCUSDT", "12h"), ("BTCUSDT", "4h")]
+    assert rep["fetched"].keys() == {"BTCUSDT@12h", "BTCUSDT@4h"}
+    assert [a["cell"] for a in rep["aborted"]] == ["BTCUSDT@1h", "ETHUSDT@12h", "ETHUSDT@4h", "ETHUSDT@1h"]
+    assert all("20:00" in a["reason"] for a in rep["aborted"])
+    assert rep["failed"] == []
+
+
+def test_no_clip_or_manifest_write_after_2000(tmp_path, monkeypatch):
+    t = {"ms": _ms(2021, 7, 10, 11, 50)}                  # 19:50 Perth; stop 20:00
+    fake = Fake(default_start="2021-06-10 00:00:00")       # both cells need a clip
+    data = tmp_path / "data"
+    _write_1d(data, "BTCUSDT", now_ms=t["ms"])
+    real_clip, real_stamp = ip.clip_to_daily_start, ip.update_snapshot_manifest
+    stamps = []
+
+    def clip_then_time_passes(*a, **k):
+        try:
+            return real_clip(*a, **k)
+        finally:
+            t["ms"] += 10 * MIN                            # the first clip ends at 20:00
+
+    def counting_stamp(d, results):
+        stamps.append(sorted(results))
+        return real_stamp(d, results)
+
+    monkeypatch.setattr(ip, "clip_to_daily_start", clip_then_time_passes)
+    monkeypatch.setattr(ip, "update_snapshot_manifest", counting_stamp)
+    rep = ip.run(data, ("1h", "4h"), now_ms=t["ms"], assets=["BTCUSDT"], fetch=fake,
+                 sleep=lambda s: None, clock=lambda: t["ms"])
+    assert rep["clipped"] == {"BTCUSDT@4h": 8 * 6}
+    assert stamps == [["BTCUSDT_4h"]]
+    assert [f["cell"] for f in rep["failed"]] == ["BTCUSDT@1h"]
+    assert "past the stop time 20:00" in rep["failed"][0]["reason"]
+    assert not list(data.glob("*.tmp"))
 
 
 # ---------------------------------------------------------------- what it never writes

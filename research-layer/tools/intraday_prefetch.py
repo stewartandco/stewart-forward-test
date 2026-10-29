@@ -107,6 +107,7 @@ PHASE_2_TIMEFRAMES = tuple(t for t in cells.PHASE_1_TIMEFRAMES if t != "1d")
 PERTH = cr.PERTH
 STOP_LOCAL = (7, 58)            # no attempt starts at or after this (Perth)
 RESUME_LOCAL = (8, 40)          # the morning jobs are done by here
+EVENING_STOP_LOCAL = (20, 0)    # no attempt starts at or after this either (Perth)
 REPLACE_RETRIES = 8             # the signal service's os.replace convention
 REPLACE_SLEEP_S = 0.25
 
@@ -152,14 +153,20 @@ def in_morning_window(now_ms: int) -> bool:
 
 
 def stop_ms_for(now_ms: int) -> int:
-    """07:58 Perth of the run day; of the next day when the run starts at or
-    after 08:40 (the morning jobs are over)."""
+    """The earliest of two stops: the next 07:58 Perth (the run day's, or the
+    next day's when the run starts at or after 08:40: the morning jobs are
+    over) and 20:00 Perth of the run day (the evening stop: no live-tree write
+    20:00-07:00). A run starting at or after 20:00 therefore gets a stop that
+    has already passed: it fetches and writes nothing and reports every cell
+    `aborted`."""
     t = _local(now_ms)
     stop = t.replace(hour=STOP_LOCAL[0], minute=STOP_LOCAL[1], second=0, microsecond=0)
     resume = t.replace(hour=RESUME_LOCAL[0], minute=RESUME_LOCAL[1], second=0, microsecond=0)
     if t >= resume:
         stop += timedelta(days=1)
-    return int(stop.timestamp() * 1000)
+    evening = t.replace(hour=EVENING_STOP_LOCAL[0], minute=EVENING_STOP_LOCAL[1],
+                        second=0, microsecond=0)
+    return int(min(stop, evening).timestamp() * 1000)
 
 
 def _wall_now_ms() -> int:
