@@ -28,7 +28,7 @@ import time
 import pytest
 
 from . import engine
-from .engine import (entry_signals, gate_mask, percentile_rank, realized_ann_vol, run_spec,
+from .engine import (_best_tstat, entry_signals, gate_mask, percentile_rank, realized_ann_vol, run_spec,
                      simulate_asset, trend_tstat, trend_tstat_series, vol_percentile_series)
 from .series_cache import SeriesCache
 
@@ -479,3 +479,174 @@ def test_gate_mask_percentile_is_not_quadratic():
     print(f"gate_mask n=20000 window=8760: {elapsed:.3f} s")
     assert any(mask)
     assert elapsed < 5.0
+
+
+# ================================================================ 2b-3 D-i Task 3
+# Switch 2 gate 4: a t-stat bar that faults is DEFERRED to the direct call.
+# trend_tstat_series precomputes every bar, including bars the old direct path
+# never visited (an exit-only window on a long intraday series). A bar whose
+# direct call raises is stored as NaN and re-evaluated by the direct call when
+# (and only when) the engine reads it, so every value the engine reads is
+# exactly what the direct path gives, exception included.
+
+# five finite positive closes whose OLS standard error underflows to 0:
+# direct trend_tstat raises ZeroDivisionError (resid != 0 but resid/(n-2)/sxx == 0)
+FAULT_ZDE5 = [2.5649007597383077e-161, 2.6569941745160286e-161, 1.4944857125489308e-161,
+              1.8758303191954845e-161, 1.8042725249279705e-161]
+# twenty such closes: a real trend_scan / tstat_decay window (w = 20)
+FAULT_ZDE20 = [1.6076323389771943e-161, 2.6033248533910892e-161, 1.3818521916707438e-161,
+               2.927073871188374e-161, 1.2346268634425825e-161, 1.1610699984244367e-161,
+               2.146276988518551e-161, 2.5544092533978495e-161, 2.4217565647529035e-161,
+               1.8111396646310153e-161, 2.4282107786841927e-161, 1.4078413714385949e-161,
+               1.6554626017814836e-161, 1.5774072038207128e-161, 1.4524860091310471e-161,
+               1.0853022022038232e-161, 1.427047033078816e-161, 2.083451251095697e-161,
+               2.2151256093379475e-161, 1.6695508590169536e-161]
+# the OverflowError flavour: (y - my) ** 2 overflows
+FAULT_OVERFLOW4 = [1e200, 3e200, 2e200, 5e200]
+# a TRUE NaN on finite input: the sum overflows to inf, inf - inf = nan
+NAN5 = [1.7e308, 1.0e308, 1.7e308, 1.7e308, 1.0e308]
+
+_PAD = [100.0 + 0.5 * k for k in range(9)]       # ordinary closes either side
+
+
+def _padded(window):
+    """(closes, index of the bar that ends `window`)."""
+    return _PAD + list(window) + _PAD, len(_PAD) + len(window) - 1
+
+
+def _is_nan_bits(x):
+    return isinstance(x, float) and math.isnan(x)
+
+
+def _direct(closes, i, w):
+    """The direct path's outcome for one bar: ("v", bits) or ("exc", type)."""
+    try:
+        return ("v", _bits(trend_tstat(closes[i - w + 1:i + 1])))
+    except Exception as e:
+        return ("exc", type(e))
+
+
+FAULT_CASES = [(FAULT_ZDE5, ZeroDivisionError), (FAULT_OVERFLOW4, OverflowError)]
+
+
+@pytest.mark.parametrize("window,exc", FAULT_CASES)
+def test_the_faulting_fixtures_are_real(window, exc):
+    # a direct call on the window raises: the fixture is not a hope
+    with pytest.raises(exc):
+        trend_tstat(window)
+    closes, i = _padded(window)
+    assert all(math.isfinite(c) and c > 0 for c in closes)
+    assert _direct(closes, i, len(window)) == ("exc", exc)
+
+
+def test_the_true_nan_fixture_is_real():
+    assert math.isnan(trend_tstat(NAN5))
+    assert all(math.isfinite(c) and c > 0 for c in NAN5)
+
+
+@pytest.mark.parametrize("window,exc", FAULT_CASES)
+def test_series_precompute_does_not_raise_on_a_faulting_bar(window, exc):
+    closes, i = _padded(window)
+    w = len(window)
+    series = trend_tstat_series(closes, w, SeriesCache(), None)    # must not raise
+    assert len(series) == len(closes)
+    assert _is_nan_bits(series[i])              # the marker: defer to the direct call
+
+
+@pytest.mark.parametrize("window,exc", FAULT_CASES)
+def test_reading_a_faulting_bar_raises_like_the_direct_path(window, exc):
+    closes, i = _padded(window)
+    w = len(window)
+    cache = SeriesCache()
+    # windows [3, w]: the cheap window is served, then the faulting one raises,
+    # in windows order, exactly as the reference loop does
+    windows = [3, w]
+    series = [trend_tstat_series(closes, x, cache, None) for x in windows]
+    ref = _raised(lambda: _best_tstat(closes, i, windows, None))
+    new = _raised(lambda: _best_tstat(closes, i, windows, series))
+    assert ref[0] is exc
+    assert new == ref
+    # a second read through the cache (the NaN round-trips the store) still raises
+    series2 = [trend_tstat_series(closes, x, cache, None) for x in windows]
+    assert _raised(lambda: _best_tstat(closes, i, windows, series2)) == ref
+
+
+@pytest.mark.parametrize("window,exc", FAULT_CASES)
+def test_other_bars_are_bit_identical(window, exc):
+    closes, fault_i = _padded(window)
+    w = len(window)
+    cache = SeriesCache()
+    series = trend_tstat_series(closes, w, cache, None)
+    again = trend_tstat_series(closes, w, cache, None)
+    assert [_bits(x) for x in again] == [_bits(x) for x in series]
+    checked = 0
+    for i in range(w - 1, len(closes)):
+        kind, got = _direct(closes, i, w)
+        if kind == "exc":
+            assert _is_nan_bits(series[i]), i       # a faulting bar is the NaN marker
+        else:
+            assert _bits(series[i]) == got, i       # bitwise, not ==
+            checked += 1
+    assert _direct(closes, fault_i, w)[0] == "exc"
+    # most bars are compared (an overflow window also spoils its neighbours,
+    # which are NaN markers too: the loop above asserted each one)
+    assert checked >= 10
+    assert series[:w - 1] == [None] * (w - 1)
+    # and the engine-facing read agrees with the reference at every readable bar
+    for i in range(w - 1, len(closes)):
+        if _direct(closes, i, w)[0] == "exc":
+            continue
+        assert _bits(_best_tstat(closes, i, [w], [series])) == \
+            _bits(_best_tstat(closes, i, [w], None)), i
+
+
+def test_a_true_nan_tstat_is_served_as_nan():
+    closes, i = _padded(NAN5)
+    w = len(NAN5)
+    series = trend_tstat_series(closes, w, SeriesCache(), None)
+    assert _is_nan_bits(series[i])
+    ref = _best_tstat(closes, i, [w], None)
+    new = _best_tstat(closes, i, [w], [series])
+    assert math.isnan(ref) and math.isnan(new)
+    assert _bits(new) == _bits(ref)                 # the direct call's own NaN, bit for bit
+    assert _bits(new) == _bits(trend_tstat(closes[i - w + 1:i + 1]))
+
+
+def _bars_from(closes):
+    return [{"date": f"2024-{k:04d}", "open": c, "high": c, "low": c, "close": c,
+             "volume": 1.0} for k, c in enumerate(closes)]
+
+
+def test_entry_signals_raise_like_the_direct_path_on_a_faulting_window():
+    closes, i = _padded(FAULT_ZDE20)
+    bars = _bars_from(closes)
+    block = {"role": "entry", "type": "trend_scan",
+             "params": {"max_lookback": 20, "t_min": 2.0}}
+    ref = _raised(lambda: entry_signals(block, bars))
+    cache = SeriesCache()
+    new = _raised(lambda: entry_signals(
+        block, bars, tstat=lambda w: trend_tstat_series(closes, w, cache, None)))
+    assert ref[0] is ZeroDivisionError
+    assert new == ref
+
+
+def test_a_bar_the_direct_path_never_visits_does_not_break_the_run():
+    """The motivating case: the faulting bar sits in a stretch where no
+    position is open, so the old exit-only path never evaluated it. The
+    precompute now reaches it and must not raise."""
+    closes = _PAD + _PAD + FAULT_ZDE20 + [100.0 + 0.5 * k for k in range(40)]
+    bars = _bars_from(closes)
+    blocks = [{"role": "entry", "type": "ma_cross_dense",
+               "params": {"fast": 2, "slow": 3, "direction": "long"}},
+              {"role": "stop", "type": "atr_stop_dense", "params": {"atr_len": 14, "mult": 3.0}},
+              {"role": "exit", "type": "tstat_decay",
+               "params": {"max_lookback": 20, "t_exit": 0.5}},
+              {"role": "risk", "type": "fixed_fraction", "params": {"f": 0.01}}]
+    golden = simulate_asset(blocks, bars, COST, version=2, _reference=True)
+    got = simulate_asset(blocks, bars, COST, version=2)
+    shared = SeriesCache()
+    cached = [simulate_asset(blocks, bars, COST, version=2, series_cache=shared, cell="X")
+              for _ in range(2)]
+    assert _canon(got) == _canon(golden)
+    assert all(_canon(c) == _canon(golden) for c in cached)
+    assert golden["trades"]                         # the run really traded
