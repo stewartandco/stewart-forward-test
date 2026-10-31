@@ -40,10 +40,12 @@ fetching exactly the cells the exclusion decision needs.
 
 THE STOP TIMES. `refresh` is given `stop_ms` = the EARLIEST of the next 07:58
 Perth (the run day's, or the next day's when the run starts at or after 08:40)
-and 20:00 Perth of the run day (the evening stop: no live-tree write
-20:00-07:00): no attempt starts at or after it, so a long run stops cleanly
-before the 08:02 `33_CryptoGridRefresh`, which shares the IP and
-read-merge-writes the same tracked manifest, and never runs on into the night.
+and 20:00 Perth of the run day (the evening stop): no attempt starts at or
+after it, so a long run stops cleanly before the 08:02 `33_CryptoGridRefresh`,
+which shares the IP and read-merge-writes the same tracked manifest, and a
+daytime run never runs on into the night. A start between 00:00 and 07:58 is
+NOT refused: it runs until 07:58 (its 20:00 is later that day). The standing
+rule of no live-tree write 20:00-07:00 is the operator's, not the tool's.
 A cold full run takes about 45 minutes (2,542 s measured), so on the live tree
 start it by 18:30. A start at or after 20:00 has no window left: it fetches and
 writes nothing and reports every cell `aborted`. The cells not reached are
@@ -172,10 +174,11 @@ def in_morning_window(now_ms: int) -> bool:
 def stop_ms_for(now_ms: int) -> int:
     """The earliest of two stops: the next 07:58 Perth (the run day's, or the
     next day's when the run starts at or after 08:40: the morning jobs are
-    over) and 20:00 Perth of the run day (the evening stop: no live-tree write
-    20:00-07:00). A run starting at or after 20:00 therefore gets a stop that
-    has already passed: it fetches and writes nothing and reports every cell
-    `aborted`."""
+    over) and 20:00 Perth of the run day (the evening stop). A run starting at
+    or after 20:00 therefore gets a stop that has already passed: it fetches
+    and writes nothing and reports every cell `aborted`. A run starting
+    00:00-07:58 runs until 07:58: the tool does not enforce the standing "no
+    live-tree write 20:00-07:00" rule, the operator does."""
     t = _local(now_ms)
     stop = t.replace(hour=STOP_LOCAL[0], minute=STOP_LOCAL[1], second=0, microsecond=0)
     resume = t.replace(hour=RESUME_LOCAL[0], minute=RESUME_LOCAL[1], second=0, microsecond=0)

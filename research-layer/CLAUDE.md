@@ -286,8 +286,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   process, measured 2026-10-19). Since 2b-3 D-i each intraday file is parsed ONCE
   per process (`quarantine._full_bars` memo, bullet below), no longer per
   strategy per date (`_load_cell_bars`); the per-date re-simulation from bar 0
-  and the O(n) `complete_days` pass per call remain, and the catch-up
-  cost at scale is (Task 10 measures). Proof:
+  and the O(n) `complete_days` pass per call remain. Measured 2026-10-31 (the
+  D-i rehearsal on a chain copy, 12 assets, 4 twins per timeframe, simulation
+  timed per twin): 1h 0.605 s, 4h 0.353 s, 12h 0.087 s per strategy-day; 9
+  dates of 12 rows took 130 s of catch-up (first date 13.0 s cold, then 3.3 to
+  4.0 s). Proof:
   `tools/quarantine_parity.py` (`dump` before and after a change, then
   `compare`) recomputes a seeded sample of chained daily quarantine days
   and compares snapshot digests and rows exactly, old code vs new;
@@ -338,8 +341,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   writes nothing at or after the stop: `clip_deferred`, a re-run after 08:40
   clips it), and it refuses to START 07:58-08:40 (exit 2; `--now` is for
   tests). A cold full run takes about 45 min (2,542 s measured): on the live
-  tree START IT BY 18:30 (the tool stops at 20:00 whatever the clock, and a
-  start at or after 20:00 does nothing and reports every cell `aborted`). A 418
+  tree START IT BY 18:30 (a daytime start stops at 20:00, and a start at or after 20:00 does
+  nothing and reports every cell `aborted`; a start 00:00-07:58 runs to 07:58,
+  so the standing no-live-write 20:00-07:00 rule is the operator's to keep). A 418
   or a RateLimited stops it at once (the rest are `aborted` rows). A
   `clip_failed` cell (file still starts before the 1d file) is a report row,
   not a stop: re-run until there are zero before the data is used. A clip
@@ -374,8 +378,11 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   = 2,000,000 bars across held files (about 1 GB as dicts); one file over the
   bound is still served and held. Access is cyclic, so a bound below the
   working set gets ZERO hits: read `full_bars_memo_stats()` (hits, misses,
-  evictions, bars and files held) after a run; hit rate and peak RSS at scale
-  are (Task 10 measures). Daily cells never use it (`_daily_bars` rewrites
+  evictions, bars and files held) after a run. Measured 2026-10-31 on the
+  rehearsal (8 intraday files, 211,159 bars held): 160 hits, 8 misses, 0
+  evictions, peak working set of the whole run 712 MB. At Switch 2 the 76 1h
+  files alone hold about 4 million bars, above the bound, so the zero-hit
+  warning applies there (plan 5). Daily cells never use it (`_daily_bars` rewrites
   dates in place). Residual: a same-size rewrite inside one filesystem
   timestamp tick in the same process would be served stale. The NTFS mtime
   comes from the system clock tick (up to about 15 ms), not 100 ns, so the
@@ -403,8 +410,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   bundle's committed `equity.csv` holds the UTC DAILY MARKS (`bars.daily_marks`;
   each row keeps the day's LAST bar's stamp: `YYYY-MM-DD 23:00:00` at 1h,
   `20:00:00` at 4h, `12:00:00` at 12h, an earlier stamp on a partial last day;
-  the `[:10]` date compares are right for all three); the per-bar curve (size per bundle at 1h:
-  (Task 10 measures); tens of KB for 1d) goes to `equity_bars.csv`, gitignored
+  the `[:10]` date compares are right for all three); the per-bar curve (size per bundle,
+  measured 2026-10-31: 1h median 1.27 MB, max 2.16 MB; 4h median 316 KB; 12h
+  median 104 KB; a 1d bundle has none) goes to `equity_bars.csv`, gitignored
   (`artifacts/*/equity_bars.csv`), never in `commit_list.BUNDLE_FILES`, never in
   `bundle_hash`'s three names, and pinned by `config.json["equity_bars_sha256"]`
   (LF-normalised sha, so `artifacts_hash` still binds it). A 1d bundle is byte
@@ -1556,16 +1564,20 @@ per window per bar; the percentile is an exact incremental one.
   least recently used. The 08:20 recorder run prints
   `seriescache: pruned N tmp, N stale-rev, N corrupt, N capped (K kept)`
   when anything was removed, so a cap hit is visible there
-  (`capped_removed`); `kept` and `bytes_kept` are POST-cap. Disk used at 1h
-  scale and prune's wall time: (Task 10 measures).
+  (`capped_removed`); `kept` and `bytes_kept` are POST-cap. Measured 2026-10-31
+  (rehearsal copy, after screen, worker and stats on 216 twins): 146 MB in 310
+  entries; 1h about 11 MB per cell (102 entries over 9 cells, about 1 MB per
+  entry), 4h 2.9 MB, 12h 0.7 MB per cell; prune 0.10 s over the 310.
 - **In-process bound (2b-3 D-i):** the in-memory store is a byte-bounded LRU,
   `MEM_MAX_BYTES` (1 GiB; an entry weighs `len(inputs) + 8 * len(values)`)
   PER PROCESS, so the gauntlet worker's 6 processes may hold up to 6 GiB
   between them. Every get refreshes recency; the entry just inserted is never
   evicted (a lone oversize entry is kept); `stats["evictions"]` counts them.
   An evicted key is adopted back from disk (counted a hit) or recomputed:
-  residency only, the values served are the same bits. Peak RSS and the
-  eviction rate at scale: (Task 10 measures).
+  residency only, the values served are the same bits. Measured 2026-10-31:
+  the 1h worker pool's tree peaked at 1.9 GB commit (6 workers, cold cache),
+  its largest process at 1.3 GB; the eviction count was not read, and at that
+  scale a process's whole disk cache (146 MB) fits the bound.
 - **Who uses it:** the quarantine recorder and the gauntlet worker WRITE it;
   the signal service is read-only and imports the cache lazily (it must not
   write `seriescache/`); screen and `run_spec` callers pass none, so they use
@@ -1613,13 +1625,14 @@ per window per bar; the percentile is an exact incremental one.
   arrive with 1h scale:
   - **Prune read and sha-checked every entry on each recorder run** (the
     morning wrapper may run it twice; GBs of reads on E: at 1h scale). Now it
-    reads the key only (Prune bullet above); measured: (Task 10 measures).
+    reads the key only (Prune bullet above); measured 0.10 s over 310 entries
+    (2026-10-31).
   - **Each key stores its own copy of the closes** (about half the bytes of an
     entry). Now bounded by `MAX_DISK_BYTES` (20 GiB cap in prune); disk
-    measured at 1h: (Task 10 measures).
+    measured at 1h: about 11 MB per cell, 1 MB per entry (2026-10-31).
   - **In-process entries were never evicted** (quarantine process, and the
     serial worker path `worker_count` == 1). Now the per-process byte LRU
-    (In-process bound bullet above), peak RSS: (Task 10 measures).
+    (In-process bound bullet above), largest process 1.3 GB (1h worker, 2026-10-31).
   - **Exit-only trend windows are computed over all n bars on per-call
     caches** (screen), so a pathological series (overflow, or a
     standard-error underflow) could raise on a bar the old path never
