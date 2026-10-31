@@ -229,7 +229,7 @@ def test_quarantine_records_the_owed_days_and_reports_them(tmp_path, monkeypatch
     assert f"| 12 | 12 | {n_entries} | {n_exits} |" in row
     assert "catch-up: nothing owed" in text
     assert "catch-up runs: 3 " in text                       # 10 + 2 + nothing owed
-    assert "1h only: 12 date(s)" in text and "for 12 1h strategy-day(s)" in text
+    assert "- 1h timed: 12 strategy-day(s)" in text
     for d in owed:                                           # timed per date
         assert any(l.startswith(f"- {d}: ") and l.endswith(", 1, 0")
                    for l in text.splitlines())
@@ -409,10 +409,336 @@ def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
     assert {r["strategy_id"] for r in rows} == {sid1}
     assert sorted(r["date"] for r in rows) == [daily[i]["date"] for i in range(151, 163)]
     assert all(r["asset"] == "ETHUSD" for r in rows)
-    assert "1 1d twin(s)" in text and "1d only: 12 date(s)" in text
+    assert "1 1d twin(s)" in text and "- 1d timed: 12 strategy-day(s)" in text
     exits = sum(1 for r in rows if r["action"] == "exit")   # daily rows: action
     assert exits > 0                                         # the gate check bites
     entries = sum(1 for r in rows if r["action"] in ("enter_long", "enter_short"))
     assert entries > 0                                       # the entries column bites
     row = next(l for l in text.splitlines() if l.startswith(f"| `{sid1}`"))
     assert f"| 12 | 12 | {entries} | {exits} | 2022-" in row
+
+
+# ---- pick_originals (CLAUDE.md Switch 2 gate 2, 2b-3 plan 4 Task 7) ----
+
+def _spec(sid, family, *block_types, version=2, **uni):
+    return {"strategy_id": sid, "version": version, "family": family,
+            "universe": dict({"assets": ["BTCUSDT"], "asset_class": "crypto",
+                              "timeframe": "1d", "session": "24x7"}, **uni),
+            "blocks": [{"role": "entry", "type": t, "params": {}}
+                       for t in block_types] or
+                      [{"role": "entry", "type": "ma_cross_ds", "params": {}}]}
+
+
+def _plain_pool(families=("a", "b", "c", "d"), per=3):
+    return {f"p-{f}{k}": _spec(f"p-{f}{k}", f)
+            for f in families for k in range(per)}
+
+
+def test_vol_target_and_vol_percentile_are_picked_first():
+    for seed in range(12):
+        specs = _plain_pool()
+        specs["vt"] = _spec("vt", "a", "vol_target")
+        specs["vp"] = _spec("vp", "b", "vol_percentile_gate")
+        got = ir.pick_originals(specs, 2, seed)
+        assert got == ["vt", "vp"], (seed, got)       # vol_target, then vol_percentile
+        got4 = ir.pick_originals(specs, 4, seed)
+        assert got4[:2] == ["vt", "vp"] and len(got4) == 4
+
+
+def test_one_spec_with_both_vol_kinds_is_picked_once():
+    specs = _plain_pool()
+    specs["both"] = _spec("both", "a", "vol_target", "vol_percentile_gate")
+    for seed in range(6):
+        got = ir.pick_originals(specs, 3, seed)
+        assert got[0] == "both" and got.count("both") == 1 and len(got) == 3
+
+
+def test_one_per_family_before_any_repeat():
+    for seed in range(25):
+        specs = _plain_pool(("a", "b", "c"), per=4)
+        got = ir.pick_originals(specs, 3, seed)
+        assert sorted(specs[s]["family"] for s in got) == ["a", "b", "c"], (seed, got)
+        got5 = ir.pick_originals(specs, 5, seed)
+        fams = [specs[s]["family"] for s in got5]
+        assert set(fams[:3]) == {"a", "b", "c"} and len(set(got5)) == 5
+    # the vol picks count toward their family: vol_target in family a means
+    # the next picks are b and c, not a second a
+    for seed in range(25):
+        specs = _plain_pool(("a", "b", "c"), per=4)
+        specs["vt"] = _spec("vt", "a", "vol_target")
+        got = ir.pick_originals(specs, 3, seed)
+        assert got[0] == "vt"
+        assert sorted(specs[s]["family"] for s in got) == ["a", "b", "c"], (seed, got)
+
+
+def test_same_seed_same_pick_and_different_seed_differs():
+    specs = _plain_pool(("a", "b", "c", "d", "e"), per=4)
+    for seed in (1, 7, 20261010):
+        assert ir.pick_originals(specs, 4, seed) == ir.pick_originals(specs, 4, seed)
+    picks = {tuple(ir.pick_originals(specs, 4, seed)) for seed in range(12)}
+    assert len(picks) > 1
+    # the vol choice itself is seeded too
+    many = dict(specs)
+    for k in range(6):
+        many[f"vt{k}"] = _spec(f"vt{k}", f"v{k}", "vol_target")
+    firsts = {ir.pick_originals(many, 1, seed)[0] for seed in range(20)}
+    assert len(firsts) > 1 and all(s.startswith("vt") for s in firsts)
+
+
+def test_non_crypto_non_v2_and_intraday_originals_are_skipped():
+    specs = {
+        "ok": _spec("ok", "a"),
+        "v1": _spec("v1", "b", version=1),
+        "fx": _spec("fx", "c", asset_class="fx"),
+        "etf": _spec("etf", "d", asset_class="equity_etf"),
+        "h1": _spec("h1", "e", timeframe="1h"),
+        "h4": _spec("h4", "f", timeframe="4h"),
+        "vt1": _spec("vt1", "g", "vol_target", version=1),
+        "vtfx": _spec("vtfx", "h", "vol_target", asset_class="fx"),
+        "vth": _spec("vth", "i", "vol_target", timeframe="1h"),
+    }
+    assert ir.pick_originals(specs, 5, 3) == ["ok"]
+    # an omitted asset_class / timeframe means crypto / 1d (the schema default)
+    bare = _spec("bare", "z")
+    del bare["universe"]["asset_class"], bare["universe"]["timeframe"]
+    assert ir.pick_originals({"bare": bare}, 1, 3) == ["bare"]
+
+
+def test_n_below_two_takes_only_the_first_kind():
+    specs = _plain_pool()
+    specs["vt"] = _spec("vt", "a", "vol_target")
+    specs["vp"] = _spec("vp", "b", "vol_percentile_gate")
+    for seed in range(8):
+        assert ir.pick_originals(specs, 1, seed) == ["vt"]
+        assert ir.pick_originals(specs, 0, seed) == []
+    only_vp = _plain_pool()
+    only_vp["vp"] = _spec("vp", "b", "vol_percentile_gate")
+    assert ir.pick_originals(only_vp, 1, 1) == ["vp"]
+
+
+def test_a_chain_without_vol_specs_still_fills_n():
+    specs = _plain_pool(("a", "b"), per=3)               # 6 specs, 2 families
+    for seed in range(10):
+        got = ir.pick_originals(specs, 4, seed)
+        assert len(got) == 4 and len(set(got)) == 4 and set(got) <= set(specs)
+        assert {specs[s]["family"] for s in got} == {"a", "b"}
+    assert len(ir.pick_originals(specs, 6, 1)) == 6
+    # asked for more than exist: everything eligible, no more (register then
+    # refuses with "only N eligible originals")
+    assert sorted(ir.pick_originals(specs, 9, 1)) == sorted(specs)
+
+
+# ---- every phase-2 timeframe; --transition-only (2b-3 plan 4 Task 7) ----
+
+def _agg(hourly, n):
+    """n-hour bars from the hourly rows (open of the first, extremes, close of
+    the last): the day's last bar keeps the day's move, so daily marks agree."""
+    out = []
+    for i in range(0, len(hourly), n):
+        g = hourly[i:i + n]
+        out.append({"date": g[0]["date"], "open": g[0]["open"],
+                    "high": max(b["high"] for b in g), "low": min(b["low"] for b in g),
+                    "close": g[-1]["close"], "volume": sum(b["volume"] for b in g)})
+    return out
+
+
+def _multi_tf_setup(tmp_path, timeframes=("1d", "1h", "4h", "12h"), owed_days=4):
+    """A tmp chain with the original and its ETHUSD twins at `timeframes`
+    (via `register`), the twins file, a scratch data dir and the bars a fake
+    fetch writes per timeframe."""
+    from pipeline.test_intraday_statistics import _twin_bars, _twin_spec
+    from pipeline.test_quarantine_record_intraday import _write
+    reg, spec = gauntlet_registry(tmp_path)
+    orig = json.loads(json.dumps(spec))
+    orig["version"] = 2
+    orig["blocks"] = _twin_spec("1h")["blocks"]
+    orig["strategy_id"] = None
+    orig["strategy_id"] = content_id(orig, "strategy_id")
+    reg.register_strategy(orig)
+    twins_path = tmp_path / "twins.json"
+    ir.main(["register", "--registry", str(reg.log_path), "--assets", "ETHUSD",
+             "--originals", "1", "--seed", "1",
+             "--timeframes", ",".join(timeframes), "--out", str(twins_path)])
+    daily, hourly, _ = _twin_bars()
+    entered = daily[150]["date"]
+    end = daily[150 + owed_days]["date"]
+    hourly = [b for b in hourly if b["date"][:10] <= end]
+    daily = [b for b in daily if b["date"][:10] <= end]
+    files = {"1h": hourly, "4h": _agg(hourly, 4), "12h": _agg(hourly, 12), "1d": daily}
+    data = tmp_path / "scratch-data"
+    data.mkdir()
+    calls = []
+
+    def fake_fetch(symbol, tf, data_dir, now_ms=None):
+        calls.append((symbol, tf))
+        _write(Path(data_dir), f"{symbol}_{tf}.csv", files[tf])
+        return {}
+
+    def freeze(*tfs):
+        for tf in tfs:
+            _write(data, f"ETHUSD_{tf}.csv", files[tf])
+    owed = [daily[150 + i]["date"] for i in range(1, owed_days + 1)]
+    return reg, twins_path, data, entered, owed, fake_fetch, calls, freeze
+
+
+def _states(reg_path):
+    out: dict[str, str] = {}
+    for e in Registry(reg_path).entries():
+        if e["entry_type"] == "state_change":
+            out[e["payload"]["strategy_id"]] = e["payload"]["to"]
+    return out
+
+
+def test_quarantine_moves_twins_of_every_requested_timeframe(tmp_path, monkeypatch):
+    from pipeline import crypto_data
+    reg, twins_path, data, entered, owed, fake_fetch, calls, _ = _multi_tf_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    twins = json.loads(twins_path.read_text())
+    assert {t["tf"] for t in twins.values()} == {"1d", "1h", "4h", "12h"}
+    by_tf = {t["tf"]: s for s, t in twins.items()}
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", entered, "--n", "1", "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert rc == 0, text
+    states = _states(reg.log_path)
+    # default = every non-1d timeframe in the file, --n twins each; 1d is left
+    for tf in ("1h", "4h", "12h"):
+        assert states[by_tf[tf]] == "quarantine", tf
+    assert by_tf["1d"] not in states
+    assert sorted(calls) == [("ETHUSD", "12h"), ("ETHUSD", "1h"), ("ETHUSD", "4h")]
+    rows = [e["payload"] for e in Registry(reg.log_path).entries()
+            if e["entry_type"] == "quarantine_decision"]
+    for tf in ("1h", "4h", "12h"):
+        mine = [r for r in rows if r["strategy_id"] == by_tf[tf]]
+        assert sorted(r["date"] for r in mine) == owed, tf
+        assert {r["asset"] for r in mine} == {f"ETHUSD@{tf}"}
+    assert not [r for r in rows if r["strategy_id"] == by_tf["1d"]]
+    assert "3 12h/4h/1h twin(s)" in text
+    for tf in ("1h", "4h", "12h"):
+        assert f"| `{by_tf[tf]}`" in text
+    assert f"| `{by_tf['1d']}`" not in text
+
+
+def test_quarantine_report_times_each_timeframe_separately(tmp_path, monkeypatch):
+    """Final review I1: seconds per strategy-day come out PER TIMEFRAME, each
+    measured around that timeframe's own simulations (never one pooled or
+    apportioned figure). A slow 4h simulation must not leak into the 1h line."""
+    import re
+    import time
+    from pipeline import crypto_data
+    from pipeline import quarantine as q
+    reg, twins_path, data, entered, owed, fake_fetch, calls, _ = _multi_tf_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    real = q.observe_day
+
+    def slow_4h(spec, *a, **kw):
+        if spec["universe"]["timeframe"] == "4h":
+            time.sleep(0.2)
+        return real(spec, *a, **kw)
+    monkeypatch.setattr(q, "observe_day", slow_4h)
+    twins = json.loads(twins_path.read_text())
+    by_tf = {t["tf"]: s for s, t in twins.items()}
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", entered, "--n", "1", "--timeframes", "1h,4h",
+                  "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert rc == 0, text
+    assert q.observe_day is slow_4h                          # the timing hook is undone
+    line = re.compile(r"^- (\S+) timed: (\d+) strategy-day\(s\), ([\d.]+)s total, "
+                      r"([\d.]+)s mean per strategy-day", re.M)
+    got = {m.group(1): (int(m.group(2)), float(m.group(3)), float(m.group(4)))
+           for m in line.finditer(text)}
+    assert set(got) == {"1h", "4h"}                          # one line per timeframe
+    rows = [e["payload"] for e in Registry(reg.log_path).entries()
+            if e["entry_type"] == "quarantine_decision"]
+    for tf in ("1h", "4h"):
+        n_rows = len([r for r in rows if r["strategy_id"] == by_tf[tf]])
+        assert got[tf][0] == n_rows == len(owed), tf         # counts add up
+    assert got["4h"][2] >= 0.2 and got["4h"][1] >= 0.2 * len(owed)
+    assert got["1h"][2] < got["4h"][2]                       # measured, not apportioned
+    assert "12h/4h/1h only" not in text and " only: " not in text   # pooled line gone
+
+
+def test_quarantine_timeframes_flag_picks_just_those(tmp_path, monkeypatch):
+    from pipeline import crypto_data
+    reg, twins_path, data, entered, owed, fake_fetch, calls, _ = _multi_tf_setup(tmp_path)
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    twins = json.loads(twins_path.read_text())
+    by_tf = {t["tf"]: s for s, t in twins.items()}
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", entered, "--n", "1", "--timeframes", "4h,12h",
+                  "--out", str(out)])
+    assert rc == 0, out.read_text(encoding="utf-8")
+    assert sorted(calls) == [("ETHUSD", "12h"), ("ETHUSD", "4h")]
+    assert {s for s, st in _states(reg.log_path).items() if st == "quarantine"} == {
+        by_tf["4h"], by_tf["12h"]}
+
+
+def test_quarantine_refuses_a_timeframe_the_twins_file_lacks_or_too_few(
+        tmp_path, monkeypatch):
+    from pipeline import crypto_data
+    reg, twins_path, data, entered, owed, fake_fetch, calls, _ = _multi_tf_setup(
+        tmp_path, timeframes=("1d", "1h"))
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+    before = reg.log_path.read_bytes()
+    common = ["quarantine", "--registry", str(reg.log_path), "--data-dir", str(data),
+              "--twins", str(twins_path), "--entered", entered,
+              "--out", str(tmp_path / "r.md")]
+    with pytest.raises(SystemExit) as exc:
+        ir.main(common + ["--n", "1", "--timeframes", "4h"])
+    assert "4h" in str(exc.value.code)
+    with pytest.raises(SystemExit) as exc:
+        ir.main(common + ["--n", "2"])                     # one 1h twin only
+    assert "only 1 1h twins" in str(exc.value.code)
+    with pytest.raises(SystemExit) as exc:
+        ir.main(common + ["--n", "1", "--timeframes", "2h"])   # not a timeframe
+    assert exc.value.code == 2
+    assert reg.log_path.read_bytes() == before and calls == []
+
+
+def test_transition_only_leaves_dates_owed_and_fetches_nothing(tmp_path, monkeypatch):
+    from pipeline import crypto_data
+    from pipeline import quarantine as q
+    reg, twins_path, data, entered, owed, fake_fetch, calls, freeze = _multi_tf_setup(
+        tmp_path, timeframes=("1d", "1h", "4h", "12h"))
+    freeze("1h", "4h", "12h")                              # the frozen data on disk
+    monkeypatch.setattr(crypto_data, "fetch_symbol", fake_fetch)
+
+    def _no_recorder(*a, **k):                             # --fetch-owed / --catch-up
+        raise AssertionError("transition-only must not run the recorder")
+    monkeypatch.setattr(q, "run", _no_recorder)
+    frozen = {p.name: p.read_bytes() for p in data.iterdir()}
+    twins = json.loads(twins_path.read_text())
+    by_tf = {t["tf"]: s for s, t in twins.items()}
+    out = tmp_path / "report.md"
+    rc = ir.main(["quarantine", "--registry", str(reg.log_path),
+                  "--data-dir", str(data), "--twins", str(twins_path),
+                  "--entered", entered, "--n", "1", "--transition-only",
+                  "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert rc == 0, text
+    assert calls == []                                     # no fetch
+    assert {p.name: p.read_bytes() for p in data.iterdir()} == frozen
+    states = _states(reg.log_path)
+    for tf in ("1h", "4h", "12h"):
+        assert states[by_tf[tf]] == "quarantine"           # the hand transition ran
+    entries = list(Registry(reg.log_path).entries())
+    assert not [e for e in entries if e["entry_type"] == "quarantine_decision"]
+    assert not (tmp_path / "logs").exists()                # no ledger, no catch-up
+    # ... and the dates are still owed, for every moved twin, on the frozen data
+    specs = {e["payload"]["strategy_id"]: e["payload"] for e in entries
+             if e["entry_type"] == "strategy_registered"}
+    for tf in ("1h", "4h", "12h"):
+        spec = specs[by_tf[tf]]
+        last = q._last_bar_date(data, spec)
+        assert sorted(q._owed_by_date(data, spec, entered, last)) == owed, tf
+    assert "transition-only" in text.lower()
+    assert "REGISTRY VALID" in text
+    for tf in ("1h", "4h", "12h"):
+        assert by_tf[tf] in text

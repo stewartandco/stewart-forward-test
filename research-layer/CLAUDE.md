@@ -283,9 +283,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   an exact incremental one and the series are cached across runs: the
   catch-up of date 2026-10-14 went 2,857 s to 286 s cold / 201 s warm, and
   `--date` plus the catch-up of the 10-18 morning 1,810 s to 259 s (single
-  process, measured 2026-10-19). The whole intraday file is still read per
-  strategy per catch-up or review and once per date per cell
-  (`_load_cell_bars`); cost it before activating. Proof:
+  process, measured 2026-10-19). Since 2b-3 D-i each intraday file is parsed ONCE
+  per process (`quarantine._full_bars` memo, bullet below), no longer per
+  strategy per date (`_load_cell_bars`); the per-date re-simulation from bar 0
+  and the O(n) `complete_days` pass per call remain. Measured 2026-10-31 (the
+  D-i rehearsal on a chain copy, 12 assets, 4 twins per timeframe, simulation
+  timed per twin): 1h 0.605 s, 4h 0.353 s, 12h 0.087 s per strategy-day; 9
+  dates of 12 rows took 130 s of catch-up (first date 13.0 s cold, then 3.3 to
+  4.0 s). Proof:
   `tools/quarantine_parity.py` (`dump` before and after a change, then
   `compare`) recomputes a seeded sample of chained daily quarantine days
   and compares snapshot digests and rows exactly, old code vs new;
@@ -306,11 +311,86 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
 - **`tools/intraday_rehearsal.py`:** scratch-only. It registers 1d/1h
   twins of real crypto strategies on a COPY of the chain, runs the real
   screen and gauntlet on the copy and reads the outcomes side by side.
-  `quarantine` moves 1h twins to quarantine on the copy by a synthetic
+  `quarantine` moves twins to quarantine on the copy by a synthetic
   gauntlet transition, then runs the real recorder with a REAL Binance
-  fetch into its scratch data dir. Both `register` and `quarantine`
+  fetch into its scratch data dir. Since 2b-3 D-i it moves `--n` twins PER
+  timeframe (`pick_twins`, coarsest first) for every timeframe in
+  `--timeframes`; the default is every non-1d timeframe the twins file holds
+  (a 1d+1h file still moves 1h only, a 1d-only file still moves 1d), and a
+  requested timeframe the file lacks, or fewer than `--n` twins at one, is a
+  SystemExit before anything is written. `--transition-only` verifies the
+  chain BEFORE, hands the twins to quarantine and stops: no
+  `quarantine.run`, no fetch, no catch-up or review, no `logs/`, no data
+  file touched (exit 0 iff `REGISTRY VALID`; no verify AFTER by design), so a
+  rehearsal can leave every date owed. Both `register` and `quarantine`
   REFUSE the live chain, and `quarantine` also refuses the live data dir
-  (exit 2, nothing written).
+  (exit 2, nothing written). `pick_originals` (the vol_target/vol_percentile
+  picks first, one per family before any repeat, seeded) is pinned by seven
+  tests in `test_intraday_rehearsal.py`.
+- **Phase 2 prefetch (2b-3 D-i1): `tools/intraday_prefetch.py`.** HAND-RUN,
+  never scheduled, and it never touches the refresh ledger
+  (`logs/degraded_crypto_refresh.json`), the chain, git or a lock. It fetches
+  the full listing history of every asset in `ACTIVE_CELLS["crypto"]` at
+  1h, 4h and 12h (228 cells, coarsest first per asset) through
+  `crypto_refresh.refresh` (keyless klines via `crypto_data.fetch_symbol`),
+  then CLIPS each completed file so it never starts before the asset's 1d
+  file (SUN's starts 2021-06-18) and re-stamps that cell's snapshot-manifest
+  entry; it reports admission rows, feed health, holes, failures and timing
+  per cell (`--out`). The stop is the EARLIER of the next 07:58 Perth and
+  20:00 Perth of the run day, INCLUDING the clip tail (a cell that needs a clip
+  writes nothing at or after the stop: `clip_deferred`, a re-run after 08:40
+  clips it), and it refuses to START 07:58-08:40 (exit 2; `--now` is for
+  tests). A cold full run takes about 45 min (2,542 s measured): on the live
+  tree START IT BY 18:30 (a daytime start stops at 20:00, and a start at or after 20:00 does
+  nothing and reports every cell `aborted`; a start 00:00-07:58 runs to 07:58,
+  so the standing no-live-write 20:00-07:00 rule is the operator's to keep). A 418
+  or a RateLimited stops it at once (the rest are `aborted` rows). A
+  `clip_failed` cell (file still starts before the 1d file) is a report row,
+  not a stop: re-run until there are zero before the data is used. A clip
+  whose manifest re-stamp fails is `clipped_manifest_stale` (file clipped,
+  entry stale): a plain re-run HEALS it, because `refresh` re-stamps every cell
+  it completes from the file on disk (`fetch_symbol` returns the on-disk
+  sha256/rows/first_date even when it adds no bar) and the clip then finds
+  nothing to drop; check the re-run's report shows the cell `fetched`, and
+  never hand-edit the manifest or refetch to repair it. **A deleted intraday
+  file is recreated ONLY with `tools.intraday_prefetch`, never with
+  `crypto_refresh` (the 08:02 `33_CryptoGridRefresh` after Switch 2),
+  `crypto_data fetch` or `quarantine --fetch-owed`:** `fetch_symbol` on a
+  missing file starts at bar 0, so those bring SUN's pre-2021-06-18 bars back,
+  and only this tool enforces "an intraday file never starts before its 1d
+  file" (the clip); neither admission nor feed health detects a violation.
+  Plan 5 adds a guard (a clip in the refresh path, or an admission rule).
+  The report's `attempts` are FETCH CALLS, not HTTP requests (a cold cell costs
+  about ceil(rows/1000) requests). It DELIBERATELY reads `cells.ACTIVE_CELLS`
+  assets, not
+  `active_cells()`, so an `EXCLUDED_CELLS` cell is still fetched: the
+  admission rows it produces are what decides the exclusions. A hand run
+  leaves the tracked manifest modified on the shared tree, as
+  `33_CryptoGridRefresh` does. Tests: `test_intraday_prefetch.py`.
+- **Intraday price files are parsed once per process (2b-3 D-i, Task 4).**
+  `quarantine._full_bars(data_dir, asset, tf)` is an LRU memo over the whole
+  intraday parse, keyed `(resolved path, st_mtime_ns, st_size)`, stat'ed before
+  AND after the read (a mismatch serves the parse and memoises nothing; a
+  missing file raises exactly as before). `_load_cell_bars` takes the date's
+  prefix by `bisect_right` on `date[:10]` and returns a NEW list over shared
+  bar dicts (no intraday path mutates a bar; pinned by a deep-copy test), so
+  results equal the old per-date re-parse. Bound: `FULL_BARS_MEMO_MAX_BARS`
+  = 2,000,000 bars across held files (about 1 GB as dicts); one file over the
+  bound is still served and held. Access is cyclic, so a bound below the
+  working set gets ZERO hits: read `full_bars_memo_stats()` (hits, misses,
+  evictions, bars and files held) after a run. Measured 2026-10-31 on the
+  rehearsal (8 intraday files, 211,159 bars held): 160 hits, 8 misses, 0
+  evictions, peak working set of the whole run 712 MB. At Switch 2 the 76 1h
+  files alone hold about 4 million bars, above the bound, so the zero-hit
+  warning applies there (plan 5). Daily cells never use it (`_daily_bars` rewrites
+  dates in place). Residual: a same-size rewrite inside one filesystem
+  timestamp tick in the same process would be served stale. The NTFS mtime
+  comes from the system clock tick (up to about 15 ms), not 100 ns, so the
+  window is wider than it looks; it is safe because the only writer of an
+  intraday file, `fetch_symbol`, only APPENDS and never re-serves a bar, so a
+  same-size rewrite is a byte-identical rewrite (and production files are
+  written by another process earlier). Anyone adding a second writer of
+  intraday files must re-read this. Tests: `test_quarantine_intraday.py`.
 - **The intraday path is dormant (crypto is ACTIVE at 1d only since Switch 1,
   2026-10-17):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets x `("1d",)`;
   the five intraday timeframes stay declared and unswept until Switch 2 (a
@@ -326,15 +406,28 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   ~70 s cold / ~16 s warm (measured 2026-10-19), and the priors are per
   timeframe (`PRIOR_S_BY_TF`, `SCREEN_PRIOR_S_BY_TF`; section "Engine series
   cache"); 1h still costs about 22-25x a 1d candidate, so cost the grid
-  before activating. Artifact storage: screen writes the
-  per-bar `equity.csv` into each bundle, and bundles are committed to the
-  PUBLIC repo; the rehearsal's 1h bundles measured 1.7-2.1 MB each against
-  tens of KB for 1d, so grid scale means tens of GB. Two explicit Switch 2
-  gates: `gauntlet_stats` has never run end to end on an intraday spec,
-  and `tools/intraday_rehearsal.pick_originals`' selection rules (the
-  vol_target/vol_percentile picks, one per family) are untested (only
-  its crypto/1d filter is); both must be exercised in Switch 2's activation
-  rehearsal before any intraday verdict is chained.
+  before activating. Artifact storage (2b-3 D-i3, 2026-10-29): an intraday
+  bundle's committed `equity.csv` holds the UTC DAILY MARKS (`bars.daily_marks`;
+  each row keeps the day's LAST bar's stamp: `YYYY-MM-DD 23:00:00` at 1h,
+  `20:00:00` at 4h, `12:00:00` at 12h, an earlier stamp on a partial last day;
+  the `[:10]` date compares are right for all three); the per-bar curve (size per bundle,
+  measured 2026-10-31: 1h median 1.27 MB, max 2.16 MB; 4h median 316 KB; 12h
+  median 104 KB; a 1d bundle has none) goes to `equity_bars.csv`, gitignored
+  (`artifacts/*/equity_bars.csv`), never in `commit_list.BUNDLE_FILES`, never in
+  `bundle_hash`'s three names, and pinned by `config.json["equity_bars_sha256"]`
+  (LF-normalised sha, so `artifacts_hash` still binds it). A 1d bundle is byte
+  identical (no new key, no new file; `universe.timeframe` read with `.get`).
+  Readers of `equity.csv` that compare the `date` column must compare `d[:10]`
+  (the diagnose_* scripts do, `[:10]` on both sides, so a cutoff day is
+  kept). Switch 2 gate still open: `gauntlet_stats` has never run end to end
+  on an intraday spec; it must be exercised in Switch 2's activation rehearsal
+  before any intraday verdict is chained. Closed in 2b-3 D-i:
+  `tools/intraday_rehearsal.pick_originals`' selection rules are now tested,
+  and the rehearsal's `quarantine` covers every phase-2 timeframe (see its
+  bullet above). `pipeline/test_switch2_preview.py` pins that a 12-asset
+  window at 1h/4h/12h/1d is 48 cells (one single-asset 24x7 spec per cell per
+  combo), and that one spec per timeframe registers on a scratch chain and passes C3 (the
+  committed gate stays 1d).
 - **The protocol note is a DRAFT and is NOT chained until Switch 2:**
   `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
   approves the exact text; it is chained VERBATIM at Switch 2 activation,
@@ -1458,7 +1551,33 @@ per window per bar; the percentile is an exact incremental one.
   recomputes from bar 0. Never relax this to a hash or a float `==`.
 - **Prune:** once per quarantine recorder run, before the first date. It
   removes `.tmp` files older than 1 h, stale-rev entries and corrupt entries,
-  leaves an entry a writer replaced mid-prune alone, and never raises.
+  leaves an entry a writer replaced mid-prune alone, and never raises. Since
+  2b-3 D-i it reads each entry's `key` member ONLY (`_read_key`), never the
+  payload or checksum, so a bit flip in the values survives prune and is
+  caught by `_load` (a MISS, healed by the next write); an entry whose key
+  cannot be read for any reason is treated as corrupt and unlinked if
+  possible (a locked file on Windows survives the failed unlink; the cost is a
+  recompute). It then CAPS the disk: if the survivors exceed `MAX_DISK_BYTES`
+  (20 GiB) it deletes the oldest by mtime until at or under, with the same
+  re-stat guard for a replaced file. The cap orders by WRITE mtime: a read does
+  not refresh it, so it removes the least recently WRITTEN entries, not the
+  least recently used. The 08:20 recorder run prints
+  `seriescache: pruned N tmp, N stale-rev, N corrupt, N capped (K kept)`
+  when anything was removed, so a cap hit is visible there
+  (`capped_removed`); `kept` and `bytes_kept` are POST-cap. Measured 2026-10-31
+  (rehearsal copy, after screen, worker and stats on 216 twins): 146 MB in 310
+  entries; 1h about 11 MB per cell (102 entries over 9 cells, about 1 MB per
+  entry), 4h 2.9 MB, 12h 0.7 MB per cell; prune 0.10 s over the 310.
+- **In-process bound (2b-3 D-i):** the in-memory store is a byte-bounded LRU,
+  `MEM_MAX_BYTES` (1 GiB; an entry weighs `len(inputs) + 8 * len(values)`)
+  PER PROCESS, so the gauntlet worker's 6 processes may hold up to 6 GiB
+  between them. Every get refreshes recency; the entry just inserted is never
+  evicted (a lone oversize entry is kept); `stats["evictions"]` counts them.
+  An evicted key is adopted back from disk (counted a hit) or recomputed:
+  residency only, the values served are the same bits. Measured 2026-10-31:
+  the 1h worker pool's tree peaked at 1.9 GB commit (6 workers, cold cache),
+  its largest process at 1.3 GB; the eviction count was not read, and at that
+  scale a process's whole disk cache (146 MB) fits the bound.
 - **Who uses it:** the quarantine recorder and the gauntlet worker WRITE it;
   the signal service is read-only and imports the cache lazily (it must not
   write `seriescache/`); screen and `run_spec` callers pass none, so they use
@@ -1501,21 +1620,39 @@ per window per bar; the percentile is an exact incremental one.
     that alternates timeframes shrinks chunks toward 1 spec: slower, chain
     unchanged. The screen's early "not even one spec fits" exit uses the
     CHEAPEST prior in the registry (min, never max).
-- **Switch 2 gates (2026-10-19 final review).** None is a defect at 1d; all
-  four are costs or edge cases that arrive with 1h scale:
-  - **Prune reads and sha-checks every entry on each recorder run**, and the
-    morning wrapper may run it twice. At 1h scale that is GBs of reads per
-    morning on E:. Before Switch 2, make prune read only the key/rev, or cap
-    the cache size.
+- **Switch 2 gates (2026-10-19 final review): all four DONE in 2b-3 D-i
+  (2026-10-29).** None was a defect at 1d; they were costs or edge cases that
+  arrive with 1h scale:
+  - **Prune read and sha-checked every entry on each recorder run** (the
+    morning wrapper may run it twice; GBs of reads on E: at 1h scale). Now it
+    reads the key only (Prune bullet above); measured 0.10 s over 310 entries
+    (2026-10-31).
   - **Each key stores its own copy of the closes** (about half the bytes of an
-    entry). Measure the disk at 1h and decide on a cap before activation.
-  - **In-process entries are never evicted**, in the quarantine process or on
-    the serial worker path (`worker_count` == 1, which is exactly the
-    low-commit case). Evict per cell or per payload before 1h load.
-  - **Exit-only trend windows are now computed over all n bars on per-call
-    caches** (screen). The values are identical, but a pathological series
-    (overflow, or a standard-error underflow) could now raise on bars the old
-    path never visited.
+    entry). Now bounded by `MAX_DISK_BYTES` (20 GiB cap in prune); disk
+    measured at 1h: about 11 MB per cell, 1 MB per entry (2026-10-31).
+  - **In-process entries were never evicted** (quarantine process, and the
+    serial worker path `worker_count` == 1). Now the per-process byte LRU
+    (In-process bound bullet above), largest process 1.3 GB (1h worker, 2026-10-31).
+  - **Exit-only trend windows are computed over all n bars on per-call
+    caches** (screen), so a pathological series (overflow, or a
+    standard-error underflow) could raise on a bar the old path never
+    visited. **The deferred-fault rule (2b-3 D-i):**
+    `trend_tstat_series.compute` catches `ArithmeticError` per bar
+    (ZeroDivisionError, OverflowError) and stores `math.nan` for that bar;
+    `_best_tstat` reads the series element-wise per window in `windows`
+    order and, on a NaN, makes the DIRECT `trend_tstat` call on that slice
+    (`_series_or_direct`): a faulting window raises its own exception at its
+    own place in the order, and a bar whose true value is NaN returns the
+    direct call's own NaN (bit-identical). A bar the direct path never reads
+    never raises. Non-NaN values are served untouched; `ValueError` (short
+    or empty window) paths are unchanged. Cost: a faulting bar re-runs the
+    direct call on every read (no cache for the deferred value), so only
+    pathological data pays.
+  - **ROLLBACK RULE (read before reverting this merge):** NaN markers are
+    PERSISTED in `seriescache/` by the new code, and pre-D-i code would serve
+    them as t-stat VALUES where the direct path raises. A revert of the D-i
+    merge MUST also delete `seriescache/` (one cold run). The same is true of
+    any hand-copy of `seriescache/` taken after the merge.
 - **Still uncached (follow-up candidate, Coen's call):** vol_target sizing's
   realized vol (about 66 s of the warm 201 s), channel_breakout
   highest/lowest (about 25 s), and the sma/stdev series and `atr_wilder`.
@@ -1894,6 +2031,31 @@ unusable file is one `feed_hole` "cannot scan" item).
   `test_switch1.py` pins; all are updated in that commit. A retired cell whose
   price file is MISSING or EMPTY still blocks via the preflight's rule 3 (a
   different failure, alarmed on purpose). Pinned by `test_retired_cells.py`.
+- **`cells.EXCLUDED_CELLS` (2b-3 plan 4, D-i Task 7; empty as committed).** A
+  PER-CELL exclusion, beside `RETIRED_CELLS` and different from it: an intraday
+  cell below the admission line leaves the sweep WITHOUT dropping its asset
+  (`SUNUSDT@1h` out; SUNUSDT at 4h, 12h and 1d stay). Retired = every
+  timeframe of an asset, a delisting; excluded = one cell, the asset stays.
+  A `frozenset` of `qcells.cell_key` strings (bare asset at 1d, `ASSET@TF`
+  otherwise). `active_cells` omits them, so everything that sweeps (the
+  composer's `sweep_cells` / `expand_family_for_class`, `crypto_refresh`, the
+  loop's window) follows; `CLASSES` is untouched (the cell stays declared) and
+  only the sweep, hence the trial denominator, shrinks. With it empty
+  `active_cells` is byte-for-byte the plain assets x timeframes product.
+  Import check (`assert_excluded_cells_valid`, run at import AFTER
+  `assert_retired_cells_valid`; what must be declared BEFORE that one is the
+  `EXCLUDED_CELLS` constant, because it calls `active_cells`, which reads the
+  constant): each key
+  well-formed, a DECLARED cell of a declared class, and not also in
+  `RETIRED_CELLS`. It accepts ANY declared cell, including one outside the
+  current gate (`X@1h` while the gate is 1d only is a silent no-op); plan 5 may
+  tighten that in the Switch 2 commit. **Hazard:** an excluded cell that
+  already has registered strategies stops being fetched (it is no longer
+  active), so those strategies park at `stale_data` exactly like an
+  unretired dead cell above: exclude only cells with no registered
+  strategies. Growing the set is a denominator event in Coen's own reviewed
+  commit; plan 5 fills it from the phase-2 prefetch admission rows (which is
+  why the prefetch still fetches excluded cells). Tests: `test_cells.py`.
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy

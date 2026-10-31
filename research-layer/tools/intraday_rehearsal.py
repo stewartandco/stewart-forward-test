@@ -16,12 +16,14 @@ trusted to be a scratch copy.
         --twins twins.json --artifacts-dir ART --out report.md
     python -m tools.intraday_rehearsal quarantine --registry COPY \
         --data-dir SCRATCH_DATA --twins twins.json --entered YYYY-MM-DD \
-        [--n 2] --out report.md
+        [--n 2] [--timeframes 1h,4h,12h] [--transition-only] --out report.md
 
 `quarantine` (2b-2 design s7) is the recorder's end-to-end proof on the
-COPY: it moves the first --n twins of the twins file's finest timeframe
-(1h when it has any 1h twin, so a default 1d+1h file is unchanged; 1d for
-a `--timeframes 1d` file, 2b-3 Switch 1) to `quarantine` BY HAND (screened,
+COPY: it moves the first --n twins of EACH requested timeframe (--timeframes;
+default every non-1d timeframe present in the twins file, so a default 1d+1h
+file still moves only 1h twins, and a 1d-only file, 2b-3 Switch 1, moves its
+1d twins; 2b-3 plan 4 Task 7 widened this from 1h only to every phase-2
+timeframe, 1h, 4h and 12h) to `quarantine` BY HAND (screened,
 gauntlet, a synthetic gauntlet `pass` with metrics {"rehearsal": true}, then
 quarantine stamped <entered>T00:00:00Z) -- no twin passed the real gauntlet,
 so the transition is made on the copy only and the report says so -- then
@@ -30,6 +32,12 @@ runs the real `pipeline.quarantine` --fetch-owed (a real Binance fetch into
 `pipeline.livegate --dry-run`, with `verify_registry.py` before the appends
 and after the whole run. It refuses the live chain exactly as `register`
 does, and writes logs/ only beside the COPY.
+
+--transition-only stops after `verify_registry.py` (before) and the hand
+transition: NO --fetch-owed, NO catch-up, no network, nothing recorded past
+entry. It leaves every date after <entered> owed on whatever data is already
+in --data-dir (a frozen copy), which is what a replay of the catch-up, old
+code against new, needs as its starting chain (2b-3 plan 4 Task 9).
 """
 from __future__ import annotations
 
@@ -394,11 +402,43 @@ def _n_decisions(registry: Path) -> int:
     return len(_decisions(registry))
 
 
+def pick_twins(twins: dict, twins_path, n: int,
+               timeframes: tuple[str, ...] | None) -> tuple[list[str], list[str]]:
+    """(picked twin ids, timeframes used): the first `n` twins of each
+    requested timeframe, coarsest timeframe first. `timeframes` None = every
+    non-1d timeframe in the file, or the file's own timeframes when it holds
+    nothing but 1d. A requested timeframe the file lacks, or fewer than `n`
+    twins at one, is a SystemExit naming it (nothing is written)."""
+    present = _tf_order(t["tf"] for t in twins.values())
+    if timeframes is None:
+        tfs = [t for t in present if t != "1d"] or present
+    else:
+        absent = [t for t in timeframes if t not in present]
+        if absent:
+            raise SystemExit(f"--timeframes {','.join(absent)}: no such twin in "
+                             f"{twins_path} (it holds {','.join(present) or 'none'})")
+        tfs = _tf_order(timeframes)
+    if not tfs:
+        raise SystemExit(f"no twins in {twins_path}")
+    picked: list[str] = []
+    for tf in tfs:
+        mine = [s for s, t in twins.items() if t["tf"] == tf][:n]
+        if len(mine) < n:
+            raise SystemExit(f"only {len(mine)} {tf} twins in {twins_path}, "
+                             f"wanted {n}")
+        picked += mine
+    return picked, tfs
+
+
 def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
-               n: int, out: Path) -> int:
+               n: int, out: Path, timeframes: tuple[str, ...] | None = None,
+               transition_only: bool = False) -> int:
     """The s7 proof on a COPY. Exit 0 = every proof criterion held, 1 = one
     failed (the report says which), 3 = BLOCKED (a fetch failed: no catch-up
-    is attempted, the report names the failed cells)."""
+    is attempted, the report names the failed cells). `timeframes` None = every
+    non-1d timeframe in the twins file (see pick_twins). `transition_only` runs
+    the verify and the hand transition and stops: no fetch, no catch-up (exit 0
+    when the chain read REGISTRY VALID before the transition, else 1)."""
     refuse_live_chain(registry, "run the quarantine rehearsal")
     refuse_live_data_dir(data_dir, "run the quarantine rehearsal")
     from pipeline import quarantine as q
@@ -409,11 +449,8 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     if not data_dir.is_dir():
         raise SystemExit(f"no scratch data dir at {data_dir}")
     twins = json.loads(Path(twins_path).read_text(encoding="utf-8"))
-    tfs = _tf_order(t["tf"] for t in twins.values())
-    tf = "1h" if "1h" in tfs else (tfs[-1] if tfs else "1h")
-    picked = [s for s, t in twins.items() if t["tf"] == tf][:n]
-    if len(picked) < n:
-        raise SystemExit(f"only {len(picked)} {tf} twins in {twins_path}, wanted {n}")
+    picked, used_tfs = pick_twins(twins, twins_path, n, timeframes)
+    tf = "/".join(used_tfs)                 # report label: 1h, or 12h/4h/1h
     states = Registry(registry).strategy_states()
     wrong = {s: states.get(s, "unregistered") for s in picked
              if states.get(s) != "proposed"}
@@ -435,6 +472,9 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     synthetic = hand_quarantine(registry, picked, entered)
     print(f"hand transition: {len(picked)} twin(s) -> quarantine at {entered}",
           flush=True)
+    if transition_only:
+        return _transition_only_report(registry, data_dir, twins, twins_path,
+                                       picked, tf, entered, v_before, out)
 
     rc, text, secs = _captured(q.run, base + ["--fetch-owed"])
     log.append(f"$ quarantine --fetch-owed  (rc {rc}, {secs:.1f}s)\n{text}")
@@ -445,29 +485,44 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     decisions_before = _n_decisions(registry)
     catchup_secs = 0.0
     date_secs: dict[str, float] = {}
+    picked_set = set(picked)
+    # Seconds per strategy-day PER TIMEFRAME (final review I1): each picked
+    # twin's observe_day call is timed on its own and filed under its spec's
+    # timeframe, so the figure is measured, never apportioned from a date
+    # pass that mixes timeframes. The hook is undone before anything else runs.
+    tf_secs: dict[str, list[float]] = {t: [] for t in used_tfs}
+    real_observe = q.observe_day
+
+    def timed_observe(spec, *a, **kw):
+        t0 = time.perf_counter()
+        result = real_observe(spec, *a, **kw)
+        if spec.get("strategy_id") in picked_set:
+            tf_secs.setdefault(spec["universe"].get("timeframe", "1d"),
+                               []).append(time.perf_counter() - t0)
+        return result
     if not blocked:
-        for k in range(MAX_CATCHUP_RUNS):
-            rc, text, secs = _captured(q.run, base + ["--catch-up"], date_secs)
-            catchup_secs += secs
-            catchup_rcs.append(rc)
-            log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
-                       f"{secs:.1f}s)\n{text}")
-            if "catch-up: nothing owed" in text:
-                nothing_owed = True
-                break
-            if rc != 0:
-                break
+        q.observe_day = timed_observe
+        try:
+            for k in range(MAX_CATCHUP_RUNS):
+                rc, text, secs = _captured(q.run, base + ["--catch-up"], date_secs)
+                catchup_secs += secs
+                catchup_rcs.append(rc)
+                log.append(f"$ quarantine --catch-up #{k + 1}  (rc {rc}, "
+                           f"{secs:.1f}s)\n{text}")
+                if "catch-up: nothing owed" in text:
+                    nothing_owed = True
+                    break
+                if rc != 0:
+                    break
+        finally:
+            q.observe_day = real_observe
     new_rows = _decisions(registry)[decisions_before:]
     strategy_days = len(new_rows)
-    picked_set = set(picked)
     twin_by_date: dict[str, int] = {}
     other_by_date: dict[str, int] = {}
     for r in new_rows:
         book = twin_by_date if r["strategy_id"] in picked_set else other_by_date
         book[r["date"]] = book.get(r["date"], 0) + 1
-    only_twins = sorted(d for d in twin_by_date if d not in other_by_date)
-    only_secs = sum(date_secs.get(d, 0.0) for d in only_twins)
-    only_rows = sum(twin_by_date[d] for d in only_twins)
 
     rc_rev, review_text, _ = _captured(q.run, base + ["--review"])
     rc_gate, gate_text, _ = _captured(livegate.run, [
@@ -570,12 +625,12 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
           f"strategy-day(s) chained (every quarantined strategy on the copy)",
           f"- seconds per strategy-day: {per_day} (wall clock including chain "
           f"reads and snapshots, so an upper bound)",
-          f"- {tf} only: {len(only_twins)} date(s) on which ONLY the picked {tf} "
-          f"twins recorded took {only_secs:.1f}s for {only_rows} {tf} "
-          f"strategy-day(s) = "
-          + (f"{only_secs / only_rows:.1f}" if only_rows else "n/a")
-          + f" seconds per {tf} strategy-day (per-date pass time, chain reads "
-          "included)",
+          *[f"- {t} timed: {len(tf_secs[t])} strategy-day(s), "
+            f"{sum(tf_secs[t]):.3f}s total, "
+            + (f"{sum(tf_secs[t]) / len(tf_secs[t]):.3f}" if tf_secs[t] else "n/a")
+            + f"s mean per strategy-day (each picked {t} twin's simulation "
+            "timed on its own; chain reads and snapshots excluded)"
+            for t in used_tfs],
           f"- rows chained by OTHER quarantined strategies on the copy: "
           f"{sum(other_by_date.values())} over {len(other_by_date)} date(s) "
           f"({', '.join(f'{d}: {n}' for d, n in sorted(other_by_date.items())) or 'none'})",
@@ -615,6 +670,36 @@ def quarantine(registry: Path, data_dir: Path, twins_path: Path, entered: str,
     return 0 if ok else 1
 
 
+def _transition_only_report(registry: Path, data_dir: Path, twins: dict,
+                            twins_path, picked: list[str], tf: str, entered: str,
+                            v_before: tuple[int, list[str], str], out: Path) -> int:
+    """--transition-only's short report: what was moved and the verify BEFORE
+    the move. Nothing was fetched or recorded; the dates after `entered` are
+    still owed."""
+    ok = v_before[0] == 0 and "REGISTRY VALID" in v_before[2]
+    L = ["# Intraday paper-stage rehearsal: hand transition only (2b-3 plan 4)", "",
+         f"Status: **{'PASS' if ok else 'FAIL'}**", "",
+         "Mode: transition-only. No `--fetch-owed`, no `--catch-up`, no network: "
+         "nothing was fetched and nothing was recorded past entry, so every date "
+         f"after `{entered}` is still owed on the data already in `{data_dir}`.", "",
+         f"Chain COPY `{registry}`.", "",
+         f"{len(picked)} {tf} twin(s) from `{twins_path}` moved to `quarantine` BY "
+         f"HAND on the copy (screened, gauntlet, a synthetic gauntlet `pass` with "
+         f"metrics `{json.dumps(SYNTHETIC_METRICS)}` and artifacts hash 64 zeros, "
+         f"then quarantine at `{entered}T00:00:00Z`): a rehearsal transition, "
+         f"never a recorder output.", "",
+         "| strategy | original | asset | tf |", "|---|---|---|---|"]
+    for sid in picked:
+        t = twins[sid]
+        L.append(f"| `{sid}` | `{t['original']}` | {t['asset']} | {t['tf']} |")
+    L += ["", f"verify BEFORE the transition (exit {v_before[0]}, {v_before[2]}): "
+          f"{len(v_before[1])} failure line(s)", "",
+          "```", *(v_before[1] or ["(none)"]), "```", ""]
+    Path(out).write_text("\n".join(L) + "\n", encoding="utf-8")
+    print(f"wrote {out}: transition-only {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m tools.intraday_rehearsal")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -636,11 +721,19 @@ def main(argv=None) -> int:
     qp.add_argument("--data-dir", type=Path, required=True)
     qp.add_argument("--twins", type=Path, required=True)
     qp.add_argument("--entered", required=True)
-    qp.add_argument("--n", type=int, default=2)
+    qp.add_argument("--n", type=int, default=2,
+                    help="twins moved PER timeframe (default 2)")
+    qp.add_argument("--timeframes", type=parse_timeframes, default=None,
+                    help="comma list of twin timeframes to move (default: every "
+                         "non-1d timeframe present in --twins)")
+    qp.add_argument("--transition-only", action="store_true",
+                    help="verify + hand transition, then stop: no --fetch-owed, "
+                         "no catch-up (dates stay owed on the data in --data-dir)")
     qp.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
     if a.cmd == "quarantine":
-        return quarantine(a.registry, a.data_dir, a.twins, a.entered, a.n, a.out)
+        return quarantine(a.registry, a.data_dir, a.twins, a.entered, a.n, a.out,
+                          a.timeframes, a.transition_only)
     if a.cmd == "register":
         twins = register(a.registry, [x for x in a.assets.split(",") if x],
                          a.originals, a.seed, a.out, a.timeframes)

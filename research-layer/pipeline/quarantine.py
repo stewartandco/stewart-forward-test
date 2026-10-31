@@ -88,6 +88,8 @@ import time
 import hashlib
 import argparse
 import traceback
+from bisect import bisect_right
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -179,11 +181,14 @@ def _series_cache(registry_path: Path) -> SeriesCache:
         # drop dead writers' temp files and entries under an old ENGINE_REV.
         # Never raises; says something only when it removed something.
         removed = cache.prune()
+        # capped_removed (the 2b-3 D-i disk cap) is shown too: a cap hit must
+        # be visible in the 08:20 run log.
         if any(removed[k] for k in ("tmp_removed", "stale_rev_removed",
-                                    "corrupt_removed")):
+                                    "corrupt_removed", "capped_removed")):
             print(f"seriescache: pruned {removed['tmp_removed']} tmp, "
                   f"{removed['stale_rev_removed']} stale-rev, "
-                  f"{removed['corrupt_removed']} corrupt "
+                  f"{removed['corrupt_removed']} corrupt, "
+                  f"{removed['capped_removed']} capped "
                   f"({removed['kept']} kept)", flush=True)
     return cache
 
@@ -638,6 +643,85 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
     return bars
 
 
+# Intraday price files are parsed ONCE per process (2b-3 D-i Task 4). A cell's
+# whole file is needed for every (strategy, date) -- the completeness rule has
+# to see whether a later day exists (s3.3) -- and parsing a 1h file is ~1 s and
+# ~40 MB as dicts, so the per-date, per-strategy re-parse dominated catch-up
+# I/O. The memo only SKIPS work (the series_cache rule): the key is the file's
+# identity (resolved path, st_mtime_ns, st_size), stat'ed before AND after the
+# parse; any difference, or a failed stat, serves the parse and memoises
+# nothing. Daily cells never come through here (`_daily_bars` normalises their
+# dates IN PLACE; a shared list would be corrupted).
+#
+# The bound is in BARS across all held cells (~40 MB per 78k-bar 1h file, so
+# 2M bars is about 1 GB). One file bigger than the bound is still served and
+# held, never refused. Access is cyclic (every strategy over every cell, then
+# every date over every cell), so an LRU smaller than the working set gets ZERO
+# hits: the bound is sized to hold every intraday cell the recorder touches,
+# and `full_bars_memo_stats()` is how a run proves that it did.
+FULL_BARS_MEMO_MAX_BARS = 2_000_000
+
+_FULL_BARS_MEMO: "OrderedDict[tuple, list[dict]]" = OrderedDict()
+_FULL_BARS_HELD = 0
+_FULL_BARS_STATS = {"hits": 0, "misses": 0, "evictions": 0}
+
+
+def _reset_full_bars_memo() -> None:
+    """Empty the memo and zero its counters (tests; never needed in a run)."""
+    global _FULL_BARS_HELD
+    _FULL_BARS_MEMO.clear()
+    _FULL_BARS_HELD = 0
+    for k in _FULL_BARS_STATS:
+        _FULL_BARS_STATS[k] = 0
+
+
+def full_bars_memo_stats() -> dict:
+    """{hits, misses, evictions, bars (held now), files (held now)} -- a
+    snapshot, so the rehearsal can report the hit rate at scale."""
+    return {**_FULL_BARS_STATS, "bars": _FULL_BARS_HELD,
+            "files": len(_FULL_BARS_MEMO)}
+
+
+def _file_identity(path: Path) -> tuple[str, int, int] | None:
+    try:
+        st = path.stat()
+        return (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _full_bars(data_dir: Path, asset: str, tf: str) -> list[dict]:
+    """The cell's WHOLE intraday file (`load_bars` with a 9999 cutoff), parsed
+    once per file identity. The returned list is the memo's own and SHARED:
+    callers must not mutate it or its dicts (`_load_cell_bars` copies the list;
+    nothing on an intraday path writes a bar, pinned by
+    test_bars_are_not_mutated_by_a_recorded_day). A missing file is not
+    memoised: `load_bars` raises exactly what it always did."""
+    global _FULL_BARS_HELD
+    path = data_dir / f"{asset}_{tf}.csv"
+    before = _file_identity(path)
+    if before is None:
+        return load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
+    hit = _FULL_BARS_MEMO.get(before)
+    if hit is not None:
+        _FULL_BARS_MEMO.move_to_end(before)
+        _FULL_BARS_STATS["hits"] += 1
+        return hit
+    full = load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
+    _FULL_BARS_STATS["misses"] += 1       # every parse counts, kept or not
+    if _file_identity(path) != before:
+        return full                       # changed mid-read: serve, never keep
+    for stale in [k for k in _FULL_BARS_MEMO if k[0] == before[0]]:
+        _FULL_BARS_HELD -= len(_FULL_BARS_MEMO.pop(stale))   # a replaced file
+    _FULL_BARS_MEMO[before] = full
+    _FULL_BARS_HELD += len(full)
+    while _FULL_BARS_HELD > FULL_BARS_MEMO_MAX_BARS and len(_FULL_BARS_MEMO) > 1:
+        _, gone = _FULL_BARS_MEMO.popitem(last=False)
+        _FULL_BARS_HELD -= len(gone)
+        _FULL_BARS_STATS["evictions"] += 1
+    return full
+
+
 def _load_cell_bars(data_dir: Path, key: str, date: str) -> tuple[list[dict], bool]:
     """(bars <= date, is `date` complete for this cell). A daily cell is
     exactly today's path: its bars normalized to the date part, complete when
@@ -648,9 +732,13 @@ def _load_cell_bars(data_dir: Path, key: str, date: str) -> tuple[list[dict], bo
     if not is_intraday_key(key):
         bars = _daily_bars(data_dir, asset, date)
         return bars, bool(bars) and bars[-1]["date"] == date
-    full = load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
-    upto = [b for b in full if b["date"][:10] <= date]
-    return upto, date in complete_days(full, tf)
+    full = _full_bars(data_dir, asset, tf)
+    # The file is strictly increasing (crypto_data.validate_rows) and
+    # load_bars sorts by date, so bars <= date is a prefix: bisect on the date
+    # part, and hand back a NEW list (callers may append to it; the dicts are
+    # shared, see _full_bars).
+    k = bisect_right(full, date, key=lambda b: b["date"][:10])
+    return full[:k], date in complete_days(full, tf)
 
 
 def _load_eligible_bars(data_dir: Path, cells: list[str], date: str
@@ -682,7 +770,7 @@ def _cell_days(data_dir: Path, key: str, through: str) -> list[str] | None:
     asset, tf = split_cell_key(key)
     if not is_intraday_key(key):
         return [b["date"] for b in _daily_bars(data_dir, asset, through)]
-    full = load_bars(data_dir, asset, "9999-12-31", timeframe=tf)
+    full = _full_bars(data_dir, asset, tf)
     return [d for d in complete_days(full, tf) if d <= through]
 
 

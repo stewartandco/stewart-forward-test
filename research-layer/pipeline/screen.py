@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from . import commit_list as _commit_list
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id, retired_cell_ids
-from .bars import bars_per_day, IntradayUnsupported
+from .bars import bars_per_day, IntradayUnsupported, daily_marks as _daily_marks
 from .parallel import run_all, CellError
 from .chainlock import ChainLock, ChainLockHeld
 from .registry import Registry, ChainMoved, UnstableEntry, SCREEN_BATCH_MAX
@@ -423,15 +423,39 @@ def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
                            lineterminator="\n", extrasaction="ignore")
         w.writeheader()
         w.writerows(result["trades"])
-    with (bundle / "equity.csv").open("w", newline="", encoding="utf-8") as f:
+    config = {"protocol": PROTOCOL, "cutoff": cutoff, "spec": spec,
+              "data_sha256": data_hashes, "data_end": data_end}
+    # An intraday bundle's per-bar curve measured 1.7-2.1 MB and bundles go to
+    # the PUBLIC repo (2b-3 D-i3): the committed equity.csv holds the UTC daily
+    # marks, the per-bar rows go to a gitignored equity_bars.csv that config.json
+    # pins by sha. A 1d bundle is unchanged byte for byte: no new file, no new
+    # key. `.get`, not ["timeframe"]: an older spec carries no timeframe.
+    intraday = spec["universe"].get("timeframe", "1d") != "1d"
+    if intraday:
+        # the marks first: a daily_marks ValueError (out-of-order input) must
+        # leave no equity_bars.csv behind
+        marks = _daily_marks(result["equity"])
+        _write_equity(bundle / "equity_bars.csv", result["equity"])
+        config["equity_bars_sha256"] = _lf_sha256(bundle / "equity_bars.csv")
+        _write_equity(bundle / "equity.csv", marks)
+    else:
+        _write_equity(bundle / "equity.csv", result["equity"])
+    (bundle / "config.json").write_text(json.dumps(
+        config, indent=1, sort_keys=True), encoding="utf-8")
+    return bundle
+
+
+def _write_equity(path: Path, rows) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["date", "combined_equity"])
-        w.writerows(result["equity"])
-    (bundle / "config.json").write_text(json.dumps(
-        {"protocol": PROTOCOL, "cutoff": cutoff, "spec": spec,
-         "data_sha256": data_hashes, "data_end": data_end},
-        indent=1, sort_keys=True), encoding="utf-8")
-    return bundle
+        w.writerows(rows)
+
+
+def _lf_sha256(path: Path) -> str:
+    """sha256 of the file's bytes with CRLF normalised to LF: bundle_hash's
+    convention, so a checkout that converted the line endings still matches."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def bundle_hash(bundle: Path,

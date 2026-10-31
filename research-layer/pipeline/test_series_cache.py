@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import os
 import struct
+from pathlib import Path
 from array import array
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
@@ -477,7 +478,8 @@ def test_prune_removes_an_old_tmp_and_keeps_a_young_one(tmp_path):
     _age(young, 3599.0, now)
     out = SeriesCache(d).prune(now=now)
     assert out == {"tmp_removed": 1, "stale_rev_removed": 0,
-                   "corrupt_removed": 0, "kept": 0}
+                   "corrupt_removed": 0, "kept": 0, "capped_removed": 0,
+                   "bytes_kept": 0}
     assert not old.exists() and young.exists()     # a live writer's, untouched
     # the age limit is a parameter
     out2 = SeriesCache(d).prune(now=now, tmp_max_age_s=10.0)
@@ -496,9 +498,11 @@ def test_prune_removes_a_stale_rev_entry_and_keeps_the_current_one(
     assert len(list(d.iterdir())) == 2
 
     out = SeriesCache(d).prune()
+    (survivor,) = list(d.iterdir())
     assert out == {"tmp_removed": 0, "stale_rev_removed": 1,
-                   "corrupt_removed": 0, "kept": 1}
-    assert not old_file.exists() and len(list(d.iterdir())) == 1
+                   "corrupt_removed": 0, "kept": 1, "capped_removed": 0,
+                   "bytes_kept": survivor.stat().st_size}
+    assert not old_file.exists()
     # the survivor is still served, from disk, without a recompute
     fresh = SeriesCache(d)
     served, spy = get(fresh, inputs, params=(20,))
@@ -516,23 +520,17 @@ def test_prune_removes_a_corrupt_file_like_load_treats_it_as_a_miss(tmp_path):
     blob = files[1].read_bytes()
     out = SeriesCache(d).prune()
     assert out == {"tmp_removed": 0, "stale_rev_removed": 0,
-                   "corrupt_removed": 1, "kept": 1}
+                   "corrupt_removed": 1, "kept": 1, "capped_removed": 0,
+                   "bytes_kept": files[1].stat().st_size}
     assert not files[0].exists() and files[1].read_bytes() == blob
-    # A truncated npz and a bit-flipped one (bad checksum) are corrupt too.
+    # A truncated npz is corrupt too. (A bit-flipped one is NOT: prune reads
+    # keys only since 2b-3 D-i; see test_a_bit_flip_in_values_survives_prune.)
     keep = files[1].name
     get(SeriesCache(d), inputs, params=(30,))
-    get(SeriesCache(d), inputs, params=(40,))
-    trunc, flipped = [p for p in sorted(d.iterdir()) if p.name != keep]
+    trunc = [p for p in sorted(d.iterdir()) if p.name != keep][0]
     trunc.write_bytes(trunc.read_bytes()[:40])
-    with np.load(flipped) as z:
-        fields = {k: z[k] for k in z.files}
-    v = fields["values"].copy()
-    v[3] = v[3] + 1.0
-    fields["values"] = v
-    with open(flipped, "wb") as fh:
-        np.savez(fh, **fields)
     out = SeriesCache(d).prune()
-    assert out["corrupt_removed"] == 2 and out["kept"] == 1
+    assert out["corrupt_removed"] == 1 and out["kept"] == 1
     assert [p.name for p in d.iterdir()] == [keep]
 
 
@@ -549,14 +547,15 @@ def test_prune_on_a_read_only_cache_touches_nothing(tmp_path, monkeypatch):
     before = {p.name: (p.read_bytes(), p.stat().st_mtime) for p in d.iterdir()}
     out = SeriesCache(d, read_only=True).prune(now=1_000_000.0)
     assert out == {"tmp_removed": 0, "stale_rev_removed": 0,
-                   "corrupt_removed": 0, "kept": 0}
+                   "corrupt_removed": 0, "kept": 0, "capped_removed": 0,
+                   "bytes_kept": 0}
     assert {p.name: (p.read_bytes(), p.stat().st_mtime)
             for p in d.iterdir()} == before
 
 
 def test_prune_on_a_missing_or_absent_directory_returns_zeros(tmp_path):
     zeros = {"tmp_removed": 0, "stale_rev_removed": 0, "corrupt_removed": 0,
-             "kept": 0}
+             "kept": 0, "capped_removed": 0, "bytes_kept": 0}
     ghost = tmp_path / "ghost"
     assert SeriesCache(ghost).prune() == zeros
     assert not ghost.exists()                    # prune never creates it
@@ -621,21 +620,21 @@ def test_prune_does_not_unlink_an_entry_rewritten_after_it_was_read(
     old_bytes = path.read_bytes()
     new_bytes = (b"Z" * len(old_bytes) if how == "mtime_only"
                  else old_bytes + b"appended-by-the-writer")
-    real_read = type(path).read_bytes
+    real_read_key = series_cache._read_key
     fired = []
 
-    def read_then_rewrite(self):
-        data = real_read(self)
-        if self.name == path.name and not fired:
+    def read_then_rewrite(p):
+        data = real_read_key(p)
+        if p.name == path.name and not fired:
             fired.append(1)
-            self.write_bytes(new_bytes)
+            p.write_bytes(new_bytes)
             if how == "mtime_only":     # same size, a strictly later mtime
-                os.utime(self, ns=(st0.st_atime_ns, st0.st_mtime_ns + 5_000_000_000))
+                os.utime(p, ns=(st0.st_atime_ns, st0.st_mtime_ns + 5_000_000_000))
             else:                       # a different size, the old mtime back
-                os.utime(self, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+                os.utime(p, ns=(st0.st_atime_ns, st0.st_mtime_ns))
         return data
 
-    monkeypatch.setattr(type(path), "read_bytes", read_then_rewrite)
+    monkeypatch.setattr(series_cache, "_read_key", read_then_rewrite)
     out = SeriesCache(d).prune()                 # must not raise
     assert fired == [1]
     assert out["stale_rev_removed"] == 0 and out["corrupt_removed"] == 0
@@ -648,16 +647,294 @@ def test_prune_leaves_an_entry_it_cannot_read_and_goes_on(tmp_path, monkeypatch)
     get(SeriesCache(d), make_inputs(100), params=(20,))
     monkeypatch.undo()
     (other,) = [p for p in d.iterdir() if p.suffix == ".npz" and p != blocked]
-    real_read = type(blocked).read_bytes
+    real_read_key = series_cache._read_key
 
-    def read(self):
-        if self.name == blocked.name:
+    def read(p):
+        if p.name == blocked.name:
             raise PermissionError("sharing violation")
-        return real_read(self)
+        return real_read_key(p)
 
-    monkeypatch.setattr(type(blocked), "read_bytes", read)
+    monkeypatch.setattr(series_cache, "_read_key", read)
     out = SeriesCache(d).prune()                 # must not raise
     assert blocked.exists()                      # left alone
     assert not other.exists()                    # the walk went on
     assert out == {"tmp_removed": 0, "stale_rev_removed": 1,
-                   "corrupt_removed": 0, "kept": 0}
+                   "corrupt_removed": 0, "kept": 0, "capped_removed": 0,
+                   "bytes_kept": 0}
+
+
+# ------------------------------------- prune: keys only, and the disk cap
+# 2b-3 D-i, Switch 2 gates 1 and 2 (engine series cache section of CLAUDE.md).
+
+def _entry_for(d, params):
+    return SeriesCache(d)._path((KIND, tuple(params), series_cache.ENGINE_REV, CELL))
+
+
+def test_the_disk_cap_default_is_20_gib():
+    assert series_cache.MAX_DISK_BYTES == 20 * 2**30
+
+
+def test_prune_never_reads_entry_payloads(tmp_path, monkeypatch):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), inputs, params=(10,))            # stale rev
+    monkeypatch.undo()
+    get(SeriesCache(d), inputs, params=(20,))            # valid
+    get(SeriesCache(d), inputs, params=(30,))            # corrupt (truncated)
+    bad = _entry_for(d, (30,))
+    bad.write_bytes(bad.read_bytes()[:40])
+
+    def boom(*a, **k):
+        raise AssertionError("prune must not read an entry's payload")
+
+    monkeypatch.setattr(series_cache, "_parse_blob", boom)
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    members = []
+    real_getitem = np.lib.npyio.NpzFile.__getitem__
+
+    def spy(self, name):                         # every npz member read
+        members.append(name)
+        return real_getitem(self, name)
+
+    monkeypatch.setattr(np.lib.npyio.NpzFile, "__getitem__", spy)
+    out = SeriesCache(d).prune()
+    # the ONLY member prune may touch is "key" (never inputs/values/sha256)
+    assert members and set(members) == {"key"}
+    assert (out["stale_rev_removed"], out["corrupt_removed"], out["kept"]) == (1, 1, 1)
+    assert out["capped_removed"] == 0
+    assert [p.name for p in d.iterdir()] == [_entry_for(d, (20,)).name]
+
+
+def test_a_writer_can_replace_an_entry_right_after_prune_read_it(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    get(SeriesCache(d), inputs, params=(20,))
+    target = _entry_for(d, (20,))
+    out = SeriesCache(d).prune()
+    assert out["kept"] == 1
+    # Windows: a handle prune left open would make this raise PermissionError.
+    donor = tmp_path / "donor.npz"
+    donor.write_bytes(b"x")
+    os.replace(donor, target)
+    assert target.read_bytes() == b"x"
+
+
+def test_prune_removes_stale_rev_and_unreadable_key(tmp_path, monkeypatch):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    monkeypatch.setattr(series_cache, "ENGINE_REV", "e2-old")
+    get(SeriesCache(d), inputs, params=(10,))
+    monkeypatch.undo()
+    get(SeriesCache(d), inputs, params=(20,))
+    get(SeriesCache(d), inputs, params=(30,))
+    valid, trunc = _entry_for(d, (20,)), _entry_for(d, (30,))
+    (stale,) = [p for p in d.iterdir() if p not in (valid, trunc)]
+    trunc.write_bytes(trunc.read_bytes()[:40])
+    out = SeriesCache(d).prune()
+    assert out["stale_rev_removed"] == 1 and out["corrupt_removed"] == 1
+    assert out["kept"] == 1
+    assert valid.exists() and not stale.exists() and not trunc.exists()
+
+
+def test_a_bit_flip_in_values_survives_prune_but_load_misses(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    get(SeriesCache(d), inputs)
+    f = _entry_file(d)
+    with np.load(f) as z:
+        fields = {k: z[k] for k in z.files}
+    v = fields["values"].copy()
+    v[3] = v[3] + 1.0
+    fields["values"] = v
+    with open(f, "wb") as fh:
+        np.savez(fh, **fields)
+    flipped = f.read_bytes()
+    out = SeriesCache(d).prune()
+    assert out["kept"] == 1 and out["corrupt_removed"] == 0
+    assert f.read_bytes() == flipped
+    fresh = SeriesCache(d)                     # _load still verifies the sha
+    served, spy = get(fresh, inputs)
+    assert spy.calls == [(0, 100)] and fresh.stats["misses"] == 1
+    assert same(served, cold(inputs))
+    healed = SeriesCache(d)                    # ... and the write healed it
+    _, spy = get(healed, inputs)
+    assert spy.calls == [] and healed.stats["hits"] == 1
+
+
+def _three_entries(tmp_path):
+    """Three valid entries with strictly increasing mtimes t1 < t2 < t3, and
+    their paths oldest first."""
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    paths = []
+    for i, prm in enumerate(((10,), (20,), (30,))):
+        get(SeriesCache(d), inputs, params=prm)
+        p = _entry_for(d, prm)
+        t_ns = 1_700_000_000_000_000_000 + i * 10_000_000_000
+        os.utime(p, ns=(t_ns, t_ns))
+        paths.append(p)
+    return d, paths
+
+
+def test_the_cap_removes_oldest_first_until_under(tmp_path):
+    d, (p1, p2, p3) = _three_entries(tmp_path)
+    s1, s2, s3 = (p.stat().st_size for p in (p1, p2, p3))
+    out = SeriesCache(d).prune(max_bytes=s2 + s3)
+    assert out["capped_removed"] == 1
+    assert out["kept"] == 2 and out["bytes_kept"] == s2 + s3
+    assert not p1.exists() and p2.exists() and p3.exists()
+    # at or under the cap is left alone
+    out2 = SeriesCache(d).prune(max_bytes=s2 + s3)
+    assert out2["capped_removed"] == 0 and out2["kept"] == 2
+
+
+def test_the_cap_removes_several_when_needed(tmp_path):
+    d, (p1, p2, p3) = _three_entries(tmp_path)
+    s3 = p3.stat().st_size
+    out = SeriesCache(d).prune(max_bytes=s3)
+    assert out["capped_removed"] == 2 and out["bytes_kept"] == s3
+    assert not p1.exists() and not p2.exists() and p3.exists()
+
+
+def test_the_cap_leaves_a_replaced_entry_alone(tmp_path, monkeypatch):
+    d, (p1, p2, p3) = _three_entries(tmp_path)
+    s2, s3 = p2.stat().st_size, p3.stat().st_size
+    real_read_key = series_cache._read_key
+
+    def read_then_replace(p):
+        out = real_read_key(p)
+        if p.name == p1.name:                  # a writer replaces the oldest
+            p.write_bytes(b"new")              # between the scan and the cap
+        return out
+
+    monkeypatch.setattr(series_cache, "_read_key", read_then_replace)
+    out = SeriesCache(d).prune(max_bytes=s2 + s3 + 3)
+    assert out["capped_removed"] == 0          # the replaced file is not ours
+    assert p1.exists() and p1.read_bytes() == b"new"
+    assert p2.exists() and p3.exists()
+
+
+def test_max_bytes_none_disables_the_cap(tmp_path):
+    d, paths = _three_entries(tmp_path)
+    total = sum(p.stat().st_size for p in paths)
+    out = SeriesCache(d).prune(max_bytes=None)
+    assert out["capped_removed"] == 0 and out["kept"] == 3
+    assert out["bytes_kept"] == total and all(p.exists() for p in paths)
+
+
+# --------------------------------------- in-process store: byte-bounded LRU
+# 2b-3 D-i, Switch 2 gate 3: `_mem` is an OrderedDict bounded in bytes.
+
+def _entry_bytes(n: int, none_prefix: int = 5) -> int:
+    # the cache's own size rule: len(inputs_b) + 8 * len(values)
+    return 8 * n + 8 * (n - none_prefix)
+
+
+def _mem_key(params):
+    return (KIND, tuple(params), series_cache.ENGINE_REV, CELL)
+
+
+def _tracked_total(cache) -> int:
+    return sum(len(e.inputs_b) + 8 * len(e.values) for e in cache._mem.values())
+
+
+def test_the_memory_budget_default_is_1_gib():
+    assert series_cache.MEM_MAX_BYTES == 2**30
+    assert SeriesCache()._mem_max_bytes == 2**30
+
+
+def test_memory_stays_under_budget(tmp_path):
+    sz = _entry_bytes(100)
+    budget = 2 * sz
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=budget)
+    inputs = make_inputs(100)
+    worst = 0
+    for i in range(6):                          # 6 x sz = 3 x budget
+        get(cache, inputs, params=(10 + i,))
+        worst = max(worst, cache._mem_bytes)
+        assert cache._mem_bytes == _tracked_total(cache)   # the books balance
+    assert worst <= budget + sz                 # the brief's bound
+    assert cache._mem_bytes <= budget           # equal-size entries: tight
+    assert len(cache._mem) == 2
+    assert cache.stats["evictions"] == 4
+
+
+def test_an_evicted_entry_comes_back_bit_identical(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    inputs = make_inputs(100)
+    cache = SeriesCache(d, mem_max_bytes=_entry_bytes(100))   # room for ONE
+    first, _ = get(cache, inputs, params=(10,))
+    get(cache, inputs, params=(20,))            # evicts (10,)
+    assert _mem_key((10,)) not in cache._mem and cache.stats["evictions"] == 1
+    again, spy = get(cache, inputs, params=(10,))
+    assert spy.calls == []                      # adopted from disk, not computed
+    # An adopt from disk is counted exactly as before this change: a hit.
+    assert cache.stats["hits"] == 1 and cache.stats["misses"] == 2
+    assert cache.stats["extends"] == 0
+    assert array("d", [x for x in again if x is not None]).tobytes() \
+        == array("d", [x for x in first if x is not None]).tobytes()
+    assert same(again, first) and same(again, cold(inputs))
+    # Without a directory the evicted entry is simply recomputed, equal.
+    mem_only = SeriesCache(mem_max_bytes=_entry_bytes(100))
+    a1, _ = get(mem_only, inputs, params=(10,))
+    get(mem_only, inputs, params=(20,))
+    a2, spy = get(mem_only, inputs, params=(10,))
+    assert spy.calls == [(0, 100)] and mem_only.stats["misses"] == 3
+    assert same(a1, a2) and same(a2, cold(inputs))
+
+
+def test_lru_order_follows_use(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=2 * _entry_bytes(100))
+    inputs = make_inputs(100)
+    get(cache, inputs, params=(10,))            # A
+    get(cache, inputs, params=(20,))            # B
+    get(cache, inputs, params=(10,))            # touch A: B is now the oldest
+    get(cache, inputs, params=(30,))            # C: evicts B, not A
+    assert list(cache._mem) == [_mem_key((10,)), _mem_key((30,))]
+    assert cache.stats["evictions"] == 1
+
+
+def test_a_single_oversize_entry_is_kept(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=10)
+    inputs = make_inputs(100)
+    out, _ = get(cache, inputs, params=(10,))
+    assert list(cache._mem) == [_mem_key((10,))]          # never evicted alone
+    assert cache._mem_bytes == _entry_bytes(100) > 10
+    assert cache.stats["evictions"] == 0
+    again, spy = get(cache, inputs, params=(10,))
+    assert spy.calls == [] and same(again, out)
+    get(cache, inputs, params=(20,))                      # the newer one stays
+    assert list(cache._mem) == [_mem_key((20,))]
+    assert cache.stats["evictions"] == 1
+
+
+def test_replacing_a_key_does_not_double_count():
+    cache = SeriesCache(mem_max_bytes=None)
+    longest = make_inputs(140)
+    for n in (100, 110, 120, 130, 140):         # the extend path replaces a key
+        get(cache, longest[:n])
+        assert cache._mem_bytes == _entry_bytes(n) == _tracked_total(cache)
+    assert cache.stats["extends"] == 4 and cache.stats["evictions"] == 0
+    assert len(cache._mem) == 1
+
+
+def test_a_disk_adopt_that_replaces_a_key_does_not_double_count(tmp_path):
+    d = tmp_path / CACHE_DIRNAME
+    longest = make_inputs(140)
+    cache = SeriesCache(d, mem_max_bytes=None)
+    get(cache, longest[:100])                    # memory holds the 100-bar entry
+    get(SeriesCache(d), longest)                 # another process writes 140 bars
+    out, spy = get(cache, longest)               # adopts the longer disk entry
+    assert spy.calls == [] and same(out, cold(longest))
+    assert cache.stats["hits"] == 1
+    assert cache._mem_bytes == _entry_bytes(140) == _tracked_total(cache)
+    assert len(cache._mem) == 1
+
+
+def test_no_budget_means_no_eviction(tmp_path):
+    cache = SeriesCache(tmp_path / CACHE_DIRNAME, mem_max_bytes=None)
+    inputs = make_inputs(100)
+    for i in range(5):
+        get(cache, inputs, params=(10 + i,))
+    assert len(cache._mem) == 5 and cache.stats["evictions"] == 0

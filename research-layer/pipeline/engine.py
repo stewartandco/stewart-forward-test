@@ -105,10 +105,29 @@ def trend_tstat_series(closes: list[float], w: int, cache: SeriesCache,
     bar). Element i is exactly `trend_tstat(closes[i-w+1:i+1])` -- the same
     call on the same slice the direct path makes -- for i >= w-1, None before.
     The cache only skips work (an exact-input prefix it already holds); it
-    never computes a value differently."""
+    never computes a value differently.
+
+    One exception, by design (2b-3 D-i, Switch 2 gate 4): a bar whose direct
+    call RAISES (ZeroDivisionError on an underflowing standard error,
+    OverflowError from `**2`) is stored as NaN, not raised. The precompute
+    reaches bars the old direct path never visited (an exit-only window on a
+    long intraday series), and a fault there must not abort a run that never
+    read the bar. NaN is the marker "defer to the direct call": `_best_tstat`
+    re-evaluates a NaN bar with `trend_tstat` itself, so a bar that is read
+    raises exactly what the direct path raises, and a bar whose true value is
+    NaN (an overflowing sum on finite input) gets that same NaN. The store
+    keeps floats bitwise, so the marker round-trips."""
     def compute(start: int, stop: int) -> list:
-        return [trend_tstat(closes[i - w + 1:i + 1]) if i >= w - 1 else None
-                for i in range(start, stop)]
+        out: list = []
+        for i in range(start, stop):
+            if i < w - 1:
+                out.append(None)
+                continue
+            try:
+                out.append(trend_tstat(closes[i - w + 1:i + 1]))
+            except ArithmeticError:
+                out.append(math.nan)
+        return out
     return cache.get("trend_tstat", (w,), cell, array("d", closes), compute)
 
 
@@ -117,10 +136,22 @@ def _best_tstat(closes: list[float], i: int, windows: list[int],
     """max |t| over `windows` at bar i, ties to the FIRST window in ascending
     order (max's rule). series None = the direct reference path, one
     trend_tstat call per window; otherwise series[k] is windows[k]'s shared
-    per-bar series (trend_tstat_series), read in the same order."""
+    per-bar series (trend_tstat_series), read in the same order, ELEMENT-WISE:
+    a stored NaN (a bar whose direct call raised, or whose true value is NaN)
+    is replaced by the direct call on that window, so every value read either
+    came from the direct call or IS the direct call, and a faulting window
+    raises its own exception at its own place in the windows order."""
     if series is None:
         return max((trend_tstat(closes[i - w + 1:i + 1]) for w in windows), key=abs)
-    return max((s[i] for s in series), key=abs)
+    return max((_series_or_direct(closes, i, w, s[i]) for w, s in zip(windows, series)),
+               key=abs)
+
+
+def _series_or_direct(closes: list[float], i: int, w: int, v: float) -> float:
+    """A served series value, or (for the NaN marker) the direct call."""
+    if v != v:
+        return trend_tstat(closes[i - w + 1:i + 1])
+    return v
 
 
 def realized_ann_vol(closes: list[float], n: int, periods_per_year: int = 365) -> list:
