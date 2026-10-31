@@ -1,0 +1,212 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2026-10-04",
+  "ETHUSD_1d": "2026-10-04"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "24089ad7f5588ed91553fb512786d608eb568fcd409dd314d27af4b73a54964a",
+  "ETHUSD_1d": "1d9fab34ab1c584845aea8814645a9019f6ff881a0d2bff5cc86cf280c129050"
+ },
+ "group_context": {},
+ "metrics": {
+  "cost_stress_net_pnl": 0.17502921247218817,
+  "edge_decay_pct": -32.62029817339533,
+  "exit_reasons_is": {
+   "stop": 35,
+   "target": 64
+  },
+  "exit_reasons_oos": {
+   "stop": 16,
+   "target": 22
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.016551393457659908,
+  "is_edge_raw": 0.013999123513578451,
+  "is_vol": 0.8457972767905969,
+  "mc_p05_equity": 1.3225555055059766,
+  "oos_edge_per_trade": 0.011152279559919398,
+  "oos_edge_raw": 0.006376462497623072,
+  "oos_vol": 0.571763150606418,
+  "open_at_end": true,
+  "p_ruin": 0.011,
+  "perturbation": {
+   "base_score": 0.7595973227206191,
+   "dense_only": true,
+   "mean_ratio": 1.1091066624645223,
+   "n_perturbations": 4,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 1.522187529101825,
+     "score": 1.1562495717844608,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 0.8226460897013256,
+     "score": 0.6248797672837132,
+     "to": 75
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.5,
+     "ratio": 0.9624259179566331,
+     "score": 0.7310561505967927,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 1.1291671130983052,
+     "score": 0.8577123160136431,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": 0.8226460897013256
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 3,
+     "net": -0.07661964762008396,
+     "win_rate": 0.3333333333333333,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 9,
+     "net": 0.04458204128565359,
+     "win_rate": 0.5555555555555556,
+     "wins": 5
+    },
+    "trend_up": {
+     "n": 26,
+     "net": 0.2743431812441071,
+     "win_rate": 0.6153846153846154,
+     "wins": 16
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.7595973227206191,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 25,
+     "net": 0.2757327658017307
+    },
+    {
+     "min_equity": 0.9223194482834909,
+     "n_trades": 45,
+     "net": 0.890741633172241
+    },
+    {
+     "min_equity": 0.8903279849752043,
+     "n_trades": 29,
+     "net": 0.21943882887029517
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-05T12:15:19Z",
+  "family": "stoploss_profittaking_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-05-120029-loop-crypto"
+  },
+  "name": "BTC+ETH 1d stoploss_profittaking_mesh dboth l55 al14 m3.5 r1.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "16278b7e95681e44",
+    "73ba48a43e430161",
+    "80a41669681d747b",
+    "a4ff31490b3d6b5d",
+    "a59075409e6a124e",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9",
+    "f6bcefd96029682d"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "stoploss_profittaking_mesh-2026-10-05-120029-loop-crypto"
+  },
+  "strategy_id": "4513df707791fa98",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

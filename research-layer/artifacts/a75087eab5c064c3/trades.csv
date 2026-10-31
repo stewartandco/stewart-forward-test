@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+NZD,short,1972-07-27 00:00:00,1.19,1972-07-31 00:00:00,1.195,stop,-0.004616623201004747
+NZD,short,1972-09-26 00:00:00,1.19,1972-09-28 00:00:00,1.194,stop,-0.0037762870665507464

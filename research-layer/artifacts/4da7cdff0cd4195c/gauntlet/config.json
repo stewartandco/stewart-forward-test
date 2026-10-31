@@ -1,0 +1,307 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "MDY_1d": "2026-09-30 00:00:00"
+ },
+ "data_sha256": {
+  "MDY_1d": "fec84e7c54b680bd10560abc4cf3b7dc7b436c9fff584debe52c4ee846d0109b"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": 0.302983943634018,
+   "excess": -0.2824505791786411,
+   "strategy_net": 0.0205333644553769,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.01733203262469818,
+  "edge_decay_pct": -83.43482245266424,
+  "era_summary": {
+   "covid_cycle": {
+    "n_trades": 12,
+    "net_pnl": 0.09559197352504922
+   },
+   "dotcom_gfc": {
+    "n_trades": 42,
+    "net_pnl": 0.6214978448817161
+   },
+   "post_2022": {
+    "n_trades": 23,
+    "net_pnl": 0.0745534275961457
+   },
+   "qe_bull": {
+    "n_trades": 46,
+    "net_pnl": 0.5327785278576247
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 89,
+   "stop": 18
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 14,
+   "stop": 2
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.04479858919986595,
+  "is_edge_raw": 0.011834656003911082,
+  "is_vol": 0.26417474780537276,
+  "mc_p05_equity": 1.086075035681911,
+  "oos_edge_per_trade": 0.00742096583965938,
+  "oos_edge_raw": 0.0015853106901307411,
+  "oos_vol": 0.21362592476284817,
+  "open_at_end": false,
+  "p_ruin": 0.0015,
+  "perturbation": {
+   "base_score": 0.42722963418342136,
+   "dense_only": true,
+   "mean_ratio": 1.017961005494311,
+   "n_perturbations": 10,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 105,
+     "ratio": 1.0043395511696094,
+     "score": 0.42908361904213377,
+     "to": 90
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 105,
+     "ratio": 0.943950578725099,
+     "score": 0.40328366043595293,
+     "to": 120
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.42722963418342136,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.42722963418342136,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.9975277498623657,
+     "score": 0.42617341566150996,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.2799772380895509,
+     "score": 0.5468442071921048,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 1.0324808794867422,
+     "score": 0.441106428444498,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 1.0620384784468784,
+     "score": 0.4537343106355773,
+     "to": 0.9
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.0,
+     "ratio": 0.8838280646695538,
+     "score": 0.3775975407498147,
+     "to": 2.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 3.0,
+     "ratio": 0.9754675144933099,
+     "score": 0.41674862937478807,
+     "to": 3.5
+    }
+   ],
+   "worst_ratio": 0.8838280646695538
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 4,
+     "net": 0.05509444179435791,
+     "win_rate": 0.5,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 12,
+     "net": -0.029729470752266035,
+     "win_rate": 0.5,
+     "wins": 6
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.42722963418342136,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9540388417395396,
+     "n_trades": 35,
+     "net": 0.500952588442967
+    },
+    {
+     "min_equity": 0.9892904250127134,
+     "n_trades": 35,
+     "net": 0.5408224077391061
+    },
+    {
+     "min_equity": 0.9131460496601672,
+     "n_trades": 37,
+     "net": 0.22453319623641266
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 105,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-18T14:47:06Z",
+  "family": "tstat_significant_trend_with_decay_exit",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-18-143037-loop-equity_etf"
+  },
+  "name": "MDY 1d tstat_significant_trend_with_decay_exit dlong ml105 tm2.5 ml200 l120 mp0.8 ml90 te0.5 al14 m3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3d4db3693d78d717",
+    "4cf9bb79602caeb9",
+    "538cb5fd38ba4ef3",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "be7a97c49de94b92",
+    "c7c0e61fc25e8ba1",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_significant_trend_with_decay_exit-2026-09-18-143037-loop-equity_etf:MDY_1d"
+  },
+  "strategy_id": "4da7cdff0cd4195c",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "MDY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

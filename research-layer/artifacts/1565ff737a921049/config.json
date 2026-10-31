@@ -1,0 +1,92 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "db48ffd3079adc478c5052f542e2a9e0d0eb874b37976f26888c146fdb7bd6e6",
+  "ETHUSD_1d": "dfd22afaba9e3996d9dcac289c1c0c1280a84405fb472c976b67556f10f16a73"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 75
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-13T12:09:43Z",
+  "family": "donchian_long_fixedfraction",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-13-120031-loop-crypto"
+  },
+  "name": "BTC+ETH 1d donchian_long_fixedfraction dlong l75 ml200 al14 m2.5 l20 f0.02",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "3605eedc183f09ce",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "donchian_long_fixedfraction-2026-10-13-120031-loop-crypto"
+  },
+  "strategy_id": "1565ff737a921049",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

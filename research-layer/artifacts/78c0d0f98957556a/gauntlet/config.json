@@ -1,0 +1,212 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "SEK_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "SEK_1d": "5a1fe8d410fd4c5f85f3e370f3443e63203a326efdef01f5b5208efd1b2e7f49"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.02914056861893851,
+   "excess": -0.06863865788746756,
+   "strategy_net": -0.039498089268529046,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.04008208624793541,
+  "edge_decay_pct": -278.665308895368,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 11,
+    "net_pnl": 0.02740034342166875
+   },
+   "post_2022": {
+    "n_trades": 5,
+    "net_pnl": -0.10729559351139817
+   },
+   "pre_gfc": {
+    "n_trades": 13,
+    "net_pnl": -0.032928772491513825
+   },
+   "tightening": {
+    "n_trades": 9,
+    "net_pnl": 0.05640270685992199
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 53,
+   "stop": 14
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 3
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.06257368856808511,
+  "is_edge_raw": 0.008057005411918148,
+  "is_vol": 0.12876027602482615,
+  "mc_p05_equity": 0.7918848928077921,
+  "oos_edge_per_trade": -0.11179747396739485,
+  "oos_edge_raw": -0.01330855570068232,
+  "oos_vol": 0.1190416494076037,
+  "open_at_end": false,
+  "p_ruin": 0.002,
+  "perturbation": {
+   "base_score": 0.22988749744356113,
+   "dense_only": true,
+   "mean_ratio": 1.0997409253335282,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "up",
+     "from": 50,
+     "ratio": 1.0997409253335282,
+     "score": 0.252816689161191,
+     "to": 100
+    }
+   ],
+   "worst_ratio": 1.0997409253335282
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 3,
+     "net": -0.039925667102046966,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.22988749744356113,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9605930355733707,
+     "n_trades": 17,
+     "net": 0.2447751114240566
+    },
+    {
+     "min_equity": 0.9843545183073334,
+     "n_trades": 25,
+     "net": 0.28247792316090176
+    },
+    {
+     "min_equity": 0.9249268449193586,
+     "n_trades": 25,
+     "net": 0.012566328013557664
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 20,
+     "slow": 100
+    },
+    "role": "entry",
+    "type": "ma_cross_ds"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-26T15:10:42Z",
+  "family": "fx_short_side_downtrend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-26-143030-loop-fx"
+  },
+  "name": "SEK 1d fx_short_side_downtrend dshort f20 s100 ml50 ml50 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "a4ff31490b3d6b5d",
+    "c7c0e61fc25e8ba1",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_short_side_downtrend-2026-09-26-143030-loop-fx:SEK_1d"
+  },
+  "strategy_id": "78c0d0f98957556a",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "SEK"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

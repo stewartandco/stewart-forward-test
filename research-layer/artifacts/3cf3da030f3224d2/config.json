@@ -1,0 +1,137 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "85056a703b04a231e4ac3cf97025835a6ecf5be86bdbc7c3708f10e1610ec322",
+  "EEM_1d": "c796e7010393ec9932305a34568581336f3039d7f7be5de173df1e41577eae8c",
+  "EFA_1d": "b7bc845aff8b5da8b222719525630aaaa9befd102b3af84242fc31a438432b6b",
+  "EWA_1d": "8b2655bdff488924f5ec0afd02aa224cca4bc41e7edddb1166e1735c79b46df5",
+  "EWC_1d": "a7d1372c20ab8a9d4c3a305f887f916655427307577db5ec1e9d4edd19556451",
+  "EWG_1d": "3aa654a1893c1272581f01a75e814fe27622363ef4dff31762501c5b6c929d1e",
+  "EWH_1d": "60a7290b2e720be6ba6eb4a485c7bee715f4c73bd68c9a96ad3d0bbefa1a8d26",
+  "EWJ_1d": "c1a1ea8078cc8a06d1e7d24f47b20db4badc91871df134b71b2c5c5cad4e5665",
+  "EWU_1d": "50c9c0cb09ded201ee111ffe284a5c959e8ad92ec016062dd7c65d872970f899",
+  "EWY_1d": "9a46cc7822156e766939689da94f21bdd8d99a6411b8eace7b36ae609effcd8e",
+  "EWZ_1d": "e4fdde729727e738b9a8e39f1f83dd18fd46fe2770bca0d28d7ab9819a85869b",
+  "FXI_1d": "73ad1b259ebeaf656a7734a5e8c2e5040074e570089dd55cdd770ee6b50624b7",
+  "IWM_1d": "00e4644560eac03c6448deea2350c31c005bece2f9a0e8e34e1460f3fc2eb9d6",
+  "MDY_1d": "4c772a405d0c952f9380a56f94ff1e0dc6330d53e3b27a8609a831ba0fd47925",
+  "QQQ_1d": "0438d17b7af58787cc6d993c57b69d69019b0cb4f586d140acddb9d5d57eb2fd",
+  "SPY_1d": "9780bca7470ec83af22e81f7ba21f5ab0456f0ffdbf3172798a5f858b9db2467"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "max_lookback": 120,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 250
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-19T14:37:32Z",
+  "family": "below_ma_short_trend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-19-143028-loop-equity_etf"
+  },
+  "name": "EWG 1d below_ma_short_trend dshort ml120 tm2.5 ml250 al14 m2.5 ml90 te0.5 ml200 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "10ee57da792af045",
+    "16179594c240d6c4",
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "35c61158d380a771",
+    "3d4db3693d78d717",
+    "3e9b146f141385b6",
+    "4cf9bb79602caeb9",
+    "538cb5fd38ba4ef3",
+    "9a6abe19343ae46f",
+    "d55afc42c2082459",
+    "df3f0c850d2c121e",
+    "e519d19950313468",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "below_ma_short_trend-2026-09-19-143028-loop-equity_etf:EWG_1d"
+  },
+  "strategy_id": "3cf3da030f3224d2",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "EWG"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

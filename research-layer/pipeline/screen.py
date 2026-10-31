@@ -1,0 +1,698 @@
+"""Screening CLI: run proposed strategy specs on training data, apply the
+pre-declared gate, chain verdicts + lifecycle transitions, write artifacts.
+
+Usage:
+    python -m pipeline.screen [--registry registry_log.jsonl]
+        [--data-dir data] [--artifacts-dir artifacts]
+        [--cutoff 2023-12-31] [--workers N] [--dry-run]
+
+A real (non-dry) run HARD-REFUSES unless a `note` entry whose text starts
+with the PROTOCOL string below is already on the chain — the gate and fence
+provably predate every verdict.
+"""
+from __future__ import annotations
+
+import csv
+import os
+import sys
+import time
+import json
+import hashlib
+import argparse
+from pathlib import Path
+from collections.abc import Iterable
+
+from . import commit_list as _commit_list
+from . import deadline as _deadline
+from .cells import CLASSES, cell_id
+from .bars import bars_per_day, IntradayUnsupported
+from .parallel import run_all, CellError
+from .chainlock import ChainLock, ChainLockHeld
+from .registry import Registry, ChainMoved, UnstableEntry, SCREEN_BATCH_MAX
+from .engine import run_spec
+
+PROTOCOL = "screen-protocol-v1"
+GATE_MIN_TRADES = 40
+DEFAULT_CUTOFF = "2023-12-31"
+
+# Phase 3 step 1 deadline tuning (see pipeline/deadline.py). The prior is
+# judged only until the first chunk has run; the 2026-09-01 fx cycle screened
+# 1,260 specs in ~25 min wall (~1.2 s each) -- 2 s is that, rounded up.
+SCREEN_PRIOR_S_PER_SPEC = 2.0
+# The prior per timeframe (engine perf Task 7, ledger ruling B4). Measured
+# 2026-10-19 on six single-asset twins of crypto 1d specs (the same spec at 1d
+# and at 1h, train bars to the 2023-12-31 cutoff, SpecJob, one process): 1d
+# 0.12 to 1.69 s (mean 0.83), 1h 3.1 to 42.4 s (mean 20.4), 24.6x the 1d cost,
+# so the flat 2.0 s was 10x too low for a 1h spec. "1d" is the legacy prior
+# above (SCREEN_PRIOR_S_PER_SPEC stays its alias); the 1h mean is rounded up to
+# the next 10 s. Judged only until a chunk of that timeframe has run, then the
+# MEASURED rate for that timeframe rules (DeadlineBudget key=tf).
+# 1h = the measured MEAN (20.38 s) rounded up to 30 s, chosen deliberately;
+# unlike the gauntlet's PRIOR_S_BY_TF["1h"], which is the heaviest class.
+SCREEN_PRIOR_S_BY_TF = {"1d": SCREEN_PRIOR_S_PER_SPEC, "1h": 30.0}
+SCREEN_CHUNK_PER_WORKER = 8
+
+
+def screen_prior_s_for(tf: str) -> float:
+    """Seconds per spec to assume before a chunk of `tf` has run: the measured
+    entry if SCREEN_PRIOR_S_BY_TF has one, else the 1h prior scaled by bars
+    per day (15m = 4x), never below the 1d prior; an unknown timeframe gets
+    the 1d prior (gauntlet_core.prior_s_for's rule, with the screen's table)."""
+    floor = SCREEN_PRIOR_S_BY_TF["1d"]
+    if tf in SCREEN_PRIOR_S_BY_TF:
+        return float(SCREEN_PRIOR_S_BY_TF[tf])
+    try:
+        bpd = bars_per_day("24x7", tf)
+    except IntradayUnsupported:
+        return float(floor)
+    return max(float(floor), SCREEN_PRIOR_S_BY_TF["1h"] * bpd / 24)
+
+
+def _spec_tf(spec: dict) -> str:
+    """A spec with no declared timeframe is a legacy daily."""
+    return spec["universe"].get("timeframe", "1d")
+
+
+def _job_tf(job: tuple) -> str:
+    return _spec_tf(job[0])
+
+
+def _tf_chunks(jobs: list, size: int) -> list[tuple[str, list]]:
+    """(timeframe, chunk) in jobs' order. A chunk never mixes timeframes: a run
+    of one timeframe is cut every `size`, and a change of timeframe cuts it
+    too. Nothing is reordered, so verdicts chain in the order they always did;
+    an all-1d run gets exactly `_deadline.chunks(jobs, size)`. A registry that
+    alternates timeframes shrinks its chunks toward 1 spec; that costs
+    performance only, the verdict chain is unchanged."""
+    size = max(1, int(size))
+    out: list[tuple[str, list]] = []
+    i = 0
+    while i < len(jobs):
+        tf = _job_tf(jobs[i])
+        end = i + 1
+        while end < len(jobs) and end - i < size and _job_tf(jobs[end]) == tf:
+            end += 1
+        out.append((tf, jobs[i:end]))
+        i = end
+    return out
+
+# 2026-10-08 design: screen takes chain.lock only for each batch write. A
+# batch that meets a held lock is kept and retried at the next chunk
+# boundary, then by a bounded drain: one non-blocking acquire every
+# DRAIN_INTERVAL_S inside DRAIN_RESERVE_S, never past the deadline (the
+# gauntlet worker's values). The reserve is held back only while a batch waits.
+DRAIN_RESERVE_S = 75.0
+DRAIN_INTERVAL_S = 5.0
+_sleep = time.sleep
+
+
+def load_bars(data_dir: Path, asset: str, cutoff: str,
+              timeframe: str = "1d") -> list[dict]:
+    """Bars for one cell, up to and including the cutoff DATE.
+
+    The fence compares the date part only. A naive string compare is wrong for
+    intraday bars: "2023-12-31 00:00:00" > "2023-12-31" is True in Python, so
+    every intraday bar on the cutoff day would be silently dropped.
+    """
+    path = data_dir / f"{asset}_{timeframe}.csv"
+    bars = []
+    with path.open("r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row["date"][:10] > cutoff[:10]:
+                continue                      # the train fence, date-inclusive
+            bars.append({"date": row["date"], "open": float(row["open"]),
+                         "high": float(row["high"]), "low": float(row["low"]),
+                         "close": float(row["close"]),
+                         "volume": float(row["volume"])})
+    bars.sort(key=lambda b: b["date"])
+    return bars
+
+
+def load_cell_data(data_dir: Path, cells, cutoff: str) -> tuple[dict, dict, dict]:
+    """Load a set of cells once, and return everything keyed by CELL.
+
+    Returns (bars_by_cell, data_sha256_by_cell_id, data_end_by_cell_id).
+
+    This exists because screen.py and gauntlet.py each hand-rolled the same
+    three lines and drifted apart: the screen became timeframe-aware while the
+    gauntlet kept loading `_1d` for every spec and hashing by bare asset. Two
+    stages evaluating one spec on different bars makes the chained verdict
+    meaningless, so cell identity lives here and both stages call it.
+
+    `data_end` is the last bar actually LOADED, not the last on disk, so a
+    fenced run never claims data it deliberately refused to read. It is the
+    field that makes cross-cell comparison checkable: the cache is not
+    time-aligned, so two cells can stop on different dates for reasons that
+    have nothing to do with the strategies being compared.
+    """
+    bars_by_cell: dict[tuple[str, str], list[dict]] = {}
+    data_hashes: dict[str, str] = {}
+    data_end: dict[str, str] = {}
+    for asset, tf in sorted(set(cells)):
+        bars = load_bars(data_dir, asset, cutoff, timeframe=tf)
+        bars_by_cell[(asset, tf)] = bars
+        cid = cell_id(asset, tf)
+        data_hashes[cid] = hashlib.sha256(
+            (data_dir / f"{asset}_{tf}.csv").read_bytes()).hexdigest()
+        data_end[cid] = bars[-1]["date"] if bars else ""
+    return bars_by_cell, data_hashes, data_end
+
+
+def cell_end_dates(data_dir: Path, cells) -> dict[str, str]:
+    """{cell_id: last bar's date string} for each (asset, timeframe), reading
+    only the TAIL of each `<asset>_<tf>.csv`.
+
+    The loop's pre-spend freshness preflight (2026-09-12 spec §3) needs the
+    same answer `load_cell_data(...)[2]` gives with cutoff 9999-12-31, on
+    every fire, without loading 140 cells of full history. The date is the
+    first comma-separated field of the last non-blank line, exactly the
+    string the CSV carries (`YYYY-MM-DD HH:MM:SS`); `assert_cells_comparable`
+    compares `[:10]`. A header-only file yields "" (the guard refuses that
+    with a message naming the cell). A missing file raises FileNotFoundError
+    naming the cell: a registered cell with no data is a defect the caller
+    reports, not something to skip.
+
+    Assumes bars are written in ascending date order (every producer in this
+    repo does; verified across all 155 live cells 2026-09-13). An unsorted
+    file makes this report EARLIER than load_cell_data, which can shrink a
+    cross-class gap and let a stale tree through to the gauntlet -- the
+    gauntlet's own assert_cells_comparable on the full load is the backstop.
+    """
+    data_dir = Path(data_dir)
+    ends: dict[str, str] = {}
+    for asset, tf in cells:
+        cid = cell_id(asset, tf)
+        path = data_dir / f"{asset}_{tf}.csv"
+        if not path.exists():
+            raise FileNotFoundError(f"{cid}: no price file at {path}")
+        ends[cid] = _last_csv_date(path)
+    return ends
+
+
+def _last_csv_date(path: Path, chunk: int = 4096) -> str:
+    """First field of the last non-blank line of `path`, or "" when the only
+    line is the header. Reads backwards in `chunk`-byte steps; never the
+    whole file."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        buf = b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step) + buf
+            lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+            # Two non-blank lines in the buffer guarantee lines[-1] starts
+            # right after a newline WE read, not mid-line -- so a last line
+            # longer than one chunk is never truncated at its FRONT (the
+            # file end already guarantees its END). Below that, keep
+            # widening the buffer until we either clear the bar or exhaust
+            # the file.
+            if len(lines) >= 2 or pos == 0:
+                break
+    lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+    if not lines:
+        return ""
+    last = lines[-1].decode("utf-8").strip().lstrip("﻿")
+    if last.lower().startswith("date,"):
+        return ""                       # header-only file
+    return last.split(",", 1)[0].strip()
+
+
+def comparable_cells(all_specs: Iterable[dict]) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """(cells_needed, class_of) for the set of registered specs the gauntlet
+    compares registry-wide. Moved here from gauntlet.run() on 2026-09-12 so
+    the loop's pre-spend preflight and the gauntlet's own check derive the
+    same cells by the same rule and cannot drift.
+
+    A CELL is (asset, timeframe), same as the screen. Timeframe defaults to
+    '1d'. The class is read from each spec's OWN declared universe
+    (`asset_class`, default 'crypto'), never from cells.class_of_asset:
+    production crypto specs register legacy BTCUSD/ETHUSD tickers that are
+    not members of cells.CLASSES's USDT grid (spec s10.9), so deriving the
+    class from the ticker would raise on every one of them. asset_class
+    already travels on every registered spec's universe (the composer stamps
+    it; legacy fixtures declare it explicitly too).
+
+    When two specs declare the same cell with different asset_class, the
+    later spec in `all_specs` order wins -- class_of is a plain dict write,
+    last one in survives. The live registry has no such conflict today, but
+    the winner is not cosmetic: it decides which class's cross-class
+    allowance `assert_cells_comparable` applies to that cell.
+
+    `all_specs` is iterated twice below (once to build `cells_needed`, once
+    for `class_of`), so it is materialised into a list first -- a one-pass
+    iterable (a generator, a database cursor) would otherwise be exhausted
+    after the first pass, silently leaving `class_of` empty while
+    `cells_needed` is still fully populated.
+    """
+    all_specs = list(all_specs)
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in all_specs for a in s["universe"]["assets"]})
+    class_of: dict[str, str] = {}
+    for s in all_specs:
+        tf = s["universe"].get("timeframe", "1d")
+        cls = s["universe"].get("asset_class", "crypto")
+        for a in s["universe"]["assets"]:
+            class_of[cell_id(a, tf)] = cls
+    return cells_needed, class_of
+
+
+def assert_cells_comparable(data_end: dict[str, str],
+                            class_of: dict[str, str] | None = None) -> None:
+    """Refuse to compare cells whose data stops on different DAYS.
+
+    A cell is the unit of survival, so a strategy that "died on SOL 1d" when
+    that cell's bars stopped two weeks early was not tested, it was truncated.
+    The cache is not time-aligned by default: on 2026-08-18 the imported grid
+    had BTCUSDT_1h through 08-15 and SOLUSDT_1d through 08-01.
+
+    DAYS, not timestamps, because a 4h bar cannot close at 23:00 -- BTCUSDT_1h
+    ends 15:23:00 and BTCUSDT_4h ends 15:20:00 while both cover through the
+    15th. Comparing whole timestamps would refuse every multi-timeframe run
+    forever. load_bars already compares date[:10] at its fence for this reason.
+
+    This raises rather than dropping the offending cells, because the pipeline
+    contract's success metrics require every cell tested to be present in the
+    trial denominator: no quiet subsetting of the reported search space. The
+    fix is a re-fetch to a common end date, not a smaller comparison.
+
+    `class_of` (cell_id -> asset class, built by the caller from each spec's
+    own declared universe) makes the rule PER-CLASS (spec s10.6): the same-day
+    rule above still applies WITHIN a class exactly as before, but cells in
+    DIFFERENT classes may end up to `3 + max(lag_a, lag_b)` calendar days
+    apart, where each lag is that class's OWN `cells.CLASSES[cls]
+    ["max_end_lag_days"]` -- a 24x7 crypto close and a 5-day fx fix are never
+    going to land on the same calendar day (the base 3-day weekend
+    allowance), and some sources lag further still on top of that for
+    reasons that have nothing to do with truncation. A real run found this
+    the hard way (2026-08-24): the fx snapshot's source, FRED H.10, is a
+    WEEKLY release, so a fetch just before its Monday release can end up to
+    9 days behind a same-day crypto fetch -- a real data fact, declared once
+    in cells.py rather than absorbed here as a wider blanket allowance. A
+    SAME-class pair (crypto-crypto, fx-fx) never reaches this allowance at
+    all -- the WITHIN-class same-day rule above is untouched and always
+    applies first -- so the crypto-only path, which only ever compares
+    crypto-crypto, is unaffected by this field's existence. `class_of=None`
+    (the default, every caller before the per-class amendment) keeps today's
+    single-class behaviour exactly -- one same-day rule across every cell --
+    so crypto-only runs are byte-identical.
+    """
+    empty = sorted(cid for cid, end in data_end.items() if not end)
+    if empty:
+        raise ValueError(
+            f"cell(s) loaded with no bars, so their data end is unknown: "
+            f"{', '.join(empty)}. An empty cell must not compare equal to "
+            f"every other cell.")
+    if class_of is None:
+        by_day: dict[str, list[str]] = {}
+        for cid, end in sorted(data_end.items()):
+            by_day.setdefault(end[:10], []).append(cid)
+        if len(by_day) > 1:
+            detail = "; ".join(f"{day}: {', '.join(cids)}"
+                               for day, cids in sorted(by_day.items()))
+            raise ValueError(
+                f"cells stop on different days, so they cannot be compared: "
+                f"{detail}. Re-fetch to a common end date; excluding the "
+                f"short cells would quietly shrink the reported search space.")
+        return
+
+    # Per-class: the exact same-day rule, applied WITHIN each declared class.
+    by_class: dict[str, dict[str, str]] = {}
+    for cid, end in data_end.items():
+        cls = class_of.get(cid)
+        if cls is None:
+            raise ValueError(f"{cid!r} has no declared class in class_of; "
+                             f"every cell being compared must name one.")
+        by_class.setdefault(cls, {})[cid] = end
+    for cls, ends in by_class.items():
+        by_day = {}
+        for cid, end in sorted(ends.items()):
+            by_day.setdefault(end[:10], []).append(cid)
+        if len(by_day) > 1:
+            detail = "; ".join(f"{day}: {', '.join(cids)}"
+                               for day, cids in sorted(by_day.items()))
+            raise ValueError(
+                f"cells stop on different days within class {cls!r}, so "
+                f"they cannot be compared: {detail}. Re-fetch to a common "
+                f"end date; excluding the short cells would quietly shrink "
+                f"the reported search space.")
+
+    # Cross-class: a weekend/holiday gap between a 24x7 close and an fx fix
+    # is expected, not truncation, so allow a BASE 3 calendar days apart, plus
+    # whatever each class's own source honestly lags by
+    # (cells.CLASSES[cls]["max_end_lag_days"]) -- declared per class, never
+    # widened here to paper over one observed gap.
+    from datetime import date as _date
+    days = {cid: _date.fromisoformat(end[:10]) for cid, end in data_end.items()}
+    ids = sorted(days)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if class_of[a] == class_of[b]:
+                continue
+            gap = abs((days[a] - days[b]).days)
+            lag_a = CLASSES.get(class_of[a], {}).get("max_end_lag_days", 0)
+            lag_b = CLASSES.get(class_of[b], {}).get("max_end_lag_days", 0)
+            worst_lag = max(lag_a, lag_b)
+            worst_cls = class_of[a] if lag_a >= lag_b else class_of[b]
+            allowed = 3 + worst_lag
+            if gap > allowed:
+                raise ValueError(
+                    f"cells stop {gap} calendar days apart across classes, "
+                    f"more than the {allowed}-day allowance (3 base + "
+                    f"{worst_lag} declared max_end_lag_days for "
+                    f"{worst_cls!r}), so they cannot be compared: {a} "
+                    f"({data_end[a][:10]}, {class_of[a]}) vs {b} "
+                    f"({data_end[b][:10]}, {class_of[b]}). Re-fetch to a "
+                    f"common end date.")
+
+
+class SpecJob:
+    """One spec's evaluation, picklable so it can cross a process boundary.
+
+    The gate threshold travels WITH the job rather than being read from the
+    module global inside the worker: a subprocess re-imports this module and
+    would otherwise see the shipped 40 even when the parent is running a
+    different gate.
+    """
+
+    def __init__(self, min_trades: int):
+        self.min_trades = min_trades
+
+    def __call__(self, item: tuple[dict, dict]) -> tuple[dict, bool, str | None]:
+        spec, bars_by_asset = item
+        result = run_spec(spec, bars_by_asset)
+        m = result["metrics"]
+        passed = m["trades"] >= self.min_trades and m["net_pnl"] > 0
+        reason = None
+        if not passed:
+            reason = "trade_count" if m["trades"] < self.min_trades else "net_negative"
+        return result, passed, reason
+
+
+def protocol_note_chained(registry: Registry) -> bool:
+    return any(e["entry_type"] == "note"
+               and str(e["payload"].get("text", "")).startswith(PROTOCOL)
+               for e in registry.entries())
+
+
+def write_artifacts(art_dir: Path, spec: dict, result: dict, cutoff: str,
+                    data_hashes: dict[str, str],
+                    data_end: dict[str, str]) -> Path:
+    """`data_end` is required on purpose: the hash says WHICH bytes produced a
+    verdict, not when they stopped, and a caller that forgot would record an
+    empty provenance for the very field that exists to catch truncation."""
+    bundle = art_dir / spec["strategy_id"]
+    bundle.mkdir(parents=True, exist_ok=True)
+    with (bundle / "trades.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["asset", "side", "entry_date",
+                                          "entry_px", "exit_date", "exit_px",
+                                          "exit_reason", "return_net"],
+                           lineterminator="\n", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(result["trades"])
+    with (bundle / "equity.csv").open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["date", "combined_equity"])
+        w.writerows(result["equity"])
+    (bundle / "config.json").write_text(json.dumps(
+        {"protocol": PROTOCOL, "cutoff": cutoff, "spec": spec,
+         "data_sha256": data_hashes, "data_end": data_end},
+        indent=1, sort_keys=True), encoding="utf-8")
+    return bundle
+
+
+def bundle_hash(bundle: Path,
+                names: tuple[str, ...] = ("trades.csv", "equity.csv",
+                                          "config.json")) -> str:
+    h = hashlib.sha256()
+    for name in names:
+        h.update((bundle / name).read_bytes().replace(b"\r\n", b"\n"))
+    return h.hexdigest()
+
+
+def _list_for_commit(logs_dir: Path, sids: list[str]) -> None:
+    """Best-effort, AFTER the chain write: the verdicts are already the record,
+    so a failure here is loud but never fails the run. Nothing else lists
+    the bundle, so it then stays uncommitted until someone commits it by
+    hand: the WARNING says so."""
+    try:
+        _commit_list.append(logs_dir, [f"research-layer/artifacts/{sid}/{n}"
+                                       for sid in sids
+                                       for n in _commit_list.BUNDLE_FILES])
+    except OSError as exc:
+        print(f"screen: WARNING could not list {len(sids)} bundle(s) for the "
+              f"loop commit ({exc}); they stay UNCOMMITTED until committed by "
+              f"hand: {', '.join(sids)}", flush=True)
+
+
+def run(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--registry", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "registry_log.jsonl")
+    ap.add_argument("--data-dir", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "data")
+    ap.add_argument("--artifacts-dir", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "artifacts")
+    ap.add_argument("--cutoff", default=DEFAULT_CUTOFF)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="fan-out width; 0 = cpu_count-1, 1 = serial")
+    ap.add_argument("--dry-run", action="store_true")
+    # Phase 3 step 1: stop BEFORE starting specs this run cannot finish by the
+    # deadline; they stay 'proposed', which is exactly what the next run
+    # selects. Absent = today's behaviour, byte for byte.
+    ap.add_argument("--deadline-utc", default=None,
+                    help="ISO-8601 instant; defer specs that cannot finish by then")
+    ap.add_argument("--logs-dir", type=Path, default=None,
+                    help="where chain.lock lives (default: <registry dir>/logs)")
+    args = ap.parse_args(argv)
+
+    registry = Registry(args.registry)
+
+    # any strategy resting in "screened" between runs is a crash artifact:
+    # only this CLI's write-triplet ever advances that state
+    orphans = [sid for sid, st in registry.strategy_states().items()
+               if st == "screened"]
+    if orphans:
+        print("ORPHANED: strategies stuck in 'screened' with no verdict "
+              "(mid-run crash?) — repair manually before proceeding:")
+        for sid in orphans:
+            print(f"  {sid}")
+        return 1
+
+    if not args.dry_run and not protocol_note_chained(registry):
+        print(f"REFUSED: no '{PROTOCOL}' note on the chain. Chain the screen "
+              f"protocol note before running for real (dry-run is allowed).")
+        return 1
+
+    logs_dir = args.logs_dir or (Path(args.registry).resolve().parent / "logs")
+    # Only bundles in the registry's own artifacts/ go on the commit list
+    # (commit_list.py); a scratch --artifacts-dir must never reach a live
+    # commit. "research-layer/" is the loop's hardcoded pathspec convention.
+    # The loop's commit reads <registry dir>/logs, so a list anywhere else
+    # would never be committed: both dirs must be the registry's own.
+    layer_dir = Path(args.registry).resolve().parent
+    list_bundles = (Path(args.artifacts_dir).resolve() == (layer_dir / "artifacts").resolve()
+                    and Path(logs_dir).resolve() == (layer_dir / "logs").resolve())
+    registered: list[dict] = []
+    snap = registry.snapshot(on_entry=lambda e: registered.append(e["payload"])
+                             if e["entry_type"] == "strategy_registered" else None)
+    specs = [p for p in registered if snap.states.get(p["strategy_id"]) == "proposed"]
+    if not specs:
+        print("No strategies in 'proposed' state.")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "screen", evaluated=0, deferred=0,
+                                   deadline_utc=args.deadline_utc, stopped_at_deadline=False)
+        return 0
+
+    budget = _deadline.DeadlineBudget(args.deadline_utc)
+    n_specs_total = len(specs)
+    # the cheapest spec's prior: "not even one fits" means not even that one
+    cheapest_prior_s = min(screen_prior_s_for(_spec_tf(s)) for s in specs)
+    if budget.active and not budget.fits(1, cheapest_prior_s):
+        print(f"DEADLINE: {budget.remaining_s():.0f}s remain before {args.deadline_utc}; "
+              f"not even one spec fits -- deferring all {n_specs_total} (they stay "
+              f"'proposed' and the next run screens them).")
+        if not args.dry_run:
+            _deadline.write_result(args.registry, "screen", evaluated=0,
+                                   deferred=n_specs_total, deadline_utc=args.deadline_utc,
+                                   stopped_at_deadline=True)
+        return 0
+
+    # A CELL is (asset, timeframe) — the unit that is loaded and hashed. Keying
+    # the manifest by bare asset would let ETHUSDT_1h and ETHUSDT_4h overwrite
+    # each other, and the manifest is the record of which bytes produced which
+    # verdict. Specs with no timeframe are the legacy dailies.
+    cells_needed = sorted({(a, s["universe"].get("timeframe", "1d"))
+                           for s in specs for a in s["universe"]["assets"]})
+    bars_by_cell, data_hashes, data_end = load_cell_data(
+        args.data_dir, cells_needed, args.cutoff)
+
+    jobs = []
+    for spec in specs:
+        tf = spec["universe"].get("timeframe", "1d")
+        jobs.append((spec, {a: bars_by_cell[(a, tf)]
+                            for a in spec["universe"]["assets"]}))
+
+    # ordered results; the engine is pure, so fan-out changes scheduling only.
+    # Chunked so the budget is asked before EACH chunk whether it can still
+    # finish; a spec that is never started stays 'proposed' for the next run.
+    # Each chunk is evaluated with NO lock held; its verdicts are then written
+    # under a short chain.lock hold (flush), kept and retried if it is held.
+    workers_eff = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+    chunk_size = max(1, workers_eff * SCREEN_CHUNK_PER_WORKER)
+    screened_reason = f"screen run, cutoff {args.cutoff}"
+    pending: list[tuple[dict, dict, bool, str | None]] = []
+    held: set[str] = set()
+    counts = {"written": 0, "retried_written": 0, "dropped_stale": 0}
+    n_pass_written = 0
+    n_started = 0
+    stopped_at_deadline = False
+    last_flush: str | None = None
+
+    def flush() -> str | None:
+        """Write `pending` in holds of <= SCREEN_BATCH_MAX, one non-blocking
+        acquire per hold. Returns "held" when a hold met a held chain.lock,
+        "deadline" when the deadline had passed before a hold could start
+        (either way the rest stays pending), else None. The outcome is kept
+        in `last_flush`: it decides how leftover specs are reported.
+        ChainMoved / UnstableEntry propagate: nothing of that hold was
+        written."""
+        nonlocal snap, n_pass_written, last_flush
+        last_flush = None
+        while pending:
+            if budget.active and (budget.remaining_s() or 0) <= 0:
+                last_flush = "deadline"     # never START a write after the deadline
+                return last_flush
+            batch = pending[:SCREEN_BATCH_MAX]
+            lock = ChainLock(logs_dir, holder="screen",
+                             purpose=f"screen {len(batch)} verdict(s)")
+            try:
+                lock.acquire()
+            except ChainLockHeld:
+                held.update(s["strategy_id"] for s, _, _, _ in pending)
+                last_flush = "held"
+                return last_flush
+            try:
+                snap = registry.advance(snap)
+                live = [x for x in batch
+                        if snap.states.get(x[0]["strategy_id"]) == "proposed"]
+                counts["dropped_stale"] += len(batch) - len(live)
+                items = []
+                for spec, result, passed, reason in live:
+                    bundle = write_artifacts(args.artifacts_dir, spec, result,
+                                             args.cutoff, data_hashes, data_end)
+                    items.append((spec["strategy_id"], "pass" if passed else "fail",
+                                  result["metrics"], bundle_hash(bundle),
+                                  "gauntlet" if passed else "graveyard", reason,
+                                  screened_reason))
+                if items:
+                    snap = registry.record_screen_outcomes_batch(snap, items)
+                    if list_bundles:
+                        _list_for_commit(logs_dir, [it[0] for it in items])
+            finally:
+                lock.release()
+            counts["written"] += len(items)
+            counts["retried_written"] += sum(1 for it in items if it[0] in held)
+            n_pass_written += sum(1 for it in items if it[1] == "pass")
+            del pending[:len(batch)]
+        return None
+
+    def final_drain() -> None:
+        if not pending:
+            return
+        stop_at = time.monotonic() + DRAIN_RESERVE_S
+        while pending:
+            if flush() in (None, "deadline"):
+                return
+            if time.monotonic() + DRAIN_INTERVAL_S >= stop_at:
+                return
+            if budget.active and (budget.remaining_s() or 0) <= DRAIN_INTERVAL_S:
+                return
+            _sleep(DRAIN_INTERVAL_S)
+
+    try:
+        for tf, chunk in _tf_chunks(jobs, chunk_size):
+            # the drain reserve is held back only while a batch is pending
+            # (the gauntlet worker's reserve_s): stop unless this chunk AND
+            # the reserve both fit in what is left
+            reserve = DRAIN_RESERVE_S if pending else 0.0
+            # the rate is measured, and the prior assumed, per timeframe
+            if budget.active and (len(chunk) * budget.rate_s(screen_prior_s_for(tf), key=tf)
+                                  + reserve > (budget.remaining_s() or 0)):
+                stopped_at_deadline = True
+                break
+            t_c0 = time.time()
+            outcomes = run_all(SpecJob(GATE_MIN_TRADES), chunk, workers=args.workers)
+            budget.record(len(chunk), time.time() - t_c0, key=tf)
+            for (spec, _), outcome in zip(chunk, outcomes):
+                if isinstance(outcome, CellError):
+                    # a verdict chain must not silently graveyard a spec that
+                    # crashed: keep what was judged so far (one attempt), then
+                    # raise; this spec and every later one stay 'proposed'.
+                    # The crash detail is printed BEFORE the flush, so a
+                    # ChainMoved in that flush cannot hide it from the log.
+                    print(f"CELL ERROR: {spec['strategy_id']}: {outcome}", flush=True)
+                    if not args.dry_run:
+                        flush()
+                    raise RuntimeError(f"{spec['strategy_id']}: {outcome}")
+                n_started += 1
+                result, passed, reason = outcome
+                m = result["metrics"]
+                print(f"{spec['strategy_id']}  {'PASS' if passed else 'fail':<4} "
+                      f"trades={m['trades']:>3}  pnl={m['net_pnl']:+.4f}  "
+                      f"wr={m['win_rate']:.2f}  dd={m['max_dd']:+.4f}"
+                      + (f"  [{reason}]" if reason else ""))
+                if not args.dry_run:
+                    pending.append((spec, result, passed, reason))
+                elif passed:
+                    n_pass_written += 1
+            if not args.dry_run:
+                flush()
+        if not args.dry_run:
+            final_drain()
+    except (ChainMoved, UnstableEntry) as exc:
+        print(f"REFUSED: chain moved or an entry did not round-trip; nothing "
+              f"written for that batch: {exc}", flush=True)
+        return 1
+
+    if args.dry_run:
+        print(f"\nDRY RUN — {n_started} screened, {n_pass_written} would pass, "
+              f"{n_started - n_pass_written} would fail; nothing written.")
+        return 0
+
+    not_started = n_specs_total - n_started
+    # Leftover pending specs are a LOCK deferral (Ruling 4: deferred +
+    # deferred_lock, no stopped_at_deadline) unless the last flush was
+    # stopped by the deadline itself (Ruling 6: deferred only, and the
+    # deadline stopped the run).
+    unwritten_deadline = len(pending) if last_flush == "deadline" else 0
+    unwritten_lock = len(pending) - unwritten_deadline
+    if unwritten_deadline:
+        stopped_at_deadline = True
+    if stopped_at_deadline and not_started:
+        print(f"DEADLINE: stopped before starting {not_started} of {n_specs_total} "
+              f"specs; they stay 'proposed' and the next run screens them.", flush=True)
+    if unwritten_deadline:
+        print(f"DEADLINE: {unwritten_deadline} screened spec(s) not written (the "
+              f"deadline passed before their write could start); they stay "
+              f"'proposed' and the next run screens them.", flush=True)
+    if unwritten_lock:
+        print(f"chain.lock held: {unwritten_lock} screened spec(s) not written; they "
+              f"stay 'proposed' and the next run screens them.", flush=True)
+    _deadline.write_result(
+        args.registry, "screen", evaluated=counts["written"],
+        deferred=not_started + len(pending), deadline_utc=args.deadline_utc,
+        stopped_at_deadline=stopped_at_deadline,
+        extra={"deferred_lock": unwritten_lock, "retried_written": counts["retried_written"],
+               "dropped_stale": counts["dropped_stale"]})
+    print(f"\n{counts['written']} screened: {n_pass_written} -> gauntlet, "
+          f"{counts['written'] - n_pass_written} -> graveyard"
+          + (f", {not_started + len(pending)} deferred to the next run."
+             if not_started + len(pending) else "."))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
