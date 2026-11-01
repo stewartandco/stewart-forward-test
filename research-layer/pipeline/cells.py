@@ -153,9 +153,11 @@ CLASSES = {
     # ACTIVATED 76 of them -- the assets below with at least 365 days of
     # daily history before screen.DEFAULT_CUTOFF (first bar on or before
     # 2022-12-31), at "1d" only -- in ACTIVE_CELLS["crypto"]. That is the
-    # DENOMINATOR EVENT. The other 24 declared assets (first bar 2023 or
-    # 2024) and the five intraday timeframes stay declared and unswept;
-    # intraday is Switch 2. The composer's legacy pooled crypto branch
+    # DENOMINATOR EVENT. SWITCH 2 (build 2b-3 phase 2) then opened 1h, 4h and
+    # 12h on the same 76 assets: 304 active cells, 48 per 12-asset rotation
+    # window, pinned by test_switch2.py. The other 24 declared assets (first
+    # bar 2023 or 2024) and the 15m and 30m timeframes (phase 3) stay
+    # declared and unswept. The composer's legacy pooled crypto branch
     # (ALLOWED_ASSETS BTCUSD/ETHUSD, UNIVERSE_BASE, COST_MODEL,
     # expand_family) was DELETED in the same commit: crypto now expands per
     # cell like every other class.
@@ -282,10 +284,17 @@ LIVE_CLASSES = ("crypto", "fx", "equity_etf", "bond_etf", "metal_etf")   # fx 08
 # crypto: SWITCH 1 (SP5 Phase 3, Coen 2026-10-17). The 76 declared assets
 # whose first daily bar is on or before 2022-12-31 (>= 365 days of history
 # before screen.DEFAULT_CUTOFF 2023-12-31), in ASSETS declaration order (the
-# import-time gate check below requires it), at 1d only. Excluded, still
+# import-time gate check below requires it). Excluded, still
 # declared: ENA ETHFI JUP PYTH RENDER STRK TAO WIF ZK ZRO (first bar 2024)
 # and GAS GLM PROM ARB SUI FLOKI PEPE PENDLE WLD SEI TIA ORDI JTO BONK
-# (first bar 2023-03-17..2023-12-15). Pinned by test_switch1.py.
+# (first bar 2023-03-17..2023-12-15). The assets are pinned by
+# test_switch1.py.
+# SWITCH 2 (2b-3 phase 2, the second DENOMINATOR EVENT): the timeframes are
+# ("1h", "4h", "12h", "1d", declaration order) on those same 76 assets, so
+# the active set is 76 x 4 = 304 cells and a 12-asset rotation window is 48
+# cells. 15m and 30m (phase 3) stay declared and unswept. Pinned by
+# test_switch2.py. The composer still holds the intraday cells back until the
+# protocol note and the phase 2 note are chained (composer.intraday_held).
 ACTIVE_CELLS = {
     # class -> {"assets": tuple | "all", "timeframes": tuple | "all"}
     "crypto":     {"assets": (
@@ -300,7 +309,7 @@ ACTIVE_CELLS = {
         "NEOUSDT", "CHZUSDT", "MANAUSDT", "APEUSDT", "XECUSDT", "ARUSDT", "SFPUSDT",
         "SNXUSDT", "1INCHUSDT", "SANDUSDT", "IMXUSDT", "EGLDUSDT", "BATUSDT", "DYDXUSDT",
         "ZENUSDT", "RSRUSDT", "GALAUSDT", "QTUMUSDT", "DGBUSDT", "YFIUSDT"),
-                   "timeframes": ("1d",)},
+                   "timeframes": ("1h", "4h", "12h", "1d")},
     "fx":         {"assets": "all", "timeframes": "all"},
     "equity_etf": {"assets": "all", "timeframes": "all"},
     "bond_etf":   {"assets": "all", "timeframes": "all"},
@@ -541,8 +550,10 @@ RETIRED_CELLS: dict[str, dict] = {}
 # follows. Declared cells stay declared (CLASSES is untouched); only the
 # sweep, and so the trial denominator, shrinks. Growing this set is a
 # denominator event in Coen's own reviewed commit (plan 5 fills it from the
-# admission rows in the Switch 2 commit). Empty today: with it empty
-# active_cells is byte-for-byte what it was.
+# admission rows in the Switch 2 commit). Empty after Switch 2 as well: no
+# phase 2 cell is below the admission line (latest intraday first bar is
+# APTUSDT 2022-10-19), so active_cells is the plain assets x timeframes
+# product.
 # ---------------------------------------------------------------------------
 EXCLUDED_CELLS: frozenset[str] = frozenset()
 

@@ -20,7 +20,7 @@ exists. What still holds, and is pinned here:
   per-cell expander, untouched by D6 rotation (their expansion is also pinned
   byte for byte against the pre-switch code in test_switch1.py);
 * crypto's DECLARATION is still 600 cells, all import-safe, of which exactly
-  76 (at 1d) are ACTIVE;
+  304 (76 assets at 1h, 4h, 12h and 1d, Switch 2) are ACTIVE;
 * crypto rotates now, against the real gate and the real dispatch.
 
 The activated state itself (the 76-asset literal, the routing + benchmark
@@ -52,7 +52,8 @@ _RUN_ID = "p2freeze"
 _MODEL = "claude-opus-5"
 _CREATED = "2026-08-29T00:00:00Z"
 
-N_ACTIVE_CRYPTO = 76
+N_ACTIVE_CRYPTO = 304       # 76 assets x ("1h", "4h", "12h", "1d"): Switch 2
+N_ACTIVE_CRYPTO_ASSETS = 76
 
 
 def _expand(asset_class: str) -> list[dict]:
@@ -121,14 +122,15 @@ def test_no_tradfi_class_expands_a_cell_outside_its_active_set():
 
 # ---------------- 3. the crypto declaration vs the crypto activation ----------------
 
-def test_crypto_declares_600_cells_and_activates_76():
+def test_crypto_declares_600_cells_and_activates_304():
     """The whole point of the gate, stated as one number pair.
 
     600 cells DECLARED (100 assets x 6 timeframes) -- which is what admits
-    data/import/snapshot work against them. 76 cells ACTIVE (Switch 1: the
-    assets with a first daily bar on or before 2022-12-31, at 1d) -- which
-    is what a generation is permitted to sweep. A change to the second number
-    is Coen's own reviewed commit (Switch 2 grows the timeframes).
+    data/import/snapshot work against them. 304 cells ACTIVE (Switch 1: the
+    76 assets with a first daily bar on or before 2022-12-31; Switch 2: at
+    1h, 4h, 12h and 1d) -- which is what a generation is permitted to sweep.
+    A change to the second number is Coen's own reviewed commit (Switch 3,
+    15m and 30m, grows the timeframes again).
     """
     assert len(cells.class_cells("crypto")) == 600, (
         "the declared crypto grid is no longer 100 assets x 6 timeframes")
@@ -136,7 +138,8 @@ def test_crypto_declares_600_cells_and_activates_76():
     assert len(active) == N_ACTIVE_CRYPTO, (
         "crypto's ACTIVE cell count moved outside a reviewed activation commit "
         "-- the trial denominator has moved")
-    assert {tf for _, tf in active} == {"1d"}
+    assert {tf for _, tf in active} == {"1h", "4h", "12h", "1d"}
+    assert len({a for a, _ in active}) == N_ACTIVE_CRYPTO_ASSETS
     assert set(active) <= set(cells.class_cells("crypto"))
 
 
@@ -145,8 +148,8 @@ def test_declared_crypto_cells_validate_and_only_the_gated_ones_are_active():
 
     validate_cell is the DECLARATION check: it must accept all 600 cells,
     because declaring them is exactly what makes fetching, snapshotting and
-    importing their data legal. active_cells is the ACTIVATION check: 76 of
-    them, because sweeping is what moves the denominator. The other 524
+    importing their data legal. active_cells is the ACTIVATION check: 304 of
+    them, because sweeping is what moves the denominator. The other 296
     validate and are never swept.
     """
     declared = cells.class_cells("crypto")
@@ -169,7 +172,7 @@ def test_crypto_rotates_over_its_active_set():
     `rotates` is True, which is what makes the loop pass --assets."""
     state = {"classes": {}}
     window, rotates = loop._sweep_window(state, "crypto")
-    active_assets = [a for a, _ in cells.active_cells("crypto")]
+    active_assets = list(dict.fromkeys(a for a, _ in cells.active_cells("crypto")))
     assert rotates is True
     assert window == active_assets[:loop.ROTATION_SIZE]
     assert len(active_assets) > loop.ROTATION_SIZE
@@ -219,7 +222,7 @@ def test_the_landed_phase3_rotates_and_the_composer_accepts_the_window():
     CELLS without consulting `expander_for`, so the third assertion proves the
     emitted window addresses real active cells and nothing outside them; that
     the composer accepts the flag end to end is
-    test_switch1.py::test_the_crypto_cap_counts_cells (a real composer.run
+    test_switch2.py::test_the_crypto_cap_counts_cells (a real composer.run
     with a 12-asset --assets window, rc 0).
     """
     assert composer.expander_for("crypto") is composer.expand_family_for_class
@@ -228,7 +231,9 @@ def test_the_landed_phase3_rotates_and_the_composer_accepts_the_window():
         "the landed Phase 3 did not switch rotation on -- the 76-asset "
         "universe would be swept whole every generation, which is the cost "
         "problem D6 exists to solve")
-    active_assets = [a for a, _ in cells.active_cells("crypto")]
+    active_assets = list(dict.fromkeys(a for a, _ in cells.active_cells("crypto")))
     assert window == active_assets[:12]
-    # the window resolves to real ACTIVE cells and nothing outside them
-    assert composer.sweep_cells("crypto", window) == [(a, "1d") for a in window]
+    # the window resolves to real ACTIVE cells and nothing outside them (Switch
+    # 2: 12 assets x 4 timeframes = 48 cells, asset-major)
+    assert composer.sweep_cells("crypto", window) == [
+        (a, tf) for a in window for tf in ("1h", "4h", "12h", "1d")]

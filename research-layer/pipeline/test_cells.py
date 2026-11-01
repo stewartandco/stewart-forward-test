@@ -144,13 +144,15 @@ def test_crypto_declared_grid_is_100_assets_by_6_timeframes():
     assert len(cells.class_cells("crypto")) == 600
 
 
-def test_crypto_active_set_is_76_assets_at_1d_since_switch1():
+def test_crypto_active_set_is_76_assets_at_four_timeframes_since_switch2():
     # Phase 2 declared; Switch 1 (SP5 Phase 3, Coen's own commit) activated
     # 76 of the 100 declared assets at 1d (the exact literal is pinned in
-    # test_switch1.py).
+    # test_switch1.py); Switch 2 added 1h, 4h and 12h on the same assets
+    # (pinned in test_switch2.py).
     active = cells.active_cells("crypto")
-    assert len(active) == 76
-    assert {tf for _, tf in active} == {"1d"}
+    assert len(active) == 304
+    assert len({a for a, _ in active}) == 76
+    assert {tf for _, tf in active} == {"1h", "4h", "12h", "1d"}
 
 
 def test_active_cells_is_a_subset_of_the_declared_grid():
@@ -479,7 +481,7 @@ def test_empty_exclusions_change_nothing():
     assert cells.EXCLUDED_CELLS == frozenset()
     expected = [(a, tf) for a in gate["assets"] for tf in gate["timeframes"]]
     assert cells.active_cells("crypto") == expected
-    assert len(expected) == 76 and {tf for _, tf in expected} == {"1d"}
+    assert len(expected) == 304 and {tf for _, tf in expected} == {"1h", "4h", "12h", "1d"}
     for cls in ("fx", "equity_etf", "bond_etf", "metal_etf"):
         assert cells.active_cells(cls) == cells.class_cells(cls)
 

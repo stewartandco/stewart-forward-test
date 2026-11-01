@@ -122,7 +122,9 @@ def test_timeframes_none_is_todays_behaviour(switch2):
 
 
 def test_a_1d_only_gate_never_reads_the_notes(tmp_path, monkeypatch):
-    assert cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1d",)
+    # the committed gate is 1h/4h/12h/1d since the Switch 2 commit: this test
+    # models the pre-Switch-2 (and every tradfi) 1d-only gate explicitly
+    monkeypatch.setitem(cells.ACTIVE_CELLS["crypto"], "timeframes", ("1d",))
 
     def _boom(registry):
         raise AssertionError("the notes must not be read with a 1d-only gate")

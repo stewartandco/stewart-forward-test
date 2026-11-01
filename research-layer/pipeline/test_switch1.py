@@ -105,11 +105,14 @@ def _crypto_family(**overrides):
 
 # ---------------- the gate ----------------
 
-def test_crypto_active_set_is_the_76_admitted_assets_at_1d():
+def test_crypto_active_set_is_the_76_admitted_assets():
+    """The asset pins. The timeframe pins moved to test_switch2.py when Switch
+    2 opened 1h, 4h and 12h (this test pinned `("1d",)` until then)."""
     assert len(ADMITTED) == 76 and len(EXCLUDED) == 24
-    assert cells.active_cells("crypto") == [(a, "1d") for a in ADMITTED]
-    assert cells.ACTIVE_CELLS["crypto"] == {"assets": ADMITTED, "timeframes": ("1d",)}
+    assert cells.ACTIVE_CELLS["crypto"]["assets"] == ADMITTED
+    assert "1d" in cells.ACTIVE_CELLS["crypto"]["timeframes"]
     active_assets = {a for a, _ in cells.active_cells("crypto")}
+    assert list(dict.fromkeys(a for a, _ in cells.active_cells("crypto"))) == list(ADMITTED)
     assert not active_assets & set(EXCLUDED)
     # the 24 are still DECLARED (data work stays legal); they are just not swept
     assert set(EXCLUDED) <= set(cells.ASSETS)
@@ -152,8 +155,9 @@ def test_a_crypto_family_expands_one_single_asset_spec_per_window_cell():
     window = list(ADMITTED[:12])
     fam = _crypto_family()
     assert composer.validate_family(fam, set(fam["card_ids"]), 60) == []
+    # the 1d slice of the window (Switch 2 added 1h/4h/12h cells: test_switch2.py)
     specs = composer.expand_family_for_class(fam, _RUN, _MODEL, _CREATED, "crypto",
-                                             assets=window)
+                                             assets=window, timeframes=("1d",))
     n_combos = 9                                   # good_family: 3 x 3 sweep
     assert len(specs) == n_combos * 12
     for spec in specs:
@@ -177,26 +181,8 @@ def test_the_usdt_name_rule_does_not_touch_tradfi_or_legacy_names():
     assert composer._build_name(["SPY"], "f", [], "1d") == "SPY 1d f"
 
 
-def test_the_crypto_cap_counts_cells(tmp_path, monkeypatch):
-    """The per-cycle bound is sibling_cap x the cells THIS invocation sweeps,
-    for crypto exactly as for every other class (D10)."""
-    from .test_composer import seeded_registry
-    seen = []
-    real_split = composer.split_for_cycle
-
-    def _spy(specs, cap):
-        seen.append(cap)
-        return real_split(specs, cap)
-
-    monkeypatch.setattr(composer, "split_for_cycle", _spy)
-    reg_path, cid = seeded_registry(tmp_path)
-    window = ",".join(ADMITTED[:12])
-    rc = composer.run(["--registry", str(reg_path), "--run-id", "cap", "--dry-run",
-                       "--sibling-cap", "25", "--assets", window,
-                       "--loop-state", str(tmp_path / "loop_state.json")],
-                      propose_fn=lambda cards: [_crypto_family(card_ids=[cid])])
-    assert rc == 0
-    assert seen == [25 * 12]
+# test_the_crypto_cap_counts_cells moved to test_switch2.py (Switch 2): a
+# 12-asset window is 48 cells now, so the cap is sibling_cap x 48.
 
 
 def test_rotation_windows_the_76_assets_twelve_at_a_time():
@@ -263,7 +249,7 @@ def test_the_crypto_brief_names_the_active_assets_and_keeps_the_history():
     assert "BTCUSD, ETHUSD" not in brief
     assert CRYPTO_BASIS.replace(" on both sides", "") in brief
     assert "today's top-100" in brief
-    assert "implementable from daily OHLCV alone" in brief
+    assert "implementable from the cell's own OHLCV bars alone" in " ".join(brief.split())
     assert "financing" not in brief
     cost = cells.CLASSES["crypto"]["cost_model"]
     assert f"{cost['commission_per_side']:.5f}" in brief
@@ -353,9 +339,12 @@ def test_the_grid_record_matches_the_gate():
     assert not text.startswith("#"), "no markdown heading: the first line is the prefix"
 
     # phase 1: the assets are the active assets, in order, and the timeframe is 1d
+    # (the note records the Switch 1 entry; Switch 2 added phase 2 on top, so the
+    # gate's timeframes are phase 1 followed by phase 2's, in declaration order)
     p1 = _note_line(text, "Phase 1 cells (active from this entry): timeframe ")
     tf, assets_txt = p1.split(" on assets: ")
-    assert (tf,) == cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1d",)
+    assert tf == "1d"
+    assert cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1h", "4h", "12h", "1d")
     assets = tuple(a.strip() for a in assets_txt.rstrip(".").split(","))
     assert len(assets) == 76
     assert assets == cells.ACTIVE_CELLS["crypto"]["assets"] == ADMITTED

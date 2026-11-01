@@ -750,7 +750,10 @@ def test_a_completed_crypto_cycle_emits_the_window_and_advances_the_cursor(
     composer calls carry --assets with the first 12 active assets, and the
     completed cycle moves the cursor exactly one window on."""
     _, fr, state_path = _crypto_cycle(tmp_path, monkeypatch)
-    window = ",".join(a for a, _ in cells.active_cells("crypto")[:loop.ROTATION_SIZE])
+    # the first 12 active ASSETS (active_cells lists one cell per timeframe, so
+    # dedupe in order: 4 cells per asset since Switch 2)
+    window = ",".join(list(dict.fromkeys(
+        a for a, _ in cells.active_cells("crypto")))[:loop.ROTATION_SIZE])
     composer_calls = [c for c in fr.calls if "pipeline.composer" in c]
     assert composer_calls, "no composer stage ran"
     for call in composer_calls:

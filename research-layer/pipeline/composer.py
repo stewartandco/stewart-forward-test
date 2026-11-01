@@ -955,7 +955,8 @@ def _snap_to_grid(blocks: list[dict]) -> None:
 # protocol note and the phase 2 note are "chained verbatim before the first
 # intraday verdict". Nothing enforced that, so the composer enforces it: with
 # an intraday timeframe active and either note missing from the chain, only the
-# 1d cells are swept (cap and expansion alike). Inert while the gate is 1d only.
+# 1d cells are swept (cap and expansion alike). Live since Switch 2 opened
+# crypto's intraday timeframes; inert for a class whose gate is 1d only.
 INTRADAY_NOTE_PREFIXES = ("gauntlet-protocol-v6.1-intraday-daily-marks:",
                           "crypto-grid-phase2-v1:")
 
@@ -1043,8 +1044,9 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     ACTIVE_CELLS gate permits a generation to SWEEP, because sweeping a cell
     moves the trial denominator. The four tradfi classes gate "all", so
     active == declared for them; crypto's gate is 76 of its 100 declared
-    assets at 1d of its six declared timeframes (Switch 1), and expansion
-    here follows the gate, never the declaration.
+    assets at 1h, 4h, 12h and 1d of its six declared timeframes (Switch 1,
+    then Switch 2), and expansion here follows the gate, never the
+    declaration.
 
     proxy_card_ids (Coen, 2026-08-25: proxy routing is recorded on the
     REGISTRATION, not only on the run-level drift record): the full set of
@@ -1071,7 +1073,7 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     """
     cls_spec = cells.CLASSES[asset_class]
     # The base universe's timeframe is the first ACTIVE timeframe (crypto
-    # declares "15m" first but activates only "1d"); expand_universe then
+    # declares "15m" first but activates "1h" first); expand_universe then
     # sets each cell's own. Falls back to the declared first only for an
     # empty gate, which sweeps no cell anyway. Tradfi gates "all", so this is
     # the declared first there, byte-identical to before Switch 1.
@@ -1238,7 +1240,10 @@ def _crypto_system_prompt() -> str:
     pre-switch brief). The shared Rules bullets, D15 EXITS included, are the
     pre-switch crypto bullets unchanged; only "implementable from daily
     OHLCV alone" moved up into the universe section, as in the other
-    classes' briefs. No financing line: crypto declares no short financing.
+    classes' briefs. Switch 2 (build 2b-3 phase 2) rewrote the universe
+    section for the four active timeframes (1h, 4h, 12h, 1d) and left the
+    history block and every Rules bullet byte for byte (test_switch2.py).
+    No financing line: crypto declares no short financing.
     DRAFT pending Coen's approval of the exact text (build 2b-3, Task 9).
     """
     cls_spec = cells.CLASSES["crypto"]
@@ -1251,15 +1256,23 @@ def _crypto_system_prompt() -> str:
     return f"""\
 You are the Composer agent in Stewart & Co.'s research pipeline. You design
 candidate trading strategies for the crypto universe ({n_assets} Binance USDT
-spot pairs on daily OHLCV bars: {assets}) as compositions of typed blocks,
-grounded in accepted research cards.
+spot pairs, each on 1h, 4h, 12h and daily OHLCV bars: {assets}) as
+compositions of typed blocks, grounded in accepted research cards.
 
 The crypto universe, stated plainly because how it is swept and what its data
 can see shape what a sound family can honestly claim:
-- Each family is swept per cell: every asset in the generation's window is
-  its own strategy and its own counted trial. A generation sweeps a rotating
-  window of these assets, never one pooled book, so a family is judged asset
-  by asset.
+- Each family is swept per cell: every cell in the generation's window is
+  its own strategy and its own counted trial. A cell is one asset at one
+  timeframe, so a window of 12 assets is 48 cells. A generation sweeps a
+  rotating window of these assets, never one pooled book, so a family is
+  judged asset by asset.
+- Every parameter is in bars of the cell's own timeframe: a lookback of 200 is
+  200 days at 1d, 100 days at 12h and about 8 days at 1h. The same family is
+  therefore a different strategy on each timeframe, and each is counted.
+  Choose parameter values for what they mean in bars; do not assume a value
+  that suits daily bars suits hourly ones. One window is fixed in time
+  instead: the volatility-percentile regime ranks against the last 365 days of
+  bars at every timeframe.
 - The universe is the {n_assets} of today's top-100 crypto assets by market
   cap that were listed by 2022-12-31 (at least 365 days of history before the
   2023-12-31 train/test cutoff), each backtested to its listing date: winners
@@ -1270,12 +1283,12 @@ can see shape what a sound family can honestly claim:
 - Returns are price returns, staking/funding yield excluded: a family whose
   thesis depends on collecting staking rewards or perpetual funding will not
   show that income here.
-- Each bar is a REAL daily OHLC bar on crypto's 24x7 calendar (every day,
-  weekends included): range-based block types are eligible here, and none
-  are excluded for this class.
+- Each bar is a REAL OHLC bar of its timeframe on crypto's 24x7 calendar
+  (every hour of every day, weekends included): range-based block types are
+  eligible here, and none are excluded for this class.
 - The declared cost model charges {commission} commission per side plus
   {slippage} slippage per side.
-- Strategies must be implementable from daily OHLCV alone.
+- Strategies must be implementable from the cell's own OHLCV bars alone.
 
 The history below is that of the pooled BTCUSD+ETHUSD book, the single
 two-asset strategy shape every crypto generation before per-cell sweeping

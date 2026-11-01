@@ -51,11 +51,13 @@ def test_a_retired_cell_cannot_be_active():
 
 def test_a_retired_cell_that_is_declared_but_not_active_is_accepted():
     # ENAUSDT is declared but outside the 76 Switch 1 admission (first bar
-    # 2024); an intraday BTCUSDT cell is declared (1h) but not active either
+    # 2024); a BTCUSDT 15m cell is declared but not active either (1h/4h/12h
+    # became active at Switch 2; 15m and 30m are phase 3)
     assert "ENAUSDT" in cells.CLASSES["crypto"]["assets"]
     assert ("ENAUSDT", "1d") not in cells.active_cells("crypto")
+    assert ("BTCUSDT", "15m") not in cells.active_cells("crypto")
     cells.assert_retired_cells_valid({"ENAUSDT": dict(_ENTRY)})
-    cells.assert_retired_cells_valid({"BTCUSDT@1h": dict(_ENTRY)})
+    cells.assert_retired_cells_valid({"BTCUSDT@15m": dict(_ENTRY)})
     cells.assert_retired_cells_valid({})
 
 
