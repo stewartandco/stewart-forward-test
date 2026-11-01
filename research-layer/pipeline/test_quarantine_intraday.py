@@ -453,3 +453,67 @@ def test_fetch_owed_and_review_do_not_size_the_memo(tmp_path, monkeypatch):
                         lambda *a, **k: called.append(a))
     quarantine_run(argv_for(reg, data, "--review"))
     assert called == []
+    # the --fetch-owed leg: the fetch itself is faked (never the network)
+    from . import crypto_data, feed_health
+    fetched = []
+    monkeypatch.setattr(crypto_data, "fetch_symbol",
+                        lambda sym, tf, *a, **k: fetched.append((sym, tf)) or {})
+    monkeypatch.setattr(feed_health, "scan", lambda *a, **k: [])
+    monkeypatch.setattr(quarantine_mod.time, "sleep", lambda s: None)
+    assert quarantine_run(argv_for(reg, data, "--fetch-owed")) == 0
+    assert sorted(fetched) == [("BTCUSD", "1h"), ("ETHUSD", "1h")]   # it did run
+    assert called == []                              # and sized nothing
+
+
+def test_the_bound_excludes_an_untouched_large_intraday_file(tmp_path, monkeypatch):
+    """Sizing counts only the cells the run records: a large intraday file in
+    the data dir that no quarantined strategy trades adds nothing."""
+    _rows_file(tmp_path, "A_1h.csv", 1000)
+    _rows_file(tmp_path, "UNTOUCHED_1h.csv", 9000)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 500)
+    assert quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h"]) == 1000
+    assert quarantine_mod.size_full_bars_memo(
+        tmp_path, ["A@1h", "UNTOUCHED@1h"]) == 10_000     # the control: counted if touched
+
+
+def test_a_touched_total_above_the_ceiling_prints_one_warn(tmp_path, monkeypatch, capsys):
+    _rows_file(tmp_path, "A_1h.csv", 4000)
+    _rows_file(tmp_path, "B_1h.csv", 4000)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 7000)
+    quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h", "B@1h"])
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "WARN full-bars memo: touched 8,000 bars > ceiling 7,000"], out
+
+
+def test_no_warn_at_or_below_the_ceiling(tmp_path, monkeypatch, capsys):
+    _rows_file(tmp_path, "A_1h.csv", 4000)
+    _rows_file(tmp_path, "B_1h.csv", 4000)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 8000)  # == total
+    quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h", "B@1h"])
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 9000)
+    quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h", "B@1h"])
+    assert "WARN" not in capsys.readouterr().out
+
+
+def test_the_ceiling_alarm_reaches_the_quarantine_ledger(tmp_path, monkeypatch, capsys):
+    """The Sentinel reads degraded_quarantine.json: a run whose touched total
+    passes the ceiling adds ONE memo_ceiling item, and a run under it none."""
+    reg, data = _two_cell_chain(tmp_path)
+    date = _twin_bars()[0][151]["date"]
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 10)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 100)
+    assert quarantine_run(argv_for(reg, data, "--date", date)) == 0
+    assert "WARN full-bars memo: touched " in capsys.readouterr().out
+    items = [i for i in ledger(reg)["items"] if i["source"] == "memo_ceiling"]
+    assert len(items) == 1 and items[0]["key"] == "full_bars_memo"
+    assert "> ceiling 100" in items[0]["reason"]
+
+    reg2, data2 = _two_cell_chain(tmp_path / "under")
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 10 ** 9)
+    quarantine_mod._reset_full_bars_memo()
+    assert quarantine_run(argv_for(reg2, data2, "--date", date)) == 0
+    assert "WARN full-bars memo" not in capsys.readouterr().out
+    assert not [i for i in ledger(reg2)["items"] if i["source"] == "memo_ceiling"]

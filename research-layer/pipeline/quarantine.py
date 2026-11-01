@@ -668,10 +668,16 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
 # 4 million bars, over the default, so an unsized memo would get zero hits. The
 # ceiling (6M bars, about 3 GB as dicts at ~0.5 KB a bar) keeps a runaway grid
 # from taking the box: above it the LRU behaves as before (correct, slower) and
-# the line the run prints shows the evictions.
+# the line the run prints shows the evictions. Passing the ceiling is a TIME
+# deadline, not a correctness one (results are identical), so the run says so:
+# `size_full_bars_memo` prints one `WARN full-bars memo: touched N bars >
+# ceiling ...` line and the run adds one `memo_ceiling` item to the quarantine
+# ledger (the Sentinel digest reads it).
 FULL_BARS_MEMO_MAX_BARS = 2_000_000
 FULL_BARS_MEMO_CEILING_BARS = 6_000_000
 _full_bars_bound: "int | None" = None      # None = the default, read live
+_full_bars_touched = 0                     # rows the last sizing counted
+MEMO_CEILING_SOURCE = "memo_ceiling"
 
 _FULL_BARS_MEMO: "OrderedDict[tuple, list[dict]]" = OrderedDict()
 _FULL_BARS_HELD = 0
@@ -680,10 +686,11 @@ _FULL_BARS_STATS = {"hits": 0, "misses": 0, "evictions": 0}
 
 def _reset_full_bars_memo() -> None:
     """Empty the memo and zero its counters (tests; never needed in a run)."""
-    global _FULL_BARS_HELD, _full_bars_bound
+    global _FULL_BARS_HELD, _full_bars_bound, _full_bars_touched
     _FULL_BARS_MEMO.clear()
     _FULL_BARS_HELD = 0
     _full_bars_bound = None
+    _full_bars_touched = 0
     for k in _FULL_BARS_STATS:
         _FULL_BARS_STATS[k] = 0
 
@@ -724,15 +731,33 @@ def size_full_bars_memo(data_dir: Path, cell_keys: Iterable[str]) -> int:
     """Set the memo's runtime bound to cover the intraday cells a run records:
     min(CEILING, max(default, their total data rows)). Daily keys and missing
     files count nothing. Returns the bound. FULL_BARS_MEMO_MAX_BARS itself is
-    never mutated (`_reset_full_bars_memo` restores the default)."""
-    global _full_bars_bound
+    never mutated (`_reset_full_bars_memo` restores the default).
+
+    A total over the ceiling prints ONE WARN line (this runs once per
+    outermost run). The bound, the eviction and every result are unchanged."""
+    global _full_bars_bound, _full_bars_touched
     total = 0
     for key in set(cell_keys):
         if is_intraday_key(key):
             total += _data_rows(cell_path(data_dir, key))
+    _full_bars_touched = total
     _full_bars_bound = min(FULL_BARS_MEMO_CEILING_BARS,
                            max(FULL_BARS_MEMO_MAX_BARS, total))
+    if total > FULL_BARS_MEMO_CEILING_BARS:
+        print(f"WARN full-bars memo: touched {total:,} bars > ceiling "
+              f"{FULL_BARS_MEMO_CEILING_BARS:,}", flush=True)
     return _full_bars_bound
+
+
+def _memo_ceiling_items() -> list[dict]:
+    """The ONE degraded item for a sizing that passed the ceiling (else none)."""
+    if _full_bars_touched <= FULL_BARS_MEMO_CEILING_BARS:
+        return []
+    return [{"source": MEMO_CEILING_SOURCE, "key": "full_bars_memo",
+             "reason": (f"touched {_full_bars_touched:,} bars > ceiling "
+                        f"{FULL_BARS_MEMO_CEILING_BARS:,}: the full-bars memo "
+                        f"cannot hold every cell, quarantine re-parses files "
+                        f"(slower, same results)")}]
 
 
 def _memo_line() -> str:
@@ -1797,9 +1822,12 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         size_full_bars_memo(args.data_dir,
                             _intraday_cells_of(quarantined, specs))
 
+    memo_items = _memo_ceiling_items() if outermost else []
+
     if args.catch_up:
         report = DateReport()
         report.degraded.extend(intraday_items)
+        report.degraded.extend(memo_items)
         dates = _owed_dates_for_catch_up(view, quarantined, entered,
                                          specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
@@ -1831,6 +1859,7 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
 
     report = report if report is not None else DateReport()
     report.degraded.extend(intraday_items)
+    report.degraded.extend(memo_items)
     try:
         return _record_date(args, registry, view, quarantined, entered, specs,
                             report)
