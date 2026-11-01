@@ -164,7 +164,7 @@ def _hourly_twin_setup(tmp_path):
     data.mkdir()
     calls = []
 
-    def fake_fetch(symbol, tf, data_dir, now_ms=None):
+    def fake_fetch(symbol, tf, data_dir, now_ms=None, end_ms=None):
         calls.append((symbol, tf))
         _write(Path(data_dir), f"{symbol}_{tf}.csv", hourly)
         return {}
@@ -656,7 +656,7 @@ def _multi_tf_setup(tmp_path, timeframes=("1d", "1h", "4h", "12h"), owed_days=4)
     data.mkdir()
     calls = []
 
-    def fake_fetch(symbol, tf, data_dir, now_ms=None):
+    def fake_fetch(symbol, tf, data_dir, now_ms=None, end_ms=None):
         calls.append((symbol, tf))
         _write(Path(data_dir), f"{symbol}_{tf}.csv", files[tf])
         return {}
