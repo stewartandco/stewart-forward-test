@@ -971,8 +971,8 @@ def intraday_notes_chained(registry: Registry) -> bool:
 
 def intraday_held(asset_class: str, registry: Registry) -> bool:
     """Whether this run must hold intraday cells back. A class whose active
-    timeframes are all 1d (today's crypto gate, and every tradfi class) never
-    reads the chain for the notes."""
+    timeframes are all 1d (a 1d-only gate: crypto before Switch 2, every tradfi
+    class) never reads the chain for the notes."""
     if all(tf == "1d" for _, tf in cells.active_cells(asset_class)):
         return False
     return not intraday_notes_chained(registry)

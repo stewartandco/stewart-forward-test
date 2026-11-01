@@ -340,11 +340,11 @@ def test_the_grid_record_matches_the_gate():
 
     # phase 1: the assets are the active assets, in order, and the timeframe is 1d
     # (the note records the Switch 1 entry; Switch 2 added phase 2 on top, so the
-    # gate's timeframes are phase 1 followed by phase 2's, in declaration order)
+    # gate's timeframes are phase 2's then phase 1's 1d, in declaration order;
+    # the gate is compared with the note's phase 2 line below)
     p1 = _note_line(text, "Phase 1 cells (active from this entry): timeframe ")
     tf, assets_txt = p1.split(" on assets: ")
     assert tf == "1d"
-    assert cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1h", "4h", "12h", "1d")
     assets = tuple(a.strip() for a in assets_txt.rstrip(".").split(","))
     assert len(assets) == 76
     assert assets == cells.ACTIVE_CELLS["crypto"]["assets"] == ADMITTED
@@ -352,6 +352,8 @@ def test_the_grid_record_matches_the_gate():
     # phases 2 and 3: later timeframes on the same assets, nothing else
     p2 = _note_line(text, "Phase 2 cells (inactive until their own Coen-gated commit): timeframes ")
     assert p2.rstrip(".") == "1h, 4h, 12h on the same assets"
+    p2_tfs = {t.strip() for t in p2.split(" on the same assets")[0].split(",")}
+    assert set(cells.ACTIVE_CELLS["crypto"]["timeframes"]) == {"1d"} | p2_tfs
     p3 = _note_line(text, "Phase 3 cells (inactive until their own Coen-gated commit): timeframes ")
     assert p3.rstrip(".") == "15m, 30m on the same assets"
 

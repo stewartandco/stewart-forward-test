@@ -396,7 +396,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   parse. At Switch 2 the 76 1h files alone hold about 4 million bars, so an
   unsized memo would get zero hits. The ceiling (about 3 GB as dicts at about
   0.5 KB a bar) stops a runaway grid taking the box; above it the LRU behaves
-  as before (correct, slower). **Read the `full-bars memo: hits N, misses N,
+  as before (correct, slower) and the run prints a `WARN full-bars memo:
+  touched N bars > ceiling 6,000,000` line and adds one `memo_ceiling` ledger
+  item (projected crossing 2027-02-14, next to the clustering deadline). **Read the `full-bars memo: hits N, misses N,
   evictions N, bound N bars` line the run prints (once, in a `finally`):
   evictions above 0 with hits near 0 means the grid outgrew the ceiling.**
   `_reset_full_bars_memo` restores the default bound. Daily cells never use it (`_daily_bars` rewrites
@@ -441,15 +443,15 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   identical (no new key, no new file; `universe.timeframe` read with `.get`).
   Readers of `equity.csv` that compare the `date` column must compare `d[:10]`
   (the diagnose_* scripts do, `[:10]` on both sides, so a cutoff day is
-  kept). Switch 2 gate still open: `gauntlet_stats` has never run end to end
-  on an intraday spec; it must be exercised in Switch 2's activation rehearsal
-  before any intraday verdict is chained. Closed in 2b-3 D-i:
+  kept). The Switch 2 gate that `gauntlet_stats` had never run end to end on an
+  intraday spec is MET on copies (2026-10-31 D-i; 2026-11-01 Task 12: gate 1
+  MET, `cluster_n` 27,102, `cluster_need_mb` 8,125, 106 stats chained, wall
+  390 s). Closed in 2b-3 D-i:
   `tools/intraday_rehearsal.pick_originals`' selection rules are now tested,
   and the rehearsal's `quarantine` covers every phase-2 timeframe (see its
   bullet above). `pipeline/test_switch2_preview.py` pins that a 12-asset
   window at 1h/4h/12h/1d is 48 cells (one single-asset 24x7 spec per cell per
-  combo), and that one spec per timeframe registers on a scratch chain and passes C3 (the
-  committed gate stays 1d).
+  combo), and that one spec per timeframe registers on a scratch chain and passes C3.
 - **The two Switch 2 notes are chained by Coen at activation, VERBATIM, protocol
   note first:** `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`
   (prefix `gauntlet-protocol-v6.1-intraday-daily-marks:`) and
@@ -922,6 +924,16 @@ of it.
   availability seen is 33,626 MB; at the 30-day registration average
   (~438 a day, in bursts) and L ~1,300 the gate stops fitting near n
   59,000: around 2027-01-14 without Switch 2, 2026-12-23 with it.
+  **A second clock beside it: the full-bars memo ceiling (final review M3).**
+  Task 12 measured 5,741,210 bars over the 228 intraday files (data to
+  2026-10-31); they grow 2,432 a day (76 cells x 32 bars), so once every
+  intraday cell has a quarantined strategy the touched total passes
+  `FULL_BARS_MEMO_CEILING_BARS` (6,000,000) about 2027-02-14. That is time, not
+  correctness (results are identical; quarantine goes back to one parse per
+  strategy-date-cell). The alarm is the `WARN full-bars memo: touched N bars >
+  ceiling 6,000,000` line the outermost quarantine run prints, plus one
+  `memo_ceiling` item in `degraded_quarantine.json` (the Sentinel WARNs, and
+  FAILs after 3 days).
   **Early warning (plan 5, sign-off 2 row 3).** The Ops Sentinel's `gauntlet_queue`
   check (a separate repo, sc-ops-sentinel branch `feat/cluster-n-warn`,
   `9bf6637`) WARNs when the clustering n is at or above 46,000 (manifest
@@ -2067,7 +2079,8 @@ unusable file is one `feed_hole` "cannot scan" item).
   a hole) and is itself ONE `feed_hole` item keyed by the file name.
 - **Owners (who raises and who clears an item):**
   1. the `crypto_refresh` ledger (`logs/degraded_crypto_refresh.json`): holes
-     for every ACTIVE 1d cell, stale only for cells fetched OK;
+     for every refreshed cell (the active cells plus registered extras), stale
+     only for cells fetched OK;
   2. the quarantine fetch-owed step (`logs/degraded_quarantine.json`): the
      owed intraday cells, items owned via `quarantine.FETCH_STEP_SOURCES`
      (`intraday_fetch_failed`, `feed_hole`, `feed_stale`); `--date` and

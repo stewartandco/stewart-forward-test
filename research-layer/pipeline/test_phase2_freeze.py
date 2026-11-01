@@ -24,7 +24,9 @@ exists. What still holds, and is pinned here:
 * crypto rotates now, against the real gate and the real dispatch.
 
 The activated state itself (the 76-asset literal, the routing + benchmark
-pair, the deleted legacy constants, the brief) is pinned in test_switch1.py.
+pair, the deleted legacy constants) is pinned in test_switch1.py; the Switch 2
+pins (the 1h/4h/12h/1d gate, the 304 active cells, the crypto brief's intraday
+text) are in test_switch2.py.
 
 Run: python -m pytest pipeline/test_phase2_freeze.py -q
 """
