@@ -628,3 +628,20 @@ def test_a_crashing_detector_is_one_item_and_the_ledger_is_still_written(
     assert health[0]["reason"].startswith("detector failed: ")
     assert "scan blew up" in health[0]["reason"]
     assert "feed health detector failed" in capsys.readouterr().err
+
+
+def test_a_missing_daily_file_is_a_cell_failure_not_a_stop(tmp_path, monkeypatch):
+    # an intraday cell whose 1d file is absent: fetch_symbol raises
+    # MissingDailyFile (a ValueError) -- an ordinary cell failure like
+    # MalformedData, never a ban-style stop.
+    _gate(monkeypatch, [A, B, C])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data",
+                {B: [cd.MissingDailyFile("XUSDT_1d.csv is absent or has no rows")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert A in fake.symbols() and C in fake.symbols()
+    items = [i for i in _ledger(tmp_path / "logs")["items"]
+             if i["source"] == cr.FETCH_SOURCE]
+    assert [i["key"] for i in items] == ["XUSDT"]
+    assert "MissingDailyFile" in items[0]["reason"] and "1d" in items[0]["reason"]
+    assert set(_manifest(tmp_path / "data")) == {f"{A}_1d", f"{C}_1d"}

@@ -661,3 +661,107 @@ def test_validate_rows_one_day_one_bar_for_1d_only():
     with pytest.raises(cd.MalformedData, match="row 2.*duplicate day 2025-01-01"):
         cd.validate_rows([a, b], "1d", "X_1d.csv")
     cd.validate_rows([a, b], "4h", "X_4h.csv")       # intraday: distinct stamps are fine
+
+
+# ------------------------------------------- intraday never before its 1d start
+
+HOUR = cd.TF_MS["1h"]
+_HEADER = "date,open,high,low,close,volume\n"
+
+
+def _hkline(open_ms):
+    return _kline(open_ms, close_ms=open_ms + HOUR - 1)
+
+
+def _write_daily(tmp_path, symbol="SUNUSDT"):
+    (tmp_path / f"{symbol}_1d.csv").write_text(
+        _HEADER + "2021-06-18 00:00:00,1.0,2.0,0.5,1.5,10.0\n", encoding="utf-8")
+
+
+def _pre_floor_hourlies():
+    # 2021-06-17 20:00 .. 2021-06-18 03:00 UTC, 8 hourly bars
+    first = _utc_ms(2021, 6, 17, 20)
+    return [_hkline(first + i * HOUR) for i in range(8)]
+
+
+def test_a_new_intraday_file_starts_at_the_daily_floor(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    _write_daily(tmp_path)
+    pager = FakePager([_pre_floor_hourlies()])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    res = cd.fetch_symbol("SUNUSDT", "1h", tmp_path, now_ms=FAR_FUTURE_MS)
+    floor = _utc_ms(2021, 6, 18)
+    assert _start_time(pager.urls[0]) == floor
+    lines = (tmp_path / "SUNUSDT_1h.csv").read_text().splitlines()
+    assert lines[1].startswith("2021-06-18 00:00:00,")
+    assert len(lines) == 1 + 4                      # 00:00 .. 03:00; the 17th is dropped
+    assert res["first_date"] == "2021-06-18 00:00:00"
+    assert res["rows"] == 4
+
+
+def test_the_floor_is_midnight_of_the_first_daily_date(tmp_path):
+    # a daily stamp with a time part still floors at 00:00 UTC of its date
+    (tmp_path / "SUNUSDT_1d.csv").write_text(
+        _HEADER + "2021-06-18 12:00:00,1.0,2.0,0.5,1.5,10.0\n", encoding="utf-8")
+    assert cd.daily_floor_ms("SUNUSDT", tmp_path) == _utc_ms(2021, 6, 18)
+
+
+def test_a_missing_daily_file_refuses_to_create_an_intraday_file(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    pager = FakePager([])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    for case in ("absent", "header-only"):
+        if case == "header-only":
+            (tmp_path / "SUNUSDT_1d.csv").write_text(_HEADER, encoding="utf-8")
+        with pytest.raises(cd.MissingDailyFile):
+            cd.fetch_symbol("SUNUSDT", "1h", tmp_path, now_ms=FAR_FUTURE_MS)
+        assert pager.urls == []                       # no HTTP call
+        assert not (tmp_path / "SUNUSDT_1h.csv").exists()
+        assert not (tmp_path / "SUNUSDT_1h.csv.tmp").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["SUNUSDT_1d.csv"]
+    assert issubclass(cd.MissingDailyFile, ValueError)
+
+
+def test_a_header_only_intraday_file_also_starts_at_the_floor(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    _write_daily(tmp_path)
+    (tmp_path / "SUNUSDT_1h.csv").write_text(_HEADER, encoding="utf-8")
+    pager = FakePager([_pre_floor_hourlies()])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    cd.fetch_symbol("SUNUSDT", "1h", tmp_path, now_ms=FAR_FUTURE_MS)
+    assert _start_time(pager.urls[0]) == _utc_ms(2021, 6, 18)
+    lines = (tmp_path / "SUNUSDT_1h.csv").read_text().splitlines()
+    assert lines[1].startswith("2021-06-18 00:00:00,") and len(lines) == 5
+
+
+def test_an_existing_intraday_file_resumes_unchanged(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    # no 1d file at all: an existing intraday file must never consult it
+    monkeypatch.setattr(cd, "daily_floor_ms",
+                        lambda *a, **k: pytest.fail("floor read on a resume"))
+    first = _utc_ms(2021, 6, 18)
+    old = ("2021-06-18 00:00:00,1.0,2.0,0.5,1.5,10.0\n"
+           "2021-06-18 01:00:00,1.0,2.0,0.5,1.5,10.0\n")
+    (tmp_path / "SUNUSDT_1h.csv").write_text(_HEADER + old, encoding="utf-8")
+    pager = FakePager([[_hkline(first + 2 * HOUR), _hkline(first + 3 * HOUR)]])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    res = cd.fetch_symbol("SUNUSDT", "1h", tmp_path, now_ms=FAR_FUTURE_MS)
+    assert _start_time(pager.urls[0]) == first + 2 * HOUR
+    body = (tmp_path / "SUNUSDT_1h.csv").read_bytes()
+    assert body == (_HEADER + old
+                    + "2021-06-18 02:00:00,1.0,2.0,0.5,1.5,10.0\n"
+                    + "2021-06-18 03:00:00,1.0,2.0,0.5,1.5,10.0\n").encode()
+    assert res["rows"] == 4
+    assert res["first_date"] == "2021-06-18 00:00:00"
+    assert res["last_date"] == "2021-06-18 03:00:00"
+
+
+def test_daily_fetch_is_unchanged(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(cd, "daily_floor_ms",
+                        lambda *a, **k: pytest.fail("floor read for a 1d fetch"))
+    pager = FakePager([_page(0, 3)])
+    monkeypatch.setattr(cd, "_http_get_json", pager)
+    res = cd.fetch_symbol("BTCUSDT", "1d", tmp_path, now_ms=FAR_FUTURE_MS)
+    assert _start_time(pager.urls[0]) == 0
+    assert res["rows"] == 3 and res["first_date"] == "1970-01-01 00:00:00"

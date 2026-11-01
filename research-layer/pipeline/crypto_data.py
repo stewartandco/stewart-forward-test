@@ -71,6 +71,14 @@ class MalformedData(ValueError):
     `crypto_refresh` records it as an ordinary cell failure."""
 
 
+class MissingDailyFile(ValueError):
+    """An intraday cell was asked to START (no existing rows) but its asset's
+    1d file is absent or holds no rows, so there is no floor to start from:
+    an intraday file must never begin before its 1d file. A ValueError, not a
+    ban or a limit: `crypto_refresh` and `quarantine --fetch-owed` record it
+    as an ordinary cell failure. Nothing is requested and nothing is written."""
+
+
 class RateLimited(Exception):
     """HTTP 429: the server told us how long to back off.
 
@@ -176,6 +184,21 @@ def _read_existing(path: Path) -> dict[str, tuple]:
     return rows
 
 
+def daily_floor_ms(symbol: str, data_dir: Path) -> int:
+    """Epoch ms of 00:00 UTC of the first data row's date in
+    `<symbol>_1d.csv`: the earliest open time an intraday file for `symbol`
+    may hold (the same rows `tools.intraday_prefetch`' clip keeps, those with
+    `date[:10] >= first 1d date`). Raises `MissingDailyFile` when that file
+    is absent or has no rows."""
+    path = Path(data_dir) / f"{symbol}_1d.csv"
+    existing = _read_existing(path) if path.exists() else {}
+    if not existing:
+        raise MissingDailyFile(
+            f"{path.name}: absent or has no rows in {Path(data_dir)} - an intraday "
+            f"file for {symbol} cannot start without its 1d file")
+    return _date_to_ms(next(iter(existing))[:10] + " 00:00:00")
+
+
 def validate_rows(rows: list[dict], tf: str, name: str) -> None:
     """Refuse a series the signal service would refuse (it raises `DataRefused`
     for the same defects in `parse_daily_csv`; this module must not import it).
@@ -276,6 +299,13 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
     (e.g. 15m from genesis, ~200k+ klines) that dies mid-cell writes nothing
     and restarts from its previous file on the next run.
 
+    A NEW intraday file (`tf != "1d"` and no existing rows: missing or
+    header-only) starts at `daily_floor_ms` and drops any kline opening before
+    it, so no path (refresh, `fetch`, `--fetch-owed`, the prefetch) can create
+    an intraday file that starts before its asset's 1d file; with no 1d file
+    it raises `MissingDailyFile` before any request. An existing intraday file
+    resumes as always (its first row is already at or after the floor).
+
     Resume trusts the file's own ordering: the LAST row is the newest bar.
     Historical gaps inside an existing file are never backfilled -- the fetch
     only ever asks the exchange for bars after the last row. A file with a
@@ -291,8 +321,12 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
     data_dir = Path(data_dir)
     path = data_dir / f"{symbol}_{tf}.csv"
     existing = _read_existing(path) if path.exists() else {}
+    floor: int | None = None
     if existing:
         start = _date_to_ms(next(reversed(existing))) + TF_MS[tf]
+    elif tf != "1d":
+        floor = daily_floor_ms(symbol, data_dir)   # raises before any request
+        start = floor
     else:
         start = 0
 
@@ -303,6 +337,8 @@ def fetch_symbol(symbol: str, tf: str, data_dir: Path, now_ms: int | None = None
         if not batch:
             break
         for k in batch:
+            if floor is not None and k[0] < floor:
+                continue                 # before the asset's 1d start
             # Still-open bar: fabricated OHLCV, drop. The SKEW_MARGIN_MS
             # widens the drop window because resume never re-serves a bar: a
             # clock-skew-admitted partial bar would be PERMANENT in this
