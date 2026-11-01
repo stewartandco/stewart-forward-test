@@ -191,7 +191,7 @@ def test_the_crypto_brief_keeps_rules_and_history():
     assert "48 cells" in flat
     assert "about 8 days at 1h" in flat
     assert "on daily OHLCV bars:" not in flat
-    # the new universe text (DRAFT pending Coen's approval, Task 12)
+    # the new universe text (approved by Coen 2026-11-01)
     assert "each on 1h, 4h, 12h and daily OHLCV bars:" in flat
     assert "every cell in the generation's window is its own strategy" in flat
     assert "every asset in the generation's window" not in flat

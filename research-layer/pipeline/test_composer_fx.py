@@ -353,8 +353,8 @@ def test_fx_specs_validate_against_schema(tmp_path):
 # Re-pinned a third time by the Switch 2 commit ("feat(research-layer): Switch
 # 2, crypto intraday 1h/4h/12h (2b-3 phase 2)"): the universe section names the
 # four timeframes (cells, 48 per window, bars of the cell's own timeframe).
-# History block and Rules bullets are byte-identical (test_switch2.py). Still
-# a DRAFT pending Coen's approval of the exact text (2b-3 plan 5, Task 12).
+# History block and Rules bullets are byte-identical (test_switch2.py). Coen
+# approved the exact text 2026-11-01 (2b-3 plan 5 gate).
 CRYPTO_SYSTEM_PROMPT_SHA256 = "cba48422d23b4fd20db7ce0a511051d076a92a1532d5bb36ad856ce014f41705"
 CRYPTO_PROPOSAL_SCHEMA_SHA256 = "725c7b936492af190be6ada4104aa92b4d0a6109378e2827af096da9a40a83b9"
 

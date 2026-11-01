@@ -1244,7 +1244,6 @@ def _crypto_system_prompt() -> str:
     section for the four active timeframes (1h, 4h, 12h, 1d) and left the
     history block and every Rules bullet byte for byte (test_switch2.py).
     No financing line: crypto declares no short financing.
-    DRAFT pending Coen's approval of the exact text (build 2b-3, Task 9).
     """
     cls_spec = cells.CLASSES["crypto"]
     active = _active_assets("crypto")
