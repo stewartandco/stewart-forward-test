@@ -377,6 +377,10 @@ def test_screen_prior_for_a_timeframe_is_measured_scaled_and_floored(monkeypatch
     assert t["1h"] == 30.0 and screen.screen_prior_s_for("1h") == 30.0
     assert screen.screen_prior_s_for("15m") == 4 * t["1h"]      # 96 / 24
     assert screen.screen_prior_s_for("30m") == 2 * t["1h"]
+    # 4h and 12h are measured entries since 2b-3 plan 5 (Task 2); remove them
+    # to exercise the scaled fallback for a timeframe with no measurement
+    monkeypatch.delitem(t, "4h")
+    monkeypatch.delitem(t, "12h")
     assert screen.screen_prior_s_for("4h") == max(2.0, t["1h"] / 4)
     monkeypatch.setitem(t, "1h", 6.0)
     assert screen.screen_prior_s_for("12h") == 2.0              # 6/12 floored
@@ -534,3 +538,20 @@ def test_a_deadline_stop_inside_a_group_leaves_the_rest_proposed(tmp_path, monke
                 if e["entry_type"] == "verdict"]
     assert len(verdicts) == len(set(verdicts)) == 24
     assert run_verifier(reg2.log_path).returncode == 0
+
+
+# ---- 2b-3 plan 5 Task 2: measured 4h and 12h priors ----
+
+def test_measured_intraday_priors():
+    """The D-i rehearsal (2026-10-31) measured 4h and 12h; rule = the 1h prior
+    x the measured ratio, rounded up to the next 5 s."""
+    assert screen.SCREEN_PRIOR_S_BY_TF == {"1d": 2.0, "1h": 30.0, "4h": 15.0, "12h": 10.0}
+    assert screen.screen_prior_s_for("4h") == 15.0
+    assert screen.screen_prior_s_for("12h") == 10.0
+
+
+def test_unmeasured_timeframes_keep_the_scaled_fallback():
+    t = screen.SCREEN_PRIOR_S_BY_TF
+    assert "15m" not in t and "30m" not in t
+    assert screen.screen_prior_s_for("15m") == 4 * t["1h"]      # 96 / 24
+    assert screen.screen_prior_s_for("30m") == 2 * t["1h"]      # 48 / 24

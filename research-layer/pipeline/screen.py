@@ -49,7 +49,11 @@ SCREEN_PRIOR_S_PER_SPEC = 2.0
 # MEASURED rate for that timeframe rules (DeadlineBudget key=tf).
 # 1h = the measured MEAN (20.38 s) rounded up to 30 s, chosen deliberately;
 # unlike the gauntlet's PRIOR_S_BY_TF["1h"], which is the heaviest class.
-SCREEN_PRIOR_S_BY_TF = {"1d": SCREEN_PRIOR_S_PER_SPEC, "1h": 30.0}
+# 4h and 12h = MEASURED 2026-10-31 (2b-3 D-i rehearsal): the 1h prior x the
+# measured ratio, rounded up to the next 5 s. 15m and 30m stay unmeasured (the
+# scaled fallback in screen_prior_s_for) until phase 3.
+SCREEN_PRIOR_S_BY_TF = {"1d": SCREEN_PRIOR_S_PER_SPEC, "1h": 30.0,
+                        "4h": 15.0, "12h": 10.0}
 SCREEN_CHUNK_PER_WORKER = 8
 
 

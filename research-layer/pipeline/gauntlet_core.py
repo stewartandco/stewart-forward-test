@@ -463,6 +463,11 @@ PRIOR_S_BY_TF = {
     # 66.8 s). Rounded up to the next 10 s. The 2026-10-10 rehearsal's ~940 s
     # was the pre-change engine on the same class. Warm: 16 s.
     "1h": 70.0,
+    # MEASURED 2026-10-31 (2b-3 D-i rehearsal): the 1h prior x the measured
+    # 4h and 12h ratios, rounded up to the next 5 s. 15m and 30m stay
+    # unmeasured (the scaled fallback in prior_s_for) until phase 3.
+    "4h": 25.0,
+    "12h": 20.0,
 }
 
 
