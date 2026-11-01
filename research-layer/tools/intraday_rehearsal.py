@@ -201,7 +201,11 @@ def register(registry: Path, assets: list[str], n: int, seed: int,
                 two = make_twin(specs[sid], asset, tf)
                 fp = composer.composition_fingerprint(two)
                 existing = known.get(fp)
-                if existing is not None:
+                # A twin already on the chain under its OWN id (a rerun, or a
+                # run that crashed after registering some) is listed, never
+                # re-registered and never skipped: only ANOTHER strategy
+                # holding the composition makes it a duplicate.
+                if two["strategy_id"] not in specs and existing is not None:
                     skipped[two["strategy_id"]] = {
                         "original": sid, "asset": asset, "tf": tf,
                         "existing": existing}

@@ -470,6 +470,46 @@ def test_pick_twins_and_render_read_an_output_with_skips(tmp_path, monkeypatch):
     assert "| 1h |" in text and "| 1d |" not in text
 
 
+def _n_registered(reg):
+    return len([e for e in Registry(reg.log_path).entries()
+                if e["entry_type"] == "strategy_registered"])
+
+
+def test_a_rerun_keeps_the_rehearsals_own_twins_in_the_map(tmp_path, monkeypatch):
+    reg, v1, orig = _v2_original(tmp_path)
+    monkeypatch.setattr(ir, "pick_originals",           # twins are eligible originals
+                        lambda specs, n, seed: [orig["strategy_id"]])
+    out = tmp_path / "twins.json"
+    argv = ["register", "--registry", str(reg.log_path),
+            "--assets", "BTCUSDT,ETHUSDT", "--originals", "1", "--seed", "1",
+            "--out", str(out)]
+    assert ir.main(argv) == 0
+    first = json.loads(out.read_text())
+    assert len(first) == 4
+    n_before = _n_registered(reg)
+    assert ir.main(argv) == 0                       # same chain, same --out
+    assert json.loads(out.read_text()) == first
+    assert json.loads((tmp_path / "twins.skipped.json").read_text()) == {}
+    assert _n_registered(reg) == n_before           # nothing re-registered
+
+
+def test_a_rerun_on_a_covered_chain_keeps_map_and_sidecar(tmp_path, monkeypatch):
+    reg, orig, covering = _covered_chain(tmp_path, monkeypatch)
+    out = tmp_path / "twins.json"
+    side = tmp_path / "twins.skipped.json"
+    argv = ["register", "--registry", str(reg.log_path),
+            "--assets", "BTCUSDT,ETHUSDT", "--originals", "1", "--seed", "1",
+            "--out", str(out)]
+    assert ir.main(argv) == 0
+    first, first_side = json.loads(out.read_text()), json.loads(side.read_text())
+    assert len(first) == 2 and len(first_side) == 2
+    n_before = _n_registered(reg)
+    assert ir.main(argv) == 0
+    assert json.loads(out.read_text()) == first
+    assert json.loads(side.read_text()) == first_side
+    assert _n_registered(reg) == n_before
+
+
 def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
     from pipeline import crypto_data
     from pipeline.test_intraday_statistics import _twin_bars
