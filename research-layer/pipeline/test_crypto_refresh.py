@@ -744,6 +744,18 @@ def test_an_unreadable_registry_falls_back_with_one_item(tmp_path, monkeypatch):
     assert "JSONDecodeError" in items[0]["reason"]
 
 
+def test_a_torn_final_chain_line_is_ignored_not_unreadable(tmp_path, monkeypatch):
+    """The 08:00 worker can be mid-append at 08:02 and the refresh takes no
+    lock: a half-written final line (no newline yet) is not an error."""
+    _gate(monkeypatch, ["BTCUSDT"], tfs=("1d",))
+    path = _chain(tmp_path, [_spec("s1", ["SOLUSDT"], tf="1h"),
+                             _spec("s2", ["BNBUSDT"], tf="4h")])
+    with path.open("a", encoding="utf-8", newline="") as f:
+        f.write('{"entry_type": "strategy_registered", "payload": {"strategy_id": "s3", "uni')
+    got = cr.refresh_cells(path)
+    assert got == cells.active_cells("crypto") + [("BNBUSDT", "4h"), ("SOLUSDT", "1h")]
+
+
 def test_main_refreshes_a_registered_inactive_cell(tmp_path, monkeypatch):
     _gate(monkeypatch, [A], tfs=("1d",))
     sol = "SOLUSDT"

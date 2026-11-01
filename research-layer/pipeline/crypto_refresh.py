@@ -339,22 +339,28 @@ def refresh_cells(registry_path: Path | None) -> list[tuple[str, str]]:
         return out
     have = set(out)
     extra: set[tuple[str, str]] = set()
-    for e in Registry(registry_path).entries():
+
+    def on_entry(e: dict) -> None:
         if e.get("entry_type") != "strategy_registered":
-            continue
+            return
         u = (e.get("payload") or {}).get("universe") or {}
         if u.get("asset_class") != "crypto":
-            continue
+            return
         assets = u.get("assets")
         if not isinstance(assets, list) or len(assets) != 1:
-            continue
+            return
         asset, tf = assets[0], u.get("timeframe", "1d")
         if asset not in cells.ASSETS or tf not in cells.TIMEFRAMES:
-            continue
+            return
         if cells.is_retired(qcells.cell_key(asset, tf)):
-            continue
+            return
         if (asset, tf) not in have:
             extra.add((asset, tf))
+
+    # `snapshot` counts COMPLETE lines only (within the size seen at open), so a
+    # final line the 08:00 worker is still appending never tears this lock-free
+    # read; a missing file is an empty snapshot (adds nothing).
+    Registry(registry_path).snapshot(on_entry=on_entry)
     return out + sorted(extra)
 
 
