@@ -77,13 +77,37 @@ def _job_tf(job: tuple) -> str:
     return _spec_tf(job[0])
 
 
+def _group_by_tf(jobs: list) -> list:
+    """A STABLE reorder: timeframes in order of first appearance, the jobs of
+    one timeframe in their original order. `run` applies it before
+    `_tf_chunks`, because a registry that alternates timeframes (Switch 2
+    expands per asset, then per timeframe) would otherwise be cut toward
+    one-spec chunks, and one-spec chunks run in-process (the D-i rehearsal
+    measured 1.16 s per intraday spec serial against 0.43 / 0.15 / 0.085 s
+    grouped). An all-one-timeframe list comes back with the same jobs in the
+    same order, so an all-1d run is unchanged. Verdicts are unchanged; only the
+    ORDER in which a mixed run's verdict batches are chained moves (it is not
+    part of any verdict: the gauntlet worker re-sorts cheapest first)."""
+    order: list[str] = []
+    by_tf: dict[str, list] = {}
+    for job in jobs:
+        tf = _job_tf(job)
+        if tf not in by_tf:
+            order.append(tf)
+            by_tf[tf] = []
+        by_tf[tf].append(job)
+    return [job for tf in order for job in by_tf[tf]]
+
+
 def _tf_chunks(jobs: list, size: int) -> list[tuple[str, list]]:
     """(timeframe, chunk) in jobs' order. A chunk never mixes timeframes: a run
     of one timeframe is cut every `size`, and a change of timeframe cuts it
-    too. Nothing is reordered, so verdicts chain in the order they always did;
-    an all-1d run gets exactly `_deadline.chunks(jobs, size)`. A registry that
-    alternates timeframes shrinks its chunks toward 1 spec; that costs
-    performance only, the verdict chain is unchanged."""
+    too. This function reorders nothing; `run` groups the jobs by timeframe
+    (`_group_by_tf`) BEFORE calling it, so a mixed registry is cut into full
+    chunks per timeframe. An all-1d run gets exactly
+    `_deadline.chunks(jobs, size)`. A list that still alternates timeframes
+    (only a direct caller can hand it one) shrinks its chunks toward 1 spec;
+    that costs performance only."""
     size = max(1, int(size))
     out: list[tuple[str, list]] = []
     i = 0
@@ -648,7 +672,7 @@ def run(argv: list[str] | None = None) -> int:
             _sleep(DRAIN_INTERVAL_S)
 
     try:
-        for tf, chunk in _tf_chunks(jobs, chunk_size):
+        for tf, chunk in _tf_chunks(_group_by_tf(jobs), chunk_size):
             # the drain reserve is held back only while a batch is pending
             # (the gauntlet worker's reserve_s): stop unless this chunk AND
             # the reserve both fit in what is left
