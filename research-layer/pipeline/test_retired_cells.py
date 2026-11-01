@@ -344,7 +344,7 @@ def test_a_retired_owed_cell_is_never_fetched_but_its_sibling_is(tmp_path, monke
     _retire(monkeypatch, "BTCUSD@1h")
     calls, sleeps = [], []
 
-    def fetch(sym, tf, d):
+    def fetch(sym, tf, d, **kw):
         if sym == "BTCUSD":
             raise RuntimeError("delisted")      # would cost two 120 s retry passes
         calls.append((sym, tf))
@@ -380,6 +380,6 @@ def test_with_nothing_retired_every_owed_cell_is_fetched(tmp_path):
     a, b, specs = _owed_pair()
     calls = []
     quarantine.fetch_owed([a["strategy_id"], b["strategy_id"]], specs, tmp_path,
-                          fetch=lambda sym, tf, d: calls.append(sym) or {},
+                          fetch=lambda sym, tf, d, **kw: calls.append(sym) or {},
                           sleep=lambda s: None, now_ms=_NOW_MS)
     assert sorted(calls) == ["BTCUSD", "ETHUSD"]

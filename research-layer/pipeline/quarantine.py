@@ -1449,11 +1449,14 @@ FETCH_STEP_SOURCES = (FETCH_SOURCE, "feed_hole", "feed_stale")
 
 
 def _feed_health_items(data_dir: Path, cells_owed: list[str],
-                       fetched_ok: set[str], now_ms: int) -> list[dict]:
+                       fetched_ok: set[str], now_ms: int,
+                       end_ms: int | None = None) -> list[dict]:
     """Hole and stale-feed items (2b-3 C1, C2) for the owed cells: holes in
     every one, staleness only for a cell fetched OK this run. NEVER raises: an
     uncaught exception here would crash the step and fail the whole 08:20
-    task (the wrapper maps it to FETCH_RC=1)."""
+    task (the wrapper maps it to FETCH_RC=1). `end_ms` is the cap the fetch ran
+    with: the scan must expect the same newest bar, or a capped afternoon run
+    reads as feed_stale."""
     try:
         from . import feed_health
         acks, note = feed_health.load_acks(data_dir)
@@ -1466,9 +1469,11 @@ def _feed_health_items(data_dir: Path, cells_owed: list[str],
         # by declaration, so a hole or stale item would be a standing alarm.
         scan_keys = [k for k in cells_owed if not cells.is_retired(k)]
         scan_stale = {k for k in fetched_ok if not cells.is_retired(k)}
-        # No end cap: this fetch has none, only the closed-bar rule.
+        # The fetch's own end cap (the refresh's), so 1h and 4h cells that
+        # correctly end at the previous UTC day are not feed_stale.
         items += feed_health.scan(Path(data_dir), scan_keys, now_ms=now_ms,
-                                  stale_keys=scan_stale, acks=acks)
+                                  stale_keys=scan_stale, acks=acks,
+                                  end_ms=end_ms)
         return items
     except Exception as exc:  # noqa: BLE001 - see the docstring
         print(f"fetch-owed: feed health detector failed: {exc!r}",
@@ -1518,13 +1523,17 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
         return []
     # Imported only once a cell is owed: a run with nothing to fetch must not
     # depend on crypto_data importing.
-    from .crypto_data import BinanceBanned, RateLimited
+    from .crypto_data import (BinanceBanned, RateLimited,
+                              last_complete_utc_day_end_ms)
     if fetch is None:
         from .crypto_data import fetch_symbol as fetch
     if sleep is None:
         sleep = time.sleep
     if now_ms is None:
         now_ms = int(time.time() * 1000)
+    # The refresh's own cap (crypto_refresh: no bar of today UTC is ever
+    # written), once per call so every cell, retry pass and the scan agree.
+    end_ms = last_complete_utc_day_end_ms(now_ms)
 
     fetched_ok: set[str] = set()
     failed: dict[str, str] = {}          # key -> last generic failure reason
@@ -1545,7 +1554,7 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
             asset, tf = split_cell_key(key)
             attempts[key] = attempts.get(key, 0) + 1
             try:
-                fetch(asset, tf, Path(data_dir))
+                fetch(asset, tf, Path(data_dir), now_ms=now_ms, end_ms=end_ms)
                 print(f"fetch-owed: {key} fetched")
                 fetched_ok.add(key)
                 failed.pop(key, None)
@@ -1596,7 +1605,8 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
         else:
             continue
         items.append({"source": FETCH_SOURCE, "key": key, "reason": reason})
-    items += _feed_health_items(Path(data_dir), cells_owed, fetched_ok, now_ms)
+    items += _feed_health_items(Path(data_dir), cells_owed, fetched_ok, now_ms,
+                                end_ms)
     return items
 
 
