@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from . import cells, composer
+from . import cells, composer, loop_state
 from .registry import Registry
 from .test_composer import seeded_registry
 from .test_switch1 import ADMITTED, _crypto_family
@@ -119,6 +119,45 @@ def test_timeframes_none_is_todays_behaviour(switch2):
             == composer.sweep_cells("crypto", assets=window))
     only_1d = composer.sweep_cells("crypto", assets=window, timeframes=("1d",))
     assert only_1d == [(a, "1d") for a in window]
+
+
+def _drain(tmp_path, reg_path):
+    """A dry-run crypto cycle whose class has one queued sibling: the composer
+    takes the D10 drain path (no proposal, no model call)."""
+    state_path = tmp_path / "loop_state.json"
+    st = loop_state.load(state_path)
+    loop_state.enqueue_specs(st, "crypto", [{
+        "strategy_id": "q1", "family": "f_q", "blocks": [],
+        "universe": {"assets": ["BTCUSDT"], "timeframe": "1d",
+                     "asset_class": "crypto", "session": "24x7"}}])
+    loop_state.save(state_path, st)
+
+    def _no_model(cards):
+        raise AssertionError("a drain must not propose")
+
+    rc = composer.run(["--registry", str(reg_path), "--run-id", "drain", "--dry-run",
+                       "--sibling-cap", str(SIBLING_CAP),
+                       "--loop-state", str(state_path)], propose_fn=_no_model)
+    assert rc == 0
+
+
+def test_the_drain_drift_record_carries_held_intraday_when_held(
+        switch2, tmp_path, capsys):
+    reg_path, _ = seeded_registry(tmp_path)
+    _drain(tmp_path, reg_path)
+    out = capsys.readouterr().out
+    assert "QUEUE DRAIN (crypto)" in out
+    rec = _drift(reg_path)
+    assert rec["held_intraday"] is True
+
+
+def test_the_drain_drift_record_has_no_held_key_when_not_held(
+        switch2, tmp_path, capsys):
+    reg_path, _ = seeded_registry(tmp_path)
+    _chain_notes(reg_path, PROTOCOL_PREFIX, PHASE2_PREFIX)
+    _drain(tmp_path, reg_path)
+    assert "QUEUE DRAIN (crypto)" in capsys.readouterr().out
+    assert "held_intraday" not in _drift(reg_path)
 
 
 def test_a_1d_only_gate_never_reads_the_notes(tmp_path, monkeypatch):

@@ -2105,7 +2105,8 @@ def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[st
 
 def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
                          queue_path: Path, known_fps: dict[str, str],
-                         per_cycle_specs: int | None) -> int:
+                         per_cycle_specs: int | None,
+                         held_intraday: bool = False) -> int:
     """D10: register one window off this class's sibling queue, propose nothing.
 
     A drain replaces THIS STAGE's proposal, not the whole cycle: the composer
@@ -2140,7 +2141,8 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
               f"already registered as {known_fps[composition_fingerprint(spec)]}")
 
     _persist_drift_record(
-        drift_record(args.run_id, args.dry_run, fresh), args.registry)
+        drift_record(args.run_id, args.dry_run, fresh,
+                     held_intraday=held_intraday), args.registry)
 
     if args.dry_run:
         print(f"\nDRY RUN — queue drain only; {len(fresh)} spec(s) would be "
@@ -2307,7 +2309,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     queue_state = loop_state.load(queue_path)
     if loop_state.queue_depth(queue_state, args.asset_class):
         return _drain_sibling_queue(args, registry, queue_state, queue_path,
-                                    known_fps, per_cycle_specs)
+                                    known_fps, per_cycle_specs,
+                                    held_intraday=held_tfs is not None)
 
     if not accepted:
         print("No accepted cards in the registry — run the Reader and triage first.")
