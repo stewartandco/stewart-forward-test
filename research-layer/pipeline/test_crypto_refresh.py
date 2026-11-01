@@ -672,13 +672,29 @@ def _chain(tmp_path, specs, extra_entries=()):
 def test_refresh_cells_is_the_active_set_when_nothing_extra_is_registered(
         tmp_path, monkeypatch):
     _gate(monkeypatch, ["BTCUSDT", "ETHUSDT"], tfs=("1d", "1h"))
-    expect = cells.active_cells("crypto")
+    active = cells.active_cells("crypto")
+    # the 1d cells first, then the others, each group in active_cells order
+    expect = ([c for c in active if c[1] == "1d"]
+              + [c for c in active if c[1] != "1d"])
+    assert expect != active                     # the order is a real change here
+    assert sorted(expect) == sorted(active)
     assert cr.refresh_cells(None) == expect
     assert cr.refresh_cells(tmp_path / "absent_log.jsonl") == expect
     # a registered cell that IS active adds nothing and does not reorder
     path = _chain(tmp_path, [_spec("s1", ["ETHUSDT"], tf="1h"),
                              _spec("s2", ["BTCUSDT"])])
     assert cr.refresh_cells(path) == expect
+
+
+def test_the_1d_cells_are_refreshed_first_under_the_hard_stop():
+    """08:12 stops every pass: the 1d cells (read by the 08:20 quarantine and
+    the 08:45 signal service) must be the first 76 of the 304."""
+    got = cr.refresh_cells(None)
+    active = cells.active_cells("crypto")
+    one_d = [c for c in active if c[1] == "1d"]
+    assert len(one_d) == 76 and len(got) == len(active)
+    assert got[:76] == one_d
+    assert got[76:] == [c for c in active if c[1] != "1d"]
 
 
 def test_a_registered_inactive_cell_is_refreshed(tmp_path, monkeypatch):

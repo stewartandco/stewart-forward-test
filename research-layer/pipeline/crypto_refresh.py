@@ -4,7 +4,8 @@ A scheduled task (08:02 Perth, UTC+8) runs `python -m pipeline.crypto_refresh`
 so the 08:20 quarantine daily and the 08:45 signal service read fresh daily
 bars. Binance's 1d bar closes 00:00 UTC = 08:00 Perth.
 
-READS / WRITES. Reads `cells.active_cells("crypto")` and each cell's CSV
+READS / WRITES. Reads `refresh_cells(registry)` (the active crypto cells, the
+1d cells first, plus any registered extras) and each cell's CSV
 (admission check). Writes the cell CSVs (atomically, inside
 `crypto_data.fetch_symbol`; this module only ever APPENDS through it, never
 repairs or trims rows), `<data>/crypto_snapshot_manifest.json` (completed
@@ -46,8 +47,10 @@ consumer on this box): that cell gets a failure item and every cell not yet
 completed a `skipped: ...` item.
 
 REGISTERED CELLS (2b-3 plan 5, Task 7). The cells refreshed are
-`refresh_cells(registry)`: `cells.active_cells("crypto")` in its order, then
-every other `(asset, tf)` a registered crypto strategy runs on (one asset in
+`refresh_cells(registry)`: `cells.active_cells("crypto")` with the 1d cells
+first (each group in its order: the 08:12 hard stop then reaches the 1d files
+the 08:20 quarantine and 08:45 signal service read before any intraday file),
+then every other `(asset, tf)` a registered crypto strategy runs on (one asset in
 `cells.ASSETS`, tf in `cells.TIMEFRAMES`, not retired), sorted. Why: a pause
 (crypto back to `("1d",)`) drops the intraday cells from `active_cells` while
 their registered strategies stay; unrefreshed, the loop preflight parks crypto
@@ -63,7 +66,7 @@ LEDGER. Items = fetch failures + `admission_problems` over the active cells
 + feed health (2b-3 C1, C2), written with `degraded.record(...,
 remove_unseen=True)`: a recovered item leaves, and an empty run still refreshes
 `ts_utc` so the Sentinel sees a live writer. Feed health is
-`feed_health.scan` over every active cell's file: a `feed_hole` item for a UTC
+`feed_health.scan` over every refreshed cell's file (`refresh_cells`): a `feed_hole` item for a UTC
 day with no bar (unless acknowledged in `<data>/intraday_holes_ack.json`; an
 unreadable ack file is ONE `feed_hole` item keyed by the file and honours
 nothing), and a `feed_stale` item for a cell FETCHED OK this run whose last bar
@@ -314,12 +317,24 @@ def _feed_health_items(data_dir: Path, cell_list: list[tuple[str, str]],
                  "reason": f"detector failed: {exc!r}"}]
 
 
+def _active_1d_first() -> list[tuple[str, str]]:
+    """The active crypto cells, the 1d cells first, then the others, each group
+    in `active_cells` order. The wrapper's `--stop-local 08:12` can end a slow
+    morning part way down the list, and the 1d files are the ones the 08:20
+    quarantine and the 08:45 signal service read, so they go first. Order
+    changes which cells a stopped run reaches, never any file's bytes."""
+    active = cells.active_cells("crypto")
+    return ([c for c in active if c[1] == "1d"]
+            + [c for c in active if c[1] != "1d"])
+
+
 def refresh_cells(registry_path: Path | None) -> list[tuple[str, str]]:
-    """The cells to refresh: the active crypto cells (their order), then every
-    other cell a registered crypto strategy runs on, sorted. `None`, or a path
-    with no file, adds nothing. Raises whatever reading the chain raises: the
+    """The cells to refresh: the active crypto cells, the 1d cells first and
+    then the others (each group in `active_cells` order), then every other
+    cell a registered crypto strategy runs on, sorted. `None`, or a path with
+    no file, adds nothing. Raises whatever reading the chain raises: the
     caller (`main`) turns that into one `registry_unreadable` item."""
-    out = list(cells.active_cells("crypto"))
+    out = _active_1d_first()
     if registry_path is None:
         return out
     have = set(out)
@@ -377,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - an unreadable chain is not a failed run
         print(f"crypto_refresh: registry unreadable, refreshing active cells only: "
               f"{exc!r}", file=sys.stderr)
-        cell_list = cells.active_cells("crypto")
+        cell_list = _active_1d_first()
         registry_items = [{"source": REGISTRY_SOURCE, "key": "registry",
                            "reason": f"registry {args.registry} unreadable "
                                      f"({exc!r}); refreshed the active cells only"}]

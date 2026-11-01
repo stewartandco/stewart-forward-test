@@ -1983,7 +1983,9 @@ per window per bar; the percentile is an exact incremental one.
   `crypto_refresh`, 30 h proposed, pending Coen) and list 33 as "observing";
   that lands at merge (sc-ops-sentinel `feat/crypto-refresh-ledger`).
 - **What it fetches:** every cell of `refresh_cells(registry)` (the active
-  crypto cells, 304 since Switch 2, then every other cell a registered crypto
+  crypto cells, 304 since Switch 2, the 76 1d cells FIRST then the other 228 in
+  `active_cells` order, so the 08:12 hard stop reaches the 1d files the 08:20
+  quarantine and 08:45 signal service read before any intraday file; then every other cell a registered crypto
   strategy runs on; section "Switch 2"), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
   it only APPENDS, never repairs or trims rows. **End cap:** every fetch is
   capped at 00:00 UTC of today's UTC date (`crypto_data.
