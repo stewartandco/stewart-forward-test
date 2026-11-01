@@ -383,6 +383,93 @@ def test_register_honours_timeframes(tmp_path, capsys):
     assert not (tmp_path / "bad.json").exists()
 
 
+# ---- register skips a twin whose composition is registered (2b-3 plan 5 Task 6) ----
+
+def _covered_chain(tmp_path, monkeypatch):
+    """A chain holding a version-2 original plus the SAME composition already
+    registered on BTCUSDT and ETHUSDT at 1d under another run (what the live
+    composer does once crypto is per-cell). `pick_originals` is pinned to the
+    original: the covering specs are themselves eligible originals."""
+    reg, v1, orig = _v2_original(tmp_path)
+    covering = {}
+    for asset in ("BTCUSDT", "ETHUSDT"):
+        cov = ir.make_twin(orig, asset, "1d")
+        cov["provenance"] = dict(cov["provenance"], run_id="composer-live",
+                                 sibling_group_id=f"composer-live:{asset}")
+        cov["strategy_id"] = None
+        cov["strategy_id"] = content_id(cov, "strategy_id")
+        reg.register_strategy(cov)
+        covering[asset] = cov["strategy_id"]
+    monkeypatch.setattr(ir, "pick_originals",
+                        lambda specs, n, seed: [orig["strategy_id"]])
+    return reg, orig, covering
+
+
+def test_register_skips_a_twin_whose_composition_is_registered(
+        tmp_path, monkeypatch, capsys):
+    reg, orig, covering = _covered_chain(tmp_path, monkeypatch)
+    out = tmp_path / "twins.json"
+    rc = ir.main(["register", "--registry", str(reg.log_path),
+                  "--assets", "BTCUSDT,ETHUSDT", "--originals", "1",
+                  "--seed", "1", "--out", str(out)])
+    assert rc == 0
+    text = capsys.readouterr().out
+    twins = json.loads(out.read_text())
+    # only the two 1h twins were registered; both 1d twins ARE the live ones
+    assert {(t["asset"], t["tf"]) for t in twins.values()} == {
+        ("BTCUSDT", "1h"), ("ETHUSDT", "1h")}
+    skipped_lines = [l for l in text.splitlines() if l.startswith("skipped twin")]
+    assert len(skipped_lines) == 2
+    eth = next(l for l in skipped_lines if "ETHUSDT" in l)
+    assert covering["ETHUSDT"] in eth and "1d" in eth
+    specs = {e["payload"]["strategy_id"]: e["payload"]
+             for e in Registry(reg.log_path).entries()
+             if e["entry_type"] == "strategy_registered"}
+    assert not any(p["provenance"].get("run_id") == "rehearsal-2b1"
+                   and p["universe"]["timeframe"] == "1d" for p in specs.values())
+    assert {s for s, p in specs.items()
+            if p["provenance"].get("run_id") == "rehearsal-2b1"} == set(twins)
+    rc, fails, verdict = ir.verify_failures(reg.log_path, tmp_path / "data")
+    assert rc == 0 and not fails and "INVALID" not in verdict, (fails, verdict)
+
+
+def test_skipped_twins_go_to_the_sidecar_not_the_map(tmp_path, monkeypatch):
+    reg, orig, covering = _covered_chain(tmp_path, monkeypatch)
+    out = tmp_path / "twins.json"
+    twins = ir.register(reg.log_path, ["BTCUSDT", "ETHUSDT"], 1, 1, out)
+    side = tmp_path / "twins.skipped.json"
+    skipped = json.loads(side.read_text())
+    assert json.loads(out.read_text()) == twins
+    assert not set(skipped) & set(twins)
+    assert len(skipped) == 2 and all(t["tf"] == "1d" for t in skipped.values())
+    for sid, t in skipped.items():
+        assert set(t) == {"original", "asset", "tf", "existing"}
+        assert t["original"] == orig["strategy_id"]
+        assert t["existing"] == covering[t["asset"]]
+        assert sid not in covering.values()                  # the twin's own id
+    for t in twins.values():                                 # map keeps its shape
+        assert set(t) == {"original", "asset", "tf"}
+
+
+def test_pick_twins_and_render_read_an_output_with_skips(tmp_path, monkeypatch):
+    reg, orig, covering = _covered_chain(tmp_path, monkeypatch)
+    out = tmp_path / "twins.json"
+    ir.main(["register", "--registry", str(reg.log_path),
+             "--assets", "BTCUSDT,ETHUSDT", "--originals", "1", "--seed", "1",
+             "--out", str(out)])
+    twins = json.loads(out.read_text())
+    picked, tfs = ir.pick_twins(twins, out, 2, None)         # default: non-1d
+    assert tfs == ["1h"] and len(picked) == 2 and set(picked) <= set(twins)
+    with pytest.raises(SystemExit) as exc:                   # the 1d twins are gone
+        ir.pick_twins(twins, out, 1, ("1d",))
+    assert "no such twin" in str(exc.value)
+    rows = ir.collect(reg.log_path, tmp_path / "art", twins)
+    text = ir.render(twins, rows)
+    assert "2 twins, 2 (original, asset) pairs." in text
+    assert all(s in text for s in twins)
+    assert "| 1h |" in text and "| 1d |" not in text
+
+
 def test_quarantine_takes_1d_twins_from_a_1d_only_file(tmp_path, monkeypatch):
     from pipeline import crypto_data
     from pipeline.test_intraday_statistics import _twin_bars
