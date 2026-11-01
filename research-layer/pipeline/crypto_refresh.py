@@ -45,6 +45,20 @@ sleep (more calls could extend an IP-wide ban shared with every Binance
 consumer on this box): that cell gets a failure item and every cell not yet
 completed a `skipped: ...` item.
 
+REGISTERED CELLS (2b-3 plan 5, Task 7). The cells refreshed are
+`refresh_cells(registry)`: `cells.active_cells("crypto")` in its order, then
+every other `(asset, tf)` a registered crypto strategy runs on (one asset in
+`cells.ASSETS`, tf in `cells.TIMEFRAMES`, not retired), sorted. Why: a pause
+(crypto back to `("1d",)`) drops the intraday cells from `active_cells` while
+their registered strategies stay; unrefreshed, the loop preflight parks crypto
+at `stale_data` and `gauntlet_stats` refuses `cells_not_comparable`
+registry-wide. The legacy `BTCUSD`/`ETHUSD` cells are not in `cells.ASSETS`
+(`data_fetch` refreshes them at 08:20) and are never added. The chain is read
+ONCE per run, read-only (`--registry`, default the layer's
+`registry_log.jsonl`); a chain that cannot be read is NOT a failed run: the
+active cells are refreshed and the ledger carries ONE `registry_unreadable`
+item naming the error.
+
 LEDGER. Items = fetch failures + `admission_problems` over the active cells
 + feed health (2b-3 C1, C2), written with `degraded.record(...,
 remove_unseen=True)`: a recovered item leaves, and an empty run still refreshes
@@ -73,6 +87,7 @@ from pathlib import Path
 
 from . import cells, degraded, feed_health, screen
 from . import qcells
+from .registry import Registry
 from .crypto_data import (BinanceBanned, RateLimited, fetch_symbol,
                           last_complete_utc_day_end_ms, update_snapshot_manifest)
 
@@ -80,6 +95,7 @@ LEDGER = "degraded_crypto_refresh.json"
 WRITER = "crypto_refresh"
 FETCH_SOURCE = "crypto_refresh_failed"
 ADMISSION_SOURCE = "crypto_admission"
+REGISTRY_SOURCE = "registry_unreadable"
 
 MIN_HISTORY_DAYS = 365
 MAX_RETRY_PASSES = 2
@@ -298,6 +314,35 @@ def _feed_health_items(data_dir: Path, cell_list: list[tuple[str, str]],
                  "reason": f"detector failed: {exc!r}"}]
 
 
+def refresh_cells(registry_path: Path | None) -> list[tuple[str, str]]:
+    """The cells to refresh: the active crypto cells (their order), then every
+    other cell a registered crypto strategy runs on, sorted. `None`, or a path
+    with no file, adds nothing. Raises whatever reading the chain raises: the
+    caller (`main`) turns that into one `registry_unreadable` item."""
+    out = list(cells.active_cells("crypto"))
+    if registry_path is None:
+        return out
+    have = set(out)
+    extra: set[tuple[str, str]] = set()
+    for e in Registry(registry_path).entries():
+        if e.get("entry_type") != "strategy_registered":
+            continue
+        u = (e.get("payload") or {}).get("universe") or {}
+        if u.get("asset_class") != "crypto":
+            continue
+        assets = u.get("assets")
+        if not isinstance(assets, list) or len(assets) != 1:
+            continue
+        asset, tf = assets[0], u.get("timeframe", "1d")
+        if asset not in cells.ASSETS or tf not in cells.TIMEFRAMES:
+            continue
+        if cells.is_retired(qcells.cell_key(asset, tf)):
+            continue
+        if (asset, tf) not in have:
+            extra.add((asset, tf))
+    return out + sorted(extra)
+
+
 def main(argv: list[str] | None = None) -> int:
     layer = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(
@@ -305,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Daily top-up of every active crypto cell's CSV.")
     ap.add_argument("--data-dir", type=Path, default=layer / "data")
     ap.add_argument("--logs-dir", type=Path, default=layer / "logs")
+    ap.add_argument("--registry", type=Path, default=layer / "registry_log.jsonl",
+                    help="chain read once (read-only) for registered cells to keep fresh")
     ap.add_argument("--deadline-local", default=DEFAULT_DEADLINE_LOCAL,
                     help="HH:MM today in UTC+8: no retry attempt starts after it")
     ap.add_argument("--stop-local", default=None,
@@ -324,15 +371,24 @@ def main(argv: list[str] | None = None) -> int:
     stop_ms = (None if args.stop_local is None
                else _deadline_ms(args.stop_local, now_ms))
     ledger = Path(args.logs_dir) / LEDGER
-    cell_list = cells.active_cells("crypto")
+    registry_items: list[dict] = []
+    try:
+        cell_list = refresh_cells(Path(args.registry))
+    except Exception as exc:  # noqa: BLE001 - an unreadable chain is not a failed run
+        print(f"crypto_refresh: registry unreadable, refreshing active cells only: "
+              f"{exc!r}", file=sys.stderr)
+        cell_list = cells.active_cells("crypto")
+        registry_items = [{"source": REGISTRY_SOURCE, "key": "registry",
+                           "reason": f"registry {args.registry} unreadable "
+                                     f"({exc!r}); refreshed the active cells only"}]
     if not cell_list:
         print("crypto_refresh: no active crypto cells")
-        degraded.record(ledger, WRITER, [], remove_unseen=True)
+        degraded.record(ledger, WRITER, registry_items, remove_unseen=True)
         return 0
 
     out = refresh(data_dir, cell_list, now_ms=now_ms, deadline_ms=deadline_ms,
                   fetch=fetch_symbol, sleep=time.sleep, stop_ms=stop_ms)
-    items = out["items"] + admission_problems(data_dir, cell_list)
+    items = registry_items + out["items"] + admission_problems(data_dir, cell_list)
     items += _feed_health_items(data_dir, cell_list, out, now_ms)
     degraded.record(ledger, WRITER, items, remove_unseen=True)
     if out["aborted"]:
