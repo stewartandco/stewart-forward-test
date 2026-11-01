@@ -793,9 +793,15 @@ of it.
   does not fit is a deadline stop. **Since 2026-10-11 the clustering
   estimate is `cluster_s` x (n / `cluster_n`)^2** (`cluster_n` = the series
   count it was measured at, carried forward with it), **and the pass starts
-  only when AVAILABLE PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (14) x
-  n^2 bytes** (`gauntlet_core.available_phys_mb`; unknown = no block; 14
-  covers step 7's "+2.4 GB at 13,730" read as GB or GiB). The
+  only when AVAILABLE PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (9) x
+  n^2 + `CLUSTER_BYTES_PER_NL` (48) x n x L bytes** (`cluster_need_mb(n,
+  days)`; L bounded above by the shortest cached series,
+  `cluster_days_bound`; `gauntlet_core.available_phys_mb`, read after the
+  series pass; unknown = no block). Re-measured 2026-11-01 on the REAL
+  aligned matrix (n 26,835, L 1,303): peak 6,896 MB = 8.4 n^2 + 34 n L; the
+  gate adds cluster_registry's aligned copies (8 B per n L) and about 10%.
+  It was 14 x n^2 from 2026-10-11, one reading at 13,730 that folded the
+  n L term into n^2 and overstated the need more as n grew. The
   merge loop touches every page of its n x n matrix on every merge, so a
   partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
   with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
@@ -806,14 +812,22 @@ of it.
   FAILs the 09:15 digest the same morning** instead of surfacing only as
   the 7-day stats-lag WARN. n grows with the registry, so a
   repeating `deferred_memory` is a capacity question for Coen, not a
-  constant to raise. **Expect it to defer often on this 16,324 MB box:**
-  the need is ~4.9 GB at today's 19,092 series and ~6.5 GB at 22,000,
-  against 4.4-4.7 GB seen available by day (night is unmeasured); each
-  deferral comes only after the full series pass and FAILs that morning's
-  digest (exit 3). A digest FAIL whose task-28 result is 3 means "not
-  enough RAM to cluster", not a crash: read the `MEMORY:` line in
-  `logs/gauntlet-stats-run.log`. Repeated nights are the RAM-upgrade
-  signal. One instance at a time
+  constant to raise. On the new PC (since 2026-10-24) the lowest 01:00
+  availability seen is 33,626 MB; at the 30-day registration average
+  (~438 a day, in bursts) and L ~1,300 the gate stops fitting near n
+  59,000: around 2027-01-14 without Switch 2, 2026-12-23 with it.
+  The memory is one n x n float64 matrix at a time (plus the merge
+  history's member sets, about 0.01 n^2 entries measured, more if the merge
+  tree turns chain-like; and the pure-Python reference path, taken when a
+  series is constant and nonzero, is far heavier and is not covered by the
+  gate): it cannot be cut
+  without changing the clustering's float results (a row-blocked Gram
+  differs from the full one in the last bit and changes the merge history,
+  measured 2026-11-01), so the lasting fix is a method decision for Coen,
+  not RAM. Each deferral comes only after the full series pass and FAILs
+  that morning's digest (exit 3). A digest FAIL whose task-28 result is 3
+  means "not enough RAM to cluster", not a crash: read the `MEMORY:` line
+  in `logs/gauntlet-stats-run.log`. One instance at a time
   (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's argmax) and

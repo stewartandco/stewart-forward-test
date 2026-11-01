@@ -1,5 +1,6 @@
 # research-layer/pipeline/test_gauntlet_stats.py
 import json
+import math
 import shutil
 from datetime import date
 
@@ -1414,11 +1415,29 @@ def test_cluster_estimate_scales_with_n_squared():
 
 
 def test_cluster_need_matches_the_measured_footprint():
-    # step 7 measured +2.4 GB of commit at n = 13,730; the constant covers it
-    # whether that figure was decimal GB or GiB
-    assert gs.cluster_need_mb(13730) * 2**20 >= 2.4 * 2**30
-    # the 2026-10-11 night: 19,092 series need ~4.9 GB, 1.4 GB was free
-    assert 4800 < gs.cluster_need_mb(19092) < 5000
+    # 2026-11-01, real aligned matrix: 6,896 MB peak at n = 26,835, L = 1,303;
+    # the gate covers it with a margin but does not drift back to 14 n^2
+    need = gs.cluster_need_mb(26835, 1303)
+    assert 6896 * 1.05 < need < 6896 * 1.25
+    assert need < math.ceil(14.0 * 26835 ** 2 / 2**20)
+    # step 7's own instrument (tools/verify_cluster_identity.py peak) on the
+    # same matrix, 2026-11-01: +2,104 MB at n = 13,730 and +6,857 MB at 26,835
+    assert gs.cluster_need_mb(13730, 1303) > 2104 * 1.10
+    assert gs.cluster_need_mb(26835, 1303) > 6857 * 1.10
+    # the n x L term counts: more aligned days, more memory
+    assert gs.cluster_need_mb(20000, 2000) > gs.cluster_need_mb(20000, 1000)
+    assert gs.cluster_need_mb(0, 1303) == 0
+
+
+def test_cluster_days_bound_is_the_shortest_series():
+    """The aligned length is not known before cluster_registry runs; the
+    shortest series bounds it from above (native: all equal; intersection:
+    at most the shortest member's dates)."""
+    from .simcache import Series
+    long_ = Series.from_pairs([(f"2024-01-{d:02d}", 0.01) for d in range(1, 31)])
+    short = Series.from_pairs([(f"2024-01-{d:02d}", 0.01) for d in range(1, 11)])
+    assert gs.cluster_days_bound({"a": long_, "b": short}) == 10
+    assert gs.cluster_days_bound({}) == 0
 
 
 def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeypatch, capsys):
@@ -1431,7 +1450,7 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
     calls = _count_clustering(monkeypatch)
-    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series: 4500)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, days: 4500)
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 1400)
     assert gs.DEFERRED_MEMORY_EXIT == 3
     assert _stats_run(reg, data, tmp_path, 5.75) == 3
@@ -1444,6 +1463,30 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 8000)
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert calls == [1] and _status(tmp_path)["exit_reason"] == "done"
+
+
+def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, monkeypatch):
+    """The gate's need is cluster_need_mb(len(dated), cluster_days_bound(dated)),
+    computed on the series the clustering is about to run on."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    seen = {}
+
+    def bound(dated):
+        seen["dated"] = (len(dated), min(len(s) for s in dated.values()))
+        return 4242
+
+    def need(n_series, days):
+        seen["need"] = (n_series, days)
+        return 1
+
+    monkeypatch.setattr(gs, "cluster_days_bound", bound)
+    monkeypatch.setattr(gs, "cluster_need_mb", need)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 8000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert seen["need"] == (seen["dated"][0], 4242) and seen["dated"][1] > 0
+    assert _status(tmp_path)["cluster_need_mb"] == 1
 
 
 def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):

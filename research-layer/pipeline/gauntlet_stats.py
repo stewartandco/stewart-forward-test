@@ -135,9 +135,9 @@ SERIES_CHUNK = 10
 # the measured mean (status `pbo_null_mean_s`) or gauntlet's PBO_NULL_PRIOR_S.
 CLUSTER_PRIOR_S = 2 * 3600.0
 # Incident 2026-10-11: clustering holds one n x n float64 matrix (8 n^2
-# bytes) plus transients, measured at +2.4 GB of commit at n = 13,730 (step
-# 7), i.e. 12.7 bytes per n^2 if that was decimal GB, 13.7 if GiB;
-# rounded up past both. Its merge loop updates a whole
+# bytes) plus transients; the 2026-10-11 constant was 14 bytes per n^2,
+# from step 7's +2.4 GB at n = 13,730 (replaced 2026-11-01, below). Its
+# merge loop updates a whole
 # column per merge, so it touches every page of the matrix every merge: if
 # any of it is paged out the pass thrashes (19,092 series: ~4.9 GB needed,
 # 1.4 GB free, 5.8 GB committed but 44 MB resident, 90 min and counting when
@@ -145,7 +145,23 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # it; otherwise the run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`)
 # and the next one retries. The time estimate also scales with n^2 from the n it was
 # measured at (`cluster_n`, carried forward like `cluster_s`).
-CLUSTER_BYTES_PER_N2 = 14.0
+# Re-measured 2026-11-01 (Coen: fix the gate only, cluster.py unchanged), on
+# the REAL aligned matrix (n = 26,835, L = 1,303 common days): peak private
+# commit 6,896 MB = 8.4 n^2 + 34 n L bytes (one n x n matrix at a time plus
+# the n x L copies inside effective_trials; the n L term held at 34-39 B from
+# n = 4,000 to 26,835, and synthetic runs to 12,000 fit the same model;
+# verify_cluster_identity's own peak read +2,104 MB at 13,730 and +6,857 MB at
+# 26,835 on the same matrix). The merge history's member sets are the one
+# other n^2-shaped term: 0.008-0.012 n^2 entries measured (about 0.35 B per
+# n^2, inside the 8.4); a chain-like merge tree would grow it. The
+# old 14 n^2 came from ONE reading at n = 13,730 that folded the n L term into
+# n^2, so it overstated the need more as n grows. The gate adds 8 B per n L for
+# cluster_registry's aligned copies (built before effective_trials, alive
+# through it) and rounds both up: 9 n^2 + 48 n L, about 10% over the
+# measurement. `available_phys_mb` is read after the series pass, so memory
+# already held is not charged again.
+CLUSTER_BYTES_PER_N2 = 9.0
+CLUSTER_BYTES_PER_NL = 48.0
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
@@ -546,8 +562,19 @@ def cluster_estimate_s(prior_s: float | None, prior_n: int | None, n: int) -> fl
     return prior_s
 
 
-def cluster_need_mb(n: int) -> int:
-    return math.ceil(CLUSTER_BYTES_PER_N2 * n * n / 2**20)
+def cluster_need_mb(n: int, days: int) -> int:
+    """MiB a clustering pass over n series of `days` aligned days needs."""
+    return math.ceil((CLUSTER_BYTES_PER_N2 * n * n
+                      + CLUSTER_BYTES_PER_NL * n * days) / 2**20)
+
+
+def cluster_days_bound(dated: dict) -> int:
+    """An upper bound on the clustering's aligned length, known before it
+    runs: the shortest series. Native alignment uses every series at its
+    one shared length; the intersection keeps at most the dates of its
+    shortest member (an intraday series counts per bar, so it never lowers
+    the bound below a daily one's)."""
+    return min((len(s) for s in dated.values()), default=0)
 
 
 def _fmt(v) -> str:
@@ -726,7 +753,8 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"{max(left_s, 0.0):.0f}s left is under the clustering estimate "
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
-        need_mb, avail_mb = cluster_need_mb(n_cluster), available_phys_mb()
+        need_mb = cluster_need_mb(n_cluster, cluster_days_bound(dated))
+        avail_mb = available_phys_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
         if avail_mb is not None and avail_mb < need_mb:
             print(f"MEMORY: clustering {n_cluster} series needs ~{need_mb} MB of "
