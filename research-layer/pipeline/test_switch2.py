@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -209,3 +210,46 @@ def test_the_crypto_brief_keeps_rules_and_history():
     assert brief.count("What happened so far") == 1
     assert PRE_SWITCH_HISTORY in brief
     assert brief.endswith(BASE_RULES)
+
+
+# ---------------- the two notes (DRAFTS Coen approves, Task 11) ----------------
+
+NOTES = Path(__file__).resolve().parent.parent / "docs" / "notes"
+PHASE2_NOTE = NOTES / "crypto-grid-phase2-v1.md"
+PROTOCOL_NOTE = NOTES / "gauntlet-protocol-v6.1-intraday-daily-marks.md"
+GITATTRIBUTES = Path(__file__).resolve().parent.parent / ".gitattributes"
+
+
+def test_the_phase2_note_matches_the_gate():
+    """crypto-grid-phase2-v1 states the Switch 2 gate: first line is the prefix,
+    LF only, every intraday timeframe named, the three counts, no foreign ticker."""
+    raw = PHASE2_NOTE.read_bytes()
+    assert b"\r" not in raw, "the note must be LF (the chain-note guard refuses CR)"
+    text = raw.decode("utf-8")
+    assert text.startswith("crypto-grid-phase2-v1: ")
+    assert not text.startswith("#"), "no markdown heading: the first line is the prefix"
+    for tf in cells.ACTIVE_CELLS["crypto"]["timeframes"]:
+        if tf != "1d":
+            assert re.search(rf"\b{tf}\b", text), tf
+    for n in ("228", "304", "456"):
+        assert re.search(rf"\b{n}\b", text), n
+    for ticker in re.findall(r"\b[0-9A-Z]+USDT\b", text):
+        assert ticker in ADMITTED, ticker
+    assert "\u2014" not in text and "\u2013" not in text, "no em or en dashes"
+
+
+def test_the_protocol_note_is_ready_to_chain():
+    raw = PROTOCOL_NOTE.read_bytes()
+    assert b"\r" not in raw, "the note must be LF (the chain-note guard refuses CR)"
+    text = raw.decode("utf-8")
+    assert text.startswith("gauntlet-protocol-v6.1-intraday-daily-marks: ")
+    assert "DRAFT" not in text
+    assert "\u2014" not in text and "\u2013" not in text, "no em or en dashes"
+
+
+def test_both_notes_have_an_lf_rule():
+    """core.autocrlf is on: without an eol=lf rule the merge checks both notes
+    out CRLF in live and chain-note refuses them."""
+    lines = [ln.strip() for ln in GITATTRIBUTES.read_text(encoding="utf-8").splitlines()]
+    assert "docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md text eol=lf" in lines
+    assert "docs/notes/crypto-grid-phase2-v1.md text eol=lf" in lines
