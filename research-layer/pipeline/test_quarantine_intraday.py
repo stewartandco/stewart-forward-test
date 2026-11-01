@@ -299,3 +299,157 @@ def test_daily_cells_are_untouched(tmp_path, monkeypatch):
         assert quarantine_mod._cell_days(tmp_path, "BTCUSD", day)[-1] == day
     assert len(calls) == 4                              # parsed every time
     assert quarantine_mod.full_bars_memo_stats()["files"] == 0
+
+
+# ---- 2b-3 plan 5 Task 5: the memo is sized to the cells a run records ----
+
+
+def _rows_file(data, name, n_rows):
+    """A tiny intraday-shaped file of exactly n_rows data rows (the sizing
+    counts bytes, never parses)."""
+    import datetime as _dt
+    t0 = _dt.datetime(2023, 1, 1)
+    with (data / name).open("w", newline="", encoding="utf-8") as f:
+        f.write("date,open,high,low,close,volume\n")
+        for k in range(n_rows):
+            ts = (t0 + _dt.timedelta(hours=k)).strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{ts},1,1,1,1,1\n")
+
+
+def test_the_bound_covers_the_touched_cells(tmp_path, monkeypatch):
+    for n, rows in (("A", 1000), ("B", 2000), ("C", 3000)):
+        _rows_file(tmp_path, f"{n}_1h.csv", rows)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    keys = ["A@1h", "B@1h", "C@1h"]
+    assert quarantine_mod.size_full_bars_memo(tmp_path, keys) == 6000
+    assert quarantine_mod.FULL_BARS_MEMO_MAX_BARS == 2500     # never mutated
+    for _ in range(3):                                         # cyclic access
+        for n in "ABC":
+            quarantine_mod._full_bars(tmp_path, n, "1h")
+    st = quarantine_mod.full_bars_memo_stats()
+    assert st["misses"] == 3 and st["evictions"] == 0 and st["hits"] == 6, st
+    assert st["bars"] == 6000
+
+
+def test_the_bound_never_drops_below_the_default(tmp_path, monkeypatch):
+    _rows_file(tmp_path, "A_1h.csv", 100)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    assert quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h"]) == 2500
+    assert quarantine_mod.size_full_bars_memo(tmp_path, []) == 2500
+    # a missing file and a daily key count nothing
+    assert quarantine_mod.size_full_bars_memo(
+        tmp_path, ["NOPE@1h", "BTCUSD"]) == 2500
+
+
+def test_the_bound_stops_at_the_ceiling(tmp_path, monkeypatch):
+    _rows_file(tmp_path, "A_1h.csv", 4000)
+    _rows_file(tmp_path, "B_1h.csv", 4000)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 5000)
+    assert quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h", "B@1h"]) == 5000
+    assert quarantine_mod.FULL_BARS_MEMO_CEILING_BARS == 5000
+    assert quarantine_mod.FULL_BARS_MEMO_MAX_BARS == 2500
+    monkeypatch.undo()
+    assert quarantine_mod.FULL_BARS_MEMO_CEILING_BARS == 6_000_000
+
+
+def test_a_reset_restores_the_default_bound(tmp_path, monkeypatch):
+    _rows_file(tmp_path, "A_1h.csv", 9000)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 2500)
+    quarantine_mod.size_full_bars_memo(tmp_path, ["A@1h"])
+    quarantine_mod._reset_full_bars_memo()
+    _rows_file(tmp_path, "B_1h.csv", 3000)
+    _rows_file(tmp_path, "C_1h.csv", 3000)
+    quarantine_mod._full_bars(tmp_path, "B", "1h")
+    quarantine_mod._full_bars(tmp_path, "C", "1h")      # 6000 > the 2500 default
+    assert quarantine_mod.full_bars_memo_stats()["evictions"] == 1
+
+
+def _two_cell_chain(root):
+    """Two 1h strategies on two cells (BTCUSD, ETHUSD), quarantined on day
+    150, with the price files truncated so a catch-up owes 151, 152, 153."""
+    from .test_gauntlet import gauntlet_registry
+    root.mkdir(parents=True, exist_ok=True)
+    reg, _ = gauntlet_registry(root)
+    daily, hourly, _ = _twin_bars()
+    end = daily[153]["date"]
+    data = root / "data"
+    data.mkdir()
+    rows = [b for b in hourly if b["date"][:10] <= end]
+    _write(data, "BTCUSD_1h.csv", rows)
+    _write(data, "ETHUSD_1h.csv", rows)
+    entered = daily[150]["date"]
+    for asset in ("BTCUSD", "ETHUSD"):
+        s = _twin_spec("1h")
+        s["universe"] = dict(s["universe"], assets=[asset])
+        _register_quarantined(reg, s, entered)
+    return reg, data
+
+
+def _rows_of(reg):
+    return sorted(json.dumps(r, sort_keys=True) for r in decisions(reg))
+
+
+def test_rows_are_identical_above_the_ceiling(tmp_path, monkeypatch):
+    """Review Focus 4: a memo too small for the touched set (LRU churn, every
+    file re-parsed) records exactly what an unbounded one records."""
+    big = 10 ** 9
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", big)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", big)
+    reg_a, data_a = _two_cell_chain(tmp_path / "unbounded")
+    assert quarantine_run(argv_for(reg_a, data_a, "--catch-up")) == 0
+    st_a = quarantine_mod.full_bars_memo_stats()
+    assert st_a["evictions"] == 0 and st_a["misses"] == 2, st_a
+    quarantine_mod._reset_full_bars_memo()
+
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_MAX_BARS", 10)
+    monkeypatch.setattr(quarantine_mod, "FULL_BARS_MEMO_CEILING_BARS", 100)
+    reg_b, data_b = _two_cell_chain(tmp_path / "bounded")
+    assert quarantine_run(argv_for(reg_b, data_b, "--catch-up")) == 0
+    st_b = quarantine_mod.full_bars_memo_stats()
+    assert st_b["evictions"] > 0 and st_b["misses"] > 2, st_b
+    rows_a, rows_b = _rows_of(reg_a), _rows_of(reg_b)
+    assert len(rows_a) == 6
+    assert rows_a == rows_b
+
+
+def test_run_prints_the_memo_line(tmp_path, capsys):
+    reg, data = _two_cell_chain(tmp_path)
+    assert quarantine_run(argv_for(reg, data, "--date",
+                                   _twin_bars()[0][151]["date"])) == 0
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.startswith("full-bars memo:")]
+    st = quarantine_mod.full_bars_memo_stats()
+    assert lines == [f"full-bars memo: hits {st['hits']}, misses {st['misses']}, "
+                     f"evictions {st['evictions']}, bound "
+                     f"{quarantine_mod._current_full_bars_bound()} bars"], lines
+    assert st["misses"] == 2 and st["evictions"] == 0
+
+
+def test_a_catch_up_sizes_and_prints_once(tmp_path, monkeypatch, capsys):
+    reg, data = _two_cell_chain(tmp_path)
+    calls = []
+    real = quarantine_mod.size_full_bars_memo
+
+    def spy(data_dir, cell_keys):
+        keys = list(cell_keys)
+        calls.append(keys)
+        return real(data_dir, keys)
+
+    monkeypatch.setattr(quarantine_mod, "size_full_bars_memo", spy)
+    assert quarantine_run(argv_for(reg, data, "--catch-up")) == 0
+    assert len(decisions(reg)) == 6                  # three dates recorded
+    assert len(calls) == 1 and sorted(calls[0]) == ["BTCUSD@1h", "ETHUSD@1h"]
+    out = capsys.readouterr().out
+    assert out.count("full-bars memo:") == 1
+    assert out.index("full-bars memo:") > out.index("catch-up: --date 2022-")
+    assert out.rstrip().splitlines()[-1].startswith("full-bars memo:")
+
+
+def test_fetch_owed_and_review_do_not_size_the_memo(tmp_path, monkeypatch):
+    reg, data = _two_cell_chain(tmp_path)
+    called = []
+    monkeypatch.setattr(quarantine_mod, "size_full_bars_memo",
+                        lambda *a, **k: called.append(a))
+    quarantine_run(argv_for(reg, data, "--review"))
+    assert called == []

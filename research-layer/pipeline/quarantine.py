@@ -90,6 +90,7 @@ import argparse
 import traceback
 from bisect import bisect_right
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -659,7 +660,18 @@ def _daily_bars(data_dir: Path, asset: str, cutoff: str) -> list[dict]:
 # every date over every cell), so an LRU smaller than the working set gets ZERO
 # hits: the bound is sized to hold every intraday cell the recorder touches,
 # and `full_bars_memo_stats()` is how a run proves that it did.
+#
+# FULL_BARS_MEMO_MAX_BARS is the DEFAULT bound and is never mutated. A run that
+# records intraday cells sizes the memo to them (`size_full_bars_memo`, 2b-3
+# plan 5): the RUNTIME bound `_full_bars_bound` becomes min(CEILING, max(default,
+# total data rows of those cells)). At Switch 2 the 76 1h files alone hold about
+# 4 million bars, over the default, so an unsized memo would get zero hits. The
+# ceiling (6M bars, about 3 GB as dicts at ~0.5 KB a bar) keeps a runaway grid
+# from taking the box: above it the LRU behaves as before (correct, slower) and
+# the line the run prints shows the evictions.
 FULL_BARS_MEMO_MAX_BARS = 2_000_000
+FULL_BARS_MEMO_CEILING_BARS = 6_000_000
+_full_bars_bound: "int | None" = None      # None = the default, read live
 
 _FULL_BARS_MEMO: "OrderedDict[tuple, list[dict]]" = OrderedDict()
 _FULL_BARS_HELD = 0
@@ -668,9 +680,10 @@ _FULL_BARS_STATS = {"hits": 0, "misses": 0, "evictions": 0}
 
 def _reset_full_bars_memo() -> None:
     """Empty the memo and zero its counters (tests; never needed in a run)."""
-    global _FULL_BARS_HELD
+    global _FULL_BARS_HELD, _full_bars_bound
     _FULL_BARS_MEMO.clear()
     _FULL_BARS_HELD = 0
+    _full_bars_bound = None
     for k in _FULL_BARS_STATS:
         _FULL_BARS_STATS[k] = 0
 
@@ -680,6 +693,53 @@ def full_bars_memo_stats() -> dict:
     snapshot, so the rehearsal can report the hit rate at scale."""
     return {**_FULL_BARS_STATS, "bars": _FULL_BARS_HELD,
             "files": len(_FULL_BARS_MEMO)}
+
+
+def _current_full_bars_bound() -> int:
+    """The bound in force: the runtime bound a run set, else the default."""
+    return (FULL_BARS_MEMO_MAX_BARS if _full_bars_bound is None
+            else _full_bars_bound)
+
+
+def _data_rows(path: Path) -> int:
+    """Data rows in a CSV (lines minus the header), by counting newline
+    bytes: no parse. A missing or unreadable file is 0 rows."""
+    try:
+        n, last = 0, b"\n"
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                n += chunk.count(b"\n")
+                last = chunk[-1:]
+    except OSError:
+        return 0
+    if last != b"\n":
+        n += 1                          # a final line with no newline
+    return max(0, n - 1)
+
+
+def size_full_bars_memo(data_dir: Path, cell_keys: Iterable[str]) -> int:
+    """Set the memo's runtime bound to cover the intraday cells a run records:
+    min(CEILING, max(default, their total data rows)). Daily keys and missing
+    files count nothing. Returns the bound. FULL_BARS_MEMO_MAX_BARS itself is
+    never mutated (`_reset_full_bars_memo` restores the default)."""
+    global _full_bars_bound
+    total = 0
+    for key in set(cell_keys):
+        if is_intraday_key(key):
+            total += _data_rows(cell_path(data_dir, key))
+    _full_bars_bound = min(FULL_BARS_MEMO_CEILING_BARS,
+                           max(FULL_BARS_MEMO_MAX_BARS, total))
+    return _full_bars_bound
+
+
+def _memo_line() -> str:
+    st = full_bars_memo_stats()
+    return (f"full-bars memo: hits {st['hits']}, misses {st['misses']}, "
+            f"evictions {st['evictions']}, bound "
+            f"{_current_full_bars_bound()} bars")
 
 
 def _file_identity(path: Path) -> tuple[str, int, int] | None:
@@ -715,7 +775,8 @@ def _full_bars(data_dir: Path, asset: str, tf: str) -> list[dict]:
         _FULL_BARS_HELD -= len(_FULL_BARS_MEMO.pop(stale))   # a replaced file
     _FULL_BARS_MEMO[before] = full
     _FULL_BARS_HELD += len(full)
-    while _FULL_BARS_HELD > FULL_BARS_MEMO_MAX_BARS and len(_FULL_BARS_MEMO) > 1:
+    bound = _current_full_bars_bound()
+    while _FULL_BARS_HELD > bound and len(_FULL_BARS_MEMO) > 1:
         _, gone = _FULL_BARS_MEMO.popitem(last=False)
         _FULL_BARS_HELD -= len(gone)
         _FULL_BARS_STATS["evictions"] += 1
@@ -1482,6 +1543,14 @@ def _feed_health_items(data_dir: Path, cells_owed: list[str],
                  "reason": f"detector failed: {exc!r}"}]
 
 
+def _intraday_cells_of(quarantined: list[str],
+                       specs: dict[str, dict]) -> list[str]:
+    """The sorted intraday cell keys the given quarantined strategies trade:
+    what --fetch-owed fetches and what the full-bars memo is sized to."""
+    return sorted({k for sid in quarantined if sid in specs
+                   for k in spec_cells(specs[sid]) if is_intraday_key(k)})
+
+
 def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
                fetch=None, *, sleep=None, now_ms: int | None = None
                ) -> list[dict]:
@@ -1509,8 +1578,7 @@ def fetch_owed(quarantined: list[str], specs: dict[str, dict], data_dir: Path,
 
     `sleep` (default time.sleep, looked up at call time) and `now_ms` (default
     the clock) are injectable for tests."""
-    cells_owed = sorted({k for sid in quarantined if sid in specs
-                         for k in spec_cells(specs[sid]) if is_intraday_key(k)})
+    cells_owed = _intraday_cells_of(quarantined, specs)
     # A retired (delisted) cell (cells.RETIRED_CELLS) is never fetched: a
     # raising fetch would cost two 120 s retry passes and leave a standing
     # intraday_fetch_failed item every day. Its strategies keep their record.
@@ -1694,6 +1762,10 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return 1
 
     registry = Registry(args.registry)
+    # Only the OUTERMOST run (no shared view) sizes and reports the full-bars
+    # memo: catch-up re-enters run() once per date with `view=`, and a nested
+    # pass must neither re-size mid-run nor print a line per date.
+    outermost = view is None
     # ONE chain read per run (2026-10-16 fast path s3.1). Catch-up hands the
     # same view to every date's pass, which moves it over the tail only; a
     # ChainMoved here fails that date (run_one_date_for_catch_up rebuilds).
@@ -1721,6 +1793,10 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return review(view, quarantined, entered, specs,
                       args.artifacts_dir, args.data_dir)
 
+    if outermost:
+        size_full_bars_memo(args.data_dir,
+                            _intraday_cells_of(quarantined, specs))
+
     if args.catch_up:
         report = DateReport()
         report.degraded.extend(intraday_items)
@@ -1728,9 +1804,13 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
                                          specs, args.data_dir, report=report)
         base = ["--registry", str(args.registry), "--data-dir",
                 str(args.data_dir), "--artifacts-dir", str(args.artifacts_dir)]
-        rc, reached_all = catch_up(
-            dates, lambda d: run_one_date_for_catch_up(
-                base, d, report, view=view, registry=registry))
+        try:
+            rc, reached_all = catch_up(
+                dates, lambda d: run_one_date_for_catch_up(
+                    base, d, report, view=view, registry=registry))
+        finally:
+            if outermost:
+                print(_memo_line(), flush=True)
         if write_ledger:
             # The authoritative pass: it removes recovered items, but only
             # when it reached every owed date (design s3.1, Review Focus 1)
@@ -1755,6 +1835,8 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
         return _record_date(args, registry, view, quarantined, entered, specs,
                             report)
     finally:
+        if outermost:
+            print(_memo_line(), flush=True)
         if write_ledger:
             # --date only ADDS or refreshes: it sees one date, so an item it
             # does not see may still be live on another (design s3.1). The
