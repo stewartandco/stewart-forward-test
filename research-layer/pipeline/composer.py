@@ -951,7 +951,34 @@ def _snap_to_grid(blocks: list[dict]) -> None:
                 b["params"][p] = next(g for g in grid if g == v)
 
 
-def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
+# Switch 2 guard (2b-3 plan 5, Task 8; cold review M2). Design s8.4: the intraday
+# protocol note and the phase 2 note are "chained verbatim before the first
+# intraday verdict". Nothing enforced that, so the composer enforces it: with
+# an intraday timeframe active and either note missing from the chain, only the
+# 1d cells are swept (cap and expansion alike). Inert while the gate is 1d only.
+INTRADAY_NOTE_PREFIXES = ("gauntlet-protocol-v6.1-intraday-daily-marks:",
+                          "crypto-grid-phase2-v1:")
+
+
+def intraday_notes_chained(registry: Registry) -> bool:
+    """True iff the chain holds a `note` whose text starts with EACH of
+    INTRADAY_NOTE_PREFIXES (the screen.protocol_note_chained read pattern)."""
+    texts = [str(e["payload"].get("text", "")) for e in registry.entries()
+             if e["entry_type"] == "note"]
+    return all(any(t.startswith(p) for t in texts) for p in INTRADAY_NOTE_PREFIXES)
+
+
+def intraday_held(asset_class: str, registry: Registry) -> bool:
+    """Whether this run must hold intraday cells back. A class whose active
+    timeframes are all 1d (today's crypto gate, and every tradfi class) never
+    reads the chain for the notes."""
+    if all(tf == "1d" for _, tf in cells.active_cells(asset_class)):
+        return False
+    return not intraday_notes_chained(registry)
+
+
+def sweep_cells(asset_class: str, assets=None,
+                timeframes: tuple | None = None) -> list[tuple[str, str]]:
     """The cells THIS invocation may sweep: active_cells(), optionally
     narrowed to an explicit asset subset (D6's rotation window, or a manual
     `--assets` override for a hand run).
@@ -962,8 +989,13 @@ def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
     schedule). A subset naming an inactive asset is refused loudly rather than
     silently ignored — the whole point of the rotation window is that it is a
     view onto the active set, never a way past it.
+
+    `timeframes` (Switch 2 guard) narrows the result to that timeframe subset;
+    None is exactly the behaviour before the guard existed.
     """
     active = cells.active_cells(asset_class)
+    if timeframes is not None:
+        active = [c for c in active if c[1] in timeframes]
     if assets is None:
         return active
     wanted = list(dict.fromkeys(assets))
@@ -980,7 +1012,8 @@ def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
 def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str,
                             asset_class: str,
                             proxy_card_ids: frozenset[str] = frozenset(),
-                            assets=None) -> list[dict]:
+                            assets=None,
+                            timeframes: tuple | None = None) -> list[dict]:
     """THE family expander, for every class (spec s4/s10.7-8; crypto since
     Switch 1, SP5 Phase 3, which deleted the pooled expand_family).
 
@@ -1028,6 +1061,10 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     later run's drift record says. Default frozenset() so every existing
     caller (fx, and any equity_etf caller that predates this task) keeps
     emitting neither key, byte-identical to before this change.
+
+    timeframes (Switch 2 guard, 2b-3 plan 5): restricts the swept cells to that
+    timeframe subset (run() passes ("1d",) while the intraday notes are not
+    chained). None = every active cell, exactly as before.
     composition_fingerprint reads only universe+blocks, so this NEVER
     affects a spec's identity, its N accounting, or resurrection-guard
     de-duplication (test-pinned).
@@ -1039,6 +1076,8 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     # empty gate, which sweeps no cell anyway. Tradfi gates "all", so this is
     # the declared first there, byte-identical to before Switch 1.
     active = cells.active_cells(asset_class)
+    if timeframes is not None:
+        active = [c for c in active if c[1] in timeframes]
     timeframe = active[0][1] if active else cls_spec["timeframes"][0]
     axes = fam.get("sweep", [])
     combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
@@ -1080,7 +1119,8 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
         # set admits sweeping (SP5 s3, P2-T1's gate); `assets` narrows THIS
         # generation's slice of the active set (D6's rotation window, spec s5)
         # without changing what is active -- see sweep_cells.
-        for cell_spec in expand_universe(base, sweep_cells(asset_class, assets)):
+        for cell_spec in expand_universe(
+                base, sweep_cells(asset_class, assets, timeframes)):
             cell_spec["name"] = _build_name(
                 cell_spec["universe"]["assets"], fam["family"],
                 cell_spec["blocks"], cell_spec["universe"]["timeframe"])
@@ -1888,7 +1928,8 @@ def normalize_proposal(families: list[dict]) -> list[dict]:
 def drift_record(run_id: str, dry_run: bool, specs: list[dict],
                  routing: dict | None = None,
                  routed_card_ids: list[str] | None = None,
-                 proxy_routed_card_ids: list[str] | None = None) -> dict:
+                 proxy_routed_card_ids: list[str] | None = None,
+                 held_intraday: bool = False) -> dict:
     """What one Composer run emitted. Written for both the dry run and the real
     run so the gap between the batch Coen approved and the batch that got
     chained stops being invisible.
@@ -1921,6 +1962,10 @@ def drift_record(run_id: str, dry_run: bool, specs: list[dict],
         record["routed_card_ids"] = routed_card_ids or []
     if proxy_routed_card_ids is not None:
         record["proxy_routed_card_ids"] = proxy_routed_card_ids
+    if held_intraday:
+        # Switch 2 guard: present (true) only when the intraday cells were held
+        # back; absent otherwise, so every other record is byte-identical.
+        record["held_intraday"] = True
     return record
 
 
@@ -2208,8 +2253,16 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # byte-identical for every family that fits: a family of n <= cap combos
     # expands to at most cap x per_combo specs and is therefore never split.
     # Only families that TODAY are refused outright are affected.
+    # Switch 2 guard: while an intraday timeframe is active and either intraday
+    # note is missing from the chain, the cap and the expansion below both use
+    # the 1d cells only (the SAME restricted set, from this one variable).
+    held_tfs = ("1d",) if intraday_held(args.asset_class, registry) else None
+    if held_tfs is not None:
+        print("HELD: intraday cells not swept until both notes are chained: "
+              + ", ".join(INTRADAY_NOTE_PREFIXES))
     try:
-        specs_per_combo = max(1, len(sweep_cells(args.asset_class, sweep_assets)))
+        specs_per_combo = max(1, len(sweep_cells(args.asset_class, sweep_assets,
+                                                 held_tfs)))
     except ValueError as exc:
         print(f"  {exc}")
         return 1
@@ -2314,7 +2367,7 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         specs = expander_for(args.asset_class)(
             fam, args.run_id, args.model, created_utc, args.asset_class,
             proxy_card_ids=frozenset(proxy_routed_card_ids or ()),
-            assets=sweep_assets)
+            assets=sweep_assets, timeframes=held_tfs)
         kept_specs, drop_notes, malformed = screen_siblings(
             specs, known_fps, run_fps, retrial_ok=retrial_ok)
         if malformed:
@@ -2376,7 +2429,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     _persist_drift_record(
         drift_record(args.run_id, args.dry_run, all_specs,
                     routing=routing_info, routed_card_ids=routed_card_ids,
-                    proxy_routed_card_ids=proxy_routed_card_ids),
+                    proxy_routed_card_ids=proxy_routed_card_ids,
+                    held_intraday=held_tfs is not None),
         args.registry)
 
     for fam, specs in kept:
