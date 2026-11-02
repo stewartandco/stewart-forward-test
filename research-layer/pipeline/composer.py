@@ -951,7 +951,35 @@ def _snap_to_grid(blocks: list[dict]) -> None:
                 b["params"][p] = next(g for g in grid if g == v)
 
 
-def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
+# Switch 2 guard (2b-3 plan 5, Task 8; cold review M2). Design s8.4: the intraday
+# protocol note and the phase 2 note are "chained verbatim before the first
+# intraday verdict". Nothing enforced that, so the composer enforces it: with
+# an intraday timeframe active and either note missing from the chain, only the
+# 1d cells are swept (cap and expansion alike). Live since Switch 2 opened
+# crypto's intraday timeframes; inert for a class whose gate is 1d only.
+INTRADAY_NOTE_PREFIXES = ("gauntlet-protocol-v6.1-intraday-daily-marks:",
+                          "crypto-grid-phase2-v1:")
+
+
+def intraday_notes_chained(registry: Registry) -> bool:
+    """True iff the chain holds a `note` whose text starts with EACH of
+    INTRADAY_NOTE_PREFIXES (the screen.protocol_note_chained read pattern)."""
+    texts = [str(e["payload"].get("text", "")) for e in registry.entries()
+             if e["entry_type"] == "note"]
+    return all(any(t.startswith(p) for t in texts) for p in INTRADAY_NOTE_PREFIXES)
+
+
+def intraday_held(asset_class: str, registry: Registry) -> bool:
+    """Whether this run must hold intraday cells back. A class whose active
+    timeframes are all 1d (a 1d-only gate: crypto before Switch 2, every tradfi
+    class) never reads the chain for the notes."""
+    if all(tf == "1d" for _, tf in cells.active_cells(asset_class)):
+        return False
+    return not intraday_notes_chained(registry)
+
+
+def sweep_cells(asset_class: str, assets=None,
+                timeframes: tuple | None = None) -> list[tuple[str, str]]:
     """The cells THIS invocation may sweep: active_cells(), optionally
     narrowed to an explicit asset subset (D6's rotation window, or a manual
     `--assets` override for a hand run).
@@ -962,8 +990,13 @@ def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
     schedule). A subset naming an inactive asset is refused loudly rather than
     silently ignored — the whole point of the rotation window is that it is a
     view onto the active set, never a way past it.
+
+    `timeframes` (Switch 2 guard) narrows the result to that timeframe subset;
+    None is exactly the behaviour before the guard existed.
     """
     active = cells.active_cells(asset_class)
+    if timeframes is not None:
+        active = [c for c in active if c[1] in timeframes]
     if assets is None:
         return active
     wanted = list(dict.fromkeys(assets))
@@ -980,7 +1013,8 @@ def sweep_cells(asset_class: str, assets=None) -> list[tuple[str, str]]:
 def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str,
                             asset_class: str,
                             proxy_card_ids: frozenset[str] = frozenset(),
-                            assets=None) -> list[dict]:
+                            assets=None,
+                            timeframes: tuple | None = None) -> list[dict]:
     """THE family expander, for every class (spec s4/s10.7-8; crypto since
     Switch 1, SP5 Phase 3, which deleted the pooled expand_family).
 
@@ -1010,8 +1044,9 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     ACTIVE_CELLS gate permits a generation to SWEEP, because sweeping a cell
     moves the trial denominator. The four tradfi classes gate "all", so
     active == declared for them; crypto's gate is 76 of its 100 declared
-    assets at 1d of its six declared timeframes (Switch 1), and expansion
-    here follows the gate, never the declaration.
+    assets at 1h, 4h, 12h and 1d of its six declared timeframes (Switch 1,
+    then Switch 2), and expansion here follows the gate, never the
+    declaration.
 
     proxy_card_ids (Coen, 2026-08-25: proxy routing is recorded on the
     REGISTRATION, not only on the run-level drift record): the full set of
@@ -1028,17 +1063,23 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
     later run's drift record says. Default frozenset() so every existing
     caller (fx, and any equity_etf caller that predates this task) keeps
     emitting neither key, byte-identical to before this change.
+
+    timeframes (Switch 2 guard, 2b-3 plan 5): restricts the swept cells to that
+    timeframe subset (run() passes ("1d",) while the intraday notes are not
+    chained). None = every active cell, exactly as before.
     composition_fingerprint reads only universe+blocks, so this NEVER
     affects a spec's identity, its N accounting, or resurrection-guard
     de-duplication (test-pinned).
     """
     cls_spec = cells.CLASSES[asset_class]
     # The base universe's timeframe is the first ACTIVE timeframe (crypto
-    # declares "15m" first but activates only "1d"); expand_universe then
+    # declares "15m" first but activates "1h" first); expand_universe then
     # sets each cell's own. Falls back to the declared first only for an
     # empty gate, which sweeps no cell anyway. Tradfi gates "all", so this is
     # the declared first there, byte-identical to before Switch 1.
     active = cells.active_cells(asset_class)
+    if timeframes is not None:
+        active = [c for c in active if c[1] in timeframes]
     timeframe = active[0][1] if active else cls_spec["timeframes"][0]
     axes = fam.get("sweep", [])
     combos = itertools.product(*[ax["values"] for ax in axes]) if axes else [()]
@@ -1080,7 +1121,8 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
         # set admits sweeping (SP5 s3, P2-T1's gate); `assets` narrows THIS
         # generation's slice of the active set (D6's rotation window, spec s5)
         # without changing what is active -- see sweep_cells.
-        for cell_spec in expand_universe(base, sweep_cells(asset_class, assets)):
+        for cell_spec in expand_universe(
+                base, sweep_cells(asset_class, assets, timeframes)):
             cell_spec["name"] = _build_name(
                 cell_spec["universe"]["assets"], fam["family"],
                 cell_spec["blocks"], cell_spec["universe"]["timeframe"])
@@ -1198,8 +1240,10 @@ def _crypto_system_prompt() -> str:
     pre-switch brief). The shared Rules bullets, D15 EXITS included, are the
     pre-switch crypto bullets unchanged; only "implementable from daily
     OHLCV alone" moved up into the universe section, as in the other
-    classes' briefs. No financing line: crypto declares no short financing.
-    DRAFT pending Coen's approval of the exact text (build 2b-3, Task 9).
+    classes' briefs. Switch 2 (build 2b-3 phase 2) rewrote the universe
+    section for the four active timeframes (1h, 4h, 12h, 1d) and left the
+    history block and every Rules bullet byte for byte (test_switch2.py).
+    No financing line: crypto declares no short financing.
     """
     cls_spec = cells.CLASSES["crypto"]
     active = _active_assets("crypto")
@@ -1211,15 +1255,23 @@ def _crypto_system_prompt() -> str:
     return f"""\
 You are the Composer agent in Stewart & Co.'s research pipeline. You design
 candidate trading strategies for the crypto universe ({n_assets} Binance USDT
-spot pairs on daily OHLCV bars: {assets}) as compositions of typed blocks,
-grounded in accepted research cards.
+spot pairs, each on 1h, 4h, 12h and daily OHLCV bars: {assets}) as
+compositions of typed blocks, grounded in accepted research cards.
 
 The crypto universe, stated plainly because how it is swept and what its data
 can see shape what a sound family can honestly claim:
-- Each family is swept per cell: every asset in the generation's window is
-  its own strategy and its own counted trial. A generation sweeps a rotating
-  window of these assets, never one pooled book, so a family is judged asset
-  by asset.
+- Each family is swept per cell: every cell in the generation's window is
+  its own strategy and its own counted trial. A cell is one asset at one
+  timeframe, so a window of 12 assets is 48 cells. A generation sweeps a
+  rotating window of these assets, never one pooled book, so a family is
+  judged asset by asset.
+- Every parameter is in bars of the cell's own timeframe: a lookback of 200 is
+  200 days at 1d, 100 days at 12h and about 8 days at 1h. The same family is
+  therefore a different strategy on each timeframe, and each is counted.
+  Choose parameter values for what they mean in bars; do not assume a value
+  that suits daily bars suits hourly ones. One window is fixed in time
+  instead: the volatility-percentile regime ranks against the last 365 days of
+  bars at every timeframe.
 - The universe is the {n_assets} of today's top-100 crypto assets by market
   cap that were listed by 2022-12-31 (at least 365 days of history before the
   2023-12-31 train/test cutoff), each backtested to its listing date: winners
@@ -1230,12 +1282,12 @@ can see shape what a sound family can honestly claim:
 - Returns are price returns, staking/funding yield excluded: a family whose
   thesis depends on collecting staking rewards or perpetual funding will not
   show that income here.
-- Each bar is a REAL daily OHLC bar on crypto's 24x7 calendar (every day,
-  weekends included): range-based block types are eligible here, and none
-  are excluded for this class.
+- Each bar is a REAL OHLC bar of its timeframe on crypto's 24x7 calendar
+  (every hour of every day, weekends included): range-based block types are
+  eligible here, and none are excluded for this class.
 - The declared cost model charges {commission} commission per side plus
   {slippage} slippage per side.
-- Strategies must be implementable from daily OHLCV alone.
+- Strategies must be implementable from the cell's own OHLCV bars alone.
 
 The history below is that of the pooled BTCUSD+ETHUSD book, the single
 two-asset strategy shape every crypto generation before per-cell sweeping
@@ -1888,7 +1940,8 @@ def normalize_proposal(families: list[dict]) -> list[dict]:
 def drift_record(run_id: str, dry_run: bool, specs: list[dict],
                  routing: dict | None = None,
                  routed_card_ids: list[str] | None = None,
-                 proxy_routed_card_ids: list[str] | None = None) -> dict:
+                 proxy_routed_card_ids: list[str] | None = None,
+                 held_intraday: bool = False) -> dict:
     """What one Composer run emitted. Written for both the dry run and the real
     run so the gap between the batch Coen approved and the batch that got
     chained stops being invisible.
@@ -1921,6 +1974,10 @@ def drift_record(run_id: str, dry_run: bool, specs: list[dict],
         record["routed_card_ids"] = routed_card_ids or []
     if proxy_routed_card_ids is not None:
         record["proxy_routed_card_ids"] = proxy_routed_card_ids
+    if held_intraday:
+        # Switch 2 guard: present (true) only when the intraday cells were held
+        # back; absent otherwise, so every other record is byte-identical.
+        record["held_intraday"] = True
     return record
 
 
@@ -2047,7 +2104,8 @@ def routable_cards(accepted: dict[str, dict], asset_class: str) -> tuple[dict[st
 
 def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
                          queue_path: Path, known_fps: dict[str, str],
-                         per_cycle_specs: int | None) -> int:
+                         per_cycle_specs: int | None,
+                         held_intraday: bool = False) -> int:
     """D10: register one window off this class's sibling queue, propose nothing.
 
     A drain replaces THIS STAGE's proposal, not the whole cycle: the composer
@@ -2082,7 +2140,8 @@ def _drain_sibling_queue(args, registry: Registry, queue_state: dict,
               f"already registered as {known_fps[composition_fingerprint(spec)]}")
 
     _persist_drift_record(
-        drift_record(args.run_id, args.dry_run, fresh), args.registry)
+        drift_record(args.run_id, args.dry_run, fresh,
+                     held_intraday=held_intraday), args.registry)
 
     if args.dry_run:
         print(f"\nDRY RUN — queue drain only; {len(fresh)} spec(s) would be "
@@ -2208,8 +2267,16 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     # byte-identical for every family that fits: a family of n <= cap combos
     # expands to at most cap x per_combo specs and is therefore never split.
     # Only families that TODAY are refused outright are affected.
+    # Switch 2 guard: while an intraday timeframe is active and either intraday
+    # note is missing from the chain, the cap and the expansion below both use
+    # the 1d cells only (the SAME restricted set, from this one variable).
+    held_tfs = ("1d",) if intraday_held(args.asset_class, registry) else None
+    if held_tfs is not None:
+        print("HELD: intraday cells not swept until both notes are chained: "
+              + ", ".join(INTRADAY_NOTE_PREFIXES))
     try:
-        specs_per_combo = max(1, len(sweep_cells(args.asset_class, sweep_assets)))
+        specs_per_combo = max(1, len(sweep_cells(args.asset_class, sweep_assets,
+                                                 held_tfs)))
     except ValueError as exc:
         print(f"  {exc}")
         return 1
@@ -2241,7 +2308,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     queue_state = loop_state.load(queue_path)
     if loop_state.queue_depth(queue_state, args.asset_class):
         return _drain_sibling_queue(args, registry, queue_state, queue_path,
-                                    known_fps, per_cycle_specs)
+                                    known_fps, per_cycle_specs,
+                                    held_intraday=held_tfs is not None)
 
     if not accepted:
         print("No accepted cards in the registry — run the Reader and triage first.")
@@ -2314,7 +2382,7 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
         specs = expander_for(args.asset_class)(
             fam, args.run_id, args.model, created_utc, args.asset_class,
             proxy_card_ids=frozenset(proxy_routed_card_ids or ()),
-            assets=sweep_assets)
+            assets=sweep_assets, timeframes=held_tfs)
         kept_specs, drop_notes, malformed = screen_siblings(
             specs, known_fps, run_fps, retrial_ok=retrial_ok)
         if malformed:
@@ -2376,7 +2444,8 @@ def run(argv: list[str] | None = None, propose_fn=None) -> int:
     _persist_drift_record(
         drift_record(args.run_id, args.dry_run, all_specs,
                     routing=routing_info, routed_card_ids=routed_card_ids,
-                    proxy_routed_card_ids=proxy_routed_card_ids),
+                    proxy_routed_card_ids=proxy_routed_card_ids,
+                    held_intraday=held_tfs is not None),
         args.registry)
 
     for fam, specs in kept:

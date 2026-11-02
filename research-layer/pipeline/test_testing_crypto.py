@@ -18,7 +18,7 @@ def test_narrows_the_active_cells_then_restores():
         # no longer touches it
         assert composer.expander_for("crypto") is composer.expand_family_for_class
     assert cells.ACTIVE_CELLS["crypto"] is gate
-    assert len(cells.active_cells("crypto")) == 76
+    assert len(cells.active_cells("crypto")) == 304       # 76 x 4 since Switch 2
 
 
 def test_restores_on_exception():

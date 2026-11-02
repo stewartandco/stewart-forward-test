@@ -377,6 +377,10 @@ def test_screen_prior_for_a_timeframe_is_measured_scaled_and_floored(monkeypatch
     assert t["1h"] == 30.0 and screen.screen_prior_s_for("1h") == 30.0
     assert screen.screen_prior_s_for("15m") == 4 * t["1h"]      # 96 / 24
     assert screen.screen_prior_s_for("30m") == 2 * t["1h"]
+    # 4h and 12h are measured entries since 2b-3 plan 5 (Task 2); remove them
+    # to exercise the scaled fallback for a timeframe with no measurement
+    monkeypatch.delitem(t, "4h")
+    monkeypatch.delitem(t, "12h")
     assert screen.screen_prior_s_for("4h") == max(2.0, t["1h"] / 4)
     monkeypatch.setitem(t, "1h", 6.0)
     assert screen.screen_prior_s_for("12h") == 2.0              # 6/12 floored
@@ -459,3 +463,95 @@ def test_a_mixed_registry_is_not_deferred_by_the_dearest_prior(tmp_path, monkeyp
     assert states[one_d] in ("gauntlet", "graveyard") and states[sids[1]] == "proposed"
     r = _result(reg)
     assert r["evaluated"] == 1 and r["deferred"] == 1 and r["stopped_at_deadline"] is True
+
+
+# ---- 2b-3 plan 5 Task 1: screen groups its jobs by timeframe before chunking ----
+
+def test_grouping_is_a_noop_for_a_single_timeframe_run():
+    jobs = [_job(f"d{i}", "1d") for i in range(40)]
+    grouped = screen._group_by_tf(jobs)
+    assert grouped == jobs and len(grouped) == len(jobs)
+    assert all(g is j for g, j in zip(grouped, jobs))            # same objects, same order
+    for size in (1, 7, 128):
+        assert screen._tf_chunks(grouped, size) == screen._tf_chunks(jobs, size)
+
+
+def test_interleaved_jobs_group_stably():
+    tfs = ("1h", "4h", "12h", "1d")
+    jobs = [_job(f"a{a}@{tf}", tf) for a in (1, 2, 3) for tf in tfs]
+    grouped = screen._group_by_tf(jobs)
+    assert [j[0]["strategy_id"] for j in grouped] == (
+        [f"a{a}@1h" for a in (1, 2, 3)] + [f"a{a}@4h" for a in (1, 2, 3)]
+        + [f"a{a}@12h" for a in (1, 2, 3)] + [f"a{a}@1d" for a in (1, 2, 3)])
+    assert len(grouped) == len(jobs) and all(any(g is j for j in jobs) for g in grouped)
+    chunks = screen._tf_chunks(grouped, 8)
+    assert len(chunks) == 4
+    assert [tf for tf, _ in chunks] == ["1h", "4h", "12h", "1d"]
+    # the legacy order would have cut one chunk per job
+    assert len(screen._tf_chunks(jobs, 8)) == len(jobs)
+
+
+def test_timeframes_group_in_order_of_first_appearance():
+    jobs = [_job("x1", "4h"), _job("y1", "1d"), _job("x2", "4h"), _job("z1", "1h"),
+            _job("y2", "1d")]
+    assert [j[0]["strategy_id"] for j in screen._group_by_tf(jobs)] == [
+        "x1", "x2", "y1", "y2", "z1"]
+    assert screen._group_by_tf([]) == []
+
+
+def test_a_deadline_stop_inside_a_group_leaves_the_rest_proposed(tmp_path, monkeypatch):
+    """24 interleaved specs (1h, 4h, 12h, 1d round robin), chunk size 8: grouped,
+    the first chunk is the six 1h specs. A budget that refuses the second chunk
+    stops the run there: exactly those six have verdicts, every other spec stays
+    `proposed`, and a second (unbudgeted) run screens the rest with no spec
+    verdicted twice."""
+    reg, sids, data = _registry_with(tmp_path, 24)
+    monkeypatch.setattr(screen, "SCREEN_CHUNK_PER_WORKER", 8)
+    tf_of = {sid: ("1h", "4h", "12h", "1d")[i % 4] for i, sid in enumerate(sids)}
+    monkeypatch.setattr(screen, "_spec_tf", lambda spec: tf_of[spec["strategy_id"]])
+
+    class RefusesTheSecondChunk:
+        active = True
+        def __init__(self, deadline_utc, **k):
+            self.recorded = 0
+        def remaining_s(self):
+            return 1e6 if self.recorded == 0 else 0.5
+        def rate_s(self, prior_s, key=None):
+            return 1.0
+        def fits(self, n, rate_s):
+            return n * rate_s <= self.remaining_s()
+        def record(self, n, elapsed_s, key=None):
+            self.recorded += n
+    monkeypatch.setattr(screen._deadline, "DeadlineBudget", RefusesTheSecondChunk)
+    assert _run(reg, data, tmp_path, "--deadline-utc", _deadline_in(3600)) == 0
+    first_chunk = {sid for sid in sids if tf_of[sid] == "1h"}
+    states = reg.strategy_states()
+    assert {s for s in sids if states[s] != "proposed"} == first_chunk
+    r = _result(reg)
+    assert r["evaluated"] == 6 and r["deferred"] == 18 and r["stopped_at_deadline"] is True
+    monkeypatch.undo()                              # the real clock, the real budget
+    reg2 = Registry(reg.log_path)
+    monkeypatch.setattr(screen, "_spec_tf", lambda spec: tf_of[spec["strategy_id"]])
+    assert _run(reg2, data, tmp_path) == 0
+    assert all(reg2.strategy_states()[s] != "proposed" for s in sids)
+    verdicts = [e["payload"]["strategy_id"] for e in reg2.entries()
+                if e["entry_type"] == "verdict"]
+    assert len(verdicts) == len(set(verdicts)) == 24
+    assert run_verifier(reg2.log_path).returncode == 0
+
+
+# ---- 2b-3 plan 5 Task 2: measured 4h and 12h priors ----
+
+def test_measured_intraday_priors():
+    """The D-i rehearsal (2026-10-31) measured 4h and 12h; rule = the 1h prior
+    x the measured ratio, rounded up to the next 5 s."""
+    assert screen.SCREEN_PRIOR_S_BY_TF == {"1d": 2.0, "1h": 30.0, "4h": 15.0, "12h": 10.0}
+    assert screen.screen_prior_s_for("4h") == 15.0
+    assert screen.screen_prior_s_for("12h") == 10.0
+
+
+def test_unmeasured_timeframes_keep_the_scaled_fallback():
+    t = screen.SCREEN_PRIOR_S_BY_TF
+    assert "15m" not in t and "30m" not in t
+    assert screen.screen_prior_s_for("15m") == 4 * t["1h"]      # 96 / 24
+    assert screen.screen_prior_s_for("30m") == 2 * t["1h"]      # 48 / 24

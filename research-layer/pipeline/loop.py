@@ -132,9 +132,11 @@ ROTATION_SIZE = 12
 # ships with its own window size if 12 is not right for it.
 #
 # Crypto is the one rotating class: Switch 1 (SP5 Phase 3) activated 76
-# assets at 1d, so a crypto generation sweeps 12 of them, and the four
-# tradfi classes still sweep their whole active sets. Pinned by
-# test_switch1.py and test_phase2_freeze.py.
+# assets at 1d, so a crypto generation sweeps 12 of them. Switch 2 added 1h,
+# 4h and 12h on the same assets, so a 12-asset window is now 48 cells (12
+# assets x 4 timeframes; the rotation still steps over ASSETS, not cells).
+# The four tradfi classes still sweep their whole active sets. Pinned by
+# test_switch1.py, test_switch2.py and test_phase2_freeze.py.
 ROTATION_CLASSES = ("crypto",)
 
 # The scheduled task this module runs under, and the shortest execution

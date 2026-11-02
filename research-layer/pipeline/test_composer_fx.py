@@ -139,8 +139,12 @@ def test_default_flag_is_byte_identical(tmp_path, monkeypatch):
     assert rc == 0
     record = _drift_record(path)
     ids = record.pop("strategy_ids")
+    # Switch 2: crypto's gate is 1h/4h/12h/1d, but this tmp chain holds neither
+    # intraday note, so the composer's hold (Task 8) sweeps the 1d cells only:
+    # the same 684 specs and ids as at Switch 1, plus the hold marker.
     assert record == {
         "families": ["trend_scan_family"],
+        "held_intraday": True,
         "mode": "dry",
         "n_specs": 9 * 76,
         "run_id": "fixed-run",
@@ -346,7 +350,12 @@ def test_fx_specs_validate_against_schema(tmp_path):
 # review: parity tools skip the control on pooled specs; brief names the
 # admission line"): the universe bullet now says the 76 of today's top-100
 # listed by 2022-12-31, not "today's top-100".
-CRYPTO_SYSTEM_PROMPT_SHA256 = "fa92f5086a0a3e3755656a0578099a9203a1bdd561d1f6183de2eed907c1cbb5"
+# Re-pinned a third time by the Switch 2 commit ("feat(research-layer): Switch
+# 2, crypto intraday 1h/4h/12h (2b-3 phase 2)"): the universe section names the
+# four timeframes (cells, 48 per window, bars of the cell's own timeframe).
+# History block and Rules bullets are byte-identical (test_switch2.py). Coen
+# approved the exact text 2026-11-01 (2b-3 plan 5 gate).
+CRYPTO_SYSTEM_PROMPT_SHA256 = "cba48422d23b4fd20db7ce0a511051d076a92a1532d5bb36ad856ce014f41705"
 CRYPTO_PROPOSAL_SCHEMA_SHA256 = "725c7b936492af190be6ada4104aa92b4d0a6109378e2827af096da9a40a83b9"
 
 

@@ -111,6 +111,8 @@ def _main(tmp_path, monkeypatch, fake, extra=(), now=NOW):
     monkeypatch.setattr(cr.time, "sleep", lambda s: None)
     argv = ["--data-dir", str(tmp_path / "data"), "--logs-dir", str(tmp_path / "logs"),
             "--now", now, *extra]
+    if "--registry" not in argv:        # never read the live chain from a test
+        argv += ["--registry", str(tmp_path / "no_registry_log.jsonl")]
     return cr.main(argv)
 
 
@@ -628,3 +630,139 @@ def test_a_crashing_detector_is_one_item_and_the_ledger_is_still_written(
     assert health[0]["reason"].startswith("detector failed: ")
     assert "scan blew up" in health[0]["reason"]
     assert "feed health detector failed" in capsys.readouterr().err
+
+
+def test_a_missing_daily_file_is_a_cell_failure_not_a_stop(tmp_path, monkeypatch):
+    # an intraday cell whose 1d file is absent: fetch_symbol raises
+    # MissingDailyFile (a ValueError) -- an ordinary cell failure like
+    # MalformedData, never a ban-style stop.
+    _gate(monkeypatch, [A, B, C])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data",
+                {B: [cd.MissingDailyFile("XUSDT_1d.csv is absent or has no rows")]})
+    assert _main(tmp_path, monkeypatch, fake) == 0
+    assert A in fake.symbols() and C in fake.symbols()
+    items = [i for i in _ledger(tmp_path / "logs")["items"]
+             if i["source"] == cr.FETCH_SOURCE]
+    assert [i["key"] for i in items] == ["XUSDT"]
+    assert "MissingDailyFile" in items[0]["reason"] and "1d" in items[0]["reason"]
+    assert set(_manifest(tmp_path / "data")) == {f"{A}_1d", f"{C}_1d"}
+
+
+# ---- every registered crypto cell stays fresh (2b-3 plan 5, Task 7) --------
+
+def _spec(sid, assets, *, tf=None, asset_class="crypto"):
+    u = {"assets": list(assets), "asset_class": asset_class, "session": "24x7"}
+    if tf is not None:
+        u["timeframe"] = tf
+    return {"strategy_id": sid, "universe": u}
+
+
+def _chain(tmp_path, specs, extra_entries=()):
+    """A tmp chain with strategy_registered lines (the refresh only reads the
+    payloads, so the lines are not hash-linked)."""
+    path = tmp_path / "registry_log.jsonl"
+    lines = [json.dumps({"entry_type": "strategy_registered", "payload": sp})
+             for sp in specs]
+    lines += [json.dumps(e) for e in extra_entries]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_refresh_cells_is_the_active_set_when_nothing_extra_is_registered(
+        tmp_path, monkeypatch):
+    _gate(monkeypatch, ["BTCUSDT", "ETHUSDT"], tfs=("1d", "1h"))
+    active = cells.active_cells("crypto")
+    # the 1d cells first, then the others, each group in active_cells order
+    expect = ([c for c in active if c[1] == "1d"]
+              + [c for c in active if c[1] != "1d"])
+    assert expect != active                     # the order is a real change here
+    assert sorted(expect) == sorted(active)
+    assert cr.refresh_cells(None) == expect
+    assert cr.refresh_cells(tmp_path / "absent_log.jsonl") == expect
+    # a registered cell that IS active adds nothing and does not reorder
+    path = _chain(tmp_path, [_spec("s1", ["ETHUSDT"], tf="1h"),
+                             _spec("s2", ["BTCUSDT"])])
+    assert cr.refresh_cells(path) == expect
+
+
+def test_the_1d_cells_are_refreshed_first_under_the_hard_stop():
+    """08:12 stops every pass: the 1d cells (read by the 08:20 quarantine and
+    the 08:45 signal service) must be the first 76 of the 304."""
+    got = cr.refresh_cells(None)
+    active = cells.active_cells("crypto")
+    one_d = [c for c in active if c[1] == "1d"]
+    assert len(one_d) == 76 and len(got) == len(active)
+    assert got[:76] == one_d
+    assert got[76:] == [c for c in active if c[1] != "1d"]
+
+
+def test_a_registered_inactive_cell_is_refreshed(tmp_path, monkeypatch):
+    _gate(monkeypatch, ["BTCUSDT", "ETHUSDT"], tfs=("1d",))      # paused: 1d only
+    path = _chain(tmp_path, [_spec("s1", ["SOLUSDT"], tf="1h"),
+                             _spec("s2", ["BNBUSDT"], tf="4h"),
+                             _spec("s3", ["BNBUSDT"], tf="4h"),   # duplicate cell
+                             _spec("s4", ["XRPUSDT"])])           # 1d, inactive asset
+    got = cr.refresh_cells(path)
+    active = cells.active_cells("crypto")
+    assert got[:len(active)] == active
+    assert got[len(active):] == [("BNBUSDT", "4h"), ("SOLUSDT", "1h"),
+                                 ("XRPUSDT", "1d")]
+
+
+def test_legacy_pooled_and_retired_cells_are_never_added(tmp_path, monkeypatch):
+    _gate(monkeypatch, ["BTCUSDT"], tfs=("1d",))
+    monkeypatch.setitem(cells.RETIRED_CELLS, "LINKUSDT@1h", {"reason": "test"})
+    monkeypatch.setitem(cells.RETIRED_CELLS, "DOGEUSDT", {"reason": "test"})
+    path = _chain(tmp_path, [
+        _spec("legacy", ["BTCUSD"], tf="1h"),          # not in cells.ASSETS
+        _spec("legacy2", ["ETHUSD"]),
+        _spec("pooled", ["SOLUSDT", "BNBUSDT"], tf="1h"),   # not one asset
+        _spec("ret1", ["LINKUSDT"], tf="1h"),           # retired
+        _spec("ret2", ["DOGEUSDT"]),                    # retired at 1d
+        _spec("equity", ["SOLUSDT"], tf="1h", asset_class="equity"),
+        _spec("badtf", ["SOLUSDT"], tf="3m"),           # not in cells.TIMEFRAMES
+        _spec("ok", ["ADAUSDT"], tf="1h"),
+    ], extra_entries=[{"entry_type": "state_change",
+                       "payload": {"strategy_id": "ok", "to": "rejected"}}])
+    got = cr.refresh_cells(path)
+    assert got == cells.active_cells("crypto") + [("ADAUSDT", "1h")]
+
+
+def test_an_unreadable_registry_falls_back_with_one_item(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A], tfs=("1d",))
+    bad = tmp_path / "registry_log.jsonl"
+    bad.write_text('{"entry_type": "strategy_registered", "payl\n', encoding="utf-8")
+    fake = Fake(tmp_path / "data")
+    (tmp_path / "data").mkdir()
+    assert _main(tmp_path, monkeypatch, fake, extra=("--registry", str(bad))) == 0
+    assert fake.symbols() == [A]                       # the active cells still run
+    items = [i for i in _ledger(tmp_path / "logs")["items"]
+             if i["source"] == cr.REGISTRY_SOURCE]
+    assert cr.REGISTRY_SOURCE == "registry_unreadable"
+    assert len(items) == 1 and items[0]["key"] == "registry"
+    assert "JSONDecodeError" in items[0]["reason"]
+
+
+def test_a_torn_final_chain_line_is_ignored_not_unreadable(tmp_path, monkeypatch):
+    """The 08:00 worker can be mid-append at 08:02 and the refresh takes no
+    lock: a half-written final line (no newline yet) is not an error."""
+    _gate(monkeypatch, ["BTCUSDT"], tfs=("1d",))
+    path = _chain(tmp_path, [_spec("s1", ["SOLUSDT"], tf="1h"),
+                             _spec("s2", ["BNBUSDT"], tf="4h")])
+    with path.open("a", encoding="utf-8", newline="") as f:
+        f.write('{"entry_type": "strategy_registered", "payload": {"strategy_id": "s3", "uni')
+    got = cr.refresh_cells(path)
+    assert got == cells.active_cells("crypto") + [("BNBUSDT", "4h"), ("SOLUSDT", "1h")]
+
+
+def test_main_refreshes_a_registered_inactive_cell(tmp_path, monkeypatch):
+    _gate(monkeypatch, [A], tfs=("1d",))
+    sol = "SOLUSDT"
+    path = _chain(tmp_path, [_spec("s1", [sol], tf="1h")])
+    (tmp_path / "data").mkdir()
+    fake = Fake(tmp_path / "data")
+    assert _main(tmp_path, monkeypatch, fake, extra=("--registry", str(path))) == 0
+    assert [(c[0], c[1]) for c in fake.calls] == [(A, "1d"), (sol, "1h")]
+    assert not [i for i in _ledger(tmp_path / "logs")["items"]
+                if i["source"] == cr.REGISTRY_SOURCE]

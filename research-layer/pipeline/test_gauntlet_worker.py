@@ -918,7 +918,10 @@ def test_prior_for_unmeasured_tf_scales_from_1h_and_is_floored(monkeypatch):
     assert gauntlet_core.prior_s_for("1h") == p["1h"]          # a measured entry
     assert gauntlet_core.prior_s_for("15m") == 4 * p["1h"]     # 96 / 24
     assert gauntlet_core.prior_s_for("30m") == 2 * p["1h"]
-    # (the measured 1h prior is 70 s, so 4h and 12h are already on the floor)
+    # 4h and 12h are measured entries since 2b-3 plan 5 (Task 2); remove them
+    # to exercise the scaled fallback for a timeframe with no measurement
+    monkeypatch.delitem(p, "4h")
+    monkeypatch.delitem(p, "12h")
     assert gauntlet_core.prior_s_for("4h") == max(20.0, p["1h"] / 4)
     assert gauntlet_core.prior_s_for("12h") == max(20.0, p["1h"] / 12)
     # the floor: a 1h prior this small would put 12h under the 1d prior
@@ -927,6 +930,21 @@ def test_prior_for_unmeasured_tf_scales_from_1h_and_is_floored(monkeypatch):
     assert gauntlet_core.prior_s_for("4h") == 25.0
     # an unknown timeframe falls back to the 1d prior, never raises
     assert gauntlet_core.prior_s_for("7m") == 20.0
+
+
+def test_measured_intraday_priors():
+    """2b-3 plan 5 Task 2: the D-i rehearsal (2026-10-31) measured 4h and 12h;
+    rule = the 1h prior x the measured ratio, rounded up to the next 5 s."""
+    assert gauntlet_core.PRIOR_S_BY_TF == {"1d": 20.0, "1h": 70.0, "4h": 25.0, "12h": 20.0}
+    assert gauntlet_core.prior_s_for("4h") == 25.0
+    assert gauntlet_core.prior_s_for("12h") == 20.0
+
+
+def test_unmeasured_timeframes_keep_the_scaled_fallback():
+    p = gauntlet_core.PRIOR_S_BY_TF
+    assert "15m" not in p and "30m" not in p
+    assert gauntlet_core.prior_s_for("15m") == 4 * p["1h"]     # 96 / 24
+    assert gauntlet_core.prior_s_for("30m") == 2 * p["1h"]     # 48 / 24
 
 
 def _tf_spec(sid, tf):

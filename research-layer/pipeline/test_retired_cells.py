@@ -51,11 +51,13 @@ def test_a_retired_cell_cannot_be_active():
 
 def test_a_retired_cell_that_is_declared_but_not_active_is_accepted():
     # ENAUSDT is declared but outside the 76 Switch 1 admission (first bar
-    # 2024); an intraday BTCUSDT cell is declared (1h) but not active either
+    # 2024); a BTCUSDT 15m cell is declared but not active either (1h/4h/12h
+    # became active at Switch 2; 15m and 30m are phase 3)
     assert "ENAUSDT" in cells.CLASSES["crypto"]["assets"]
     assert ("ENAUSDT", "1d") not in cells.active_cells("crypto")
+    assert ("BTCUSDT", "15m") not in cells.active_cells("crypto")
     cells.assert_retired_cells_valid({"ENAUSDT": dict(_ENTRY)})
-    cells.assert_retired_cells_valid({"BTCUSDT@1h": dict(_ENTRY)})
+    cells.assert_retired_cells_valid({"BTCUSDT@15m": dict(_ENTRY)})
     cells.assert_retired_cells_valid({})
 
 
@@ -344,7 +346,7 @@ def test_a_retired_owed_cell_is_never_fetched_but_its_sibling_is(tmp_path, monke
     _retire(monkeypatch, "BTCUSD@1h")
     calls, sleeps = [], []
 
-    def fetch(sym, tf, d):
+    def fetch(sym, tf, d, **kw):
         if sym == "BTCUSD":
             raise RuntimeError("delisted")      # would cost two 120 s retry passes
         calls.append((sym, tf))
@@ -380,6 +382,6 @@ def test_with_nothing_retired_every_owed_cell_is_fetched(tmp_path):
     a, b, specs = _owed_pair()
     calls = []
     quarantine.fetch_owed([a["strategy_id"], b["strategy_id"]], specs, tmp_path,
-                          fetch=lambda sym, tf, d: calls.append(sym) or {},
+                          fetch=lambda sym, tf, d, **kw: calls.append(sym) or {},
                           sleep=lambda s: None, now_ms=_NOW_MS)
     assert sorted(calls) == ["BTCUSD", "ETHUSD"]

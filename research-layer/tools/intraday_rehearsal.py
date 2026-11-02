@@ -185,16 +185,42 @@ def register(registry: Path, assets: list[str], n: int, seed: int,
     originals = pick_originals(specs, n, seed)
     if len(originals) < n:
         raise SystemExit(f"only {len(originals)} eligible originals, wanted {n}")
+    # A twin whose COMPOSITION (universe + blocks, the verifier's own
+    # fingerprint) is already on the chain IS that strategy (a 1d twin on an
+    # asset the composer already covered), so registering it is a duplicate
+    # the verifier flags. It is skipped, kept out of the twins map (the map's
+    # flat {sid: {original, asset, tf}} shape is read by pick_twins, render,
+    # collect and quarantine) and recorded in the sidecar. 2b-3 plan 5 Task 6.
+    from pipeline import composer
+    known = composer.registered_fingerprints(reg)
     twins: dict[str, dict] = {}
+    skipped: dict[str, dict] = {}
     for sid in originals:
         for asset in assets:
             for tf in timeframes:
                 two = make_twin(specs[sid], asset, tf)
+                fp = composer.composition_fingerprint(two)
+                existing = known.get(fp)
+                # A twin already on the chain under its OWN id (a rerun, or a
+                # run that crashed after registering some) is listed, never
+                # re-registered and never skipped: only ANOTHER strategy
+                # holding the composition makes it a duplicate.
+                if two["strategy_id"] not in specs and existing is not None:
+                    skipped[two["strategy_id"]] = {
+                        "original": sid, "asset": asset, "tf": tf,
+                        "existing": existing}
+                    print(f"skipped twin {two['strategy_id']} ({asset} {tf} of "
+                          f"{sid}): composition already registered as {existing}")
+                    continue
                 if two["strategy_id"] not in specs:
                     reg.register_strategy(two)
+                    known[fp] = two["strategy_id"]
                 twins[two["strategy_id"]] = {"original": sid, "asset": asset,
                                              "tf": tf}
     out.write_text(json.dumps(twins, indent=1, sort_keys=True), encoding="utf-8")
+    skipped_path = out.with_name(out.stem + ".skipped.json")
+    skipped_path.write_text(json.dumps(skipped, indent=1, sort_keys=True),
+                            encoding="utf-8")
     return twins
 
 

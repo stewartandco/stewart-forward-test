@@ -2,9 +2,10 @@
 change to ("1h", "4h", "12h", "1d") does to a sweep window, proven BEFORE the
 commit that flips it.
 
-Nothing here activates anything: the gate is monkeypatched for the duration of
-a test, no model is called (expand_family_for_class runs on a canned family),
-and the chain is a tmp one.
+Written as a preview (the gate monkeypatched open); the Switch 2 commit made
+the gate real, so these tests now run against the committed gate. No model is
+called (expand_family_for_class runs on a canned family) and the chain is a tmp
+one.
 """
 from __future__ import annotations
 
@@ -21,8 +22,10 @@ N_COMBOS = 9                                    # good_family: 3 x 3 sweep
 
 
 @pytest.fixture
-def switch2(monkeypatch):
-    monkeypatch.setitem(cells.ACTIVE_CELLS["crypto"], "timeframes", SWITCH2_TIMEFRAMES)
+def switch2():
+    """The preview's gate is the committed gate since the Switch 2 commit:
+    nothing is monkeypatched any more, and the fixture asserts that."""
+    assert cells.ACTIVE_CELLS["crypto"]["timeframes"] == SWITCH2_TIMEFRAMES
 
 
 def test_a_window_of_12_is_48_cells(switch2):
@@ -53,13 +56,6 @@ def test_a_window_of_12_is_48_cells(switch2):
     assert set(per_cell.values()) == {N_COMBOS}
     # one sibling group per cell
     assert len({s["provenance"]["sibling_group_id"] for s in specs}) == 48
-
-
-def test_the_committed_gate_is_still_1d_after_the_preview():
-    """The fixture above is the ONLY thing that opens the intraday timeframes:
-    without it the committed gate is still 76 x 1d."""
-    assert cells.ACTIVE_CELLS["crypto"]["timeframes"] == ("1d",)
-    assert len(composer.sweep_cells("crypto", assets=list(ADMITTED[:12]))) == 12
 
 
 def test_one_spec_per_timeframe_registers_on_a_tmp_chain_and_passes_c3(switch2, tmp_path):

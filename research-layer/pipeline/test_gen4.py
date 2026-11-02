@@ -456,9 +456,13 @@ def test_composer_run_persists_one_drift_record_per_invocation(tmp_path):
     rec = json.loads(lines[0])
     assert rec["run_id"] == "driftrun"
     assert rec["mode"] == "dry"
-    # 9 combos per active crypto cell (per-cell expansion since Switch 1)
+    # 9 combos per active crypto cell (per-cell expansion since Switch 1). Since
+    # Switch 2 the gate is 1h/4h/12h/1d, but this tmp chain holds neither
+    # intraday note, so the composer's hold sweeps the 1d cells only.
     from pipeline import cells
-    assert rec["n_specs"] == 9 * len(cells.active_cells("crypto")) == 9 * 76
+    cells_1d = [c for c in cells.active_cells("crypto") if c[1] == "1d"]
+    assert rec["n_specs"] == 9 * len(cells_1d) == 9 * 76
+    assert rec["held_intraday"] is True
 
 
 from pipeline.stats import harvey_liu_haircut

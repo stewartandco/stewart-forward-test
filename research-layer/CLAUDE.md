@@ -353,13 +353,19 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   sha256/rows/first_date even when it adds no bar) and the clip then finds
   nothing to drop; check the re-run's report shows the cell `fetched`, and
   never hand-edit the manifest or refetch to repair it. **A deleted intraday
-  file is recreated ONLY with `tools.intraday_prefetch`, never with
-  `crypto_refresh` (the 08:02 `33_CryptoGridRefresh` after Switch 2),
-  `crypto_data fetch` or `quarantine --fetch-owed`:** `fetch_symbol` on a
-  missing file starts at bar 0, so those bring SUN's pre-2021-06-18 bars back,
-  and only this tool enforces "an intraday file never starts before its 1d
-  file" (the clip); neither admission nor feed health detects a violation.
-  Plan 5 adds a guard (a clip in the refresh path, or an admission rule).
+  file is recreated from its asset's 1d start by ANY path (2b-3 plan 5,
+  `dfaf72b44`):** `crypto_data.fetch_symbol` on a tf != "1d" file with no rows
+  starts at `daily_floor_ms(symbol, data_dir)` (00:00 UTC of the first
+  `<symbol>_1d.csv` row's date) and drops any kline opening before it, so
+  `crypto_refresh` (the 08:02 `33_CryptoGridRefresh`), `crypto_data fetch`,
+  `quarantine --fetch-owed` and this tool all rebuild a file that never starts
+  before its 1d file (SUN's starts 2021-06-18). With the 1d file absent or
+  empty it raises `crypto_data.MissingDailyFile` (a `ValueError`) BEFORE any
+  request: an ordinary cell failure (`crypto_refresh_failed` /
+  `intraday_fetch_failed`), never a ban stop, nothing written. Fix a missing 1d
+  file first. The floor applies only when CREATING: an existing intraday file
+  resumes as always. The clip above stays as the second belt for a file written
+  before the guard; neither admission nor feed health detects a violation.
   The report's `attempts` are FETCH CALLS, not HTTP requests (a cold cell costs
   about ceil(rows/1000) requests). It DELIBERATELY reads `cells.ACTIVE_CELLS`
   assets, not
@@ -380,9 +386,22 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   working set gets ZERO hits: read `full_bars_memo_stats()` (hits, misses,
   evictions, bars and files held) after a run. Measured 2026-10-31 on the
   rehearsal (8 intraday files, 211,159 bars held): 160 hits, 8 misses, 0
-  evictions, peak working set of the whole run 712 MB. At Switch 2 the 76 1h
-  files alone hold about 4 million bars, above the bound, so the zero-hit
-  warning applies there (plan 5). Daily cells never use it (`_daily_bars` rewrites
+  evictions, peak working set of the whole run 712 MB. **Sized per run (2b-3
+  plan 5, `358313d23`):** `FULL_BARS_MEMO_MAX_BARS` is only the DEFAULT bound
+  and is never mutated. The OUTERMOST `quarantine.run` (a catch-up's per-date
+  passes share its view and do not) calls `size_full_bars_memo(data_dir,
+  cell_keys)` over the intraday cells it records, which sets the RUNTIME bound
+  `_full_bars_bound` = min(`FULL_BARS_MEMO_CEILING_BARS` 6,000,000, max(default,
+  total data rows of those cells)); rows are counted by newline bytes, no
+  parse. At Switch 2 the 76 1h files alone hold about 4 million bars, so an
+  unsized memo would get zero hits. The ceiling (about 3 GB as dicts at about
+  0.5 KB a bar) stops a runaway grid taking the box; above it the LRU behaves
+  as before (correct, slower) and the run prints a `WARN full-bars memo:
+  touched N bars > ceiling 6,000,000` line and adds one `memo_ceiling` ledger
+  item (projected crossing 2027-02-14, next to the clustering deadline). **Read the `full-bars memo: hits N, misses N,
+  evictions N, bound N bars` line the run prints (once, in a `finally`):
+  evictions above 0 with hits near 0 means the grid outgrew the ceiling.**
+  `_reset_full_bars_memo` restores the default bound. Daily cells never use it (`_daily_bars` rewrites
   dates in place). Residual: a same-size rewrite inside one filesystem
   timestamp tick in the same process would be served stale. The NTFS mtime
   comes from the system clock tick (up to about 15 ms), not 100 ns, so the
@@ -391,13 +410,18 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   same-size rewrite is a byte-identical rewrite (and production files are
   written by another process earlier). Anyone adding a second writer of
   intraday files must re-read this. Tests: `test_quarantine_intraday.py`.
-- **The intraday path is dormant (crypto is ACTIVE at 1d only since Switch 1,
-  2026-10-17):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets x `("1d",)`;
-  the five intraday timeframes stay declared and unswept until Switch 2 (a
-  later plan, its own cost sign-off and Coen gate), so no scheduled task
-  registers an intraday strategy.
-- **Switch 2 hazards (cost these before activating intraday; Switch 1 is 1d
-  only):** `vol_percentile` in
+- **Crypto intraday is ACTIVE from the Switch 2 commit (2b-3 plan 5; Switch 1,
+  2026-10-17, was 1d only):** `cells.ACTIVE_CELLS["crypto"]` = 76 USDT assets
+  x `("1h", "4h", "12h", "1d")` (declaration order, import-checked) = 304
+  cells; a 12-asset rotation window is 48 cells (the rotation still steps over
+  ASSETS). 15m and 30m (phase 3) stay declared and unswept. `EXCLUDED_CELLS`
+  stays empty: the latest phase 2 first bar is APTUSDT 2022-10-19, so the
+  admission rule excludes nothing. Pinned by `test_switch2.py`,
+  `test_switch2_guard.py`, `test_switch2_preview.py`. The composer still holds
+  the intraday cells back until BOTH notes are chained, and the pause and
+  rollback rules are in the "Switch 2" section below.
+- **Switch 2 hazards (costed for plan 5; the figures stay as the basis for any
+  new timeframe):** `vol_percentile` in
   `gate_mask` was O(n x 365 x bars_per_day), about 940 s per 1h
   vol_percentile candidate under perturbation, and
   `GAUNTLET_PRIOR_S_PER_CANDIDATE` (20 s) was ~47x too low for 1h, so the
@@ -419,23 +443,107 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   identical (no new key, no new file; `universe.timeframe` read with `.get`).
   Readers of `equity.csv` that compare the `date` column must compare `d[:10]`
   (the diagnose_* scripts do, `[:10]` on both sides, so a cutoff day is
-  kept). Switch 2 gate still open: `gauntlet_stats` has never run end to end
-  on an intraday spec; it must be exercised in Switch 2's activation rehearsal
-  before any intraday verdict is chained. Closed in 2b-3 D-i:
+  kept). The Switch 2 gate that `gauntlet_stats` had never run end to end on an
+  intraday spec is MET on copies (2026-10-31 D-i; 2026-11-01 Task 12: gate 1
+  MET, `cluster_n` 27,102, `cluster_need_mb` 8,125, 106 stats chained, wall
+  390 s). Closed in 2b-3 D-i:
   `tools/intraday_rehearsal.pick_originals`' selection rules are now tested,
   and the rehearsal's `quarantine` covers every phase-2 timeframe (see its
   bullet above). `pipeline/test_switch2_preview.py` pins that a 12-asset
   window at 1h/4h/12h/1d is 48 cells (one single-asset 24x7 spec per cell per
-  combo), and that one spec per timeframe registers on a scratch chain and passes C3 (the
-  committed gate stays 1d).
-- **The protocol note is a DRAFT and is NOT chained until Switch 2:**
-  `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`. Coen
-  approves the exact text; it is chained VERBATIM at Switch 2 activation,
-  before the first intraday verdict (the v6.1-amendment pattern). Since
-  2b-2 it has a second paragraph, "Quarantine and the live gate" (the
-  cell key, entries/exits, the completeness rule, the live gate's sum of
-  exits). Do not chain it, edit its wording, or treat intraday daily-mark
-  verdicts as protocol-covered before then.
+  combo), and that one spec per timeframe registers on a scratch chain and passes C3.
+- **The two Switch 2 notes are chained by Coen at activation, VERBATIM, protocol
+  note first:** `docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md`
+  (prefix `gauntlet-protocol-v6.1-intraday-daily-marks:`) and
+  `docs/notes/crypto-grid-phase2-v1.md` (prefix `crypto-grid-phase2-v1:`), each
+  with `python -m tools.grid_switch chain-note ... --prefix ...` (LF bytes
+  enforced by `.gitattributes`; the tool refuses a CR). Coen approves the exact
+  text; the commit that added them still calls them drafts. Plan 5 removed the
+  protocol note's "STATUS: DRAFT" line. Since 2b-2 the protocol note has a second paragraph, "Quarantine and
+  the live gate" (the cell key, entries/exits, the completeness rule, the live
+  gate's sum of exits). Do not edit either wording after approval, and do not
+  treat intraday daily-mark verdicts as protocol-covered before both are on the
+  chain: the composer hold below enforces it for new registrations.
+
+## Switch 2 (2b-3 plan 5, 2026-11-01): crypto intraday goes live
+- **Parameters are bars as written.** A lookback of N is N bars of the cell's
+  own timeframe (200 = 200 days at 1d, 100 days at 12h, about 8 days at 1h), so
+  one family is a different strategy on each timeframe and each is its own
+  counted trial. The ONE window fixed in time is the vol-percentile regime:
+  365 days of bars at every timeframe (`gate_mask`, protocol note). The
+  composer's crypto brief says this in a bullet (`test_switch2.py` pins that the
+  history block and every Rules bullet are byte for byte the Switch 1 text).
+- **The composer HOLDS intraday cells until both notes are chained
+  (`6f29e438d`).** `composer.INTRADAY_NOTE_PREFIXES` = the two note prefixes
+  above; `intraday_held(asset_class, registry)` is True only when the class has
+  an active non-1d timeframe AND at least one prefix has no chained `note`
+  starting with it (ONE note present still holds). A 1d-only gate and every
+  tradfi class never read the chain for it. While held, `run` sets
+  `held_tfs = ("1d",)`, prints `HELD: intraday cells not swept until both
+  notes are chained: ...`, and passes the SAME restriction to the per-combo
+  cap (`sweep_cells(..., timeframes)`) and to the expansion
+  (`expand_family_for_class(..., timeframes=)`); the cap and the expansion
+  cannot disagree. The drift record in `logs/batch_drift.jsonl` carries
+  `"held_intraday": true` when held (the key is ABSENT otherwise, so every
+  other record is byte-identical). The hold lifts by itself on the first fire
+  after the second note lands. Until then crypto sweeps its 76 1d cells only
+  (a 12-asset window is 12 cells).
+- **The refresh keeps every REGISTERED crypto cell fresh, not only active ones
+  (`f052441f0`).** `crypto_refresh.refresh_cells(registry)` = `active_cells
+  ("crypto")` in order, then every other `(asset, tf)` a registered
+  single-asset crypto strategy runs on (asset in `cells.ASSETS`, tf in
+  `cells.TIMEFRAMES`, not retired), sorted. The legacy pooled BTCUSD/ETHUSD
+  specs are never added (`data_fetch` refreshes them at 08:20). New flag
+  `--registry` (default the layer's `registry_log.jsonl`): the chain is read
+  ONCE per run, read-only. A chain that cannot be read is NOT a failed run: the
+  active cells are refreshed and the ledger carries ONE `registry_unreadable`
+  item naming the error. Why it exists: a pause (below) drops intraday cells
+  from `active_cells` while their strategies stay registered; unrefreshed they
+  would park crypto at `stale_data` and make `gauntlet_stats` refuse
+  `cells_not_comparable` registry-wide.
+- **Fetch-owed uses the refresh's end cap (`03ed4d88c`, test fix `a4eb08277`).**
+  `quarantine.fetch_owed` computes `end_ms = last_complete_utc_day_end_ms(now_ms)`
+  once per call and passes `now_ms=` and `end_ms=` to every `fetch` call and
+  to the feed-health scan (`_feed_health_items(..., end_ms)`), so an intraday
+  cell ends on the same previous UTC day the refresh leaves it on and a
+  capped afternoon run does not read as `feed_stale`. A fake `fetch` for
+  `fetch_owed` (and the rehearsal's) must accept those two keywords.
+- **The screen groups jobs by timeframe before chunking (`261a4a60c`).**
+  `screen._group_by_tf(jobs)` is a STABLE reorder (timeframes in order of first
+  appearance, original order within one) applied in `run` before `_tf_chunks`.
+  Switch 2 expands per asset then per timeframe, so an alternating list would be
+  cut toward one-spec chunks and one-spec chunks run in-process (the D-i
+  rehearsal: 1.16 s per intraday spec serial against 0.43 / 0.15 / 0.085 s
+  grouped). An all-one-timeframe run, so every all-1d run, keeps its exact order
+  and chunking. Verdicts are unchanged; only the ORDER a mixed run's verdict
+  batches are chained moves (the gauntlet worker re-sorts cheapest first).
+- **The rehearsal skips twins already registered (`db046ecd6`, `f10a16cab`).**
+  `tools/intraday_rehearsal.register` skips a twin whose composition fingerprint
+  (`composer.composition_fingerprint`, universe + blocks) is already held by
+  ANOTHER strategy on the chain (a 1d twin on an asset the composer already
+  covered is a duplicate the verifier flags). Skipped twins stay out of the
+  twins map (its flat `{sid: {original, asset, tf}}` shape is read by
+  `pick_twins`, render, collect and quarantine) and go to the sidecar
+  `<out stem>.skipped.json` (`{sid: {original, asset, tf, existing}}`). A twin
+  already on the chain under its OWN id (a rerun) is listed in the map and never
+  re-registered or skipped.
+- **THE PAUSE (Coen 2026-11-01).** If the effective-trials METHOD change has not
+  landed before the clustering crossing (about 2026-12-23 at the Switch 2
+  rate; see the clustering paragraph under "Gauntlet worker"), Switch 2 pauses
+  by a FORWARD reviewed commit that sets crypto's `ACTIVE_CELLS` timeframes back
+  to `("1d",)`, plus a pause note if Coen wants one. The refresh's
+  registered-cell union (above) keeps the registered intraday cells fresh, and
+  quarantine keeps recording them. **NEVER a revert once an intraday strategy
+  is registered:** those strategies stay on the chain, counted in N and
+  re-simulated forever, and a revert deletes the code that reads them. A pause
+  stops N growing; it does not shrink it.
+- **ABORT / ROLLBACK.** A revert of the Switch 2 MERGE as a whole is safe ONLY
+  BEFORE the first intraday registration (the first `strategy_registered` with a
+  tf other than 1d; the composer hold keeps the composer from registering one
+  before both notes are chained). After it, the only way back is the forward pause above. The D-i rule
+  "a D-i revert must also delete `seriescache/`" (Engine series cache,
+  ROLLBACK RULE) is UNCHANGED and separate: a Switch 2 revert neither implies
+  it nor replaces it.
 
 ## Pipeline loop (25_PipelineLoop)
 - **Screen is a plain stage, not a locked one (2026-10-08).** The loop runs
@@ -816,6 +924,27 @@ of it.
   availability seen is 33,626 MB; at the 30-day registration average
   (~438 a day, in bursts) and L ~1,300 the gate stops fitting near n
   59,000: around 2027-01-14 without Switch 2, 2026-12-23 with it.
+  **A second clock beside it: the full-bars memo ceiling (final review M3).**
+  Task 12 measured 5,741,210 bars over the 228 intraday files (data to
+  2026-10-31); they grow 2,432 a day (76 cells x 32 bars), so once every
+  intraday cell has a quarantined strategy the touched total passes
+  `FULL_BARS_MEMO_CEILING_BARS` (6,000,000) about 2027-02-14. That is time, not
+  correctness (results are identical; quarantine goes back to one parse per
+  strategy-date-cell). The alarm is the `WARN full-bars memo: touched N bars >
+  ceiling 6,000,000` line the outermost quarantine run prints, plus one
+  `memo_ceiling` item in `degraded_quarantine.json` (the Sentinel WARNs, and
+  FAILs after 3 days).
+  **Early warning (plan 5, sign-off 2 row 3).** The Ops Sentinel's `gauntlet_queue`
+  check (a separate repo, sc-ops-sentinel branch `feat/cluster-n-warn`,
+  `9bf6637`) WARNs when the clustering n is at or above 46,000 (manifest
+  `cluster_n_warn`; `>=`, not `>`), about 21 days before the crossing at the
+  basis registration rate and about 10 days at the cap rate. Limits: it reads
+  `cluster_n` from the status file, which is CARRIED FORWARD on nights that do
+  not cluster (the number can be a night or more old), and it is a warning, not
+  a stop; it fires on a `nothing_to_do` night too. The lasting fix is the
+  effective-trials method change (its own project), not RAM. If it has
+  not landed before the crossing, Switch 2 pauses (section "Switch 2", THE
+  PAUSE).
   The memory is one n x n float64 matrix at a time (plus the merge
   history's member sets, about 0.01 n^2 entries measured, more if the merge
   tree turns chain-like; and the pure-Python reference path, taken when a
@@ -1609,13 +1738,18 @@ per window per bar; the percentile is an exact incremental one.
     259 s;
   - the 1h/1d cost ratio is about 22-25x for screen, gauntlet and quarantine.
 - **Deadline priors are per timeframe, and so are the measured rates.**
-  - `gauntlet_core.PRIOR_S_BY_TF` = {"1d": 20.0, "1h": 70.0} plus
+  - `gauntlet_core.PRIOR_S_BY_TF` = {"1d": 20.0, "1h": 70.0, "4h": 25.0,
+    "12h": 20.0} plus
     `prior_s_for(tf)` (an unlisted timeframe = the 1h prior scaled by bars per
     day, floored at the 1d prior). The 1h value is the HEAVIEST class
-    measured, rounded up to 10 s.
-  - `screen.SCREEN_PRIOR_S_BY_TF` = {"1d": 2.0, "1h": 30.0} plus
+    measured, rounded up to 10 s. 4h and 12h (plan 5, `fd0794887`) are the 1h
+    prior x the ratios measured in the 2026-10-31 D-i rehearsal, rounded up to
+    5 s; 15m and 30m stay unmeasured (the scaled fallback) until phase 3.
+  - `screen.SCREEN_PRIOR_S_BY_TF` = {"1d": 2.0, "1h": 30.0, "4h": 15.0,
+    "12h": 10.0} plus
     `screen_prior_s_for(tf)`. The 1h value is the MEAN measurement (20.38 s)
-    rounded up to 10 s, deliberately, unlike the gauntlet's.
+    rounded up to 10 s, deliberately, unlike the gauntlet's. 4h and 12h are
+    the 1h prior x the measured ratios (2026-10-31), rounded up to 5 s.
   - Both are conservative on purpose: the budget charges chunk wall / n
     across a pool, and a prior is judged only until a chunk of that
     timeframe has run. `DeadlineBudget` keeps its rates per timeframe
@@ -1631,8 +1765,9 @@ per window per bar; the percentile is an exact incremental one.
     One round (6 x 70 + 75 = 495 s) fits and records the pool's real rate.
     No candidate is reordered. The same cap applies to an unmeasured first
     1d chunk (24 becomes 6 once per run). A registry
-    that alternates timeframes shrinks chunks toward 1 spec: slower, chain
-    unchanged. The screen's early "not even one spec fits" exit uses the
+    that alternates timeframes still shrinks the GAUNTLET worker's chunks
+    toward 1 spec: slower, chain unchanged. The screen no longer does: it
+    groups its jobs by timeframe first (section "Switch 2"). The screen's early "not even one spec fits" exit uses the
     CHEAPEST prior in the registry (min, never max).
 - **Switch 2 gates (2026-10-19 final review): all four DONE in 2b-3 D-i
   (2026-10-29).** None was a defect at 1d; they were costs or edge cases that
@@ -1859,8 +1994,11 @@ per window per bar; the percentile is an exact incremental one.
   the plan, Coen-gated), not before. The Sentinel will watch its ledger (label
   `crypto_refresh`, 30 h proposed, pending Coen) and list 33 as "observing";
   that lands at merge (sc-ops-sentinel `feat/crypto-refresh-ledger`).
-- **What it fetches:** every cell of `cells.active_cells("crypto")` (76 USDT
-  assets at 1d), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
+- **What it fetches:** every cell of `refresh_cells(registry)` (the active
+  crypto cells, 304 since Switch 2, the 76 1d cells FIRST then the other 228 in
+  `active_cells` order, so the 08:12 hard stop reaches the 1d files the 08:20
+  quarantine and 08:45 signal service read before any intraday file; then every other cell a registered crypto
+  strategy runs on; section "Switch 2"), incrementally, through `crypto_data.fetch_symbol(..., end_ms=)`;
   it only APPENDS, never repairs or trims rows. **End cap:** every fetch is
   capped at 00:00 UTC of today's UTC date (`crypto_data.
   last_complete_utc_day_end_ms`), so no bar dated "today UTC" is ever written,
@@ -1941,7 +2079,8 @@ unusable file is one `feed_hole` "cannot scan" item).
   a hole) and is itself ONE `feed_hole` item keyed by the file name.
 - **Owners (who raises and who clears an item):**
   1. the `crypto_refresh` ledger (`logs/degraded_crypto_refresh.json`): holes
-     for every ACTIVE 1d cell, stale only for cells fetched OK;
+     for every refreshed cell (the active cells plus registered extras), stale
+     only for cells fetched OK;
   2. the quarantine fetch-owed step (`logs/degraded_quarantine.json`): the
      owed intraday cells, items owned via `quarantine.FETCH_STEP_SOURCES`
      (`intraday_fetch_failed`, `feed_hole`, `feed_stale`); `--date` and
@@ -1991,7 +2130,7 @@ unusable file is one `feed_hole` "cannot scan" item).
   composer's pooled path (`expand_family`, `ALLOWED_ASSETS`, `UNIVERSE_BASE`,
   `COST_MODEL`) is DELETED and `cells.CLASSES["crypto"]["cost_model"]` is the
   one source (10 bps commission + 5 bps slippage per side). Switch 2
-  (intraday) is a later plan.
+  (intraday) followed in 2b-3 plan 5 (section "Switch 2").
 - **The pooled path is retired.** Every pre-switch crypto strategy (533 at
   2026-10-17: 431 graveyard, 102 quarantine) is a pooled `[BTCUSD, ETHUSD]`
   spec; they stay on the chain and re-simulate forever; nothing about them is
@@ -2062,14 +2201,14 @@ unusable file is one `feed_hole` "cannot scan" item).
   constant): each key
   well-formed, a DECLARED cell of a declared class, and not also in
   `RETIRED_CELLS`. It accepts ANY declared cell, including one outside the
-  current gate (`X@1h` while the gate is 1d only is a silent no-op); plan 5 may
-  tighten that in the Switch 2 commit. **Hazard:** an excluded cell that
+  current gate (`X@1h` while the gate is 1d only is a silent no-op); plan 5 did
+  not tighten it (the Switch 2 commit left the check as it was). **Hazard:** an excluded cell that
   already has registered strategies stops being fetched (it is no longer
   active), so those strategies park at `stale_data` exactly like an
   unretired dead cell above: exclude only cells with no registered
   strategies. Growing the set is a denominator event in Coen's own reviewed
-  commit; plan 5 fills it from the phase-2 prefetch admission rows (which is
-  why the prefetch still fetches excluded cells). Tests: `test_cells.py`.
+  commit; plan 5 read the phase-2 prefetch admission rows and excluded nothing
+  (which is why the prefetch still fetches excluded cells). Tests: `test_cells.py`.
 - **Merge-day facts (Task 12, Coen-gated, by day, shared tree):**
   1. `python -m tools.grid_switch preflight --registry <live registry> --loop-state
      <live loop_state.json>` must exit 0 BEFORE merging: it lists any legacy
