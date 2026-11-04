@@ -112,3 +112,35 @@ def cut_partition(returns_by_id: dict) -> PartitionCut:
         labels[i] = k_tree
     k = k_tree + (1 if zero_ids else 0)
     return PartitionCut(k, labels, len(zero_ids), late)
+
+
+def effective_trials_by_cell(returns_by_id: dict, key_of: dict) -> dict:
+    """Registry-wide count: sum of per-partition cuts (design s4 steps 5-7).
+
+    Partitions are cut in sorted key order and their labels offset by the k of
+    the earlier ones. trials_var pools every cluster representative (mean member
+    Sharpe) through cluster._reps_variance over all sorted ids; a never-traded
+    cluster's representative is 0.0 and enters once, however many rows it holds.
+    """
+    groups: dict[str, dict] = {}
+    for sid in sorted(returns_by_id):
+        groups.setdefault(key_of[sid], {})[sid] = returns_by_id[sid]
+    labels: dict[str, int] = {}
+    by_partition: dict[str, dict] = {}
+    offset = late = sum_n2 = largest = 0
+    for key in sorted(groups):
+        part = groups[key]
+        cut = cut_partition(part)
+        for sid, lab in cut.labels.items():
+            labels[sid] = lab + offset
+        offset += cut.k
+        late += cut.late_merges
+        n = len(part)
+        sum_n2 += n * n
+        largest = max(largest, n)
+        by_partition[key] = {"n": n, "k": cut.k, "never_traded": cut.never_traded}
+    ids = sorted(returns_by_id)
+    var = _reps_variance(returns_by_id, ids, labels) if ids else 0.0
+    return {"trials_n": offset, "cluster_labels": labels, "trials_var": var,
+            "partitions": len(groups), "largest_partition_n": largest,
+            "late_merges": late, "sum_n2": sum_n2, "by_partition": by_partition}

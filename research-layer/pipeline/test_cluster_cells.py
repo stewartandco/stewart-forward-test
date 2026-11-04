@@ -4,12 +4,15 @@ Run: python -m pytest pipeline/test_cluster_cells.py -q
 """
 from __future__ import annotations
 
+import statistics
+
 import numpy as np
 import pytest
 
 from . import cluster, cluster_cells
 from .cluster_cells import (CUT_DISTANCE, CUT_RHO, ConstantNonzeroRow,
-                            cut_partition, merge_heights, partition_key)
+                            cut_partition, effective_trials_by_cell,
+                            merge_heights, partition_key)
 
 L = 60
 
@@ -173,3 +176,101 @@ def test_matches_scipy_fcluster_on_block_fixture():
     r = cut_partition(rows)
     assert r.k == expect
     assert 1 < r.k < 60
+
+
+# ---- registry-wide aggregation (Task 2) ----
+
+def _blocks(prefix: str, k: int, per: int, seed: int) -> dict:
+    """k well separated groups of `per` near-duplicate rows."""
+    rng = np.random.default_rng(seed)
+    out = {}
+    for g in range(k):
+        base = rng.standard_normal(L)
+        for j in range(per):
+            out[f"{prefix}{g}_{j}"] = (base + 0.01 * rng.standard_normal(L)).tolist()
+    return out
+
+
+def _three_partitions():
+    rows, key_of = {}, {}
+    for prefix, k, seed, key in (("a", 2, 1, "A"), ("b", 1, 2, "B"), ("c", 3, 3, "C")):
+        part = _blocks(prefix, k, 2, seed)
+        rows.update(part)
+        key_of.update({sid: key for sid in part})
+    return rows, key_of
+
+
+def test_trials_n_is_the_sum_of_partition_k():
+    rows, key_of = _three_partitions()
+    r = effective_trials_by_cell(rows, key_of)
+    assert [r["by_partition"][k]["k"] for k in "ABC"] == [2, 1, 3]
+    assert r["trials_n"] == 6
+    assert r["partitions"] == 3
+
+
+def test_labels_offset_in_sorted_key_order():
+    rows, key_of = _three_partitions()
+    r = effective_trials_by_cell(rows, key_of)
+    lab = r["cluster_labels"]
+    assert {lab[s] for s in rows if key_of[s] == "A"} == {0, 1}
+    assert {lab[s] for s in rows if key_of[s] == "B"} == {2}
+    assert {lab[s] for s in rows if key_of[s] == "C"} == {3, 4, 5}
+
+
+def test_pooled_variance_matches_hand_computation():
+    rows, key_of = _three_partitions()
+    r = effective_trials_by_cell(rows, key_of)
+    groups = {}
+    for sid, lab in r["cluster_labels"].items():
+        groups.setdefault(lab, []).append(sid)
+    reps = [sum(cluster._sharpe(rows[s]) for s in g) / len(g)
+            for g in groups.values()]
+    assert r["trials_var"] == pytest.approx(statistics.variance(reps), rel=1e-12)
+
+
+def test_never_traded_representative_enters_once():
+    base = _blocks("a", 2, 2, 7)
+    key_one = {s: "A" for s in base}
+    key_one["z0"] = "Z"
+    one = dict(base, z0=[0.0] * L)
+    three = dict(one, z1=[0.0] * L, z2=[0.0] * L)
+    key_three = dict(key_one, z1="Z", z2="Z")
+    r1 = effective_trials_by_cell(one, key_one)
+    r3 = effective_trials_by_cell(three, key_three)
+    assert r1["trials_var"] == r3["trials_var"]
+    assert r1["trials_n"] == r3["trials_n"] == 3
+    assert r3["by_partition"]["Z"] == {"n": 3, "k": 1, "never_traded": 3}
+
+
+def test_order_independence():
+    rows, key_of = _three_partitions()
+    base = effective_trials_by_cell(rows, key_of)
+    rng = np.random.default_rng(0)
+    sids = list(rows)
+    rng.shuffle(sids)
+    rows2 = {s: rows[s] for s in sids}
+    key2 = {s: key_of[s] for s in reversed(sids)}
+    assert effective_trials_by_cell(rows2, key2) == base
+
+
+def test_other_partitions_do_not_change_a_partition():
+    rows, key_of = _three_partitions()
+    full = effective_trials_by_cell(rows, key_of)
+    keep = {s for s in rows if key_of[s] != "B"}
+    sub = effective_trials_by_cell({s: rows[s] for s in keep},
+                                   {s: key_of[s] for s in keep})
+    assert sub["by_partition"]["A"] == full["by_partition"]["A"]
+    assert "B" not in sub["by_partition"]
+
+
+def test_sum_n2_and_largest():
+    rows, key_of = {}, {}
+    for key, n, seed in (("A", 3, 1), ("B", 1, 2), ("C", 5, 3)):
+        part = random_rows(n, seed=seed)
+        for sid, v in part.items():
+            rows[f"{key}{sid}"] = v
+            key_of[f"{key}{sid}"] = key
+    r = effective_trials_by_cell(rows, key_of)
+    assert r["sum_n2"] == 35
+    assert r["largest_partition_n"] == 5
+    assert r["late_merges"] == 0
