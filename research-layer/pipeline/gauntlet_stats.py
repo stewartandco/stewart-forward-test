@@ -142,34 +142,28 @@ SERIES_CHUNK = 10
 # (about 1.5 h at 11.8k strategies, Ruling 13). Each PBO null likewise needs
 # the measured mean (status `pbo_null_mean_s`) or gauntlet's PBO_NULL_PRIOR_S.
 CLUSTER_PRIOR_S = 2 * 3600.0
-# Incident 2026-10-11: clustering holds one n x n float64 matrix (8 n^2
-# bytes) plus transients; the 2026-10-11 constant was 14 bytes per n^2,
-# from step 7's +2.4 GB at n = 13,730 (replaced 2026-11-01, below). Its
-# merge loop updates a whole
-# column per merge, so it touches every page of the matrix every merge: if
-# any of it is paged out the pass thrashes (19,092 series: ~4.9 GB needed,
-# 1.4 GB free, 5.8 GB committed but 44 MB resident, 90 min and counting when
-# killed). So the pass starts only when AVAILABLE PHYSICAL memory covers
-# it; otherwise the run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`)
-# and the next one retries. The time estimate also scales with n^2 from the n it was
-# measured at (`cluster_n`, carried forward like `cluster_s`).
-# Re-measured 2026-11-01 (Coen: fix the gate only, cluster.py unchanged), on
-# the REAL aligned matrix (n = 26,835, L = 1,303 common days): peak private
-# commit 6,896 MB = 8.4 n^2 + 34 n L bytes (one n x n matrix at a time plus
-# the n x L copies inside effective_trials; the n L term held at 34-39 B from
-# n = 4,000 to 26,835, and synthetic runs to 12,000 fit the same model;
-# verify_cluster_identity's own peak read +2,104 MB at 13,730 and +6,857 MB at
-# 26,835 on the same matrix). The merge history's member sets are the one
-# other n^2-shaped term: 0.008-0.012 n^2 entries measured (about 0.35 B per
-# n^2, inside the 8.4); a chain-like merge tree would grow it. The
-# old 14 n^2 came from ONE reading at n = 13,730 that folded the n L term into
-# n^2, so it overstated the need more as n grows. The gate adds 8 B per n L for
-# cluster_registry's aligned copies (built before effective_trials, alive
-# through it) and rounds both up: 9 n^2 + 48 n L, about 10% over the
-# measurement. `available_phys_mb` is read after the series pass, so memory
-# already held is not charged again.
+# Memory gate (spec s5, effective trials per cell). The clustering runs one
+# partition at a time, so the pass holds ONE n_max x n_max float64 matrix
+# (n_max = the largest partition's series count), not a registry-wide n x n.
+# Its merge loop touches every page of that matrix every merge: if any of it
+# is paged out the pass thrashes (2026-10-11: 19,092 series, ~4.9 GB needed,
+# 1.4 GB free, killed after 90 min). So the pass starts only when AVAILABLE
+# PHYSICAL memory covers the need; otherwise the run stops (exit
+# DEFERRED_MEMORY_EXIT, `deferred_memory`) and the next one retries.
+# need = 9 n_max^2 + 48 n_max L + 10 n L bytes (n series in all, L aligned
+# days): the first two are the largest partition's matrix and its n_max x L
+# copies, the last is cluster_registry_by_cell's aligned copies of ALL n
+# series (built up front, alive through the pass). `available_phys_mb` is
+# read after the series pass, so memory already held is not charged again.
+# The 10 B per aligned n L is provisional (Task 6 re-measures it).
+# History: 14 n^2 (2026-10-11, one reading at n = 13,730) became 9 n^2 +
+# 48 n L on 2026-11-01 (real matrix n = 26,835, L = 1,303: peak 6,896 MB =
+# 8.4 n^2 + 34 n L, plus 8 B per n L for the aligned copies, ~10% margin).
+# The time estimate scales by the ratio of sum n_k^2 over partitions (the
+# status carries `cluster_sum_n2` forward like `cluster_s`).
 CLUSTER_BYTES_PER_N2 = 9.0
 CLUSTER_BYTES_PER_NL = 48.0
+CLUSTER_BYTES_PER_ALIGNED_NL = 10.0
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
@@ -580,22 +574,59 @@ def _prior_cluster_n(logs_dir: Path) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
-def cluster_estimate_s(prior_s: float | None, prior_n: int | None, n: int) -> float:
+def _prior_cluster_sum_n2(logs_dir: Path) -> int | None:
+    """The sum of squared partition sizes `cluster_s` was measured at
+    (carried forward with it); None when the last status has none (a status
+    written by the registry-wide method has no such field)."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    v = st.get("cluster_sum_n2") if isinstance(st, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def cluster_estimate_s(prior_s: float | None, prior_sum_n2: int | None,
+                       sum_n2: int) -> float:
     """The clustering pass's expected duration: the last measured one scaled
-    by (n / the n it was measured at)^2, the pass being O(n^2) per merge
-    sweep; unscaled when that n is unknown; CLUSTER_PRIOR_S before any
+    by (sum n_k^2 now / sum n_k^2 when it was measured) -- the pass is a sum
+    of per-partition O(n_k^2) sweeps; unscaled when that sum is unknown (a
+    status from the registry-wide method); CLUSTER_PRIOR_S before any
     measurement."""
     if not prior_s:
         return CLUSTER_PRIOR_S
-    if prior_n and n > 0:
-        return prior_s * (n / prior_n) ** 2
+    if prior_sum_n2 and sum_n2 > 0:
+        return prior_s * (sum_n2 / prior_sum_n2)
     return prior_s
 
 
-def cluster_need_mb(n: int, days: int) -> int:
-    """MiB a clustering pass over n series of `days` aligned days needs."""
-    return math.ceil((CLUSTER_BYTES_PER_N2 * n * n
-                      + CLUSTER_BYTES_PER_NL * n * days) / 2**20)
+def cluster_need_mb(n: int, n_max: int, days: int) -> int:
+    """MiB a per-cell clustering pass needs: the largest partition's n_max x
+    n_max matrix and its n_max x `days` copies, plus the aligned copies of
+    all n series."""
+    return math.ceil((CLUSTER_BYTES_PER_N2 * n_max * n_max
+                      + CLUSTER_BYTES_PER_NL * n_max * days
+                      + CLUSTER_BYTES_PER_ALIGNED_NL * n * days) / 2**20)
+
+
+def _partition_sizes(specs: list[dict], sids) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for s in specs:
+        if s["strategy_id"] in sids:
+            k = cluster_cells.partition_key(s)
+            sizes[k] = sizes.get(k, 0) + 1
+    return sizes
+
+
+def largest_partition_n(specs: list[dict], sids) -> int:
+    """Series count of the largest partition among the specs whose series
+    exist (`sids`), known before clustering."""
+    return max(_partition_sizes(specs, sids).values(), default=0)
+
+
+def partition_sum_n2(specs: list[dict], sids) -> int:
+    """Sum of squared partition sizes over the specs whose series exist."""
+    return sum(n * n for n in _partition_sizes(specs, sids).values())
 
 
 def cluster_days_bound(dated: dict) -> int:
@@ -652,6 +683,7 @@ def run(argv: list[str] | None = None) -> int:
     vintage = vintage_date(date.today())
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     prior_cluster_n = _prior_cluster_n(a.logs_dir)
+    prior_cluster_sum_n2 = _prior_cluster_sum_n2(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -669,7 +701,9 @@ def run(argv: list[str] | None = None) -> int:
               # this run's admission check, when it got that far (2026-10-11)
               "cluster_need_mb": None, "avail_phys_mb": None,
               # this run's clustering shape, once it has clustered (spec s6)
-              "cluster_max_cell_n": None, "cluster_sum_n2": None,
+              "cluster_max_cell_n": None,
+              # carried forward until this run clusters, like cluster_s
+              "cluster_sum_n2": prior_cluster_sum_n2,
               "cut_late_merges": None,
               "exit_reason": None}
     extra: dict = {}
@@ -797,7 +831,13 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         # kill with no status written. The time left must cover the estimate
         # (last measured duration, else CLUSTER_PRIOR_S), not merely be > 0.
         n_cluster = len(dated)
-        cluster_est = cluster_estimate_s(prior_cluster_s, status["cluster_n"], n_cluster)
+        # The partitions are known before clustering (spec s5): the gate and
+        # the estimate read them from the specs whose series exist.
+        sids = set(dated)
+        n_max = largest_partition_n(all_specs, sids)
+        sum_n2 = partition_sum_n2(all_specs, sids)
+        cluster_est = cluster_estimate_s(prior_cluster_s, status["cluster_sum_n2"],
+                                         sum_n2)
         left_s = t_end - time.time()
         if left_s < cluster_est:
             status["stopped_at_deadline"] = True
@@ -805,14 +845,15 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"{max(left_s, 0.0):.0f}s left is under the clustering estimate "
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
-        need_mb = cluster_need_mb(n_cluster, cluster_days_bound(dated))
+        need_mb = cluster_need_mb(n_cluster, n_max, cluster_days_bound(dated))
         avail_mb = available_phys_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
         if avail_mb is not None and avail_mb < need_mb:
-            print(f"MEMORY: clustering {n_cluster} series needs ~{need_mb} MB of "
-                  f"physical memory and {avail_mb} MB is available; not started "
-                  f"(it would page and thrash). Series are cached; the next run "
-                  f"retries.", flush=True)
+            print(f"MEMORY: clustering {n_cluster} series (largest partition "
+                  f"{n_max}) needs ~{need_mb} MB of physical memory and "
+                  f"{avail_mb} MB is available; not started (it would page and "
+                  f"thrash). Series are cached; the next run retries.",
+                  flush=True)
             return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()
         try:

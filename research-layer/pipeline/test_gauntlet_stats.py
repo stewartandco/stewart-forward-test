@@ -1586,26 +1586,80 @@ def test_a_huge_integer_is_no_sr_star_floor_and_does_not_raise():
 
 # ---- 2026-10-11 orphan incident: cluster admission ----
 
-def test_cluster_estimate_scales_with_n_squared():
-    assert gs.cluster_estimate_s(None, None, 19092) == gs.CLUSTER_PRIOR_S
-    assert gs.cluster_estimate_s(374.1, None, 19092) == 374.1
-    est = gs.cluster_estimate_s(374.1, 17333, 19092)
-    assert abs(est - 374.1 * (19092 / 17333) ** 2) < 1e-9 and est > 450
+def test_estimate_scales_by_sum_n2():
+    """Spec s5: the pass is a sum of per-partition n^2 sweeps, so the last
+    measured duration scales LINEARLY in the ratio of the sums."""
+    assert gs.cluster_estimate_s(None, None, 2_000_000) == gs.CLUSTER_PRIOR_S
+    assert gs.cluster_estimate_s(100.0, 1_000_000, 2_000_000) == 200.0
+    assert gs.cluster_estimate_s(100.0, 2_000_000, 1_000_000) == 50.0
 
 
-def test_cluster_need_matches_the_measured_footprint():
-    # 2026-11-01, real aligned matrix: 6,896 MB peak at n = 26,835, L = 1,303;
-    # the gate covers it with a margin but does not drift back to 14 n^2
-    need = gs.cluster_need_mb(26835, 1303)
-    assert 6896 * 1.05 < need < 6896 * 1.25
-    assert need < math.ceil(14.0 * 26835 ** 2 / 2**20)
-    # step 7's own instrument (tools/verify_cluster_identity.py peak) on the
-    # same matrix, 2026-11-01: +2,104 MB at n = 13,730 and +6,857 MB at 26,835
-    assert gs.cluster_need_mb(13730, 1303) > 2104 * 1.10
-    assert gs.cluster_need_mb(26835, 1303) > 6857 * 1.10
+def test_estimate_unscaled_without_prior_sum_n2():
+    """Review Focus 1: the first run after cutover reads a status written by
+    the old method (cluster_s, cluster_n, no cluster_sum_n2): the prior is
+    used unscaled, never scaled by a missing value."""
+    assert gs.cluster_estimate_s(129.1, None, 5_000_000) == 129.1
+    assert gs.cluster_estimate_s(129.1, 0, 5_000_000) == 129.1
+
+
+def test_prior_cluster_sum_n2_reads_only_a_positive_int(tmp_path):
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None          # no status
+    for bad in (None, 0, -5, True, 1.5, "9"):
+        _seed_status(tmp_path, cluster_sum_n2=bad)
+        assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None, bad
+    _seed_status(tmp_path, cluster_s=129.1, cluster_n=26835)  # old-method status
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None
+    _seed_status(tmp_path, cluster_sum_n2=123456)
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") == 123456
+
+
+def _cell_spec(sid, *assets):
+    return {"strategy_id": sid,
+            "universe": {"assets": list(assets), "asset_class": "crypto",
+                         "timeframe": "1d", "session": "24x7"}}
+
+
+def test_partition_helpers_count_the_series_that_exist():
+    specs = [_cell_spec("a", "BTCUSDT"), _cell_spec("b", "BTCUSDT"),
+             _cell_spec("c", "BTCUSDT"), _cell_spec("d", "ETHUSDT"),
+             _cell_spec("e", "ETHUSDT"), _cell_spec("z", "SOLUSDT")]
+    sids = {"a", "b", "c", "d", "e"}                   # z has no series
+    assert gs.largest_partition_n(specs, sids) == 3
+    assert gs.partition_sum_n2(specs, sids) == 3 * 3 + 2 * 2
+    assert gs.largest_partition_n(specs, set()) == 0
+    assert gs.partition_sum_n2(specs, set()) == 0
+
+
+def test_need_uses_the_largest_partition():
+    """Spec s5: one n_max x n_max matrix at a time, plus the aligned copies
+    of ALL n series (10 B per n L). 29,180 series, largest partition 1,068,
+    1,308 aligned days: 438 MiB."""
+    assert gs.CLUSTER_BYTES_PER_ALIGNED_NL == 10.0
+    assert gs.cluster_need_mb(29180, 1068, 1308) == 438
+    assert gs.cluster_need_mb(29180, 1068, 1308) == math.ceil(
+        (9.0 * 1068 ** 2 + 48.0 * 1068 * 1308 + 10.0 * 29180 * 1308) / 2**20)
+    assert gs.cluster_need_mb(0, 0, 1303) == 0
+
+
+def test_need_grows_with_n_max_squared_not_n():
+    """Doubling n at a fixed n_max changes only the aligned term."""
+    base = gs.cluster_need_mb(10000, 1000, 1300)
+    doubled = gs.cluster_need_mb(20000, 1000, 1300)
+    assert doubled - base in (
+        math.ceil(10.0 * 10000 * 1300 / 2**20) - 1,
+        math.ceil(10.0 * 10000 * 1300 / 2**20),
+        math.ceil(10.0 * 10000 * 1300 / 2**20) + 1)
+    # doubling n_max at a fixed n quadruples the matrix term
+    quad = gs.cluster_need_mb(10000, 2000, 1300) - gs.cluster_need_mb(10000, 0, 1300)
+    one = gs.cluster_need_mb(10000, 1000, 1300) - gs.cluster_need_mb(10000, 0, 1300)
+    assert quad > 2 * one
+    # the registry-wide n^2 of the old model is gone: 26,835 in one partition
+    # still costs what the 2026-11-01 measurement said (6,896 MB), with margin
+    one_big = gs.cluster_need_mb(26835, 26835, 1303)
+    assert 6896 * 1.05 < one_big < 6896 * 1.30
+    assert gs.cluster_need_mb(26835, 1068, 1303) < one_big / 10
     # the n x L term counts: more aligned days, more memory
-    assert gs.cluster_need_mb(20000, 2000) > gs.cluster_need_mb(20000, 1000)
-    assert gs.cluster_need_mb(0, 1303) == 0
+    assert gs.cluster_need_mb(20000, 800, 2000) > gs.cluster_need_mb(20000, 800, 1000)
 
 
 def test_cluster_days_bound_is_the_shortest_series():
@@ -1629,7 +1683,7 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
     calls = _count_clustering(monkeypatch)
-    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, days: 4500)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 1400)
     assert gs.DEFERRED_MEMORY_EXIT == 3
     assert _stats_run(reg, data, tmp_path, 5.75) == 3
@@ -1645,8 +1699,8 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
 
 
 def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, monkeypatch):
-    """The gate's need is cluster_need_mb(len(dated), cluster_days_bound(dated)),
-    computed on the series the clustering is about to run on."""
+    """The gate's need is cluster_need_mb(len(dated), n_max, cluster_days_bound
+    (dated)), computed on the series the clustering is about to run on."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
@@ -1656,8 +1710,9 @@ def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, m
         seen["dated"] = (len(dated), min(len(s) for s in dated.values()))
         return 4242
 
-    def need(n_series, days):
+    def need(n_series, n_max, days):
         seen["need"] = (n_series, days)
+        seen["n_max"] = n_max
         return 1
 
     monkeypatch.setattr(gs, "cluster_days_bound", bound)
@@ -1665,7 +1720,51 @@ def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, m
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 8000)
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert seen["need"] == (seen["dated"][0], 4242) and seen["dated"][1] > 0
+    assert seen["n_max"] == 1                    # one spec, one partition
     assert _status(tmp_path)["cluster_need_mb"] == 1
+
+
+def test_gate_reads_n_max_before_clustering(tmp_path, monkeypatch):
+    """The gate's n_max is the PRE-clustering largest partition from
+    largest_partition_n: a need that is high for a whole-registry partition
+    but low for a smaller n_max clusters (exit 0); with the real helper's
+    n_max (== n here) the same stub defers (exit 3, deferred_memory)."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    seen = []
+
+    def need(n_series, n_max, days):
+        seen.append((n_series, n_max))
+        return 4000 if n_max >= n_series else 300
+
+    monkeypatch.setattr(gs, "cluster_need_mb", need)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 1000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3          # real n_max == n
+    assert not calls and seen == [(1, 1)]
+    monkeypatch.setattr(gs, "largest_partition_n", lambda specs, sids: 0)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0           # per-cell fits
+    assert calls == [1] and seen[-1] == (1, 0)
+    assert _status(tmp_path)["exit_reason"] == "done"
+
+
+def test_deferred_memory_still_exit_3(tmp_path, monkeypatch, capsys):
+    """A per-cell need above the free memory is exit 3 deferred_memory, and
+    the message names the largest partition."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 0)
+    assert gs.DEFERRED_MEMORY_EXIT == 3
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    assert not calls
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deferred_memory"
+    assert st["cluster_need_mb"] > 0 and st["avail_phys_mb"] == 0
+    out = capsys.readouterr().out
+    assert "MEMORY: clustering" in out and "largest partition" in out
 
 
 def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):
@@ -1678,27 +1777,34 @@ def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):
     assert calls == [1]
 
 
-def test_cluster_n_is_carried_and_scales_the_estimate(tmp_path, monkeypatch):
-    """The estimate is the measured cluster_s scaled by (n / cluster_n)^2.
-    The fixture has one series: 600 s measured at 10 series scales to 6 s,
-    which fits in 100 s left where the unscaled 600 s would not. Without a
-    cluster_n the same seed is a deadline stop, and cluster_s/cluster_n are
-    carried forward unchanged by a run that does not cluster."""
+def test_cluster_sum_n2_is_carried_and_scales_the_estimate(tmp_path, monkeypatch):
+    """The estimate is the measured cluster_s scaled by sum_n2 / cluster_sum_n2.
+    The fixture has one series (sum_n2 1): 600 s measured at sum_n2 100 scales
+    to 6 s, which fits in 100 s left where the unscaled 600 s would not.
+    Without a cluster_sum_n2 (an old-method status) the same seed is a
+    deadline stop, and cluster_s / cluster_n / cluster_sum_n2 are carried
+    forward unchanged by a run that does not cluster."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     _frozen(monkeypatch)
     calls = _count_clustering(monkeypatch, advance_s=5.0)
     hours = 100.0 / 3600
-    _seed_status(tmp_path, cluster_s=600.0)                 # no n: unscaled
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10)   # old method: unscaled
     assert _stats_run(reg, data, tmp_path, hours) == 0
     st = _status(tmp_path)
-    assert not calls and (st["exit_reason"], st["cluster_n"]) == ("deadline", None)
-    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10)
+    assert not calls and (st["exit_reason"], st["cluster_n"]) == ("deadline", 10)
+    assert st["cluster_s"] == 600.0 and st["cluster_sum_n2"] is None
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10, cluster_sum_n2=100)
+    assert _stats_run(reg, data, tmp_path, 100.0 / 3600 / 100) == 0   # 1 s left
+    st = _status(tmp_path)                       # a non-clustering night carries it
+    assert not calls and st["exit_reason"] == "deadline"
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (600.0, 10, 100)
     assert _stats_run(reg, data, tmp_path, hours) == 0
     st = _status(tmp_path)
     assert calls == [1] and st["exit_reason"] == "done"
-    assert (st["cluster_s"], st["cluster_n"]) == (5.0, 1)   # re-measured at n = 1
+    # re-measured at n = 1, sum_n2 = 1
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (5.0, 1, 1)
 
 
 def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
