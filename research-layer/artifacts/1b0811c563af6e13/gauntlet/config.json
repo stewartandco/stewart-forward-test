@@ -1,0 +1,194 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CRVUSDT_4h": "2026-11-03 20:00:00"
+ },
+ "data_sha256": {
+  "CRVUSDT_4h": "8444e404eb64b9f3315449fe80e05f9292d5b06c734118168b4c42a81d6551a9"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.571076668869795,
+   "excess": 0.6421386234554762,
+   "strategy_net": 0.07106195458568121,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.06539684843855187,
+  "edge_decay_pct": 31.185410036399425,
+  "exit_reasons_is": {
+   "signal:channel_exit": 66,
+   "stop": 15
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 62,
+   "stop": 9
+  },
+  "fail_reason": "mc_p05",
+  "is_edge_per_trade": 0.0008599169498331646,
+  "is_edge_raw": 0.001320341985123218,
+  "is_vol": 1.5354296544327708,
+  "mc_p05_equity": 0.8605385473931405,
+  "oos_edge_per_trade": 0.001128085576611136,
+  "oos_edge_raw": 0.001184656874858423,
+  "oos_vol": 1.0501480556264462,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.5029811494424022,
+   "dense_only": true,
+   "mean_ratio": 0.8922476334055951,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 75,
+     "ratio": 1.0155490905485436,
+     "score": 0.5108020488792927,
+     "to": 55
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 75,
+     "ratio": 0.7689461762626465,
+     "score": 0.38676543159592597,
+     "to": 100
+    }
+   ],
+   "worst_ratio": 0.7689461762626465
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 3,
+     "net": 0.00800068644646925,
+     "win_rate": 0.3333333333333333,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 46,
+     "net": 0.16932728769880656,
+     "win_rate": 0.32608695652173914,
+     "wins": 15
+    },
+    "trend_up": {
+     "n": 22,
+     "net": -0.09321733603032781,
+     "win_rate": 0.09090909090909091,
+     "wins": 2
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5029811494424022,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9806480222751034,
+     "n_trades": 25,
+     "net": 0.010165421566271735
+    },
+    {
+     "min_equity": 0.9838144511689464,
+     "n_trades": 30,
+     "net": 0.007910668954154494
+    },
+    {
+     "min_equity": 0.9896651033101206,
+     "n_trades": 26,
+     "net": 0.08887161027455445
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 75
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "CRV 4h range_breakout_both_sides dboth l75 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:CRVUSDT_4h"
+  },
+  "strategy_id": "1b0811c563af6e13",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "CRVUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

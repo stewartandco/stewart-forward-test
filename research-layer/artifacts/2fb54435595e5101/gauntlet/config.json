@@ -1,0 +1,228 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CAKEUSDT_1h": "2026-11-03 23:00:00"
+ },
+ "data_sha256": {
+  "CAKEUSDT_1h": "f35ede7063e77994448b6258a73288e83971afea6963a766cae02ff82681bcc0"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.45778110599078337,
+   "excess": 0.261020074787066,
+   "strategy_net": -0.19676103120371735,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.3230050381184988,
+  "edge_decay_pct": -101.07712853374822,
+  "exit_reasons_is": {
+   "signal:regime_flip": 115,
+   "stop": 68
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 128,
+   "stop": 95
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.004075052688708945,
+  "is_edge_raw": 0.004519869722976369,
+  "is_vol": 1.1091561430604104,
+  "mc_p05_equity": 0.35084412587069613,
+  "oos_edge_per_trade": -4.389355527535725e-05,
+  "oos_edge_raw": -4.0163888819847524e-05,
+  "oos_vol": 0.9150292922933122,
+  "open_at_end": false,
+  "p_ruin": 0.2525,
+  "perturbation": {
+   "base_score": 0.7689144463241474,
+   "dense_only": true,
+   "mean_ratio": 0.45238289424192546,
+   "n_perturbations": 5,
+   "reason": null,
+   "results": [
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 34,
+     "ratio": 0.2818487595871781,
+     "score": 0.21671758292512278,
+     "to": 20
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 130,
+     "ratio": 0.5486629774339533,
+     "score": 0.42187488951218644,
+     "to": 80
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 130,
+     "ratio": -0.47977210213340926,
+     "score": -0.3689037002736827,
+     "to": 200
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.9202066099040501,
+     "score": 0.7075601559581934,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 0.990968226417855,
+     "score": 0.7619697851409073,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": -0.47977210213340926
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 30,
+     "net": 0.2958330137054712,
+     "win_rate": 0.4,
+     "wins": 12
+    },
+    "trend_down": {
+     "n": 114,
+     "net": -0.3902796116524035,
+     "win_rate": 0.17543859649122806,
+     "wins": 20
+    },
+    "trend_up": {
+     "n": 79,
+     "net": 0.08549005074010631,
+     "win_rate": 0.26582278481012656,
+     "wins": 21
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.7689144463241474,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9889154323351574,
+     "n_trades": 58,
+     "net": 0.47979703101906446
+    },
+    {
+     "min_equity": 0.8220444126718274,
+     "n_trades": 65,
+     "net": -0.10078784370160429
+    },
+    {
+     "min_equity": 0.891925313462435,
+     "n_trades": 60,
+     "net": 0.448126971987215
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 34,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "symmetric_ma_trend_speed_scan",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "CAKE 1h symmetric_ma_trend_speed_scan dboth f34 s130 al14 m2.5 ml150 f0.02",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "1be665e133422ed2",
+    "2243c5930df5c5be",
+    "3605eedc183f09ce",
+    "4e907fc4974a48f9",
+    "6078cc70ec7b8303",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "be7a97c49de94b92",
+    "c7c0e61fc25e8ba1",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_ma_trend_speed_scan-2026-11-04-120010-loop-crypto:CAKEUSDT_1h"
+  },
+  "strategy_id": "2fb54435595e5101",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "CAKEUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

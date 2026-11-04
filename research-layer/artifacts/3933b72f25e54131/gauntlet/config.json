@@ -1,0 +1,194 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "VETUSDT_12h": "2026-11-03 12:00:00"
+ },
+ "data_sha256": {
+  "VETUSDT_12h": "dbfd69ee3e62e3a29d672cbf50b0d307087c57e2adafdbeb2c8b1ec08e17d811"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8381296242353626,
+   "excess": 0.8633081203334656,
+   "strategy_net": 0.025178496098102965,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.023887490055218175,
+  "edge_decay_pct": -64.4596405375441,
+  "exit_reasons_is": {
+   "signal:channel_exit": 43,
+   "stop": 5
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 21,
+   "stop": 5
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.0033559895441876634,
+  "is_edge_raw": 0.003972380467704125,
+  "is_vol": 1.183668904625763,
+  "mc_p05_equity": 1.0099225597247605,
+  "oos_edge_per_trade": 0.0011927307475267303,
+  "oos_edge_raw": 0.0010508237267715446,
+  "oos_vol": 0.8810234237279061,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.7708782939233818,
+   "dense_only": true,
+   "mean_ratio": 0.8511088941036018,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 1.011668559244419,
+     "score": 0.7798733329662634,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 0.6905492289627847,
+     "score": 0.5323294114929382,
+     "to": 75
+    }
+   ],
+   "worst_ratio": 0.6905492289627847
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 20,
+     "net": 0.02444272673899347,
+     "win_rate": 0.3,
+     "wins": 6
+    },
+    "trend_up": {
+     "n": 6,
+     "net": 0.0028786901570666927,
+     "win_rate": 0.3333333333333333,
+     "wins": 2
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.7708782939233818,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9898955555555555,
+     "n_trades": 15,
+     "net": 0.1042103007184372
+    },
+    {
+     "min_equity": 0.9805257668370101,
+     "n_trades": 15,
+     "net": 0.04878561817059214
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 18,
+     "net": 0.03767834356076864
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "VET 12h range_breakout_both_sides dboth l55 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:VETUSDT_12h"
+  },
+  "strategy_id": "3933b72f25e54131",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "VETUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

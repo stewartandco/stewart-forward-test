@@ -1,0 +1,185 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "JSTUSDT_4h": "2026-11-03 20:00:00"
+ },
+ "data_sha256": {
+  "JSTUSDT_4h": "a06c46496b7b1d6378d2e7102ea49be93c6c4340ce2f2679f12118ecb9793b37"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": 3.4751652529060637,
+   "excess": -3.5418398654571477,
+   "strategy_net": -0.06667461255108398,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.07431256682502951,
+  "edge_decay_pct": -267.9545129039828,
+  "exit_reasons_is": {
+   "signal:channel_exit": 44,
+   "stop": 11
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 48,
+   "stop": 11
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0010367808803551672,
+  "is_edge_raw": 0.0011375142941855644,
+  "is_vol": 1.0971597911758262,
+  "mc_p05_equity": 0.8358663794770146,
+  "oos_edge_per_trade": -0.0017413202774821455,
+  "oos_edge_raw": -0.0011324677844930958,
+  "oos_vol": 0.6503500815660302,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.31020832659893643,
+   "dense_only": true,
+   "mean_ratio": 1.3878462305302355,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 100,
+     "ratio": 1.3878462305302355,
+     "score": 0.4305214567494261,
+     "to": 75
+    }
+   ],
+   "worst_ratio": 1.3878462305302355
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 10,
+     "net": -0.016401465162676043,
+     "win_rate": 0.2,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 15,
+     "net": -0.013535210552396214,
+     "win_rate": 0.4,
+     "wins": 6
+    },
+    "trend_up": {
+     "n": 34,
+     "net": -0.036878923570020386,
+     "win_rate": 0.35294117647058826,
+     "wins": 12
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.31020832659893643,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9994901169405815,
+     "n_trades": 20,
+     "net": 0.0454810329320753
+    },
+    {
+     "min_equity": 0.9837083544623787,
+     "n_trades": 17,
+     "net": 0.06800469309813156
+    },
+    {
+     "min_equity": 0.9498561121703915,
+     "n_trades": 18,
+     "net": -0.05092243985000082
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "JST 4h range_breakout_both_sides dboth l100 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:JSTUSDT_4h"
+  },
+  "strategy_id": "b82c7f0bb0e9c2ee",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "JSTUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}
