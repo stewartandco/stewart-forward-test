@@ -615,8 +615,18 @@ def _write_report(path: Path, status: dict, extra: dict) -> None:
     lines = ["# gauntlet_stats report", "", "| key | value |", "|---|---|"]
     for k in STATUS_FIELDS:
         lines.append(f"| {k} | {_fmt(status.get(k))} |")
+    parts = extra.get("by_partition")
     for k, v in extra.items():
-        lines.append(f"| {k} | {_fmt(v)} |")
+        if k != "by_partition":
+            lines.append(f"| {k} | {_fmt(v)} |")
+    if parts:
+        # Spec s6: the FULL per-partition breakdown, sorted by key. Report
+        # only: never on a chain entry (spec s3).
+        lines += ["", "## partitions", "",
+                  "| partition | n | k | never_traded |", "|---|---|---|---|"]
+        for key in sorted(parts):
+            b = parts[key]
+            lines.append(f"| {key} | {b['n']} | {b['k']} | {b['never_traded']} |")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -815,14 +825,18 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         status["cluster_max_cell_n"] = clustered["largest_partition_n"]
         status["cluster_sum_n2"] = clustered["sum_n2"]
         status["cut_late_merges"] = clustered["late_merges"]
-        # Per-partition detail goes to the run log, never to a chain entry
-        # (spec s3) and not to the report's key/value table: top 20 by n.
+        # Per-partition detail: the FULL table to the report (spec s6), the
+        # top 20 by n to the run log; never on a chain entry (spec s3).
+        extra["by_partition"] = clustered["by_partition"]
         top = sorted(clustered["by_partition"].items(),
                      key=lambda kv: (-kv[1]["n"], kv[0]))[:20]
         print(f"gauntlet_stats: {clustered['partitions']} partitions, top "
               f"{len(top)} by n (key n k never_traded):", flush=True)
         for key, bp in top:
             print(f"  {key} {bp['n']} {bp['k']} {bp['never_traded']}", flush=True)
+        if a.report is not None:
+            print(f"gauntlet_stats: full per-partition table in {a.report}",
+                  flush=True)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
         # Ruling 35: ONE SR* floor per run, from the same single read.

@@ -391,7 +391,7 @@ def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path,
 
 # ---------------- fix round (Ruling 14): pin the data, not just the date ----------------
 
-def _mixed_twin(tmp_path, name, drop_eur_row):
+def _mixed_twin(tmp_path, name, drop_eur_row, report=None):
     """The mixed-class registry judged by the worker, then statted with
     --chain, on bars that are identical except that one EUR row (a weekday
     long BEFORE any vintage Sunday) can be withheld -- an fx row that arrives
@@ -433,7 +433,8 @@ def _mixed_twin(tmp_path, name, drop_eur_row):
                    "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
                    "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                   "--logs-dir", str(d / "logs"), "--cutoff", cutoff, "--chain"]) == 0
+                   "--logs-dir", str(d / "logs"), "--cutoff", cutoff, "--chain"]
+                  + (["--report", str(report)] if report else [])) == 0
     stats = {e["payload"]["strategy_id"]: e["payload"]
              for e in Registry(reg.log_path).entries()
              if e["entry_type"] == "gauntlet_stats"}
@@ -1420,24 +1421,38 @@ def test_the_amendment2_note_is_its_own_prefix():
     assert not gs.is_amendment2_note(None) and not gs.is_amendment2_note(7)
 
 
-def test_entries_carry_partition_fields_and_method(tmp_path, monkeypatch, capsys):
-    from . import cluster_cells
-    reg, data, logs, cutoff = _v61_sweep(tmp_path)
-    seen = _spy_clustering(monkeypatch)
-    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+def test_entries_carry_partition_fields_and_method(tmp_path, capsys):
+    """Multi-partition fixture (BTCUSD + GBP + EUR, one strategy each = 3
+    partitions of 1): literal values, so a constant or a len(registry) in
+    place of the real figure fails."""
+    stats, sids = _mixed_twin(tmp_path, "parts", drop_eur_row=False)
     capsys.readouterr()
-    ps = _stats_payloads(reg)
-    assert ps
-    for p in ps:
-        assert p["cluster_method"] == cluster_cells.METHOD == gs.CLUSTER_METHOD
+    assert len(stats) == 3
+    for p in stats.values():
+        assert p["cluster_method"] == "effective_trials/v4 per-cell average-linkage cut rho>=0.9"
         assert p["trials_cut_rho"] == 0.9
-        assert p["trials_partitions"] == seen["partitions"]
-        assert p["trials_largest_partition_n"] == seen["largest_partition_n"]
+        assert p["trials_partitions"] == 3
+        assert p["trials_largest_partition_n"] == 1
         assert "by_partition" not in p
-    st = json.loads((logs / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
-    assert st["cluster_max_cell_n"] == seen["largest_partition_n"]
-    assert st["cluster_sum_n2"] == seen["sum_n2"]
-    assert st["cut_late_merges"] == seen["late_merges"]
+    st = json.loads((tmp_path / "parts" / "logs" / "gauntlet_stats_status.json")
+                    .read_text(encoding="utf-8"))
+    assert st["cluster_max_cell_n"] == 1
+    assert st["cluster_sum_n2"] == 3
+    assert st["cut_late_merges"] == 0
+
+
+def test_report_holds_one_row_per_partition(tmp_path, capsys):
+    rep = tmp_path / "rep.md"
+    _mixed_twin(tmp_path, "rep", drop_eur_row=False, report=rep)
+    out = capsys.readouterr().out
+    lines = rep.read_text(encoding="utf-8").splitlines()
+    i = lines.index("| partition | n | k | never_traded |")
+    rows = [l for l in lines[i + 2:] if l.startswith("|")]
+    keys = [r.split("|")[1].strip() for r in rows]
+    assert len(rows) == 3 and keys == sorted(keys) and len(set(keys)) == 3
+    assert all(r.split("|")[2:5] == [" 1 ", " 1 ", " 0 "] for r in rows)
+    assert not any(l.startswith("| by_partition") for l in lines)
+    assert f"full per-partition table in {rep}" in out
 
 
 def test_floor_binds_when_the_cell_sum_is_below_it(tmp_path, monkeypatch, capsys):
