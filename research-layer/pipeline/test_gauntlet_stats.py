@@ -1450,7 +1450,9 @@ def test_report_holds_one_row_per_partition(tmp_path, capsys):
     rows = [l for l in lines[i + 2:] if l.startswith("|")]
     keys = [r.split("|")[1].strip() for r in rows]
     assert len(rows) == 3 and keys == sorted(keys) and len(set(keys)) == 3
-    assert all(r.split("|")[2:5] == [" 1 ", " 1 ", " 0 "] for r in rows)
+    assert [r.split("|")[1:5] for r in rows] == [
+        [" BTCUSD ", " 1 ", " 1 ", " 1 "], [" EUR ", " 1 ", " 1 ", " 1 "],
+        [" GBP ", " 1 ", " 1 ", " 0 "]]
     assert not any(l.startswith("| by_partition") for l in lines)
     assert f"full per-partition table in {rep}" in out
 
