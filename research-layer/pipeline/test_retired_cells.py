@@ -243,7 +243,7 @@ def _dead_fx_cell_registry(tmp_path):
     to a live sibling, which stats must refuse, or, once EUR is retired,
     simulate."""
     from .test_gauntlet_classes import mixed_class_gauntlet_registry, _daily_bars, _weekday_bars
-    from .test_gauntlet_stats import V61_AMEND1, _walk_weekday_bars
+    from .test_gauntlet_stats import _amend, _walk_weekday_bars
     from .test_gauntlet_worker import V61
     from .test_screen import write_data_dir
     from . import gauntlet_worker as gw
@@ -251,7 +251,7 @@ def _dead_fx_cell_registry(tmp_path):
     d.mkdir()
     reg, _, _, _ = mixed_class_gauntlet_registry(d)
     reg.append("note", {"text": V61})
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     data = write_data_dir(d, {
         "BTCUSD": _daily_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31)),
         "GBP": _walk_weekday_bars(dt.date(2015, 1, 1), dt.date(2020, 12, 31)),

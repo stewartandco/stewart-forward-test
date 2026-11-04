@@ -10,12 +10,19 @@ a strategy's state. Without --chain it only reports. With --chain it
 REFUSES (exit 1, exit_reason refused_no_amendment_note, nothing computed or
 written) until the gauntlet-protocol-v6.1-amendment-1 note is on the chain:
 entries whose SR* is floored must never be chained under the v6.1 text that
-says trials_sr_var "is not floored".
+says trials_sr_var "is not floored". It refuses likewise (exit_reason
+refused_no_amendment2_note) until the gauntlet-protocol-v6.1-amendment-2 note
+is on the chain: entries whose effective trials are counted per cell must
+never be chained under the text that says they are counted registry-wide.
 
 Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
-- the registry-wide series and the clustering are gauntlet.registry_series
-  and gauntlet.cluster_registry, the functions gauntlet.run itself calls;
-  the sibling families are gauntlet.sibling_families. Nothing is re-derived.
+- the registry-wide series is gauntlet.registry_series and the sibling
+  families gauntlet.sibling_families, the functions gauntlet.run itself
+  calls. The effective trials are counted PER CELL PARTITION by
+  gauntlet.cluster_registry_by_cell (pipeline/cluster_cells.py, spec
+  2026-11-04): the same aligned series as gauntlet.cluster_registry, one
+  average-linkage tree per cell partition cut at rho >= 0.9, k summed.
+  Nothing is re-derived.
 - deflated Sharpe: evaluate_spec's formula, psr(sharpe(r),
   expected_max_sharpe(trials_n, trials_var), len(r), skew, kurt), over the
   SAME series gauntlet.run passed evaluate_spec as daily_returns:
@@ -119,12 +126,13 @@ from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
 from .taskguard import task_started
 # Module-level names on purpose: the tests replace them to prove the job
 # calls the gauntlet's own functions rather than a copy.
-from .gauntlet import cluster_registry, registry_series, sibling_families
+from .gauntlet import cluster_registry_by_cell, registry_series, sibling_families
+from . import cluster_cells
 from .gauntlet import (CSCV_SPLITS, PBO_MIN_DISTINCT, PBO_PASS_PCTILE,
                        PBO_KILL_PCTILE, PBO_NULL_DRAWS, PBO_NULL_PRIOR_S, _as_list)
 
 LAYER = Path(__file__).resolve().parent.parent
-CLUSTER_METHOD = "effective_trials/v3 correlation-distance"
+CLUSTER_METHOD = cluster_cells.METHOD
 # Specs per registry_series call; the deadline is checked between calls,
 # so a cold night overruns it by at most one chunk's simulations.
 SERIES_CHUNK = 10
@@ -191,7 +199,11 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "trials_common_days", "stopped_at_deadline", "chained",
                  "cluster_s", "pbo_null_mean_s",
                  "pbo_nulls_computed", "pbo_nulls_cached",
-                 "cluster_n", "cluster_need_mb", "avail_phys_mb")
+                 "cluster_n", "cluster_need_mb", "avail_phys_mb",
+                 # per-cell effective trials (spec s6): this run's largest cell
+                 # partition, sum of n^2 over partitions, and merges that were
+                 # at or under the cut but not counted (float noise)
+                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -262,6 +274,16 @@ def is_amendment_note(text) -> bool:
     return isinstance(text, str) and text.startswith(AMENDMENT_NOTE_PREFIX)
 
 
+# Amendment 2 (spec 2026-11-04 s6): --chain refuses until this note is on the
+# chain, detected the same way (first line's prefix, first occurrence). It
+# records that effective trials are counted per cell partition.
+AMENDMENT2_NOTE_PREFIX = "gauntlet-protocol-v6.1-amendment-2:"
+
+
+def is_amendment2_note(text) -> bool:
+    return isinstance(text, str) and text.startswith(AMENDMENT2_NOTE_PREFIX)
+
+
 def _positive_number(v) -> bool:
     """A usable floor value: an int or float (never a bool), finite, > 0.
     Total: an int too large for a float (math.isfinite raises OverflowError
@@ -291,6 +313,8 @@ class _View:
         self.sr_floor_hash: str | None = None
         # Ruling 35 (ii): the amendment note's entry hash (first occurrence).
         self.amendment_hash: str | None = None
+        # Amendment 2: the per-cell note's entry hash (first occurrence).
+        self.amendment2_hash: str | None = None
 
     def _floor_candidate(self, n, e: dict) -> None:
         # A cluster count is a positive int; anything else is no floor.
@@ -316,6 +340,9 @@ class _View:
         elif (et == "note" and self.amendment_hash is None
               and is_amendment_note(p.get("text"))):
             self.amendment_hash = entry_hash(e)
+        elif (et == "note" and self.amendment2_hash is None
+              and is_amendment2_note(p.get("text"))):
+            self.amendment2_hash = entry_hash(e)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             m = p.get("metrics")
             if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
@@ -500,6 +527,9 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                                            t_years=n_train_points / 365.0,
                                            n_trials=trials_n),
                         window="train"),
+        "trials_partitions": clustered["partitions"],
+        "trials_largest_partition_n": clustered["largest_partition_n"],
+        "trials_cut_rho": cluster_cells.CUT_RHO,
         "cluster_method": CLUSTER_METHOD,
         "data_vintage": vintage,
         "data_digest": data_digest,
@@ -628,6 +658,9 @@ def run(argv: list[str] | None = None) -> int:
               "cluster_n": prior_cluster_n,
               # this run's admission check, when it got that far (2026-10-11)
               "cluster_need_mb": None, "avail_phys_mb": None,
+              # this run's clustering shape, once it has clustered (spec s6)
+              "cluster_max_cell_n": None, "cluster_sum_n2": None,
+              "cut_late_merges": None,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -694,6 +727,15 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"written. {len(pending)} v6.1 verdict(s) without stats.",
                   flush=True)
             return finish(1, "refused_no_amendment_note")
+        if a.chain and view.amendment2_hash is None:
+            # Spec s6: effective trials are counted per cell from here on,
+            # and the chained text says registry-wide. Report-only runs are
+            # unaffected.
+            print(f"REFUSED: --chain needs the '{AMENDMENT2_NOTE_PREFIX}' note "
+                  f"on the chain (it records the per-cell effective trials); "
+                  f"nothing computed or written. {len(pending)} v6.1 "
+                  f"verdict(s) without stats.", flush=True)
+            return finish(1, "refused_no_amendment2_note")
         all_specs = view.specs
         by_class: dict[str, int] = {}
         for s in all_specs:
@@ -764,12 +806,23 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()
         try:
-            clustered = cluster_registry(dated, eq_len, all_specs)
+            clustered = cluster_registry_by_cell(dated, eq_len, all_specs)
         except ValueError as exc:
             print(f"REFUSED: clustering: {exc}", flush=True)
             return finish(1, "cluster_refused")
         status["cluster_s"] = round(time.time() - t_cluster0, 1)
         status["cluster_n"] = n_cluster
+        status["cluster_max_cell_n"] = clustered["largest_partition_n"]
+        status["cluster_sum_n2"] = clustered["sum_n2"]
+        status["cut_late_merges"] = clustered["late_merges"]
+        # Per-partition detail goes to the run log, never to a chain entry
+        # (spec s3) and not to the report's key/value table: top 20 by n.
+        top = sorted(clustered["by_partition"].items(),
+                     key=lambda kv: (-kv[1]["n"], kv[0]))[:20]
+        print(f"gauntlet_stats: {clustered['partitions']} partitions, top "
+              f"{len(top)} by n (key n k never_traded):", flush=True)
+        for key, bp in top:
+            print(f"  {key} {bp['n']} {bp['k']} {bp['never_traded']}", flush=True)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
         # Ruling 35: ONE SR* floor per run, from the same single read.
