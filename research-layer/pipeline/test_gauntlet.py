@@ -537,3 +537,79 @@ def v4_sweep_registry(tmp_path):
 # tests in test_plateau.py and test_pbo.py, because both are still COMPUTED and
 # RECORDED under v6 -- they simply stopped deciding.
 # ---------------------------------------------------------------------------
+
+
+# ---------------- cluster_registry_by_cell (effective trials per cell) ------
+
+def _cell_spec(sid, asset, asset_class="crypto", tf="1d"):
+    return {"strategy_id": sid,
+            "universe": {"assets": [asset], "asset_class": asset_class,
+                         "timeframe": tf}}
+
+
+def _dated(dates, vals):
+    import numpy as np
+    from .simcache import Series
+    from datetime import date
+    return Series(np.array([date.fromisoformat(d).toordinal() for d in dates],
+                           dtype=np.int32), np.array(vals, dtype=np.float64))
+
+
+def _mixed_fixture():
+    import numpy as np
+    from datetime import date, timedelta
+    d0 = date(2025, 1, 1)
+    crypto = [(d0 + timedelta(days=i)).isoformat() for i in range(200)]
+    fx = [d for d in crypto if date.fromisoformat(d).weekday() < 5]
+    rng = np.random.default_rng(7)
+    dated = {"a": _dated(crypto, rng.normal(0, 0.01, 200)),
+             "b": _dated(crypto, rng.normal(0, 0.01, 200)),
+             "c": _dated(fx, rng.normal(0, 0.01, len(fx)))}
+    lens = {"a": 201, "b": 201, "c": len(fx) + 1}
+    specs = [_cell_spec("a", "BTCUSDT"), _cell_spec("b", "ETHUSDT"),
+             _cell_spec("c", "EUR", "fx")]
+    return dated, lens, specs
+
+
+def test_by_cell_uses_cluster_registrys_alignment():
+    from . import gauntlet
+    dated, lens, specs = _mixed_fixture()
+    old = gauntlet.cluster_registry(dated, lens, specs)
+    new = gauntlet.cluster_registry_by_cell(dated, lens, specs)
+    assert old["trials_alignment"] == new["trials_alignment"] == "intersection"
+    assert old["trials_common_days"] == new["trials_common_days"]
+    assert {k: list(v) for k, v in old["returns_by_id"].items()} == \
+           {k: list(v) for k, v in new["returns_by_id"].items()}
+    assert new["registered_n"] == old["registered_n"] == 3
+
+
+def test_by_cell_partitions_by_spec_cells():
+    from . import gauntlet
+    dated, lens, specs = _mixed_fixture()
+    out = gauntlet.cluster_registry_by_cell(dated, lens, specs)
+    assert out["partitions"] == 3
+    assert set(out["cluster_labels"]) == {"a", "b", "c"}
+    for key in ("trials_n", "trials_var", "largest_partition_n", "late_merges",
+                "sum_n2", "by_partition"):
+        assert key in out
+    # two specs on the same cell share a partition
+    specs2 = [_cell_spec("a", "BTCUSDT"), _cell_spec("b", "BTCUSDT"),
+              _cell_spec("c", "EUR", "fx")]
+    assert gauntlet.cluster_registry_by_cell(dated, lens, specs2)["partitions"] == 2
+
+
+def test_cluster_registry_still_calls_effective_trials(monkeypatch):
+    from . import gauntlet
+    seen = []
+    real = gauntlet.effective_trials
+
+    def spy(r):
+        seen.append(sorted(r))
+        return real(r)
+    monkeypatch.setattr(gauntlet, "effective_trials", spy)
+    dated, lens, specs = _mixed_fixture()
+    gauntlet.cluster_registry(dated, lens, specs)
+    assert seen == [["a", "b", "c"]]
+    seen.clear()
+    gauntlet.cluster_registry_by_cell(dated, lens, specs)
+    assert seen == []

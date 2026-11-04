@@ -674,13 +674,11 @@ def registry_series(all_specs: list[dict], bars_by_cell: dict,
     return dated_returns_by_sid, equity_len_by_sid, sim_cache_hits, sim_cache_misses
 
 
-def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
-                     all_specs: list[dict]) -> dict:
-    """Alignment + effective trials over the registry-wide series, moved
-    out of run() unchanged (Build 2a task 7) so gauntlet_stats.py clusters
-    by the SAME method. Returns trials_n, cluster_labels, trials_var,
-    trials_alignment, trials_common_days, registered_n, and returns_by_id
-    (the aligned series the clustering and the deflated Sharpe read)."""
+def _align_for_trials(dated_returns_by_sid: dict, equity_len_by_sid: dict,
+                       all_specs: list[dict]) -> tuple[dict, str, int | None]:
+    """The alignment block of cluster_registry, moved out unchanged so
+    cluster_registry_by_cell aligns EXACTLY the same way. Returns
+    (returns_by_id, trials_alignment, trials_common_days)."""
     # A run whose registered specs are ALREADY on one shared calendar (today:
     # every real crypto chain, which has only ever registered the legacy
     # BTCUSD/ETHUSD pair -- same start date, same length) keeps the exact
@@ -729,6 +727,18 @@ def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
         returns_by_id = {sid: series.rets
                          for sid, series in dated_returns_by_sid.items()}
         trials_alignment, trials_common_days = "native", None
+    return returns_by_id, trials_alignment, trials_common_days
+
+
+def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
+                     all_specs: list[dict]) -> dict:
+    """Alignment + effective trials over the registry-wide series, moved
+    out of run() unchanged (Build 2a task 7) so gauntlet_stats.py clusters
+    by the SAME method. Returns trials_n, cluster_labels, trials_var,
+    trials_alignment, trials_common_days, registered_n, and returns_by_id
+    (the aligned series the clustering and the deflated Sharpe read)."""
+    returns_by_id, trials_alignment, trials_common_days = _align_for_trials(
+        dated_returns_by_sid, equity_len_by_sid, all_specs)
     registered_n = len(all_specs)
 
     # protocol-v3: DSR no longer gates this stage, but it still ranks siblings
@@ -747,6 +757,36 @@ def cluster_registry(dated_returns_by_sid: dict, equity_len_by_sid: dict,
             "trials_var": trials_var, "trials_alignment": trials_alignment,
             "trials_common_days": trials_common_days,
             "registered_n": registered_n, "returns_by_id": returns_by_id}
+
+
+def cluster_registry_by_cell(dated_returns_by_sid: dict, equity_len_by_sid: dict,
+                             all_specs: list[dict]) -> dict:
+    """cluster_registry's keys over the SAME alignment, with the effective
+    trials counted per cell partition (cluster_cells, design s4) instead of
+    over the whole registry. Adds partitions, largest_partition_n,
+    late_merges, sum_n2 and by_partition."""
+    from . import cluster_cells
+    returns_by_id, trials_alignment, trials_common_days = _align_for_trials(
+        dated_returns_by_sid, equity_len_by_sid, all_specs)
+    registered_n = len(all_specs)
+    check_aligned(returns_by_id)
+    key_of = {s["strategy_id"]: cluster_cells.partition_key(s)
+              for s in all_specs if s["strategy_id"] in returns_by_id}
+    t_et0 = time.time()
+    res = cluster_cells.effective_trials_by_cell(returns_by_id, key_of)
+    print(f"[gauntlet] effective_trials {time.time() - t_et0:.1f}s "
+          f"(per-cell clustering, inside the clustering stage)", flush=True)
+    print(f"effective trials: {res['trials_n']} clusters over {registered_n} "
+          f"registered strategies, {res['partitions']} partitions "
+          f"(largest {res['largest_partition_n']})")
+    return {"trials_n": res["trials_n"], "cluster_labels": res["cluster_labels"],
+            "trials_var": res["trials_var"], "trials_alignment": trials_alignment,
+            "trials_common_days": trials_common_days,
+            "registered_n": registered_n, "returns_by_id": returns_by_id,
+            "partitions": res["partitions"],
+            "largest_partition_n": res["largest_partition_n"],
+            "late_merges": res["late_merges"], "sum_n2": res["sum_n2"],
+            "by_partition": res["by_partition"]}
 
 
 def sibling_families(all_specs: list[dict], train_sharpe: dict,
