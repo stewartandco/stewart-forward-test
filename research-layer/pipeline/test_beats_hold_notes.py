@@ -53,13 +53,34 @@ def test_the_v2_note_constants_equal_the_code():
     text = LIVE_V2.read_bytes().decode("ascii")
     expected = {"HOLD_BLOCK_LEN": beats_hold.HOLD_BLOCK_LEN,
                 "HOLD_TEST_PATHS": beats_hold.HOLD_TEST_PATHS,
+                "HOLD_CHUNK_PATHS": beats_hold.HOLD_CHUNK_PATHS,
                 "SR_DIFF_TOL": beats_hold.SR_DIFF_TOL}
     found: dict[str, list[float]] = {}
     for name, value in re.findall(
-            r"\b(HOLD_BLOCK_LEN|HOLD_TEST_PATHS|SR_DIFF_TOL) = ([0-9][0-9.e+-]*)", text):
+            r"\b(HOLD_BLOCK_LEN|HOLD_TEST_PATHS|HOLD_CHUNK_PATHS|SR_DIFF_TOL)"
+            r" = ([0-9][0-9.e+-]*)", text):
         found.setdefault(name, []).append(float(value.rstrip(".")))
     assert set(found) == set(expected), f"the note must state each constant: {found}"
     for name, values in found.items():
         assert all(v == expected[name] for v in values), (name, values, expected[name])
     assert isinstance(beats_hold.HOLD_BLOCK_LEN, int)
     assert isinstance(beats_hold.HOLD_TEST_PATHS, int)
+    assert isinstance(beats_hold.HOLD_CHUNK_PATHS, int)
+
+
+def test_the_v2_note_states_the_refinement_rule_the_code_applies():
+    """The floor refinement (final review I1): the note's rule, P = ceil(2 x m
+    / q) when larger than HOLD_TEST_PATHS, applied only to a p_hold exactly on
+    the floor, is the code's."""
+    import math
+    text = LIVE_V2.read_bytes().decode("ascii")
+    for phrase in ("P = ceil(2 x m / q)",
+                   "equals exactly 1 / (HOLD_TEST_PATHS + 1)",
+                   "when P is larger than HOLD_TEST_PATHS",
+                   "the same seed",
+                   "p_hold_paths",
+                   "is not positive, so the hold cannot be rebased"):
+        assert phrase in text, phrase
+    for m, q in ((1, 0.05), (50, 0.05), (51, 0.05), (300, 0.05), (900, 0.05),
+                 (7, 0.01)):
+        assert beats_hold.refined_paths(m, q) == math.ceil(2 * m / q)

@@ -4,9 +4,9 @@ from datetime import date, timedelta
 
 import pytest
 
-from . import cells, livegate
-from .beats_hold import (forward_hold_series, gauntlet_beats_hold,
-                         hold_oos_returns, paired_sharpe_pvalue)
+from . import beats_hold, cells, livegate
+from .beats_hold import (forward_hold_series, gauntlet_beats_hold, hold_pvalue,
+                         hold_oos_returns, paired_sharpe_pvalue, refined_paths)
 
 CUT = "2024-01-01"
 START = date(2024, 1, 2)
@@ -304,3 +304,117 @@ def test_pvalue_rounding_noise_copy_is_one(seed):
     diff = max(abs(x - y) for x, y in zip(strat, hold))
     assert 0 < diff < 1e-15, "fixture must differ by rounding only"
     assert paired_sharpe_pvalue(strat, hold, seed=seed) == 1.0
+
+
+# ---- final review I1: chunked bootstrap and the floor refinement -----------
+
+def _graded():
+    hold = _noise(250, 0.01, 20)
+    return [h + 0.0004 + e for h, e in zip(hold, _noise(250, 0.004, 21))], hold
+
+
+def _strong():
+    hold = _noise(250, 0.01, 40)
+    return [h + 0.003 + e for h, e in zip(hold, _noise(250, 0.002, 41))], hold
+
+
+def test_chunked_pvalue_equals_the_pre_chunking_code():
+    """Values recorded from the unchunked code (1a8155035) on the same
+    fixtures: at paths <= HOLD_CHUNK_PATHS chunking changes nothing."""
+    hold = [h + 0.002 for h in _noise(300, 0.01, 12)]
+    worse = [h - 0.001 + e for h, e in zip(hold, _noise(300, 0.004, 13))]
+    assert paired_sharpe_pvalue(worse, hold, seed=5) == 0.9995002498750625
+    s, h = _graded()
+    assert paired_sharpe_pvalue(s, h, seed=9) == 0.12593703148425786
+    assert paired_sharpe_pvalue(s, h, seed=9, paths=137) == 0.13043478260869565
+    h3 = _noise(23, 0.01, 30)
+    s3 = [x + 0.001 + e for x, e in zip(h3, _noise(23, 0.006, 31))]
+    assert paired_sharpe_pvalue(s3, h3, seed=4) == 0.39280359820089955
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 500, 1999, 2000, 5000])
+def test_chunk_size_does_not_change_the_pvalue(monkeypatch, chunk):
+    s, h = _graded()
+    want = paired_sharpe_pvalue(s, h, seed=9, paths=2000)
+    monkeypatch.setattr(beats_hold, "HOLD_CHUNK_PATHS", chunk)
+    assert paired_sharpe_pvalue(s, h, seed=9, paths=2000) == want
+
+
+def test_large_path_counts_are_evaluated_in_bounded_chunks(monkeypatch):
+    """No resample array holds more than HOLD_CHUNK_PATHS paths, and every
+    path is evaluated exactly once."""
+    seen = []
+    real = beats_hold._block_se
+
+    def spy(y, m, grad, block):
+        if y.ndim == 3:
+            seen.append(y.shape[0])
+        return real(y, m, grad, block)
+    monkeypatch.setattr(beats_hold, "_block_se", spy)
+    s, h = _graded()
+    paired_sharpe_pvalue(s, h, seed=9, paths=4500)
+    assert max(seen) <= beats_hold.HOLD_CHUNK_PATHS
+    assert sum(seen) == 4500
+
+
+def test_refined_paths_is_ceil_two_m_over_q():
+    assert refined_paths(300, 0.05) == 12000
+    assert refined_paths(900, 0.05) == 36000
+    assert refined_paths(51, 0.05) == 2040
+
+
+def test_a_floor_survivor_is_refined_below_q_over_m():
+    s, h = _strong()
+    floor = 1 / (beats_hold.HOLD_TEST_PATHS + 1)
+    assert paired_sharpe_pvalue(s, h, seed=3) == floor, "fixture must sit on the floor"
+    p, paths = hold_pvalue(s, h, seed=3, m=300, q=0.05)
+    assert paths == 12000
+    assert p < 0.05 / 300
+    assert p == paired_sharpe_pvalue(s, h, seed=3, paths=12000)
+
+
+def test_a_survivor_above_the_floor_is_not_refined(monkeypatch):
+    s, h = _graded()
+    calls = []
+    real = beats_hold.paired_sharpe_pvalue
+
+    def spy(*a, **k):
+        calls.append(k.get("paths", beats_hold.HOLD_TEST_PATHS))
+        return real(*a, **k)
+    monkeypatch.setattr(beats_hold, "paired_sharpe_pvalue", spy)
+    p, paths = hold_pvalue(s, h, seed=9, m=300, q=0.05)
+    assert (p, paths) == (0.12593703148425786, beats_hold.HOLD_TEST_PATHS)
+    assert calls == [beats_hold.HOLD_TEST_PATHS]
+
+
+def test_a_small_cohort_floor_is_not_redrawn():
+    """ceil(2 m / q) <= HOLD_TEST_PATHS: the floor is already below q / (2 m)."""
+    s, h = _strong()
+    p, paths = hold_pvalue(s, h, seed=3, m=50, q=0.05)
+    assert (p, paths) == (1 / (beats_hold.HOLD_TEST_PATHS + 1), beats_hold.HOLD_TEST_PATHS)
+
+
+def test_the_refined_pvalue_is_deterministic():
+    s, h = _strong()
+    assert hold_pvalue(s, h, seed=3, m=300, q=0.05) == hold_pvalue(s, h, seed=3, m=300, q=0.05)
+
+
+def test_one_refined_call_at_t500_m900_is_bounded():
+    """The commit message records the measured time; this only guards against
+    a pathological regression (e.g. an unchunked 640 MB array)."""
+    import time
+    hold = _noise(500, 0.01, 50)
+    strat = [x + 0.003 + e for x, e in zip(hold, _noise(500, 0.002, 51))]
+    t0 = time.perf_counter()
+    p, paths = hold_pvalue(strat, hold, seed=8, m=900, q=0.05)
+    assert paths == 36000 and p < 0.05 / 900
+    assert time.perf_counter() - t0 < 30
+
+
+# ---- final review M1: a non-positive first price ---------------------------
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_forward_hold_with_a_non_positive_first_price_is_empty(bad):
+    _, _, rows = _qrows()
+    rows[0] = dict(rows[0], price=bad)          # BTCUSD's earliest row
+    assert forward_hold_series(rows) == []

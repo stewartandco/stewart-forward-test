@@ -14,6 +14,11 @@ import numpy as np
 
 HOLD_BLOCK_LEN = 5       # circular block length (days) of the paired test
 HOLD_TEST_PATHS = 2000   # bootstrap resamples of the paired test
+# Resamples evaluated per chunk. Bounds memory only: a (paths, T, 4) float64
+# array at T=500 and 36,000 paths would be about 576 MB. The block starts of
+# ALL resamples are drawn first, in one call, so the chunk size never changes
+# a p-value (pinned by test_chunk_size_does_not_change_the_pvalue).
+HOLD_CHUNK_PATHS = 2000
 # An observed per-period Sharpe difference below this is rounding, not
 # evidence: a constant-exposure book (returns = c x the hold's, c > 0) has a
 # difference of about 1e-16 and an se of the same order, so its t is noise
@@ -102,12 +107,18 @@ def forward_hold_series(rows: list[dict]) -> list[tuple[str, float]]:
     """Forward buy-and-hold curve from quarantine rows: per asset, `price`
     rebased to 1.0 at that asset's FIRST row (earliest date), combined by the
     mean across assets on the dates where EVERY asset reports -- exactly
-    livegate.forward_series' date rule. No cost is charged."""
+    livegate.forward_series' date rule. No cost is charged.
+
+    The registry requires a row price to be finite only, so a first price can
+    be 0 or negative: such an asset cannot be rebased and the curve is EMPTY
+    (the live gate then gives p_hold = 1.0; it never raises)."""
     first: dict[str, tuple[str, float]] = {}
     for r in rows:
         a = r["asset"]
         if a not in first or r["date"] < first[a][0]:
             first[a] = (r["date"], r["price"])
+    if not all(price > 0 for _, price in first.values()):
+        return []
     by_date: dict[str, dict[str, float]] = defaultdict(dict)
     for r in rows:
         by_date[r["date"]][r["asset"]] = r["price"] / first[r["asset"]][1]
@@ -154,6 +165,12 @@ def paired_sharpe_pvalue(strat: list[float], hold: list[float], seed: int,
     or t_obs is non-finite. A
     resample whose variance or se* is <= 0, or whose t* is non-finite,
     contributes t* = +inf. Mismatched lengths are a caller bug: ValueError.
+
+    RNG stream: ONE call, rng.integers(0, T, size=(paths, ceil(T/block))),
+    row k = resample k. The rows are then evaluated HOLD_CHUNK_PATHS at a
+    time, in row order; each resample's t* depends on its own row only, so
+    the count, and the p-value, are the same for every chunk size (and for
+    paths <= HOLD_CHUNK_PATHS the computation is the unchunked one).
     """
     if len(strat) != len(hold):
         raise ValueError(f"paired series differ in length: "
@@ -186,14 +203,51 @@ def paired_sharpe_pvalue(strat: list[float], hold: list[float], seed: int,
         rng = np.random.default_rng(seed)
         n_starts = -(-T // block)
         starts = rng.integers(0, T, size=(paths, n_starts))
-        idx = ((starts[:, :, None] + np.arange(block)) % T)
-        idx = idx.reshape(paths, n_starts * block)[:, :T]
-        ys = y[idx]                                     # (paths, T, 4)
-        ms = ys.mean(axis=1)
-        fs, grads, vas, vbs = _delta_and_grad(ms)
-        ses = _block_se(ys, ms, grads, block)
-        ts = (fs - f) / ses
-        flat = (np.ptp(ys[:, :, 0], axis=1) == 0) | (np.ptp(ys[:, :, 1], axis=1) == 0)
-        bad = flat | (vas <= 0) | (vbs <= 0) | ~(ses > 0) | ~np.isfinite(ts)
-        ts = np.where(bad, np.inf, ts)
-    return float((1 + np.count_nonzero(ts >= t_obs)) / (paths + 1))
+        hits = 0
+        for lo in range(0, paths, HOLD_CHUNK_PATHS):
+            hits += _count_at_or_above(y, f, t_obs, starts[lo:lo + HOLD_CHUNK_PATHS],
+                                       block)
+    return float((1 + hits) / (paths + 1))
+
+
+def _count_at_or_above(y: np.ndarray, f: float, t_obs: float,
+                       starts: np.ndarray, block: int) -> int:
+    """Number of the resamples given by `starts` (one row per resample) with
+    t* >= t_obs; a degenerate resample counts as t* = +inf."""
+    T = y.shape[0]
+    n = starts.shape[0]
+    idx = ((starts[:, :, None] + np.arange(block)) % T)
+    idx = idx.reshape(n, starts.shape[1] * block)[:, :T]
+    ys = y[idx]                                         # (n, T, 4)
+    ms = ys.mean(axis=1)
+    fs, grads, vas, vbs = _delta_and_grad(ms)
+    ses = _block_se(ys, ms, grads, block)
+    ts = (fs - f) / ses
+    flat = (np.ptp(ys[:, :, 0], axis=1) == 0) | (np.ptp(ys[:, :, 1], axis=1) == 0)
+    bad = flat | (vas <= 0) | (vbs <= 0) | ~(ses > 0) | ~np.isfinite(ts)
+    ts = np.where(bad, np.inf, ts)
+    return int(np.count_nonzero(ts >= t_obs))
+
+
+def refined_paths(m: int, q: float) -> int:
+    """Resamples of the floor refinement: ceil(2 m / q), so the refined floor
+    1 / (P + 1) is below q / (2 m), half BH's bar for a lone rejection."""
+    return math.ceil(2 * m / q)
+
+
+def hold_pvalue(strat: list[float], hold: list[float], seed: int, m: int,
+                q: float) -> tuple[float, int]:
+    """(p_hold, paths): the live gate's two-stage paired test for one of `m`
+    survivors judged at BH rate `q` (v2 note, THE FLOOR REFINEMENT).
+
+    Stage 1 runs HOLD_TEST_PATHS resamples. Only a p exactly on its floor,
+    1 / (HOLD_TEST_PATHS + 1), is redrawn: same record, same seed,
+    P = refined_paths(m, q) resamples, and only when P > HOLD_TEST_PATHS (at
+    or below it the floor already sits under q / (2 m)). Any other p is kept.
+    """
+    p = paired_sharpe_pvalue(strat, hold, seed)
+    if p == 1 / (HOLD_TEST_PATHS + 1):
+        paths = refined_paths(m, q)
+        if paths > HOLD_TEST_PATHS:
+            return paired_sharpe_pvalue(strat, hold, seed, paths=paths), paths
+    return p, HOLD_TEST_PATHS

@@ -367,7 +367,7 @@ def test_the_live_chain_dry_run_holds_everything_and_writes_nothing(tmp_path, ca
 
 # ---------------- v2 arm: beat zero AND the own-asset hold ----------------
 
-HOLD_KEYS = {"p_zero", "p_hold", "p", "strategy_sr", "hold_sr"}
+HOLD_KEYS = {"p_zero", "p_hold", "p", "p_hold_paths", "strategy_sr", "hold_sr"}
 
 
 def priced_case(sid, rets, hold_rets, trades=0, contribs=FLAT_CONTRIBS):
@@ -475,6 +475,7 @@ def test_hold_arm_graduates_a_strategy_that_beats_both():
     assert r["p_hold"] < 0.05 and r["p_zero"] < 0.05
     assert r["strategy_sr"] > r["hold_sr"]
     assert r["cohort_size"] == 1
+    assert r["p_hold_paths"] == 2000          # m = 1: nothing to refine
 
 
 def test_hold_arm_keeps_kill_first():
@@ -512,3 +513,53 @@ def test_hold_arm_length_mismatch_is_p_hold_one_not_an_error():
     assert out["zero"]["eligible"] is True
     assert out["zero"]["p_hold"] == 1.0
     assert out["zero"]["verdict"] == "hold"
+
+
+def _alpha_case(sid="alpha", alpha=0.003):
+    import random as _r
+    rng = _r.Random(3)
+    hold = _pinned(200, 0.0, 0.01, seed=3)
+    strat = [h + alpha + rng.gauss(0, 0.002) for h in hold]
+    return priced_case(sid, strat, hold)
+
+
+def test_hold_arm_refines_a_floor_survivor_in_a_large_cohort():
+    """Final review I1: at m = 300 survivors BH needs p <= q/m = 1.7e-4 for a
+    lone rejection, below the 2000-path floor 1/2001. The floor survivor is
+    redrawn with ceil(2 m / q) paths and graduates; the flat books (p_hold
+    1.0, above the floor) keep 2000 paths."""
+    from .beats_hold import paired_sharpe_pvalue, HOLD_TEST_PATHS
+    from .livegate import daily_returns
+    from .beats_hold import forward_hold_series
+    alpha = _alpha_case(alpha=0.005)          # p_zero must clear q/m too
+    a = daily_returns(forward_series(alpha["rows"]))
+    b = daily_returns(forward_hold_series(alpha["rows"]))
+    assert paired_sharpe_pvalue(a, b, 0) == 1 / (HOLD_TEST_PATHS + 1)
+    flats = [priced_case(f"f{i:03d}", [0.0] * 200, _pinned(200, 0.0, 0.01, seed=i))
+             for i in range(299)]
+    out = assess([alpha] + flats, min_days=60, hold_arm=True)
+    r = out["alpha"]
+    assert r["cohort_size"] == 300
+    assert r["p_hold_paths"] == 12000
+    assert r["p_hold"] < 0.05 / 300 and r["p"] < 0.05 / 300
+    assert r["verdict"] == "live", r
+    assert all(out[f"f{i:03d}"]["p_hold_paths"] == 2000 for i in range(299))
+    assert all(out[f"f{i:03d}"]["verdict"] == "hold" for i in range(299))
+
+
+def test_hold_arm_refinement_uses_the_q_passed_to_assess():
+    """m = 1 at q = 0.0001: ceil(2 / 0.0001) = 20000 > 2000, so redrawn."""
+    out = assess([_alpha_case()], min_days=60, q=0.0001, hold_arm=True)
+    assert out["alpha"]["p_hold_paths"] == 20000
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_hold_arm_non_positive_first_price_is_p_hold_one_not_an_error(bad):
+    """Final review M1: the registry requires a finite price only. A first
+    row priced 0 (or below) cannot rebase the hold: p_hold = 1.0, no raise."""
+    case = _alpha_case("zp")
+    case["rows"][0]["price"] = bad
+    out = assess([case], min_days=60, hold_arm=True)
+    assert out["zp"]["eligible"] is True
+    assert out["zp"]["p_hold"] == 1.0
+    assert out["zp"]["verdict"] == "hold"

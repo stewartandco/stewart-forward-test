@@ -32,7 +32,7 @@ import math
 import random
 from collections import defaultdict
 
-from .beats_hold import forward_hold_series, paired_sharpe_pvalue
+from .beats_hold import HOLD_TEST_PATHS, forward_hold_series, hold_pvalue
 from .protocols import LIVE_V2, NOTE_LIVE_V2
 from .stats import moments, sharpe, percentile, psr
 
@@ -170,8 +170,10 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q,
     `hold_arm` (quarantine-live-protocol-v2): each surviving eligible strategy
     must ALSO beat its own asset's hold. Its row gains p_zero (1 - PSR, the v1
     test), p_hold (paired Sharpe test against the forward hold), p = the larger
-    of the two, which is what Benjamini-Hochberg sees, and the two annualized
-    Sharpes, which are recorded only and decide nothing.
+    of the two, which is what Benjamini-Hochberg sees, p_hold_paths (the
+    resamples p_hold was drawn from: HOLD_TEST_PATHS, or more when a p on the
+    2000-path floor is refined for m = the number of survivors at rate q), and
+    the two annualized Sharpes, which are recorded only and decide nothing.
     """
     report: dict[str, dict] = {}
     cones: dict[str, dict | None] = {}
@@ -216,7 +218,7 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q,
         if hold_arm:
             for s in survivors:
                 report[s].update(_hold_test(s, rets_by_sid[s], rows_by_sid[s],
-                                            report[s]["psr"]))
+                                            report[s]["psr"], len(survivors), q))
             pvals = [report[s]["p"] for s in survivors]
         else:
             pvals = [1.0 - report[s]["psr"] for s in survivors]
@@ -228,15 +230,20 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q,
 
 
 def _hold_test(sid: str, rets: list[float], rows: list[dict],
-               psr_value: float) -> dict:
-    """The v2 arm's fields for one survivor. A strategy whose equity touched
-    0 has a step dropped by daily_returns, so its record no longer pairs with
-    the hold's: that cannot be tested, so p_hold = 1.0 (never an error)."""
+               psr_value: float, m: int, q: float) -> dict:
+    """The v2 arm's fields for one of `m` survivors judged at BH rate `q`.
+    Cannot be tested, so p_hold = 1.0 (never an error): a strategy whose
+    equity touched 0 has a step dropped by daily_returns, so its record no
+    longer pairs with the hold's; an asset whose first price is not positive
+    leaves no hold curve (forward_hold_series returns [])."""
     hold = daily_returns(forward_hold_series(rows))
     p_zero = 1.0 - psr_value
-    p_hold = (paired_sharpe_pvalue(rets, hold, _seed(sid))
-              if len(rets) == len(hold) else 1.0)
+    if hold and len(rets) == len(hold):
+        p_hold, paths = hold_pvalue(rets, hold, _seed(sid), m, q)
+    else:
+        p_hold, paths = 1.0, HOLD_TEST_PATHS
     return {"p_zero": p_zero, "p_hold": p_hold, "p": max(p_zero, p_hold),
+            "p_hold_paths": paths,
             "strategy_sr": sharpe(rets) * math.sqrt(TRADING_DAYS) if rets else 0.0,
             "hold_sr": sharpe(hold) * math.sqrt(TRADING_DAYS) if hold else 0.0}
 
@@ -331,9 +338,9 @@ def write_report(out_dir, report: dict, min_days: int, q: float,
                 f"paired Sharpe test vs the hold) with Benjamini-Hochberg at q={q}.",
                 "",
                 f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
-                "| strategy | days | trades | terminal | cone p01 | PSR | p_hold | p "
+                "| strategy | days | trades | terminal | cone p01 | PSR | p_hold | paths | p "
                 "| SR | hold SR | verdict |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     else:
         head = [f"Protocol: `{PROTOCOL}`. Kill arm from {min_days} trading days; "
                 f"graduation = PSR vs 0 with Benjamini-Hochberg at q={q}.", "",
@@ -346,8 +353,11 @@ def write_report(out_dir, report: dict, min_days: int, q: float,
         cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
         extra = ""
         if hold_arm:
-            extra = "".join("n/a | " if r.get(k) is None else f"{r[k]:.4f} | "
-                            for k in ("p_hold", "p", "strategy_sr", "hold_sr"))
+            # p fields in %g: a refined p (below 1/2001) reads 0.0000 in %.4f
+            extra = "".join("n/a | " if r.get(k) is None else f"{r[k]:{fmt}} | "
+                            for k, fmt in (("p_hold", ".4g"), ("p_hold_paths", "d"),
+                                           ("p", ".4g"), ("strategy_sr", ".4f"),
+                                           ("hold_sr", ".4f")))
         lines.append(f"| `{sid}` | {r['forward_days']} | {r['forward_trades']} | "
                      f"{r['terminal']:.4f} | {cone} | {r['psr']:.4f} | {extra}"
                      f"**{r['verdict'].upper()}**{'' if r['eligible'] else ' (not yet eligible)'} |")
@@ -414,7 +424,8 @@ def run(argv: list[str] | None = None) -> int:
         print(f"{sid}  days={r['forward_days']:>4} trades={r['forward_trades']:>3} "
               f"terminal={r['terminal']:.4f} cone_p01={cone:>7} "
               f"psr={r['psr']:.4f}"
-              + (f" p_hold={r['p_hold']:.4f} p={r['p']:.4f}" if "p_hold" in r else "")
+              + (f" p_hold={r['p_hold']:.4g} p_hold_paths={r['p_hold_paths']}"
+                 f" p={r['p']:.4g}" if "p_hold" in r else "")
               + f"  -> {r['verdict'].upper()}"
               + ("" if r["eligible"] else "  (not yet eligible)"))
 
@@ -463,7 +474,8 @@ def run(argv: list[str] | None = None) -> int:
                        | {"protocol": protocol, "cohort_size": r.get("cohort_size")})
             if v2:
                 # a buried strategy was never hold-tested: its p fields are None
-                metrics |= {k: r.get(k) for k in ("p_zero", "p_hold", "p")}
+                metrics |= {k: r.get(k) for k in ("p_zero", "p_hold", "p",
+                                                  "p_hold_paths")}
             registry.record_verdict(
                 sid, "live_gate", "pass" if r["verdict"] == "live" else "fail",
                 metrics, "0" * 64)

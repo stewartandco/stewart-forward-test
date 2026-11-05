@@ -88,7 +88,7 @@ def test_report_is_written_dated_and_works_with_dry_run(tmp_path, monkeypatch):
 
 # ---------------- v2 switch: the quarantine-live-protocol-v2 note ----------------
 
-V2_ROW = {"p_zero": 0.01, "p_hold": 0.02, "p": 0.02,
+V2_ROW = {"p_zero": 0.01, "p_hold": 0.02, "p": 0.02, "p_hold_paths": 12000,
           "strategy_sr": 2.0, "hold_sr": 0.5}
 
 
@@ -115,7 +115,7 @@ def _gate_entries(reg, sid):
     return v, s
 
 
-def test_v2_note_switches_and_labels(tmp_path, monkeypatch):
+def test_v2_note_switches_and_labels(tmp_path, monkeypatch, capsys):
     reg, sid = _quarantined(tmp_path)
     reg.append("note", {"text": "quarantine-live-protocol-v2: test anchor"})
     seen = []
@@ -130,10 +130,13 @@ def test_v2_note_switches_and_labels(tmp_path, monkeypatch):
     m = verdicts[0]["metrics"]
     assert m["protocol"] == "quarantine-live-protocol-v2"
     assert (m["p_zero"], m["p_hold"], m["p"]) == (0.01, 0.02, 0.02)
+    assert m["p_hold_paths"] == 12000
     assert [c["reason"] for c in changes] == ["quarantine-live-protocol-v2 pass"]
     body = next(out_dir.glob("*-livegate-assessment.md")).read_text(encoding="utf-8")
     assert "`quarantine-live-protocol-v2`" in body
     assert "beats zero AND own-asset hold" in body
+    assert "| paths |" in body and "| 12000 |" in body
+    assert "p_hold_paths=12000" in capsys.readouterr().out
 
 
 def test_v1_only_chain_unchanged(tmp_path, monkeypatch):
@@ -154,6 +157,7 @@ def test_v1_only_chain_unchanged(tmp_path, monkeypatch):
     body = next(out_dir.glob("*-livegate-assessment.md")).read_text(encoding="utf-8")
     assert "quarantine-live-protocol-v2" not in body
     assert "own-asset hold" not in body
+    assert "paths" not in body
 
 
 def test_v2_mention_does_not_arm(tmp_path, monkeypatch):
@@ -198,5 +202,5 @@ def test_v2_graveyard_verdict_carries_null_p_fields(tmp_path, monkeypatch):
     verdicts, _ = _gate_entries(reg, sid)
     m = verdicts[0]["metrics"]
     assert m["protocol"] == "quarantine-live-protocol-v2"
-    assert (m["p_zero"], m["p_hold"], m["p"]) == (None, None, None)
+    assert (m["p_zero"], m["p_hold"], m["p"], m["p_hold_paths"]) == (None, None, None, None)
     assert Registry(reg.log_path).strategy_states()[sid] == "graveyard"
