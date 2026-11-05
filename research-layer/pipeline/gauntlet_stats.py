@@ -26,8 +26,9 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - deflated Sharpe: evaluate_spec's formula, psr(sharpe(r),
   expected_max_sharpe(trials_n, trials_var), len(r), skew, kurt), over the
   SAME series gauntlet.run passed evaluate_spec as daily_returns:
-  cluster_registry's returns_by_id[sid] -- intersection-trimmed when classes
-  are mixed or calendars ragged, native otherwise (Ruling 11; a different
+  cluster_registry_by_cell's returns_by_id[sid], built by the same alignment
+  as cluster_registry's (gauntlet._align_for_trials) -- intersection-trimmed
+  when classes are mixed or calendars ragged, native otherwise (Ruling 11; a different
   window would make v6 and v6.1 DSRs on one chain incomparable). The
   alignment used is recorded beside it (trials_alignment,
   trials_common_days), as v6 recorded it in metrics.
@@ -49,13 +50,22 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - haircut: harvey_liu_haircut(train Sharpe, train years, trials_n), window
   "train", as _evaluate_candidate recorded it.
 - effective trials are FLOORED at the highest k ever recorded on the chain
-  (Ruling 20, Coen option 1): the silhouette argmax is unstable on a growing
-  registry (302 -> 480 -> 44), and a lower N would flatter every later
-  deflated Sharpe. Each entry records trials_n_raw (this run's argmax, method
-  unchanged), trials_n_floor + trials_n_floor_entry_hash (the chain max BEFORE
-  this run and the entry that supplied it, or null), and trials_n =
-  max(raw, floor), the figure the deflated Sharpe AND the haircut use.
-  trials_sr_var stays this run's. See _View.on_entry for what counts.
+  (Ruling 20, Coen option 1): the registry-wide silhouette argmax was
+  unstable on a growing registry (302 -> 480 -> 44), a fixed cut can still
+  dip by a few as members arrive, and a lower N would flatter every later
+  deflated Sharpe. Each entry records trials_n_raw (this run's per-cell sum
+  of k, gauntlet-protocol-v6.1-amendment-2; the registry-wide argmax before
+  it), trials_n_floor + trials_n_floor_entry_hash (the chain max BEFORE this
+  run and the entry that supplied it, or null), and trials_n = max(raw,
+  floor), the figure the deflated Sharpe AND the haircut use. The jump from
+  the registry-wide k to the per-cell k is a ratchet: once chained, the
+  floor holds it, so a code rollback cannot lower the recorded N or SR*.
+  trials_sr_var stays this run's (every partition's cluster representatives
+  pooled in one sample variance). Each entry also records trials_partitions,
+  trials_largest_partition_n and trials_cut_rho (cluster_cells.CUT_RHO,
+  changed only by a new chained note); the per-partition table goes to the
+  --report file and the run log, never onto an entry. See _View.on_entry for
+  what counts.
 - the expected maximum Sharpe SR* is FLOORED too (step 7, Coen option a,
   gauntlet-protocol-v6.1-amendment-1): SR* scales with sqrt(trials_sr_var),
   and the variance moves by orders of magnitude between the silhouette
@@ -87,8 +97,15 @@ them. chain.lock is never waited on, polled inside, or broken here.
 
 Deadline (I5): clustering starts only when the time left covers its
 estimate (the last measured duration, persisted in the status as cluster_s,
-else CLUSTER_PRIOR_S); each PBO null likewise (pbo_null_mean_s, else
+scaled by this run's sum of squared partition sizes over the cluster_sum_n2
+it was measured at; unscaled when the status has no cluster_sum_n2, as one
+written by the registry-wide method; CLUSTER_PRIOR_S before any
+measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
+Memory: clustering then starts only when available physical memory covers
+cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes
+(n_max the largest partition, read from the specs before clustering; L
+bounded by the shortest cached series); otherwise exit 3.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
@@ -155,6 +172,16 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # copies, the last is cluster_registry_by_cell's aligned copies of ALL n
 # series (built up front, alive through the pass). `available_phys_mb` is
 # read after the series pass, so memory already held is not charged again.
+# HAZARD, not covered: the merge history's member sets are a further
+# n_max^2-shaped term (about 0.01 n^2 entries measured on the registry-wide
+# pass, more if the merge tree turns chain-like), inside the margin only.
+# The pure-Python reference path (cluster.effective_trials sends a constant
+# nonzero series there) is far heavier and is not covered by this gate; the
+# per-cell design never takes it: cluster_cells raises ConstantNonzeroRow
+# for such a row and the run refuses (`cluster_refused`, exit 1).
+# Not gated either: the whole job's peak AFTER clustering (11,745 MB at n
+# 30,140 on 2026-11-05: the train-window float lists for every strategy, the
+# PBO pass and the verdict loop) grows linearly with n (follow-up).
 # 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
 # copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
 # added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
@@ -199,9 +226,12 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "cluster_s", "pbo_null_mean_s",
                  "pbo_nulls_computed", "pbo_nulls_cached",
                  "cluster_n", "cluster_need_mb", "avail_phys_mb",
-                 # per-cell effective trials (spec s6): this run's largest cell
-                 # partition, sum of n^2 over partitions, and merges that were
-                 # at or under the cut but not counted (float noise)
+                 # per-cell effective trials (spec s6): cluster_max_cell_n and
+                 # cut_late_merges are THIS run's (largest cell partition;
+                 # merges at or under the cut but not counted, float noise),
+                 # null when it did not cluster; cluster_sum_n2 (sum of n^2
+                 # over partitions) is carried forward like cluster_n and
+                 # cluster_s, the figure the time estimate scales by
                  "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has

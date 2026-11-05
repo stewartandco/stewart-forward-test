@@ -552,9 +552,9 @@ def _stats_payloads(reg):
 
 
 def _spy_clustering(monkeypatch, trials_n=None, trials_var=None):
-    """Capture cluster_registry's output (the job's own call); optionally force
-    its raw k and/or its trials_var (otherwise as that run's clustering
-    computed them)."""
+    """Capture cluster_registry_by_cell's output (the job's own call);
+    optionally force its raw k and/or its trials_var (otherwise as that run's
+    per-cell clustering computed them)."""
     from . import gauntlet
     seen = {}
     real = gauntlet.cluster_registry_by_cell
@@ -1439,6 +1439,24 @@ def test_entries_carry_partition_fields_and_method(tmp_path, capsys):
     assert st["cluster_max_cell_n"] == 1
     assert st["cluster_sum_n2"] == 3
     assert st["cut_late_merges"] == 0
+
+
+def test_largest_partition_n_is_the_real_multi_row_count(tmp_path, capsys):
+    """Task 7 mutation (9): the sweep fixture registers 5 BTCUSD strategies,
+    ONE partition of 5 rows, so a hard-coded 1 (or the partition count) in
+    place of the largest partition's n fails here, where the 1-member
+    fixture above cannot tell them apart."""
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    stats = _stats_payloads(reg)
+    assert len(stats) == 5
+    for p in stats:
+        assert p["trials_partitions"] == 1
+        assert p["trials_largest_partition_n"] == 5
+    st = json.loads((logs / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
+    assert st["cluster_max_cell_n"] == 5
+    assert st["cluster_sum_n2"] == 25
 
 
 def test_report_holds_one_row_per_partition(tmp_path, capsys):
