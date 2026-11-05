@@ -10,17 +10,25 @@ a strategy's state. Without --chain it only reports. With --chain it
 REFUSES (exit 1, exit_reason refused_no_amendment_note, nothing computed or
 written) until the gauntlet-protocol-v6.1-amendment-1 note is on the chain:
 entries whose SR* is floored must never be chained under the v6.1 text that
-says trials_sr_var "is not floored".
+says trials_sr_var "is not floored". It refuses likewise (exit_reason
+refused_no_amendment2_note) until the gauntlet-protocol-v6.1-amendment-2 note
+is on the chain: entries whose effective trials are counted per cell must
+never be chained under the text that says they are counted registry-wide.
 
 Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
-- the registry-wide series and the clustering are gauntlet.registry_series
-  and gauntlet.cluster_registry, the functions gauntlet.run itself calls;
-  the sibling families are gauntlet.sibling_families. Nothing is re-derived.
+- the registry-wide series is gauntlet.registry_series and the sibling
+  families gauntlet.sibling_families, the functions gauntlet.run itself
+  calls. The effective trials are counted PER CELL PARTITION by
+  gauntlet.cluster_registry_by_cell (pipeline/cluster_cells.py, spec
+  2026-11-04): the same aligned series as gauntlet.cluster_registry, one
+  average-linkage tree per cell partition cut at rho >= 0.9, k summed.
+  Nothing is re-derived.
 - deflated Sharpe: evaluate_spec's formula, psr(sharpe(r),
   expected_max_sharpe(trials_n, trials_var), len(r), skew, kurt), over the
   SAME series gauntlet.run passed evaluate_spec as daily_returns:
-  cluster_registry's returns_by_id[sid] -- intersection-trimmed when classes
-  are mixed or calendars ragged, native otherwise (Ruling 11; a different
+  cluster_registry_by_cell's returns_by_id[sid], built by the same alignment
+  as cluster_registry's (gauntlet._align_for_trials) -- intersection-trimmed
+  when classes are mixed or calendars ragged, native otherwise (Ruling 11; a different
   window would make v6 and v6.1 DSRs on one chain incomparable). The
   alignment used is recorded beside it (trials_alignment,
   trials_common_days), as v6 recorded it in metrics.
@@ -42,13 +50,22 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
 - haircut: harvey_liu_haircut(train Sharpe, train years, trials_n), window
   "train", as _evaluate_candidate recorded it.
 - effective trials are FLOORED at the highest k ever recorded on the chain
-  (Ruling 20, Coen option 1): the silhouette argmax is unstable on a growing
-  registry (302 -> 480 -> 44), and a lower N would flatter every later
-  deflated Sharpe. Each entry records trials_n_raw (this run's argmax, method
-  unchanged), trials_n_floor + trials_n_floor_entry_hash (the chain max BEFORE
-  this run and the entry that supplied it, or null), and trials_n =
-  max(raw, floor), the figure the deflated Sharpe AND the haircut use.
-  trials_sr_var stays this run's. See _View.on_entry for what counts.
+  (Ruling 20, Coen option 1): the registry-wide silhouette argmax was
+  unstable on a growing registry (302 -> 480 -> 44), a fixed cut can still
+  dip by a few as members arrive, and a lower N would flatter every later
+  deflated Sharpe. Each entry records trials_n_raw (this run's per-cell sum
+  of k, gauntlet-protocol-v6.1-amendment-2; the registry-wide argmax before
+  it), trials_n_floor + trials_n_floor_entry_hash (the chain max BEFORE this
+  run and the entry that supplied it, or null), and trials_n = max(raw,
+  floor), the figure the deflated Sharpe AND the haircut use. The jump from
+  the registry-wide k to the per-cell k is a ratchet: once chained, the
+  floor holds it, so a code rollback cannot lower the recorded N or SR*.
+  trials_sr_var stays this run's (every partition's cluster representatives
+  pooled in one sample variance). Each entry also records trials_partitions,
+  trials_largest_partition_n and trials_cut_rho (cluster_cells.CUT_RHO,
+  changed only by a new chained note); the full per-partition table goes to
+  the --report file and the 20 largest partitions to the run log; neither
+  goes onto an entry. See _View.on_entry for what counts.
 - the expected maximum Sharpe SR* is FLOORED too (step 7, Coen option a,
   gauntlet-protocol-v6.1-amendment-1): SR* scales with sqrt(trials_sr_var),
   and the variance moves by orders of magnitude between the silhouette
@@ -80,8 +97,15 @@ them. chain.lock is never waited on, polled inside, or broken here.
 
 Deadline (I5): clustering starts only when the time left covers its
 estimate (the last measured duration, persisted in the status as cluster_s,
-else CLUSTER_PRIOR_S); each PBO null likewise (pbo_null_mean_s, else
+scaled by this run's sum of squared partition sizes over the cluster_sum_n2
+it was measured at; unscaled when the status has no cluster_sum_n2, as one
+written by the registry-wide method; CLUSTER_PRIOR_S before any
+measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
+Memory: clustering then starts only when available physical memory covers
+cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes
+(n_max the largest partition, read from the specs before clustering; L
+bounded by the shortest cached series); otherwise exit 3.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
@@ -119,12 +143,13 @@ from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
 from .taskguard import task_started
 # Module-level names on purpose: the tests replace them to prove the job
 # calls the gauntlet's own functions rather than a copy.
-from .gauntlet import cluster_registry, registry_series, sibling_families
+from .gauntlet import cluster_registry_by_cell, registry_series, sibling_families
+from . import cluster_cells
 from .gauntlet import (CSCV_SPLITS, PBO_MIN_DISTINCT, PBO_PASS_PCTILE,
                        PBO_KILL_PCTILE, PBO_NULL_DRAWS, PBO_NULL_PRIOR_S, _as_list)
 
 LAYER = Path(__file__).resolve().parent.parent
-CLUSTER_METHOD = "effective_trials/v3 correlation-distance"
+CLUSTER_METHOD = cluster_cells.METHOD
 # Specs per registry_series call; the deadline is checked between calls,
 # so a cold night overruns it by at most one chunk's simulations.
 SERIES_CHUNK = 10
@@ -134,34 +159,43 @@ SERIES_CHUNK = 10
 # (about 1.5 h at 11.8k strategies, Ruling 13). Each PBO null likewise needs
 # the measured mean (status `pbo_null_mean_s`) or gauntlet's PBO_NULL_PRIOR_S.
 CLUSTER_PRIOR_S = 2 * 3600.0
-# Incident 2026-10-11: clustering holds one n x n float64 matrix (8 n^2
-# bytes) plus transients; the 2026-10-11 constant was 14 bytes per n^2,
-# from step 7's +2.4 GB at n = 13,730 (replaced 2026-11-01, below). Its
-# merge loop updates a whole
-# column per merge, so it touches every page of the matrix every merge: if
-# any of it is paged out the pass thrashes (19,092 series: ~4.9 GB needed,
-# 1.4 GB free, 5.8 GB committed but 44 MB resident, 90 min and counting when
-# killed). So the pass starts only when AVAILABLE PHYSICAL memory covers
-# it; otherwise the run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`)
-# and the next one retries. The time estimate also scales with n^2 from the n it was
-# measured at (`cluster_n`, carried forward like `cluster_s`).
-# Re-measured 2026-11-01 (Coen: fix the gate only, cluster.py unchanged), on
-# the REAL aligned matrix (n = 26,835, L = 1,303 common days): peak private
-# commit 6,896 MB = 8.4 n^2 + 34 n L bytes (one n x n matrix at a time plus
-# the n x L copies inside effective_trials; the n L term held at 34-39 B from
-# n = 4,000 to 26,835, and synthetic runs to 12,000 fit the same model;
-# verify_cluster_identity's own peak read +2,104 MB at 13,730 and +6,857 MB at
-# 26,835 on the same matrix). The merge history's member sets are the one
-# other n^2-shaped term: 0.008-0.012 n^2 entries measured (about 0.35 B per
-# n^2, inside the 8.4); a chain-like merge tree would grow it. The
-# old 14 n^2 came from ONE reading at n = 13,730 that folded the n L term into
-# n^2, so it overstated the need more as n grows. The gate adds 8 B per n L for
-# cluster_registry's aligned copies (built before effective_trials, alive
-# through it) and rounds both up: 9 n^2 + 48 n L, about 10% over the
-# measurement. `available_phys_mb` is read after the series pass, so memory
-# already held is not charged again.
+# Memory gate (spec s5, effective trials per cell). The clustering runs one
+# partition at a time, so the pass holds ONE n_max x n_max float64 matrix
+# (n_max = the largest partition's series count), not a registry-wide n x n.
+# Its merge loop touches every page of that matrix every merge: if any of it
+# is paged out the pass thrashes (2026-10-11: 19,092 series, ~4.9 GB needed,
+# 1.4 GB free, killed after 90 min). So the pass starts only when AVAILABLE
+# PHYSICAL memory covers the need; otherwise the run stops (exit
+# DEFERRED_MEMORY_EXIT, `deferred_memory`) and the next one retries.
+# need = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all, L aligned
+# days): the first two are the largest partition's matrix and its n_max x L
+# copies, the last is cluster_registry_by_cell's aligned copies of ALL n
+# series (built up front, alive through the pass). `available_phys_mb` is
+# read after the series pass, so memory already held is not charged again.
+# HAZARD, not covered: the merge history's member sets are a further
+# n_max^2-shaped term (about 0.01 n^2 entries measured on the registry-wide
+# pass, more if the merge tree turns chain-like), inside the margin only.
+# The pure-Python reference path (cluster.effective_trials sends a constant
+# nonzero series there) is far heavier and is not covered by this gate; the
+# per-cell design never takes it: cluster_cells raises ConstantNonzeroRow
+# for such a row and the run refuses (`cluster_refused`, exit 1).
+# Not gated either: the whole job's peak AFTER clustering (11,745 MB at n
+# 30,140 on 2026-11-05: the train-window float lists for every strategy, the
+# PBO pass and the verdict loop) grows linearly with n (follow-up).
+# 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
+# copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
+# added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
+# per n L) and at most 39.1 MB a single partition's cut (33.1 MB the largest,
+# under the n_max terms' 58.8 MB, so 9 and 48 stay); the rest scales with n,
+# so (332.3 - 33.1) MB = 10.4 B per n L, plus about 10%.
+# History: 14 n^2 (2026-10-11, one reading at n = 13,730) became 9 n^2 +
+# 48 n L on 2026-11-01 (real matrix n = 26,835, L = 1,303: peak 6,896 MB =
+# 8.4 n^2 + 34 n L, plus 8 B per n L for the aligned copies, ~10% margin).
+# The time estimate scales by the ratio of sum n_k^2 over partitions (the
+# status carries `cluster_sum_n2` forward like `cluster_s`).
 CLUSTER_BYTES_PER_N2 = 9.0
 CLUSTER_BYTES_PER_NL = 48.0
+CLUSTER_BYTES_PER_ALIGNED_NL = 11.5
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
@@ -191,7 +225,14 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  "trials_common_days", "stopped_at_deadline", "chained",
                  "cluster_s", "pbo_null_mean_s",
                  "pbo_nulls_computed", "pbo_nulls_cached",
-                 "cluster_n", "cluster_need_mb", "avail_phys_mb")
+                 "cluster_n", "cluster_need_mb", "avail_phys_mb",
+                 # per-cell effective trials (spec s6): cluster_max_cell_n and
+                 # cut_late_merges are THIS run's (largest cell partition;
+                 # merges at or under the cut but not counted, float noise),
+                 # null when it did not cluster; cluster_sum_n2 (sum of n^2
+                 # over partitions) is carried forward like cluster_n and
+                 # cluster_s, the figure the time estimate scales by
+                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -262,6 +303,16 @@ def is_amendment_note(text) -> bool:
     return isinstance(text, str) and text.startswith(AMENDMENT_NOTE_PREFIX)
 
 
+# Amendment 2 (spec 2026-11-04 s6): --chain refuses until this note is on the
+# chain, detected the same way (first line's prefix, first occurrence). It
+# records that effective trials are counted per cell partition.
+AMENDMENT2_NOTE_PREFIX = "gauntlet-protocol-v6.1-amendment-2:"
+
+
+def is_amendment2_note(text) -> bool:
+    return isinstance(text, str) and text.startswith(AMENDMENT2_NOTE_PREFIX)
+
+
 def _positive_number(v) -> bool:
     """A usable floor value: an int or float (never a bool), finite, > 0.
     Total: an int too large for a float (math.isfinite raises OverflowError
@@ -291,6 +342,8 @@ class _View:
         self.sr_floor_hash: str | None = None
         # Ruling 35 (ii): the amendment note's entry hash (first occurrence).
         self.amendment_hash: str | None = None
+        # Amendment 2: the per-cell note's entry hash (first occurrence).
+        self.amendment2_hash: str | None = None
 
     def _floor_candidate(self, n, e: dict) -> None:
         # A cluster count is a positive int; anything else is no floor.
@@ -316,6 +369,9 @@ class _View:
         elif (et == "note" and self.amendment_hash is None
               and is_amendment_note(p.get("text"))):
             self.amendment_hash = entry_hash(e)
+        elif (et == "note" and self.amendment2_hash is None
+              and is_amendment2_note(p.get("text"))):
+            self.amendment2_hash = entry_hash(e)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             m = p.get("metrics")
             if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
@@ -500,6 +556,9 @@ def verdict_stats(sid: str, dsr_rets, train_rets: list[float],
                                            t_years=n_train_points / 365.0,
                                            n_trials=trials_n),
                         window="train"),
+        "trials_partitions": clustered["partitions"],
+        "trials_largest_partition_n": clustered["largest_partition_n"],
+        "trials_cut_rho": cluster_cells.CUT_RHO,
         "cluster_method": CLUSTER_METHOD,
         "data_vintage": vintage,
         "data_digest": data_digest,
@@ -550,22 +609,59 @@ def _prior_cluster_n(logs_dir: Path) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
-def cluster_estimate_s(prior_s: float | None, prior_n: int | None, n: int) -> float:
+def _prior_cluster_sum_n2(logs_dir: Path) -> int | None:
+    """The sum of squared partition sizes `cluster_s` was measured at
+    (carried forward with it); None when the last status has none (a status
+    written by the registry-wide method has no such field)."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    v = st.get("cluster_sum_n2") if isinstance(st, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def cluster_estimate_s(prior_s: float | None, prior_sum_n2: int | None,
+                       sum_n2: int) -> float:
     """The clustering pass's expected duration: the last measured one scaled
-    by (n / the n it was measured at)^2, the pass being O(n^2) per merge
-    sweep; unscaled when that n is unknown; CLUSTER_PRIOR_S before any
+    by (sum n_k^2 now / sum n_k^2 when it was measured) -- the pass is a sum
+    of per-partition O(n_k^2) sweeps; unscaled when that sum is unknown (a
+    status from the registry-wide method); CLUSTER_PRIOR_S before any
     measurement."""
     if not prior_s:
         return CLUSTER_PRIOR_S
-    if prior_n and n > 0:
-        return prior_s * (n / prior_n) ** 2
+    if prior_sum_n2 and sum_n2 > 0:
+        return prior_s * (sum_n2 / prior_sum_n2)
     return prior_s
 
 
-def cluster_need_mb(n: int, days: int) -> int:
-    """MiB a clustering pass over n series of `days` aligned days needs."""
-    return math.ceil((CLUSTER_BYTES_PER_N2 * n * n
-                      + CLUSTER_BYTES_PER_NL * n * days) / 2**20)
+def cluster_need_mb(n: int, n_max: int, days: int) -> int:
+    """MiB a per-cell clustering pass needs: the largest partition's n_max x
+    n_max matrix and its n_max x `days` copies, plus the aligned copies of
+    all n series."""
+    return math.ceil((CLUSTER_BYTES_PER_N2 * n_max * n_max
+                      + CLUSTER_BYTES_PER_NL * n_max * days
+                      + CLUSTER_BYTES_PER_ALIGNED_NL * n * days) / 2**20)
+
+
+def _partition_sizes(specs: list[dict], sids) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for s in specs:
+        if s["strategy_id"] in sids:
+            k = cluster_cells.partition_key(s)
+            sizes[k] = sizes.get(k, 0) + 1
+    return sizes
+
+
+def largest_partition_n(specs: list[dict], sids) -> int:
+    """Series count of the largest partition among the specs whose series
+    exist (`sids`), known before clustering."""
+    return max(_partition_sizes(specs, sids).values(), default=0)
+
+
+def partition_sum_n2(specs: list[dict], sids) -> int:
+    """Sum of squared partition sizes over the specs whose series exist."""
+    return sum(n * n for n in _partition_sizes(specs, sids).values())
 
 
 def cluster_days_bound(dated: dict) -> int:
@@ -585,8 +681,18 @@ def _write_report(path: Path, status: dict, extra: dict) -> None:
     lines = ["# gauntlet_stats report", "", "| key | value |", "|---|---|"]
     for k in STATUS_FIELDS:
         lines.append(f"| {k} | {_fmt(status.get(k))} |")
+    parts = extra.get("by_partition")
     for k, v in extra.items():
-        lines.append(f"| {k} | {_fmt(v)} |")
+        if k != "by_partition":
+            lines.append(f"| {k} | {_fmt(v)} |")
+    if parts:
+        # Spec s6: the FULL per-partition breakdown, sorted by key. Report
+        # only: never on a chain entry (spec s3).
+        lines += ["", "## partitions", "",
+                  "| partition | n | k | never_traded |", "|---|---|---|---|"]
+        for key in sorted(parts):
+            b = parts[key]
+            lines.append(f"| {key} | {b['n']} | {b['k']} | {b['never_traded']} |")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -612,6 +718,7 @@ def run(argv: list[str] | None = None) -> int:
     vintage = vintage_date(date.today())
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     prior_cluster_n = _prior_cluster_n(a.logs_dir)
+    prior_cluster_sum_n2 = _prior_cluster_sum_n2(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -628,6 +735,11 @@ def run(argv: list[str] | None = None) -> int:
               "cluster_n": prior_cluster_n,
               # this run's admission check, when it got that far (2026-10-11)
               "cluster_need_mb": None, "avail_phys_mb": None,
+              # this run's clustering shape, once it has clustered (spec s6)
+              "cluster_max_cell_n": None,
+              # carried forward until this run clusters, like cluster_s
+              "cluster_sum_n2": prior_cluster_sum_n2,
+              "cut_late_merges": None,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -694,6 +806,15 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"written. {len(pending)} v6.1 verdict(s) without stats.",
                   flush=True)
             return finish(1, "refused_no_amendment_note")
+        if a.chain and view.amendment2_hash is None:
+            # Spec s6: effective trials are counted per cell from here on,
+            # and the chained text says registry-wide. Report-only runs are
+            # unaffected.
+            print(f"REFUSED: --chain needs the '{AMENDMENT2_NOTE_PREFIX}' note "
+                  f"on the chain (it records the per-cell effective trials); "
+                  f"nothing computed or written. {len(pending)} v6.1 "
+                  f"verdict(s) without stats.", flush=True)
+            return finish(1, "refused_no_amendment2_note")
         all_specs = view.specs
         by_class: dict[str, int] = {}
         for s in all_specs:
@@ -745,7 +866,13 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         # kill with no status written. The time left must cover the estimate
         # (last measured duration, else CLUSTER_PRIOR_S), not merely be > 0.
         n_cluster = len(dated)
-        cluster_est = cluster_estimate_s(prior_cluster_s, status["cluster_n"], n_cluster)
+        # The partitions are known before clustering (spec s5): the gate and
+        # the estimate read them from the specs whose series exist.
+        sids = set(dated)
+        n_max = largest_partition_n(all_specs, sids)
+        sum_n2 = partition_sum_n2(all_specs, sids)
+        cluster_est = cluster_estimate_s(prior_cluster_s, status["cluster_sum_n2"],
+                                         sum_n2)
         left_s = t_end - time.time()
         if left_s < cluster_est:
             status["stopped_at_deadline"] = True
@@ -753,23 +880,43 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"{max(left_s, 0.0):.0f}s left is under the clustering estimate "
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
-        need_mb = cluster_need_mb(n_cluster, cluster_days_bound(dated))
+        need_mb = cluster_need_mb(n_cluster, n_max, cluster_days_bound(dated))
         avail_mb = available_phys_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
         if avail_mb is not None and avail_mb < need_mb:
-            print(f"MEMORY: clustering {n_cluster} series needs ~{need_mb} MB of "
-                  f"physical memory and {avail_mb} MB is available; not started "
-                  f"(it would page and thrash). Series are cached; the next run "
-                  f"retries.", flush=True)
+            print(f"MEMORY: clustering {n_cluster} series (largest partition "
+                  f"{n_max}) needs ~{need_mb} MB of physical memory and "
+                  f"{avail_mb} MB is available; not started (it would page and "
+                  f"thrash). Series are cached; the next run retries.",
+                  flush=True)
             return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()
         try:
-            clustered = cluster_registry(dated, eq_len, all_specs)
+            clustered = cluster_registry_by_cell(dated, eq_len, all_specs)
         except ValueError as exc:
             print(f"REFUSED: clustering: {exc}", flush=True)
             return finish(1, "cluster_refused")
         status["cluster_s"] = round(time.time() - t_cluster0, 1)
         status["cluster_n"] = n_cluster
+        status["cluster_max_cell_n"] = clustered["largest_partition_n"]
+        status["cluster_sum_n2"] = clustered["sum_n2"]
+        status["cut_late_merges"] = clustered["late_merges"]
+        if clustered["late_merges"]:
+            print(f"WARN cut_late_merges {clustered['late_merges']}: merges at "
+                  f"or under the cut after the first over it (not counted)",
+                  flush=True)
+        # Per-partition detail: the FULL table to the report (spec s6), the
+        # top 20 by n to the run log; never on a chain entry (spec s3).
+        extra["by_partition"] = clustered["by_partition"]
+        top = sorted(clustered["by_partition"].items(),
+                     key=lambda kv: (-kv[1]["n"], kv[0]))[:20]
+        print(f"gauntlet_stats: {clustered['partitions']} partitions, top "
+              f"{len(top)} by n (key n k never_traded):", flush=True)
+        for key, bp in top:
+            print(f"  {key} {bp['n']} {bp['k']} {bp['never_traded']}", flush=True)
+        if a.report is not None:
+            print(f"gauntlet_stats: full per-partition table in {a.report}",
+                  flush=True)
         # Ruling 20: ONE floor per run, from the read above, before chaining.
         floor, floor_hash = view.trials_floor, view.trials_floor_hash
         # Ruling 35: ONE SR* floor per run, from the same single read.

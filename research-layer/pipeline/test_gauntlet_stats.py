@@ -10,6 +10,15 @@ from . import gauntlet_stats as gs
 # so every fixture below that chains stats carries it (test anchors, not the
 # real text; the refusal itself is tested at the end of this file).
 V61_AMEND1 = gs.AMENDMENT_NOTE_PREFIX + " test anchor"
+# Amendment 2 (per-cell effective trials, spec s6): --chain refuses without it
+# as well, so every chaining fixture carries both notes.
+V61_AMEND2 = gs.AMENDMENT2_NOTE_PREFIX + " test anchor"
+
+
+def _amend(reg):
+    """Both amendment notes, in order, on `reg`."""
+    reg.append("note", {"text": V61_AMEND1})
+    reg.append("note", {"text": V61_AMEND2})
 
 
 def _setup(tmp_path, note=True):
@@ -17,7 +26,7 @@ def _setup(tmp_path, note=True):
     v6.1 amendment note."""
     from .test_gauntlet_worker import _setup as worker_setup
     reg, spec, data = worker_setup(tmp_path, note=note)
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     return reg, spec, data
 
 
@@ -53,23 +62,24 @@ def test_with_chain_flag_every_v61_verdict_gets_one_linked_entry(tmp_path):
 
 
 def test_the_stats_job_uses_the_gauntlets_own_clustering(tmp_path, monkeypatch):
-    """The method is unchanged: the stats job calls gauntlet.cluster_registry
-    (the function gauntlet.run itself uses) and reports its trials_n."""
+    """Spec s10: the stats job calls gauntlet.cluster_registry_by_cell (the
+    gauntlet's own per-cell clustering, not a copy) and reports its trials_n."""
     from . import gauntlet
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     seen = {}
-    real = gauntlet.cluster_registry
+    # spec s10: the job's clustering call is cluster_registry_by_cell
+    real = gauntlet.cluster_registry_by_cell
     def spy(*a, **k):
         out = real(*a, **k)
         seen.update(out)
         return out
-    monkeypatch.setattr(gs, "cluster_registry", spy)
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", spy)
     rep = tmp_path / "report.md"
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--logs-dir", str(tmp_path / "logs"), "--report", str(rep)]) == 0
-    assert seen, "the stats job did not call gauntlet.cluster_registry"
+    assert seen, "the stats job did not call gauntlet.cluster_registry_by_cell"
     assert f"| trials_n_raw | {seen['trials_n']} |" in rep.read_text(encoding="utf-8")
 
 
@@ -84,7 +94,9 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                "pbo_nulls_cached", "expected_max_sharpe_raw",
                "expected_max_sharpe_effective",
                # 2026-10-11 orphan incident: memory-aware cluster admission
-               "cluster_n", "cluster_need_mb", "avail_phys_mb"}
+               "cluster_n", "cluster_need_mb", "avail_phys_mb",
+               # per-cell effective trials (spec s6)
+               "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges"}
 
 
 def _status(tmp_path):
@@ -137,12 +149,12 @@ def test_stats_chained_by_someone_else_mid_run_are_not_duplicated(tmp_path, monk
     assert _run(reg, data, tmp_path) == 0
     v = next(e for e in reg.entries() if e["entry_type"] == "verdict"
              and e["payload"]["stage"] == "gauntlet")
-    real = gauntlet.cluster_registry
+    real = gauntlet.cluster_registry_by_cell
     def racing(*a, **k):
         out = real(*a, **k)
         reg.record_gauntlet_stats(spec["strategy_id"], entry_hash(v), {"trials_n": 1})
         return out
-    monkeypatch.setattr(gs, "cluster_registry", racing)
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", racing)
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--logs-dir", str(tmp_path / "logs"), "--chain"]) == 0
     stats = [e for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
@@ -192,11 +204,28 @@ def test_the_weekly_vintage_truncates_the_bars(tmp_path, monkeypatch):
     assert _status(tmp_path)["vintage"] == "2023-01-20"
 
 
-def test_recorded_stats_match_the_v6_gauntlets_own_numbers(tmp_path, capsys):
+def _registry_wide_clustering(monkeypatch):
+    """Hold the stats job's clustering to the v6 gauntlet's own registry-wide
+    method (cluster_registry, one partition) so the tests below can still pin
+    every figure OUTSIDE the clustering method against a v6 verdict. The
+    per-cell method itself is pinned by the cluster_cells tests and the
+    entry tests at the end of this file."""
+    from . import gauntlet
+
+    def wide(*a, **k):
+        out = gauntlet.cluster_registry(*a, **k)
+        n = len(out["returns_by_id"])
+        return {**out, "partitions": 1, "largest_partition_n": n,
+                "late_merges": 0, "sum_n2": n * n, "by_partition": {}}
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", wide)
+
+
+def test_recorded_stats_match_the_v6_gauntlets_own_numbers(tmp_path, capsys, monkeypatch):
     """Same registry, same bars (the fixture ends before any vintage Sunday,
-    so truncation is a no-op): the stats job must record exactly what
-    gauntlet.run recorded in a v6 verdict for every registry-wide figure --
-    effective trials, the deflated Sharpe, PBO, plateau_ok and the haircut."""
+    so truncation is a no-op): with the clustering held to the registry-wide
+    method, the stats job must record exactly what gauntlet.run recorded in a
+    v6 verdict for every registry-wide figure -- effective trials, the
+    deflated Sharpe, PBO, plateau_ok and the haircut."""
     from .gauntlet import run as gauntlet_run
     from .registry import Registry
     from .test_gauntlet import v4_sweep_registry, v4_bars, V4_CUTOFF, run_verifier
@@ -215,10 +244,11 @@ def test_recorded_stats_match_the_v6_gauntlets_own_numbers(tmp_path, capsys):
                          "--cutoff", V4_CUTOFF, "--no-perturb"]) == 0
     r61 = Registry(new / "reg.jsonl")
     r61.append("note", {"text": V61})
-    r61.append("note", {"text": V61_AMEND1})
+    _amend(r61)
     assert gw.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--artifacts-dir", str(new / "art"), "--logs-dir", str(new / "logs"),
                    "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
+    _registry_wide_clustering(monkeypatch)
     assert gs.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--logs-dir", str(new / "logs"), "--cutoff", V4_CUTOFF,
                    "--chain"]) == 0
@@ -274,7 +304,7 @@ def test_a_crash_leaves_a_status_saying_so(tmp_path, monkeypatch):
     assert _run(reg, data, tmp_path) == 0
     def boom(*a, **k):
         raise RuntimeError("disk on fire")
-    monkeypatch.setattr(gs, "cluster_registry", boom)
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", boom)
     with pytest.raises(RuntimeError):
         gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                 "--logs-dir", str(tmp_path / "logs"), "--chain"])
@@ -301,7 +331,7 @@ def _walk_weekday_bars(start, end, seed=11, price=1.30):
     return bars
 
 
-def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path, capsys):
+def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path, capsys, monkeypatch):
     """Ruling 11: crypto + two fx strategies with unequal history starts, so
     clustering intersects and the DSR input is the intersection-trimmed
     series, not the strategy's own full history. The job must record exactly
@@ -334,10 +364,11 @@ def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path,
                          "--cutoff", cutoff, "--no-perturb"]) == 0
     r61 = Registry(new / "reg.jsonl")
     r61.append("note", {"text": V61})
-    r61.append("note", {"text": V61_AMEND1})
+    _amend(r61)
     assert gw.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--artifacts-dir", str(new / "art"), "--logs-dir", str(new / "logs"),
                    "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
+    _registry_wide_clustering(monkeypatch)
     assert gs.run(["--registry", str(r61.log_path), "--data-dir", str(new / "data"),
                    "--logs-dir", str(new / "logs"), "--cutoff", cutoff,
                    "--chain"]) == 0
@@ -360,7 +391,7 @@ def test_deflated_sharpe_uses_v6s_own_window_on_a_mixed_class_registry(tmp_path,
 
 # ---------------- fix round (Ruling 14): pin the data, not just the date ----------------
 
-def _mixed_twin(tmp_path, name, drop_eur_row):
+def _mixed_twin(tmp_path, name, drop_eur_row, report=None):
     """The mixed-class registry judged by the worker, then statted with
     --chain, on bars that are identical except that one EUR row (a weekday
     long BEFORE any vintage Sunday) can be withheld -- an fx row that arrives
@@ -389,7 +420,7 @@ def _mixed_twin(tmp_path, name, drop_eur_row):
     shutil.copyfile(src / "reg.jsonl", d / "reg.jsonl")
     reg = Registry(d / "reg.jsonl")
     reg.append("note", {"text": V61})
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     eur = _weekday_bars(dt.date(2020, 1, 1), dt.date(2020, 12, 31))
     if drop_eur_row:
         eur = [b for b in eur if b["date"] != "2020-03-02"]
@@ -402,7 +433,8 @@ def _mixed_twin(tmp_path, name, drop_eur_row):
                    "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
                    "--cutoff", cutoff, "--no-perturb", "--max-workers", "1"]) == 0
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
-                   "--logs-dir", str(d / "logs"), "--cutoff", cutoff, "--chain"]) == 0
+                   "--logs-dir", str(d / "logs"), "--cutoff", cutoff, "--chain"]
+                  + (["--report", str(report)] if report else [])) == 0
     stats = {e["payload"]["strategy_id"]: e["payload"]
              for e in Registry(reg.log_path).entries()
              if e["entry_type"] == "gauntlet_stats"}
@@ -461,8 +493,8 @@ def test_no_clustering_starts_after_the_deadline(tmp_path, monkeypatch):
     called = []
     monkeypatch.setattr(gs, "registry_series", series_then_expire)
     monkeypatch.setattr(gs, "time", _Clock)
-    monkeypatch.setattr(gs, "cluster_registry",
-                        lambda *a, **k: called.append(1) or gauntlet.cluster_registry(*a, **k))
+    monkeypatch.setattr(gs, "cluster_registry_by_cell",
+                        lambda *a, **k: called.append(1) or gauntlet.cluster_registry_by_cell(*a, **k))
     n = sum(1 for _ in reg.entries())
     assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
                    "--logs-dir", str(tmp_path / "logs"), "--chain"]) == 0
@@ -490,7 +522,7 @@ def _v61_sweep(tmp_path):
     write_data_dir(d, {"BTCUSD": v4_bars()})
     reg = Registry(d / "reg.jsonl")
     reg.append("note", {"text": V61})
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     assert gw.run(["--registry", str(reg.log_path), "--data-dir", str(d / "data"),
                    "--artifacts-dir", str(d / "art"), "--logs-dir", str(d / "logs"),
                    "--cutoff", V4_CUTOFF, "--no-perturb", "--max-workers", "1"]) == 0
@@ -520,12 +552,12 @@ def _stats_payloads(reg):
 
 
 def _spy_clustering(monkeypatch, trials_n=None, trials_var=None):
-    """Capture cluster_registry's output (the job's own call); optionally force
-    its raw k and/or its trials_var (otherwise as that run's clustering
-    computed them)."""
+    """Capture cluster_registry_by_cell's output (the job's own call);
+    optionally force its raw k and/or its trials_var (otherwise as that run's
+    per-cell clustering computed them)."""
     from . import gauntlet
     seen = {}
-    real = gauntlet.cluster_registry
+    real = gauntlet.cluster_registry_by_cell
 
     def spy(*a, **k):
         out = real(*a, **k)
@@ -536,7 +568,7 @@ def _spy_clustering(monkeypatch, trials_n=None, trials_var=None):
         seen.clear()
         seen.update(out)
         return out
-    monkeypatch.setattr(gs, "cluster_registry", spy)
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", spy)
     return seen
 
 
@@ -679,10 +711,10 @@ def _count_clustering(monkeypatch, advance_s=0.0):
 
     def spy(*a, **k):
         calls.append(1)
-        out = gauntlet.cluster_registry(*a, **k)
+        out = gauntlet.cluster_registry_by_cell(*a, **k)
         _FrozenClock.now += advance_s
         return out
-    monkeypatch.setattr(gs, "cluster_registry", spy)
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", spy)
     return calls
 
 
@@ -752,7 +784,7 @@ def _live_family_v61(tmp_path):
     from . import gauntlet_worker as gw
     reg, live_sids, _, _, _ = dead_and_live_family_registry(tmp_path)
     reg.append("note", {"text": V61})
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     data = write_data_dir(tmp_path, {"BTCUSD": v4_bars(),
                                      "ETHUSD": _flat_like(v4_bars())})
     logs = tmp_path / "logs"
@@ -1331,7 +1363,7 @@ def test_chain_refuses_until_the_amendment_note_is_chained(tmp_path, capsys):
     assert sum(1 for _ in reg.entries()) == n
     assert gs.run(args) == 0                             # report only: unaffected
     assert _status(tmp_path)["exit_reason"] == "done"
-    reg.append("note", {"text": V61_AMEND1})
+    _amend(reg)
     assert gs.run(args + ["--chain"]) == 0
     assert _status(tmp_path)["stats_written"] == 1
 
@@ -1342,6 +1374,171 @@ def test_the_v61_note_is_not_the_amendment_and_vice_versa():
     assert gs.is_amendment_note(V61_AMEND1)
     assert not V61_AMEND1.startswith(PROTOCOL_V61 + ":")
     assert not gs.is_amendment_note(None) and not gs.is_amendment_note(42)
+
+
+# ------- per-cell effective trials (spec s2, s4 step 8, s6) -------
+
+def _amend1_only(tmp_path):
+    """A judged registry carrying amendment 1 but NOT amendment 2."""
+    from .test_gauntlet_worker import _setup as worker_setup, _run
+    reg, spec, data = worker_setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    reg.append("note", {"text": V61_AMEND1})
+    return reg, data
+
+
+def test_chain_refuses_without_amendment2_note(tmp_path, capsys):
+    reg, data = _amend1_only(tmp_path)
+    reg.append("note", {"text": "see " + gs.AMENDMENT2_NOTE_PREFIX + " later"})
+    n = sum(1 for _ in reg.entries())
+    args = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--logs-dir", str(tmp_path / "logs"), "--chain"]
+    assert gs.run(args) == 1
+    assert "REFUSED" in capsys.readouterr().out
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "refused_no_amendment2_note"
+    assert st["stats_written"] == 0
+    assert sum(1 for _ in reg.entries()) == n
+    reg.append("note", {"text": V61_AMEND2})
+    assert gs.run(args) == 0
+    assert _status(tmp_path)["stats_written"] == 1
+
+
+def test_report_only_runs_without_amendment2_note(tmp_path):
+    reg, data = _amend1_only(tmp_path)
+    n = sum(1 for _ in reg.entries())
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(tmp_path / "logs")]) == 0
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "done" and st["chained"] is False
+    assert sum(1 for _ in reg.entries()) == n
+
+
+def test_the_amendment2_note_is_its_own_prefix():
+    assert gs.is_amendment2_note(V61_AMEND2)
+    assert not gs.is_amendment2_note(V61_AMEND1)
+    assert not gs.is_amendment_note(V61_AMEND2)
+    assert not gs.is_amendment2_note(None) and not gs.is_amendment2_note(7)
+
+
+def test_entries_carry_partition_fields_and_method(tmp_path, capsys):
+    """Multi-partition fixture (BTCUSD + GBP + EUR, one strategy each = 3
+    partitions of 1): literal values, so a constant or a len(registry) in
+    place of the real figure fails."""
+    stats, sids = _mixed_twin(tmp_path, "parts", drop_eur_row=False)
+    capsys.readouterr()
+    assert len(stats) == 3
+    for p in stats.values():
+        assert p["cluster_method"] == "effective_trials/v4 per-cell average-linkage cut rho>=0.9"
+        assert p["trials_cut_rho"] == 0.9
+        assert p["trials_partitions"] == 3
+        assert p["trials_largest_partition_n"] == 1
+        assert "by_partition" not in p
+    st = json.loads((tmp_path / "parts" / "logs" / "gauntlet_stats_status.json")
+                    .read_text(encoding="utf-8"))
+    assert st["cluster_max_cell_n"] == 1
+    assert st["cluster_sum_n2"] == 3
+    assert st["cut_late_merges"] == 0
+
+
+def test_largest_partition_n_is_the_real_multi_row_count(tmp_path, capsys):
+    """Task 7 mutation (9): the sweep fixture registers 5 BTCUSD strategies,
+    ONE partition of 5 rows, so a hard-coded 1 (or the partition count) in
+    place of the largest partition's n fails here, where the 1-member
+    fixture above cannot tell them apart."""
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    stats = _stats_payloads(reg)
+    assert len(stats) == 5
+    for p in stats:
+        assert p["trials_partitions"] == 1
+        assert p["trials_largest_partition_n"] == 5
+    st = json.loads((logs / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
+    assert st["cluster_max_cell_n"] == 5
+    assert st["cluster_sum_n2"] == 25
+
+
+def test_report_holds_one_row_per_partition(tmp_path, capsys):
+    rep = tmp_path / "rep.md"
+    _mixed_twin(tmp_path, "rep", drop_eur_row=False, report=rep)
+    out = capsys.readouterr().out
+    lines = rep.read_text(encoding="utf-8").splitlines()
+    i = lines.index("| partition | n | k | never_traded |")
+    rows = [l for l in lines[i + 2:] if l.startswith("|")]
+    keys = [r.split("|")[1].strip() for r in rows]
+    assert len(rows) == 3 and keys == sorted(keys) and len(set(keys)) == 3
+    assert [r.split("|")[1:5] for r in rows] == [
+        [" BTCUSD ", " 1 ", " 1 ", " 1 "], [" EUR ", " 1 ", " 1 ", " 1 "],
+        [" GBP ", " 1 ", " 1 ", " 0 "]]
+    assert not any(l.startswith("| by_partition") for l in lines)
+    assert f"full per-partition table in {rep}" in out
+
+
+def test_floor_binds_when_the_cell_sum_is_below_it(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    fh = _chain_verdict(reg, _a_sid(reg),
+                        {"protocol": "gauntlet-protocol-v3", "trials_n": 10 ** 6})
+    seen = _spy_clustering(monkeypatch)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    assert seen["trials_n"] < 10 ** 6
+    for p in _stats_payloads(reg):
+        assert p["trials_n_raw"] == seen["trials_n"]
+        assert p["trials_n"] == p["trials_n_floor"] == 10 ** 6
+        assert p["trials_n_floor_entry_hash"] == fh
+
+
+def test_cell_sum_above_the_floor_is_recorded(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v3", "trials_n": 1})
+    seen = _spy_clustering(monkeypatch, trials_n=6082)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    assert seen["trials_n"] == 6082
+    for p in _stats_payloads(reg):
+        assert p["trials_n"] == p["trials_n_raw"] == 6082
+        assert p["trials_n_floor"] == 1
+
+
+def test_next_night_floor_reads_the_per_cell_raw(tmp_path, monkeypatch, capsys):
+    """Review Focus 4: run 1 chains raw R; run 2 whose raw dips by 3 records
+    trials_n R and trials_n_floor R (never lower)."""
+    from .common import entry_hash
+    R = 6082
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    _spy_clustering(monkeypatch, trials_n=R)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    first = _stats_payloads(reg)
+    assert first and all(p["trials_n_raw"] == R for p in first)
+    _chain_verdict(reg, _a_sid(reg), {"protocol": "gauntlet-protocol-v6.1"})
+    _spy_clustering(monkeypatch, trials_n=R - 3)
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    capsys.readouterr()
+    new = _stats_payloads(reg)[len(first):]
+    assert len(new) == 1
+    p = new[0]
+    assert p["trials_n_raw"] == R - 3
+    assert p["trials_n"] == R and p["trials_n_floor"] == R
+    stats = [e for e in reg.entries() if e["entry_type"] == "gauntlet_stats"]
+    assert p["trials_n_floor_entry_hash"] == entry_hash(stats[0])
+
+
+def test_constant_nonzero_row_is_cluster_refused(tmp_path, monkeypatch, capsys):
+    from .cluster_cells import ConstantNonzeroRow
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+
+    def boom(*a, **k):
+        raise ConstantNonzeroRow("row s1 is constant 0.001")
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", boom)
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(tmp_path / "logs"), "--chain"]) == 1
+    assert "REFUSED" in capsys.readouterr().out
+    assert _status(tmp_path)["exit_reason"] == "cluster_refused"
+    assert sum(1 for _ in reg.entries()) == n
 
 
 # ------- step 7 fix round 1 (review M2, M3, M4) -------
@@ -1407,26 +1604,81 @@ def test_a_huge_integer_is_no_sr_star_floor_and_does_not_raise():
 
 # ---- 2026-10-11 orphan incident: cluster admission ----
 
-def test_cluster_estimate_scales_with_n_squared():
-    assert gs.cluster_estimate_s(None, None, 19092) == gs.CLUSTER_PRIOR_S
-    assert gs.cluster_estimate_s(374.1, None, 19092) == 374.1
-    est = gs.cluster_estimate_s(374.1, 17333, 19092)
-    assert abs(est - 374.1 * (19092 / 17333) ** 2) < 1e-9 and est > 450
+def test_estimate_scales_by_sum_n2():
+    """Spec s5: the pass is a sum of per-partition n^2 sweeps, so the last
+    measured duration scales LINEARLY in the ratio of the sums."""
+    assert gs.cluster_estimate_s(None, None, 2_000_000) == gs.CLUSTER_PRIOR_S
+    assert gs.cluster_estimate_s(100.0, 1_000_000, 2_000_000) == 200.0
+    assert gs.cluster_estimate_s(100.0, 2_000_000, 1_000_000) == 50.0
 
 
-def test_cluster_need_matches_the_measured_footprint():
-    # 2026-11-01, real aligned matrix: 6,896 MB peak at n = 26,835, L = 1,303;
-    # the gate covers it with a margin but does not drift back to 14 n^2
-    need = gs.cluster_need_mb(26835, 1303)
-    assert 6896 * 1.05 < need < 6896 * 1.25
-    assert need < math.ceil(14.0 * 26835 ** 2 / 2**20)
-    # step 7's own instrument (tools/verify_cluster_identity.py peak) on the
-    # same matrix, 2026-11-01: +2,104 MB at n = 13,730 and +6,857 MB at 26,835
-    assert gs.cluster_need_mb(13730, 1303) > 2104 * 1.10
-    assert gs.cluster_need_mb(26835, 1303) > 6857 * 1.10
+def test_estimate_unscaled_without_prior_sum_n2():
+    """Review Focus 1: the first run after cutover reads a status written by
+    the old method (cluster_s, cluster_n, no cluster_sum_n2): the prior is
+    used unscaled, never scaled by a missing value."""
+    assert gs.cluster_estimate_s(129.1, None, 5_000_000) == 129.1
+    assert gs.cluster_estimate_s(129.1, 0, 5_000_000) == 129.1
+
+
+def test_prior_cluster_sum_n2_reads_only_a_positive_int(tmp_path):
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None          # no status
+    for bad in (None, 0, -5, True, 1.5, "9"):
+        _seed_status(tmp_path, cluster_sum_n2=bad)
+        assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None, bad
+    _seed_status(tmp_path, cluster_s=129.1, cluster_n=26835)  # old-method status
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") is None
+    _seed_status(tmp_path, cluster_sum_n2=123456)
+    assert gs._prior_cluster_sum_n2(tmp_path / "logs") == 123456
+
+
+def _cell_spec(sid, *assets):
+    return {"strategy_id": sid,
+            "universe": {"assets": list(assets), "asset_class": "crypto",
+                         "timeframe": "1d", "session": "24x7"}}
+
+
+def test_partition_helpers_count_the_series_that_exist():
+    specs = [_cell_spec("a", "BTCUSDT"), _cell_spec("b", "BTCUSDT"),
+             _cell_spec("c", "BTCUSDT"), _cell_spec("d", "ETHUSDT"),
+             _cell_spec("e", "ETHUSDT"), _cell_spec("z", "SOLUSDT")]
+    sids = {"a", "b", "c", "d", "e"}                   # z has no series
+    assert gs.largest_partition_n(specs, sids) == 3
+    assert gs.partition_sum_n2(specs, sids) == 3 * 3 + 2 * 2
+    assert gs.largest_partition_n(specs, set()) == 0
+    assert gs.partition_sum_n2(specs, set()) == 0
+
+
+def test_need_uses_the_largest_partition():
+    """Spec s5: one n_max x n_max matrix at a time, plus the aligned copies
+    of ALL n series (11.5 B per n L, re-measured by the Task 6 rehearsal on
+    2026-11-05). 29,180 series, largest partition 1,068, 1,308 aligned days:
+    493 MiB."""
+    assert gs.CLUSTER_BYTES_PER_ALIGNED_NL == 11.5
+    assert gs.cluster_need_mb(29180, 1068, 1308) == 493
+    assert gs.cluster_need_mb(29180, 1068, 1308) == math.ceil(
+        (9.0 * 1068 ** 2 + 48.0 * 1068 * 1308 + 11.5 * 29180 * 1308) / 2**20)
+    assert gs.cluster_need_mb(0, 0, 1303) == 0
+
+
+def test_need_grows_with_n_max_squared_not_n():
+    """Doubling n at a fixed n_max changes only the aligned term."""
+    base = gs.cluster_need_mb(10000, 1000, 1300)
+    doubled = gs.cluster_need_mb(20000, 1000, 1300)
+    assert doubled - base in (
+        math.ceil(11.5 * 10000 * 1300 / 2**20) - 1,
+        math.ceil(11.5 * 10000 * 1300 / 2**20),
+        math.ceil(11.5 * 10000 * 1300 / 2**20) + 1)
+    # doubling n_max at a fixed n quadruples the matrix term
+    quad = gs.cluster_need_mb(10000, 2000, 1300) - gs.cluster_need_mb(10000, 0, 1300)
+    one = gs.cluster_need_mb(10000, 1000, 1300) - gs.cluster_need_mb(10000, 0, 1300)
+    assert quad > 2 * one
+    # the registry-wide n^2 of the old model is gone: 26,835 in one partition
+    # still costs what the 2026-11-01 measurement said (6,896 MB), with margin
+    one_big = gs.cluster_need_mb(26835, 26835, 1303)
+    assert 6896 * 1.05 < one_big < 6896 * 1.30
+    assert gs.cluster_need_mb(26835, 1068, 1303) < one_big / 10
     # the n x L term counts: more aligned days, more memory
-    assert gs.cluster_need_mb(20000, 2000) > gs.cluster_need_mb(20000, 1000)
-    assert gs.cluster_need_mb(0, 1303) == 0
+    assert gs.cluster_need_mb(20000, 800, 2000) > gs.cluster_need_mb(20000, 800, 1000)
 
 
 def test_cluster_days_bound_is_the_shortest_series():
@@ -1450,7 +1702,7 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
     assert _run(reg, data, tmp_path) == 0
     n = sum(1 for _ in reg.entries())
     calls = _count_clustering(monkeypatch)
-    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, days: 4500)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 1400)
     assert gs.DEFERRED_MEMORY_EXIT == 3
     assert _stats_run(reg, data, tmp_path, 5.75) == 3
@@ -1466,8 +1718,8 @@ def test_clustering_is_not_started_without_the_physical_memory(tmp_path, monkeyp
 
 
 def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, monkeypatch):
-    """The gate's need is cluster_need_mb(len(dated), cluster_days_bound(dated)),
-    computed on the series the clustering is about to run on."""
+    """The gate's need is cluster_need_mb(len(dated), n_max, cluster_days_bound
+    (dated)), computed on the series the clustering is about to run on."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
@@ -1477,8 +1729,9 @@ def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, m
         seen["dated"] = (len(dated), min(len(s) for s in dated.values()))
         return 4242
 
-    def need(n_series, days):
+    def need(n_series, n_max, days):
         seen["need"] = (n_series, days)
+        seen["n_max"] = n_max
         return 1
 
     monkeypatch.setattr(gs, "cluster_days_bound", bound)
@@ -1486,7 +1739,51 @@ def test_the_memory_gate_charges_the_series_count_and_the_days_bound(tmp_path, m
     monkeypatch.setattr(gs, "available_phys_mb", lambda: 8000)
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert seen["need"] == (seen["dated"][0], 4242) and seen["dated"][1] > 0
+    assert seen["n_max"] == 1                    # one spec, one partition
     assert _status(tmp_path)["cluster_need_mb"] == 1
+
+
+def test_gate_reads_n_max_before_clustering(tmp_path, monkeypatch):
+    """The gate's n_max is the PRE-clustering largest partition from
+    largest_partition_n: a need that is high for a whole-registry partition
+    but low for a smaller n_max clusters (exit 0); with the real helper's
+    n_max (== n here) the same stub defers (exit 3, deferred_memory)."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    seen = []
+
+    def need(n_series, n_max, days):
+        seen.append((n_series, n_max))
+        return 4000 if n_max >= n_series else 300
+
+    monkeypatch.setattr(gs, "cluster_need_mb", need)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 1000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3          # real n_max == n
+    assert not calls and seen == [(1, 1)]
+    monkeypatch.setattr(gs, "largest_partition_n", lambda specs, sids: 0)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0           # per-cell fits
+    assert calls == [1] and seen[-1] == (1, 0)
+    assert _status(tmp_path)["exit_reason"] == "done"
+
+
+def test_deferred_memory_still_exit_3(tmp_path, monkeypatch, capsys):
+    """A per-cell need above the free memory is exit 3 deferred_memory, and
+    the message names the largest partition."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 0)
+    assert gs.DEFERRED_MEMORY_EXIT == 3
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    assert not calls
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deferred_memory"
+    assert st["cluster_need_mb"] > 0 and st["avail_phys_mb"] == 0
+    out = capsys.readouterr().out
+    assert "MEMORY: clustering" in out and "largest partition" in out
 
 
 def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):
@@ -1499,27 +1796,53 @@ def test_unknown_free_memory_does_not_block(tmp_path, monkeypatch):
     assert calls == [1]
 
 
-def test_cluster_n_is_carried_and_scales_the_estimate(tmp_path, monkeypatch):
-    """The estimate is the measured cluster_s scaled by (n / cluster_n)^2.
-    The fixture has one series: 600 s measured at 10 series scales to 6 s,
-    which fits in 100 s left where the unscaled 600 s would not. Without a
-    cluster_n the same seed is a deadline stop, and cluster_s/cluster_n are
-    carried forward unchanged by a run that does not cluster."""
+def test_cluster_sum_n2_is_carried_and_scales_the_estimate(tmp_path, monkeypatch):
+    """The estimate is the measured cluster_s scaled by sum_n2 / cluster_sum_n2.
+    The fixture has one series (sum_n2 1): 600 s measured at sum_n2 100 scales
+    to 6 s, which fits in 100 s left where the unscaled 600 s would not.
+    Without a cluster_sum_n2 (an old-method status) the same seed is a
+    deadline stop, and cluster_s / cluster_n / cluster_sum_n2 are carried
+    forward unchanged by a run that does not cluster."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
     assert _run(reg, data, tmp_path) == 0
     _frozen(monkeypatch)
     calls = _count_clustering(monkeypatch, advance_s=5.0)
     hours = 100.0 / 3600
-    _seed_status(tmp_path, cluster_s=600.0)                 # no n: unscaled
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10)   # old method: unscaled
     assert _stats_run(reg, data, tmp_path, hours) == 0
     st = _status(tmp_path)
-    assert not calls and (st["exit_reason"], st["cluster_n"]) == ("deadline", None)
-    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10)
+    assert not calls and (st["exit_reason"], st["cluster_n"]) == ("deadline", 10)
+    assert st["cluster_s"] == 600.0 and st["cluster_sum_n2"] is None
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10, cluster_sum_n2=100)
+    assert _stats_run(reg, data, tmp_path, 100.0 / 3600 / 100) == 0   # 1 s left
+    st = _status(tmp_path)                       # a non-clustering night carries it
+    assert not calls and st["exit_reason"] == "deadline"
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (600.0, 10, 100)
     assert _stats_run(reg, data, tmp_path, hours) == 0
     st = _status(tmp_path)
     assert calls == [1] and st["exit_reason"] == "done"
-    assert (st["cluster_s"], st["cluster_n"]) == (5.0, 1)   # re-measured at n = 1
+    # re-measured at n = 1, sum_n2 = 1
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (5.0, 1, 1)
+
+
+def test_estimate_scales_by_the_partition_sum_not_n_squared(tmp_path, monkeypatch):
+    """Task 7 mutation (8): two partitions of 5 (BTCUSD, ETHUSD), so n = 10
+    and sum_n2 = 50, not n^2 = 100. 600 s measured at cluster_sum_n2 50
+    estimates 600 s and fits in 900 s left; an estimate scaled by n^2 would
+    be 1,200 s and stop the run before clustering. The fixture above has one
+    series, where the two scalings agree."""
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    _frozen(monkeypatch)
+    calls = _count_clustering(monkeypatch, advance_s=7.0)
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10, cluster_sum_n2=50)
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(logs), "--cutoff", cutoff,
+                   "--deadline-hours", str(900.0 / 3600)]) == 0
+    st = _status(tmp_path)
+    assert calls == [1] and st["stopped_at_deadline"] is False
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (7.0, 10, 50)
+    assert st["cluster_max_cell_n"] == 5
 
 
 def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
@@ -1535,3 +1858,30 @@ def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
                                      - timedelta(hours=6)).isoformat())
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert not calls and _status(tmp_path)["exit_reason"] == "deadline"
+
+
+
+def _late_merges_run(tmp_path, monkeypatch, capsys, late):
+    from . import gauntlet
+    real = gauntlet.cluster_registry_by_cell
+
+    def stub(*a, **k):
+        return {**real(*a, **k), "late_merges": late}
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", stub)
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    capsys.readouterr()
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    out = capsys.readouterr().out
+    st = json.loads((logs / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
+    return out, st
+
+
+def test_late_merges_print_one_warn_line(tmp_path, monkeypatch, capsys):
+    """Final review M4: a run whose cut found late merges says so in the run
+    log, once; a run with none prints no such line."""
+    out, st = _late_merges_run(tmp_path / "one", monkeypatch, capsys, 1)
+    line = ("WARN cut_late_merges 1: merges at or under the cut after the "
+            "first over it (not counted)")
+    assert out.count(line) == 1 and st["cut_late_merges"] == 1
+    out, st = _late_merges_run(tmp_path / "zero", monkeypatch, capsys, 0)
+    assert "WARN cut_late_merges" not in out and st["cut_late_merges"] == 0

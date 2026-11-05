@@ -398,7 +398,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   0.5 KB a bar) stops a runaway grid taking the box; above it the LRU behaves
   as before (correct, slower) and the run prints a `WARN full-bars memo:
   touched N bars > ceiling 6,000,000` line and adds one `memo_ceiling` ledger
-  item (projected crossing 2027-02-14, next to the clustering deadline). **Read the `full-bars memo: hits N, misses N,
+  item (projected crossing 2027-02-14; the clustering memory wall it was once
+  paired with is retired by the per-cell method, so this ceiling stands on its
+  own). **Read the `full-bars memo: hits N, misses N,
   evictions N, bound N bars` line the run prints (once, in a `finally`):
   evictions above 0 with hits near 0 means the grid outgrew the ceiling.**
   `_reset_full_bars_memo` restores the default bound. Daily cells never use it (`_daily_bars` rewrites
@@ -527,9 +529,14 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   `<out stem>.skipped.json` (`{sid: {original, asset, tf, existing}}`). A twin
   already on the chain under its OWN id (a rerun) is listed in the map and never
   re-registered or skipped.
-- **THE PAUSE (Coen 2026-11-01).** If the effective-trials METHOD change has not
-  landed before the clustering crossing (about 2026-12-23 at the Switch 2
-  rate; see the clustering paragraph under "Gauntlet worker"), Switch 2 pauses
+- **THE PAUSE (Coen 2026-11-01; trigger restated at the effective-trials
+  per-cell change).** The trigger is a REPEATING `deferred_memory` on task 28
+  (exit 3, night after night), not a date: the crossing date (planning date
+  2026-12-03; 2026-12-23 was the original sign-off figure, history) is
+  retired, because per-cell clustering grows with the largest
+  cell's n, not the registry's (see "Effective trials per cell" under
+  "Gauntlet worker"). Before the per-cell change is merged the same trigger
+  applies to the registry-wide pass. Switch 2 pauses
   by a FORWARD reviewed commit that sets crypto's `ACTIVE_CELLS` timeframes back
   to `("1d",)`, plus a pause note if Coen wants one. The refresh's
   registered-cell union (above) keeps the registered intraday cells fresh, and
@@ -898,19 +905,31 @@ of it.
   time left covers its estimate (the last measured duration, `cluster_s` in
   its status file, else a 2 h prior), and each PBO null only when the time
   left covers the measured mean (`pbo_null_mean_s`, else 60 s); a pass that
-  does not fit is a deadline stop. **Since 2026-10-11 the clustering
-  estimate is `cluster_s` x (n / `cluster_n`)^2** (`cluster_n` = the series
-  count it was measured at, carried forward with it), **and the pass starts
-  only when AVAILABLE PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (9) x
-  n^2 + `CLUSTER_BYTES_PER_NL` (48) x n x L bytes** (`cluster_need_mb(n,
-  days)`; L bounded above by the shortest cached series,
-  `cluster_days_bound`; `gauntlet_core.available_phys_mb`, read after the
-  series pass; unknown = no block). Re-measured 2026-11-01 on the REAL
-  aligned matrix (n 26,835, L 1,303): peak 6,896 MB = 8.4 n^2 + 34 n L; the
-  gate adds cluster_registry's aligned copies (8 B per n L) and about 10%.
-  It was 14 x n^2 from 2026-10-11, one reading at 13,730 that folded the
-  n L term into n^2 and overstated the need more as n grew. The
-  merge loop touches every page of its n x n matrix on every merge, so a
+  does not fit is a deadline stop. **Since the per-cell change the
+  clustering estimate is `cluster_s` x (sum of n_c^2 over partitions now /
+  `cluster_sum_n2`)** (`cluster_sum_n2` = the sum it was measured at,
+  carried forward with `cluster_s` and `cluster_n`; a status with no
+  `cluster_sum_n2`, as the one the registry-wide method wrote, gives the
+  UNSCALED `cluster_s`: the first night after cutover never deadline-stops a
+  pass that takes seconds), **and the pass starts only when AVAILABLE
+  PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (9) x n_max^2 +
+  `CLUSTER_BYTES_PER_NL` (48) x n_max x L + `CLUSTER_BYTES_PER_ALIGNED_NL`
+  (11.5) x n x L bytes** (`cluster_need_mb(n, n_max, days)`; n_max = the
+  largest cell partition's series count, read from the specs BEFORE
+  clustering; n = all series, whose aligned copies live through the pass; L
+  bounded above by the shortest cached series, `cluster_days_bound`;
+  `gauntlet_core.available_phys_mb`, read after the series pass; unknown =
+  no block). 11.5 measured 2026-11-05 (rehearsal on a chain copy, n 30,140,
+  L 1,003, n_max 1,068): the pass added 332 MB, 257 MB of it the aligned
+  copies; (332 - 33 MB for the largest cut) / n L = 10.4 B, plus about 10%.
+  The need was 9,831 MB the same night under the old method. Before the
+  per-cell change (history): the estimate was `cluster_s` x (n /
+  `cluster_n`)^2 and the gate 9 x n^2 + 48 x n x L, re-measured 2026-11-01
+  on the REAL aligned matrix (n 26,835, L 1,303: peak 6,896 MB = 8.4 n^2 +
+  34 n L, plus cluster_registry's aligned copies at 8 B per n L and about
+  10%); it was 14 x n^2 from 2026-10-11, one reading at 13,730 that folded
+  the n L term into n^2. The
+  merge loop touches every page of its matrix on every merge, so a
   partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
   with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
   PT6H. Short of memory = **exit 3** `deferred_memory` (status
@@ -918,12 +937,19 @@ of it.
   retries). **Nonzero on purpose (Coen, 2026-10-11, option b): task 28 is
   `daily` in the Sentinel with no tolerated codes, so a memory deferral
   FAILs the 09:15 digest the same morning** instead of surfacing only as
-  the 7-day stats-lag WARN. n grows with the registry, so a
-  repeating `deferred_memory` is a capacity question for Coen, not a
-  constant to raise. On the new PC (since 2026-10-24) the lowest 01:00
-  availability seen is 33,626 MB; at the 30-day registration average
-  (~438 a day, in bursts) and L ~1,300 the gate stops fitting near n
-  59,000: around 2027-01-14 without Switch 2, 2026-12-23 with it.
+  the 7-day stats-lag WARN. A repeating `deferred_memory` is a capacity
+  question for Coen, not a constant to raise, and it is THE PAUSE trigger
+  (section "Switch 2"). Under the registry-wide method the gate would have
+  stopped fitting near n 46,850 at about 23 GB free (planning date
+  2026-12-03; 34,277 MB free at 01:00 on 2026-11-05); per cell, the need at
+  n 30,140 is about 390 to 570 MB and grows with n_max^2 plus a linear n L
+  term. **FOLLOW-UP (not gated): the whole job's peak AFTER clustering**
+  (11,745 MB private at n 30,140, measured 2026-11-05: the train-window
+  float lists `gauntlet_stats` builds for every strategy, the PBO pass and
+  the verdict loop) grows LINEARLY with n and no gate covers it; at about
+  23 GB free it crosses near n 86,000, at 34 GB near 127,000 (about
+  2027-02 to 04). It is the next memory wall to watch. The old method's
+  whole peak was about 13.4 GB, so the per-cell change lowers it.
   **A second clock beside it: the full-bars memo ceiling (final review M3).**
   Task 12 measured 5,741,210 bars over the 228 intraday files (data to
   2026-10-31); they grow 2,432 a day (76 cells x 32 bars), so once every
@@ -934,33 +960,117 @@ of it.
   ceiling 6,000,000` line the outermost quarantine run prints, plus one
   `memo_ceiling` item in `degraded_quarantine.json` (the Sentinel WARNs, and
   FAILs after 3 days).
-  **Early warning (plan 5, sign-off 2 row 3).** The Ops Sentinel's `gauntlet_queue`
-  check (a separate repo, sc-ops-sentinel branch `feat/cluster-n-warn`,
-  `9bf6637`) WARNs when the clustering n is at or above 46,000 (manifest
-  `cluster_n_warn`; `>=`, not `>`), about 21 days before the crossing at the
-  basis registration rate and about 10 days at the cap rate. Limits: it reads
-  `cluster_n` from the status file, which is CARRIED FORWARD on nights that do
-  not cluster (the number can be a night or more old), and it is a warning, not
-  a stop; it fires on a `nothing_to_do` night too. The lasting fix is the
-  effective-trials method change (its own project), not RAM. If it has
-  not landed before the crossing, Switch 2 pauses (section "Switch 2", THE
-  PAUSE).
-  The memory is one n x n float64 matrix at a time (plus the merge
-  history's member sets, about 0.01 n^2 entries measured, more if the merge
-  tree turns chain-like; and the pure-Python reference path, taken when a
-  series is constant and nonzero, is far heavier and is not covered by the
-  gate): it cannot be cut
+  **Early warning.** The Ops Sentinel's `gauntlet_queue` check WARNs when
+  `cluster_need_mb` >= `cluster_headroom_warn` (0.6) x `avail_phys_mb`
+  (sc-ops-sentinel `ac61861`, 2026-11-04); it reads the status's need and so
+  works unchanged on the per-cell need. The n line (`cluster_n_warn`
+  46,000, plan 5, `9bf6637`) is retired in the same cutover as the per-cell
+  change (sc-ops-sentinel branch `feat/retire-cluster-n-warn`): n no longer
+  drives the need. Both are warnings, not stops.
+  The memory is one n_max x n_max float64 matrix at a time (the largest
+  partition's), plus the merge history's member sets (about 0.01 n^2
+  entries measured on the registry-wide pass, so about 0.01 n_max^2 per
+  partition, more if the merge tree turns chain-like), which the gate covers
+  only through its margin. The
+  pure-Python reference path (`cluster.effective_trials` sends a constant
+  nonzero series there) is far heavier and is NOT covered by the gate; the
+  per-cell code never takes it: such a row raises `ConstantNonzeroRow` and
+  the run refuses (`cluster_refused`, exit 1, nothing chained), a protocol
+  question for Coen. The registry-wide matrix could not be cut
   without changing the clustering's float results (a row-blocked Gram
   differs from the full one in the last bit and changes the merge history,
-  measured 2026-11-01), so the lasting fix is a method decision for Coen,
-  not RAM. Each deferral comes only after the full series pass and FAILs
+  measured 2026-11-01), which is why the count itself changed (bullet
+  "Effective trials per cell" below). Each deferral comes only after the full series pass and FAILs
   that morning's digest (exit 3). A digest FAIL whose task-28 result is 3
   means "not enough RAM to cluster", not a crash: read the `MEMORY:` line
   in `logs/gauntlet-stats-run.log`. One instance at a time
   (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
   the 01:00 task, defers with exit 0 and never touches the status file.
-  The status reports `trials_n_raw` (this run's argmax) and
+  The status reports `trials_n_raw` (this run's per-cell sum of k; the
+  registry-wide argmax before the per-cell change) and
   `trials_n_effective` (the floored N the entries use).
+- **Effective trials per cell (design
+  `docs/2026-11-04-effective-trials-per-cell-design.md`, Coen 2026-11-04;
+  `pipeline/cluster_cells.py`, `gauntlet.cluster_registry_by_cell`).** The
+  stats job no longer clusters the whole registry. Method: the SAME aligned
+  series as `cluster_registry` (`gauntlet._align_for_trials`); rows split by
+  cell key (`cluster_cells.partition_key` = the spec's cells sorted, joined
+  by `|`; `BTCUSDT@1h` keeps the timeframe; the legacy pair is its own
+  partition); in each partition the never-traded rows (all exactly 0.0) leave
+  the tree and form ONE cluster (representative Sharpe 0.0, entered once in
+  the pooled variance); a constant NONZERO row refuses the run
+  (`cluster_refused`); the rest get `cluster._agglomerate_np`'s unchanged
+  merge history, each merge's average-linkage height is replayed
+  (`merge_heights`), and the tree is cut at `CUT_DISTANCE` = sqrt(0.5 x (1 -
+  `CUT_RHO`)), `CUT_RHO` = 0.9: a merge counts when round(height, 12) <=
+  round(CUT_DISTANCE, 12), the counted merges are the PREFIX up to the first
+  one over the cut (a later one at or under it is float noise, not counted,
+  reported as `cut_late_merges`); k = rows - counted (+1 for never-traded
+  rows); `trials_n_raw` = the sum of k; labels offset in sorted key order;
+  `trials_sr_var` = every partition's representatives pooled. Floors, SR*,
+  DSR (still the registry-wide aligned series, Ruling 11) and the haircut are
+  unchanged code; `cluster.py` and `gauntlet.run` are untouched (a change to
+  `cluster.py` re-runs `tools/verify_cluster_identity.py` first). **`CUT_RHO`
+  changes only by a new chained note, never as a tuning knob.** Entries carry
+  `cluster_method` `"effective_trials/v4 per-cell average-linkage cut
+  rho>=0.9"` and exactly three new fields: `trials_partitions`,
+  `trials_largest_partition_n`, `trials_cut_rho`. The per-partition table
+  (every partition, sorted key: n, k, never_traded) goes to the `--report`
+  file; the run log prints the top 20 by n and a line naming the report;
+  neither goes on an entry. Status fields: `cluster_max_cell_n` and
+  `cut_late_merges` (THIS run's, null on a night that did not cluster) and
+  `cluster_sum_n2` (carried forward like `cluster_s`). **THE RATCHET:** the
+  per-cell k (6,183 on 2026-11-05, against the old method's 4,320 the same
+  night) and SR* (0.13453 against 0.12533) sit above the chain floors, so
+  once the first per-cell entry is chained the floors hold them: a code
+  rollback to the registry-wide method restores the code, not the recorded N
+  or SR*. **A code rollback AFTER the amendment-2 note is chained also needs
+  a superseding chained note:** the old code would chain v3-method entries
+  under a chained text that says the count is per cell from that note
+  onward (the entries label themselves by `cluster_method`, but the chained
+  protocol text would be wrong for them). A fixed cut can dip by a few as
+  members arrive; the floor absorbs it. Measured 2026-11-05 on a chain copy (300 verdicts re-statted): every
+  recorded DSR falls (median 1.42e-5 -> 3.83e-6), none >= 0.95 before or
+  after. The 7,687 `gauntlet_stats` entries chained before the amendment-2
+  note (count on the 2026-11-05 copy) stand, unrestated.
+- **`--chain` REFUSES until `docs/notes/gauntlet-protocol-v6.1-amendment-2.md`
+  is chained** (exit 1, `exit_reason` `refused_no_amendment2_note`; first-line
+  prefix `gauntlet-protocol-v6.1-amendment-2:`, first occurrence; the hyphen
+  after v6.1 arms none of the `gauntlet-protocol-v6.1:` checks). Report-only
+  runs are unaffected. The note is chained VERBATIM, after Coen approves its
+  exact text, BEFORE the first 01:00 run on the per-cell code, with
+  `python -m tools.grid_switch chain-note` and `--prefix
+  gauntlet-protocol-v6.1-amendment-2:` (LF bytes, `.gitattributes`
+  `eol=lf`; the tool refuses a CR). Until then the committed file is a DRAFT
+  (it carries no STATUS line, the plan 5 convention, so it can be chained as
+  is: the draft state is in the commit message and the run ledger). Never
+  edit it after approval.
+- **`tools/stats_rehearsal.py`: report-only rehearsal on a chain COPY.**
+  HAND-RUN, NEVER scheduled. It runs the real `gauntlet_stats.run` WITHOUT
+  `--chain` on a registry copy, reading the live `data/` and `simcache/`,
+  and measures the clustering's memory (private bytes sampled every 10 ms
+  per phase) and time: `python -m tools.stats_rehearsal --registry
+  <scratch copy> --data-dir <live data> --simcache-dir <live simcache>
+  --scratch <scratch dir> [--dump-aligned <scratch>/aligned.npz]`. Every
+  `SimCache` write path (`put`, `_write`, `_poison`, `_migrate_legacy`)
+  raises for the whole run, so a cache miss aborts (exit 2) instead of
+  writing; data and simcache fingerprints must match before and after (exit
+  3 if not). The passthrough (after `--`) is an ALLOW-LIST: only
+  `--cutoff`, `--deadline-hours` and `--pbo-null-draws`, each with its value
+  (`--opt value` or `--opt=value`; handed on as `--opt=value`). Any other
+  token REFUSES (exit 2, nothing run), because gauntlet_stats' argparse
+  takes a prefix (`--chai` is `--chain`) and lets a repeated option win (a
+  second `--registry`, `--logs-dir` or `--report` would point the run at the
+  live chain or status file): so `--chain`, `--registry`, `--data-dir`,
+  `--simcache-dir`, `--logs-dir`, `--report` and every prefix of them are
+  refused there. It also REFUSES (exit 2) a `--registry` or output path in a
+  directory holding `registry_log.d` (the live layout), and a `--registry`
+  that is this layer's own chain. Writes
+  only under `--scratch` (logs/, report.md, rehearsal.json). Copy the chain
+  between worker fires with no `chain.lock` held, and check line count and
+  size before and after the copy. A copy with no unstatted v6.1 verdict
+  stops at `nothing_to_do` before clustering: cut a prefix just before the
+  last night's first `gauntlet_stats` entry (as the 2026-11-05 run did).
 - **Step 7 (2026-10-03): the clustering takes ~2 min, not 4 h.** 95% of the
   old 4.1 h was a Python tie loop in `cluster._agglomerate_np`, driven by the
   all-zero return rows (79 at 13,730; distance exactly sqrt(0.5) to
@@ -1014,13 +1124,17 @@ of it.
   remove it, or re-add it after a code-revert rollback (the
   `GAUNTLET_IN_LOOP` flag no longer exists), without Coen's say-so; the job
   itself refuses to chain until `gauntlet-protocol-v6.1-amendment-1` is on the
-  chain (it is, line 81246). Coen's
+  chain (it is, line 81246), and `gauntlet-protocol-v6.1-amendment-2` (the
+  per-cell count, bullet above). Coen's
   effective-trials decision (2026-10-01, option 1) is in the v6.1 addendum and
   IS implemented and committed in `gauntlet_stats.py` (b7c17658): `trials_n` is
-  the larger of the clustering's argmax (`trials_n_raw`) and the highest cluster
-  count already on the chain (`trials_n_floor`, source named by
-  `trials_n_floor_entry_hash`). Reason: the argmax moved 302 -> 480 -> 44 on a
-  registry that only grew, and a falling N flatters the deflated Sharpe. Chain
+  the larger of the clustering's count (`trials_n_raw`: the registry-wide
+  argmax until the per-cell change, the per-cell sum of k after it) and the
+  highest cluster count already on the chain (`trials_n_floor`, source named
+  by `trials_n_floor_entry_hash`; it still reads `trials_n_raw` of earlier
+  stats entries and `FLOOR_PROTOCOLS` is unchanged). Reason: the argmax moved
+  302 -> 480 -> 44 on a registry that only grew, and a falling N flatters the
+  deflated Sharpe; the floor is also what makes the per-cell jump a ratchet. Chain
   the entries only after the 480 -> 44 explanation is on record. A
   `gauntlet_stats` entry is append-only and cannot be corrected, only superseded
   by a note.
@@ -1045,7 +1159,10 @@ of it.
   `stopped_at_deadline`; since step 7 also `retried_written` /
   `deferred_lock` (T7 flush), `pbo_nulls_computed` / `pbo_nulls_cached` (PBO
   scope) and `expected_max_sharpe_raw` / `expected_max_sharpe_effective` (SR*
-  floor). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
+  floor); `cluster_n` / `cluster_s` / `cluster_sum_n2` (carried forward),
+  `cluster_need_mb` / `avail_phys_mb` (this run's memory gate) and
+  `cluster_max_cell_n` / `cut_late_merges` (this run's per-cell shape, null
+  when it did not cluster). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
@@ -1063,8 +1180,10 @@ of it.
   (routine); 1 = a candidate raised, the run crashed, or setup was refused.
   Stats: 0 = done, nothing to do, deadline stop, chain.lock held, or another
   instance running; 1 = the data or the chain refused the run, or `--chain`
-  without the amendment-1 note (`refused_no_amendment_note`), or the
-  clustering refused (`cluster_refused`), or the run crashed (`crashed`);
+  without the amendment-1 note (`refused_no_amendment_note`), or `--chain`
+  without the amendment-2 note (`refused_no_amendment2_note`), or the
+  clustering refused (`cluster_refused`, e.g. a constant nonzero series in
+  a partition), or the run crashed (`crashed`);
   2 = argparse usage error; 3 = not
   enough free physical memory to cluster (`deferred_memory`, FAILs the
   digest on purpose).
