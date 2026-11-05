@@ -398,7 +398,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   0.5 KB a bar) stops a runaway grid taking the box; above it the LRU behaves
   as before (correct, slower) and the run prints a `WARN full-bars memo:
   touched N bars > ceiling 6,000,000` line and adds one `memo_ceiling` ledger
-  item (projected crossing 2027-02-14, next to the clustering deadline). **Read the `full-bars memo: hits N, misses N,
+  item (projected crossing 2027-02-14; the clustering memory wall it was once
+  paired with is retired by the per-cell method, so this ceiling stands on its
+  own). **Read the `full-bars memo: hits N, misses N,
   evictions N, bound N bars` line the run prints (once, in a `finally`):
   evictions above 0 with hits near 0 means the grid outgrew the ceiling.**
   `_reset_full_bars_memo` restores the default bound. Daily cells never use it (`_daily_bars` rewrites
@@ -529,8 +531,9 @@ on the first sighting -- same dead-pid fast path loop.lock uses.
   re-registered or skipped.
 - **THE PAUSE (Coen 2026-11-01; trigger restated at the effective-trials
   per-cell change).** The trigger is a REPEATING `deferred_memory` on task 28
-  (exit 3, night after night), not a date: the crossing date (about
-  2026-12-23) is retired, because per-cell clustering grows with the largest
+  (exit 3, night after night), not a date: the crossing date (planning date
+  2026-12-03; 2026-12-23 was the original sign-off figure, history) is
+  retired, because per-cell clustering grows with the largest
   cell's n, not the registry's (see "Effective trials per cell" under
   "Gauntlet worker"). Before the per-cell change is merged the same trigger
   applies to the registry-wide pass. Switch 2 pauses
@@ -1021,8 +1024,12 @@ of it.
   night) and SR* (0.13453 against 0.12533) sit above the chain floors, so
   once the first per-cell entry is chained the floors hold them: a code
   rollback to the registry-wide method restores the code, not the recorded N
-  or SR*. A fixed cut can dip by a few as members arrive; the floor absorbs
-  it. Measured 2026-11-05 on a chain copy (300 verdicts re-statted): every
+  or SR*. **A code rollback AFTER the amendment-2 note is chained also needs
+  a superseding chained note:** the old code would chain v3-method entries
+  under a chained text that says the count is per cell from that note
+  onward (the entries label themselves by `cluster_method`, but the chained
+  protocol text would be wrong for them). A fixed cut can dip by a few as
+  members arrive; the floor absorbs it. Measured 2026-11-05 on a chain copy (300 verdicts re-statted): every
   recorded DSR falls (median 1.42e-5 -> 3.83e-6), none >= 0.95 before or
   after. The 7,687 `gauntlet_stats` entries chained before the amendment-2
   note (count on the 2026-11-05 copy) stand, unrestated.
@@ -1048,9 +1055,17 @@ of it.
   `SimCache` write path (`put`, `_write`, `_poison`, `_migrate_legacy`)
   raises for the whole run, so a cache miss aborts (exit 2) instead of
   writing; data and simcache fingerprints must match before and after (exit
-  3 if not). It REFUSES (exit 2, nothing run) `--chain` in the passthrough,
-  a `--registry` or output path in a directory holding `registry_log.d` (the
-  live layout), and a `--registry` that is this layer's own chain. Writes
+  3 if not). The passthrough (after `--`) is an ALLOW-LIST: only
+  `--cutoff`, `--deadline-hours` and `--pbo-null-draws`, each with its value
+  (`--opt value` or `--opt=value`; handed on as `--opt=value`). Any other
+  token REFUSES (exit 2, nothing run), because gauntlet_stats' argparse
+  takes a prefix (`--chai` is `--chain`) and lets a repeated option win (a
+  second `--registry`, `--logs-dir` or `--report` would point the run at the
+  live chain or status file): so `--chain`, `--registry`, `--data-dir`,
+  `--simcache-dir`, `--logs-dir`, `--report` and every prefix of them are
+  refused there. It also REFUSES (exit 2) a `--registry` or output path in a
+  directory holding `registry_log.d` (the live layout), and a `--registry`
+  that is this layer's own chain. Writes
   only under `--scratch` (logs/, report.md, rehearsal.json). Copy the chain
   between worker fires with no `chain.lock` held, and check line count and
   size before and after the copy. A copy with no unstatted v6.1 verdict

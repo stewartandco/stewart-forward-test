@@ -276,7 +276,11 @@ the same cutover as this one.
 
 Rollback: revert the merge. The code goes back to one registry-wide pass
 (and its memory wall); the recorded N stays at the per-cell floor (section
-4, ratchet).
+4, ratchet). A code rollback AFTER the amendment-2 note is chained also
+needs a superseding chained note: the old code would chain v3-method
+entries under a chained text that says the count is per cell from that
+note onward. The entries label themselves by cluster_method, but the
+chained protocol text would be wrong for them.
 
 ## 9. Measured on the 2026-11-04 registry (read-only, chain copy)
 
