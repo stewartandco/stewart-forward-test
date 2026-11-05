@@ -96,7 +96,9 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                # 2026-10-11 orphan incident: memory-aware cluster admission
                "cluster_n", "cluster_need_mb", "avail_phys_mb",
                # per-cell effective trials (spec s6)
-               "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges"}
+               "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges",
+               # train windows as views (memory spec s3.1)
+               "train_view_fallbacks"}
 
 
 def _status(tmp_path):
@@ -1885,3 +1887,187 @@ def test_late_merges_print_one_warn_line(tmp_path, monkeypatch, capsys):
     assert out.count(line) == 1 and st["cut_late_merges"] == 1
     out, st = _late_merges_run(tmp_path / "zero", monkeypatch, capsys, 0)
     assert "WARN cut_late_merges" not in out and st["cut_late_merges"] == 0
+
+
+# ------- train windows as views (memory spec s3.1, Task 2) -------
+
+# Pinned on BASE 49e8e0fb2 (gauntlet_stats.py, pbo.py and stats.py unchanged
+# since): the cache key of this fixture family, and the PBO code part of the
+# cache key. A deliberate PBO code change re-pins the second, never this task.
+BASE_PBO_INPUTS_SHA = "b62488ab5e5ad29c9d76e9190565446769e94240412578767f23514752558788"
+BASE_PBO_CODE_SHA = "d4f980d9591d04869277554368f420bf78472e72f5ffe9d3c43dff4bb2f9eb59"
+_SHA_FAM = [{"sid": "s2"}, {"sid": "s1"}, {"sid": "s3"}]
+_SHA_TRAIN = {"s1": [0.01, -0.02, 0.5e-3, 1 / 3],
+              "s2": [-0.25, 0.125, 1e-17, 2.0], "s3": []}
+
+
+def _as_views(train):
+    """Each list as a real prefix view of a longer parent, as train_view
+    returns it (the parent's tail is past the cutoff)."""
+    import numpy as np
+    out = {}
+    for sid, r in train.items():
+        parent = np.asarray(list(r) + [9.0, -9.0], dtype=np.float64)
+        out[sid] = parent[:len(r)]
+        assert out[sid].base is parent
+    return out
+
+
+def test_pbo_inputs_sha_is_unchanged_for_views():
+    """Spec s2 anti-goal: the PBO cache key is byte-identical for the same
+    family whether its train windows arrive as lists or as views."""
+    import numpy as np
+    lists = {k: list(v) for k, v in _SHA_TRAIN.items()}
+    arrays = {k: np.asarray(v, dtype=np.float64) for k, v in _SHA_TRAIN.items()}
+    assert gs.pbo_inputs_sha("g-fixture", _SHA_FAM, lists, 50) == BASE_PBO_INPUTS_SHA
+    assert gs.pbo_inputs_sha("g-fixture", _SHA_FAM, arrays, 50) == BASE_PBO_INPUTS_SHA
+    assert (gs.pbo_inputs_sha("g-fixture", _SHA_FAM, _as_views(_SHA_TRAIN), 50)
+            == BASE_PBO_INPUTS_SHA)
+
+
+def test_group_pbo_is_unchanged_for_views():
+    """The run hands group_pbo one family's lists built from its views
+    (family_train); the result equals the list input's, null included.
+    group_pbo's own source is untouched: pbo_code_sha() hashes it, so an edit
+    there would re-key every cached null (spec s2 anti-goal)."""
+    import random
+    rng = random.Random(7)
+    fam = [{"sid": f"m{i}"} for i in range(6)]
+    lists = {s["sid"]: [rng.gauss(0.0, 0.01) for _ in range(160)] for s in fam}
+    views = _as_views(lists)
+    fam_lists = gs.family_train(fam, views)
+    assert fam_lists == lists
+    assert all(type(x) is float for r in fam_lists.values() for x in r)
+    want = gs.group_pbo("g-views", fam, lists, True, 3)
+    got = gs.group_pbo("g-views", fam, fam_lists, True, 3)
+    assert want["pbo_status"] == "measured" and want["pbo_null_draws"] == 3
+    assert json.dumps(got, sort_keys=True) == json.dumps(want, sort_keys=True)
+    assert gs.pbo_code_sha() == BASE_PBO_CODE_SHA
+
+
+def _spy_payloads(monkeypatch):
+    """verdict_stats' return (the chained payload less strategy_id and
+    verdict_entry_hash) per strategy, as canonical JSON."""
+    got = {}
+    real = gs.verdict_stats
+
+    def spy(sid, *a, **k):
+        out = real(sid, *a, **k)
+        got[sid] = json.dumps(out, sort_keys=True)
+        return out
+    monkeypatch.setattr(gs, "verdict_stats", spy)
+    return got
+
+
+def _list_path(monkeypatch):
+    """train_view replaced by today's list path (mask copy, as an array)."""
+    import numpy as np
+    from . import simcache
+    monkeypatch.setattr(simcache.Series, "train_view",
+                        lambda self, c: (np.asarray(self.train(c)), False))
+
+
+def _count_views(monkeypatch):
+    from . import simcache
+    calls = []
+    real = simcache.Series.train_view
+
+    def spy(self, c):
+        calls.append(c)
+        return real(self, c)
+    monkeypatch.setattr(simcache.Series, "train_view", spy)
+    return calls
+
+
+def _report_only(reg, data, logs, cutoff):
+    return gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(logs), "--cutoff", cutoff])
+
+
+def test_entries_are_identical_with_views(tmp_path, monkeypatch, capsys):
+    """Every payload the job computes is identical, as canonical JSON, to the
+    one computed when train_view is today's list path: the v4 sweep (report
+    only, same registry, fresh logs and PBO cache each run) and the mixed
+    class twin (crypto + fx)."""
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    with monkeypatch.context() as m:
+        calls = _count_views(m)
+        views = _spy_payloads(m)
+        assert _report_only(reg, data, tmp_path / "logs_views", cutoff) == 0
+    n_registered = sum(1 for e in reg.entries()
+                       if e["entry_type"] == "strategy_registered")
+    assert len(calls) == n_registered        # the run took the view path
+    with monkeypatch.context() as m:
+        _list_path(m)
+        lists = _spy_payloads(m)
+        assert _report_only(reg, data, tmp_path / "logs_lists", cutoff) == 0
+    assert views and views == lists
+    with monkeypatch.context() as m:
+        calls = _count_views(m)
+        views = _spy_payloads(m)
+        _mixed_twin(tmp_path, "views", drop_eur_row=False)
+    assert calls
+    with monkeypatch.context() as m:
+        _list_path(m)
+        lists = _spy_payloads(m)
+        _mixed_twin(tmp_path, "lists", drop_eur_row=False)
+    capsys.readouterr()
+    assert len(views) == 3 and views == lists
+
+
+def test_consumers_never_write_into_a_train_view(tmp_path, monkeypatch, capsys):
+    """Review Focus 3: every train view and its parent `rets` are made
+    read-only; the whole run (train Sharpe, sibling families, PBO key and
+    null, the verdict loop) completes, so no consumer writes into either."""
+    from . import simcache
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    seen = []
+    real = simcache.Series.train_view
+
+    def read_only(self, c):
+        v, fell_back = real(self, c)
+        self.rets.setflags(write=False)
+        v.setflags(write=False)
+        seen.append(v)
+        return v, fell_back
+    monkeypatch.setattr(simcache.Series, "train_view", read_only)
+    got = _spy_payloads(monkeypatch)
+    assert _report_only(reg, data, tmp_path / "logs_ro", cutoff) == 0
+    capsys.readouterr()
+    assert seen and got
+    assert all(not v.flags.writeable for v in seen)
+
+
+def test_train_view_fallbacks_counted(tmp_path, monkeypatch, capsys):
+    """Review Focus 1: a series whose dates are not non-decreasing (its last
+    two dates swapped, both past the cutoff) takes train_view's mask-copy
+    fallback; the status counts it (0 on a clean run) and every payload is
+    unchanged."""
+    from . import simcache
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    clean = _spy_payloads(monkeypatch)
+    assert _report_only(reg, data, tmp_path / "logs_clean", cutoff) == 0
+    st = json.loads((tmp_path / "logs_clean" / gs.STATUS_NAME)
+                    .read_text(encoding="utf-8"))
+    assert st["train_view_fallbacks"] == 0
+    real = gs.cluster_registry_by_cell
+    swapped = []
+
+    def unsort_one(dated, *a, **k):
+        out = real(dated, *a, **k)
+        sid = sorted(dated)[0]
+        s = dated[sid]
+        d = s.dates.copy()
+        assert len(d) >= 2 and d[-2] > simcache.date_ordinal(cutoff)
+        d[-1], d[-2] = d[-2], d[-1]
+        dated[sid] = simcache.Series(d, s.rets)
+        swapped.append(sid)
+        return out
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", unsort_one)
+    fell = _spy_payloads(monkeypatch)
+    assert _report_only(reg, data, tmp_path / "logs_unsorted", cutoff) == 0
+    capsys.readouterr()
+    st = json.loads((tmp_path / "logs_unsorted" / gs.STATUS_NAME)
+                    .read_text(encoding="utf-8"))
+    assert swapped and st["train_view_fallbacks"] == 1
+    assert clean and fell == clean

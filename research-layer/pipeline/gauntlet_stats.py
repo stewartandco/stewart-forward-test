@@ -232,7 +232,11 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  # null when it did not cluster; cluster_sum_n2 (sum of n^2
                  # over partitions) is carried forward like cluster_n and
                  # cluster_s, the figure the time estimate scales by
-                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges")
+                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges",
+                 # train windows held as views (memory spec s3.1): how many
+                 # series took train_view's mask-copy fallback (dates not
+                 # non-decreasing); 0 on a clean run
+                 "train_view_fallbacks")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -430,6 +434,15 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
+def family_train(fam: list[dict], train: dict) -> dict[str, list[float]]:
+    """One family's train windows as the Python float lists group_pbo's
+    pure-Python PBO reads, built from the run's views for this family only
+    and dropped after its PBO (memory spec s3.1). The conversion lives here,
+    not in group_pbo: pbo_code_sha() hashes group_pbo's source, so an edit
+    there would re-key every cached null (spec s2 anti-goal)."""
+    return {s["sid"]: _as_list(train[s["sid"]]) for s in fam}
+
+
 def pbo_code_sha() -> str:
     """The code-and-constants part of the PBO cache key: PBO_CACHE_REV, the
     PBO constants, and the source of pipeline/pbo.py, group_pbo and
@@ -451,10 +464,12 @@ def pbo_code_sha() -> str:
 def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
     """Everything group_pbo's result depends on: the family id (it seeds the
     null), the draw count, CSCV_SPLITS, and each member's train series, in
-    sorted member order."""
+    sorted member order. A member's window is a list or a train view; either
+    becomes array("d", its .tolist()), so the key bytes do not depend on
+    which (memory spec s3.1)."""
     h = hashlib.sha256(json.dumps([g, draws, CSCV_SPLITS]).encode("utf-8"))
     for sid in sorted(s["sid"] for s in fam):
-        r = array("d", train[sid])
+        r = array("d", _as_list(train[sid]))
         h.update(f"\n{sid}:{len(r)}:".encode("utf-8"))
         h.update(r.tobytes())
     return h.hexdigest()
@@ -740,6 +755,8 @@ def run(argv: list[str] | None = None) -> int:
               # carried forward until this run clusters, like cluster_s
               "cluster_sum_n2": prior_cluster_sum_n2,
               "cut_late_merges": None,
+              # train_view mask-copy fallbacks this run (memory spec s3.1)
+              "train_view_fallbacks": 0,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -935,9 +952,19 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         extra["expected_max_sharpe_floor"] = sr_floor
         extra["expected_max_sharpe_floor_entry_hash"] = sr_floor_hash
 
-        train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
-                 for s in all_specs}
-        train_sharpe = {sid: _annualized_sharpe_from_returns(r)
+        # Memory spec s3.1: each train window is a zero-copy view of its
+        # series (float64, 8 B a value, not a ~40 B Python float). A list is
+        # built only inside each consumer and dropped after it: here one at a
+        # time, one family's in family_train, pbo_inputs_sha's per member,
+        # and the verdict's own. Read-only by contract: nothing writes into
+        # a view. A series whose dates are not non-decreasing gets the mask
+        # copy instead, counted in the status.
+        train = {}
+        for s in all_specs:
+            sid = s["strategy_id"]
+            train[sid], fell_back = dated[sid].train_view(a.cutoff)
+            status["train_view_fallbacks"] += int(fell_back)
+        train_sharpe = {sid: _annualized_sharpe_from_returns(r.tolist())
                         for sid, r in train.items()}
         family_by_group, grids_by_group = sibling_families(
             all_specs, train_sharpe, view.screen_tc_fail)
@@ -1047,8 +1074,9 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                 status["pbo_nulls_cached"] += pbo["pbo_null_draws"] > 0
             else:
                 n_nulls = len(null_times)
-                pbo = group_pbo(g, fam, train, True, a.pbo_null_draws,
-                                null_fits=null_fits, null_times=null_times)
+                pbo = group_pbo(g, fam, family_train(fam, train), True,
+                                a.pbo_null_draws, null_fits=null_fits,
+                                null_times=null_times)
                 if pbo is not None:
                     status["pbo_nulls_computed"] += len(null_times) - n_nulls
                     pbo_cache.put(g, inputs_sha, pbo)
@@ -1066,7 +1094,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                 sibling = next(x for x in fam if x["sid"] == sid)
                 ok, _ = qualifies(sibling, fam, grids)
                 items.append((sid, v["vh"], verdict_stats(
-                    sid, clustered["returns_by_id"][sid], train[sid],
+                    sid, clustered["returns_by_id"][sid], train[sid].tolist(),
                     train_sharpe[sid], clustered,
                     pbo, ok, vintage, data_digest, own_ends(sid),
                     floor, floor_hash, sr_floor, sr_floor_hash)))
