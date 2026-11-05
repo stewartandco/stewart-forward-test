@@ -94,6 +94,7 @@ from pipeline.blocks import (RETIRED_TYPES,                    # noqa: E402
 # Invariant 11 links a stats entry to a verdict by the WRITER's hash, so the
 # verifier uses the writer's function, not a third copy.
 from pipeline.common import entry_hash                         # noqa: E402
+from pipeline.protocols import V61_FAMILY                      # noqa: E402
 from pipeline import chain_mirror                               # noqa: E402
 
 
@@ -578,7 +579,7 @@ def verify(log_path: Path, artifacts_dir: Path | None = None,
                         fail(lineno, "invariant 12: state_change cites "
                              "pbo_family_kill after gauntlet-protocol-v6.1")
                 if (etype == "verdict" and payload.get("stage") == "gauntlet"
-                        and m.get("protocol") == "gauntlet-protocol-v6.1"):
+                        and m.get("protocol") in V61_FAMILY):
                     v61_verdicts[entry_hash(entry)] = payload.get("strategy_id")
                 if etype == "state_change" and sid in strategies:
                     frm, to = payload.get("from"), payload.get("to")

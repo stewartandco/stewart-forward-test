@@ -363,3 +363,203 @@ def test_the_live_chain_dry_run_holds_everything_and_writes_nothing(tmp_path, ca
     out = capsys.readouterr().out
     assert "0 would go live, 0 would be buried" in out
     assert "not yet eligible" in out
+
+
+# ---------------- v2 arm: beat zero AND the own-asset hold ----------------
+
+HOLD_KEYS = {"p_zero", "p_hold", "p", "p_hold_paths", "strategy_sr", "hold_sr"}
+
+
+def priced_case(sid, rets, hold_rets, trades=0, contribs=FLAT_CONTRIBS):
+    """One asset whose equity compounds `rets` and whose price compounds
+    `hold_rets`, so the strategy and its own hold are fixed independently.
+    The first row is the entry mark (equity and price both 1.0), so equal
+    `rets` and `hold_rets` give bit-identical daily returns on both sides."""
+    rows, eq, px = [], 1.0, 1.0
+    for i, (r_i, h_i) in enumerate([(0.0, 0.0)] + list(zip(rets, hold_rets))):
+        d = f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}"
+        eq *= 1 + r_i
+        px *= 1 + h_i
+        act = "exit" if 0 < i <= trades else "hold"
+        r = row(sid, d, "BTCUSD", eq, act)
+        r["price"] = px
+        rows.append(r)
+    return {"sid": sid, "rows": rows, "train_contributions": contribs}
+
+
+def _pinned(days, ann_sharpe, sd, seed):
+    """Returns with realized annualized Sharpe exactly `ann_sharpe` (the
+    case_with_sharpe construction)."""
+    import random as _r
+    rng = _r.Random(seed)
+    xs = [rng.gauss(0, 1) for _ in range(days)]
+    m = sum(xs) / days
+    s = (sum((x - m) ** 2 for x in xs) / (days - 1)) ** 0.5
+    mu = ann_sharpe / (365 ** 0.5) * sd
+    return [mu + sd * (x - m) / s for x in xs]
+
+
+def test_assess_default_unchanged():
+    cases = [case_with_sharpe("s0", 900, 1.5, 30, CONTRIBS),
+             case_with_sharpe("w", 200, 0.1, 30, FLAT_CONTRIBS),
+             make_case("d", 900, 0.01, 40, CONTRIBS),
+             make_case("short", 30, 1.2, 6, CONTRIBS)]
+    default = assess(cases, min_days=60)
+    assert default == assess(cases, min_days=60, hold_arm=False)
+    assert all("p_hold" not in r for r in default.values())
+    assert all(not (HOLD_KEYS & set(r)) for r in default.values())
+
+
+def _beta_case(sid, seed):
+    """Equity tracks price up to ROUNDING: the strategy is its hold, but the
+    price is quoted at 100, so the hold's rebased returns differ from the
+    equity's in the last bits -- the realistic case of a book long the whole
+    window (fix round 1: such noise once read as signal, p_hold 0.023)."""
+    rows, eq, px = [], 1.0, 100.0
+    for i, r_i in enumerate(_pinned(200, 3.0, 0.01, seed=seed)):
+        eq *= 1 + r_i
+        px *= 1 + r_i
+        r = row(sid, f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}", "BTCUSD", eq)
+        r["price"] = px
+        rows.append(r)
+    return {"sid": sid, "rows": rows, "train_contributions": FLAT_CONTRIBS}
+
+
+def test_hold_arm_blocks_beta_strategy():
+    """In a rising market v1 graduates a pure-beta book on PSR alone; v2 asks
+    it to beat the hold too, and rounding noise must not count as beating it."""
+    from .livegate import daily_returns
+    from .beats_hold import forward_hold_series
+    case = _beta_case("beta", seed=1)
+    a = daily_returns(forward_series(case["rows"]))
+    b = daily_returns(forward_hold_series(case["rows"]))
+    assert a != b, "fixture must differ by rounding or the test is vacuous"
+    assert max(abs(x - y) for x, y in zip(a, b)) < 1e-12
+    v1 = assess([case], min_days=60)
+    v2 = assess([case], min_days=60, hold_arm=True)
+    assert v1["beta"]["verdict"] == "live", v1["beta"]
+    assert v2["beta"]["verdict"] == "hold", v2["beta"]
+    assert v2["beta"]["p_hold"] == 1.0
+    assert v2["beta"]["p_zero"] == pytest.approx(1 - v1["beta"]["psr"])
+    assert v2["beta"]["p"] == max(v2["beta"]["p_zero"], v2["beta"]["p_hold"])
+    assert v2["beta"]["strategy_sr"] == pytest.approx(v2["beta"]["hold_sr"])
+    # 199 returns (the first is folded into the first mark): near 3.0
+    assert v2["beta"]["strategy_sr"] == pytest.approx(3.0, rel=0.05)
+    for seed in range(2, 22):
+        out = assess([_beta_case("b", seed)], min_days=60, hold_arm=True)["b"]
+        assert out["p_hold"] == 1.0 and out["verdict"] == "hold", (seed, out)
+
+
+def test_hold_arm_never_graduates_a_flat_book():
+    """Price falls, no trades, equity stays at 1.0: beating a falling hold is
+    not evidence of an edge when the book never beat zero."""
+    hold = [-0.002 + x for x in _pinned(200, 0.0, 0.01, seed=2)]
+    case = priced_case("flat", [0.0] * 200, hold)
+    out = assess([case], min_days=60, hold_arm=True)
+    assert out["flat"]["eligible"] is True
+    assert out["flat"]["verdict"] == "hold"
+    assert out["flat"]["p_hold"] == 1.0
+    assert out["flat"]["strategy_sr"] == 0.0
+
+
+def test_hold_arm_graduates_a_strategy_that_beats_both():
+    """The v2 arm must still be able to promote: the hold plus a steady alpha
+    beats both zero and the hold."""
+    import random as _r
+    rng = _r.Random(3)
+    hold = _pinned(200, 0.0, 0.01, seed=3)
+    strat = [h + 0.003 + rng.gauss(0, 0.002) for h in hold]
+    out = assess([priced_case("alpha", strat, hold)], min_days=60, hold_arm=True)
+    r = out["alpha"]
+    assert r["verdict"] == "live", r
+    assert r["p_hold"] < 0.05 and r["p_zero"] < 0.05
+    assert r["strategy_sr"] > r["hold_sr"]
+    assert r["cohort_size"] == 1
+    assert r["p_hold_paths"] == 2000          # m = 1: nothing to refine
+
+
+def test_hold_arm_keeps_kill_first():
+    """Burial runs before either test, in both arms: a disproved book is
+    graveyard and does not count in the cohort."""
+    good = case_with_sharpe("g", 900, 1.5, 30, CONTRIBS)
+    dead = make_case("d", 900, 0.01, 40, CONTRIBS)
+    for arm in (False, True):
+        out = assess([good, dead], min_days=60, hold_arm=arm)
+        assert out["d"]["verdict"] == "graveyard"
+        assert out["g"]["cohort_size"] == 1
+        assert "cohort_size" not in out["d"]
+        assert not (HOLD_KEYS & set(out["d"]))
+
+
+def test_hold_arm_skips_ineligible_strategies():
+    out = assess([make_case("short", 30, 1.2, 6, CONTRIBS)], min_days=60,
+                 hold_arm=True)
+    assert out["short"]["verdict"] == "hold"
+    assert not (HOLD_KEYS & set(out["short"]))
+
+
+def test_hold_arm_length_mismatch_is_p_hold_one_not_an_error():
+    """Equity touching 0 makes daily_returns drop the next step, so the
+    strategy record is one shorter than the hold. The gate must not raise."""
+    from .livegate import daily_returns
+    from .beats_hold import forward_hold_series
+    hold = _pinned(120, 1.0, 0.01, seed=4)
+    rets = list(hold)
+    rets[50] = -1.0                       # equity hits exactly 0.0
+    case = priced_case("zero", rets, hold)
+    assert (len(daily_returns(forward_series(case["rows"])))
+            != len(daily_returns(forward_hold_series(case["rows"]))))
+    out = assess([case], min_days=60, hold_arm=True)
+    assert out["zero"]["eligible"] is True
+    assert out["zero"]["p_hold"] == 1.0
+    assert out["zero"]["verdict"] == "hold"
+
+
+def _alpha_case(sid="alpha", alpha=0.003):
+    import random as _r
+    rng = _r.Random(3)
+    hold = _pinned(200, 0.0, 0.01, seed=3)
+    strat = [h + alpha + rng.gauss(0, 0.002) for h in hold]
+    return priced_case(sid, strat, hold)
+
+
+def test_hold_arm_refines_a_floor_survivor_in_a_large_cohort():
+    """Final review I1: at m = 300 survivors BH needs p <= q/m = 1.7e-4 for a
+    lone rejection, below the 2000-path floor 1/2001. The floor survivor is
+    redrawn with ceil(2 m / q) paths and graduates; the flat books (p_hold
+    1.0, above the floor) keep 2000 paths."""
+    from .beats_hold import paired_sharpe_pvalue, HOLD_TEST_PATHS
+    from .livegate import daily_returns
+    from .beats_hold import forward_hold_series
+    alpha = _alpha_case(alpha=0.005)          # p_zero must clear q/m too
+    a = daily_returns(forward_series(alpha["rows"]))
+    b = daily_returns(forward_hold_series(alpha["rows"]))
+    assert paired_sharpe_pvalue(a, b, 0) == 1 / (HOLD_TEST_PATHS + 1)
+    flats = [priced_case(f"f{i:03d}", [0.0] * 200, _pinned(200, 0.0, 0.01, seed=i))
+             for i in range(299)]
+    out = assess([alpha] + flats, min_days=60, hold_arm=True)
+    r = out["alpha"]
+    assert r["cohort_size"] == 300
+    assert r["p_hold_paths"] == 12000
+    assert r["p_hold"] < 0.05 / 300 and r["p"] < 0.05 / 300
+    assert r["verdict"] == "live", r
+    assert all(out[f"f{i:03d}"]["p_hold_paths"] == 2000 for i in range(299))
+    assert all(out[f"f{i:03d}"]["verdict"] == "hold" for i in range(299))
+
+
+def test_hold_arm_refinement_uses_the_q_passed_to_assess():
+    """m = 1 at q = 0.0001: ceil(2 / 0.0001) = 20000 > 2000, so redrawn."""
+    out = assess([_alpha_case()], min_days=60, q=0.0001, hold_arm=True)
+    assert out["alpha"]["p_hold_paths"] == 20000
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_hold_arm_non_positive_first_price_is_p_hold_one_not_an_error(bad):
+    """Final review M1: the registry requires a finite price only. A first
+    row priced 0 (or below) cannot rebase the hold: p_hold = 1.0, no raise."""
+    case = _alpha_case("zp")
+    case["rows"][0]["price"] = bad
+    out = assess([case], min_days=60, hold_arm=True)
+    assert out["zp"]["eligible"] is True
+    assert out["zp"]["p_hold"] == 1.0
+    assert out["zp"]["verdict"] == "hold"

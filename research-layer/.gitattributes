@@ -7,3 +7,6 @@ docs/notes/gauntlet-protocol-v6.1-intraday-daily-marks.md text eol=lf
 docs/notes/crypto-grid-phase2-v1.md text eol=lf
 # the effective-trials amendment is chained verbatim from LF bytes by chain-note too
 docs/notes/gauntlet-protocol-v6.1-amendment-2.md text eol=lf
+# the beats-hold notes (gauntlet v6.2, live gate v2) are chained verbatim from LF bytes by chain-note too
+docs/notes/gauntlet-protocol-v6.2.md text eol=lf
+docs/notes/quarantine-live-protocol-v2.md text eol=lf

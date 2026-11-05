@@ -54,6 +54,7 @@ from . import cells, loop_state, pipeline_budget, pipeline_status
 from .budget import BudgetMeter, PIPELINE_CAP_USD
 from .chainlock import ChainLock, ChainLockHeld
 from .composer import routable_cards
+from .protocols import V61_FAMILY
 from .registry import Registry
 from .tradfi_data import DEFAULT_TS_ROOT
 
@@ -698,7 +699,7 @@ def _gauntlet_orphans(registry: Registry) -> list[str]:
                  if e["entry_type"] == "verdict"
                  and e["payload"].get("stage") == "gauntlet"
                  and (e["payload"].get("metrics") or {}).get("protocol")
-                 != "gauntlet-protocol-v6.1"}
+                 not in V61_FAMILY}
     return sorted(sid for sid, st in states.items()
                   if st == "gauntlet" and sid in verdicted)
 

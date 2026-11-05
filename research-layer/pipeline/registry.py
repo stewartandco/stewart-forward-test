@@ -240,7 +240,7 @@ class UnstableEntry(ValueError):
     broken link. Refused before anything is written."""
 
 
-PROTOCOL_V61 = "gauntlet-protocol-v6.1"
+from .protocols import PROTOCOL_V61, V61_FAMILY   # noqa: E402,F401  (PROTOCOL_V61 re-exported)
 # Ruling 10: at most this many gauntlet_stats entries per chain.lock hold.
 # The batch writer refuses more, so a caller cannot hold the lock for an
 # unbounded append; it chunks and releases chain.lock between chunks.
@@ -289,7 +289,7 @@ def _fold(states: dict, judged: set, entry: dict,
         judged.add(p["strategy_id"])
         m = p.get("metrics")
         if (v61 is not None and isinstance(m, dict)
-                and m.get("protocol") == PROTOCOL_V61):
+                and m.get("protocol") in V61_FAMILY):
             v61[entry_hash(entry)] = p.get("strategy_id")
     elif et == "gauntlet_stats" and statted is not None:
         vh = p.get("verdict_entry_hash")
