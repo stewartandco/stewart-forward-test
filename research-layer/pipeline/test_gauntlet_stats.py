@@ -1826,6 +1826,25 @@ def test_cluster_sum_n2_is_carried_and_scales_the_estimate(tmp_path, monkeypatch
     assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (5.0, 1, 1)
 
 
+def test_estimate_scales_by_the_partition_sum_not_n_squared(tmp_path, monkeypatch):
+    """Task 7 mutation (8): two partitions of 5 (BTCUSD, ETHUSD), so n = 10
+    and sum_n2 = 50, not n^2 = 100. 600 s measured at cluster_sum_n2 50
+    estimates 600 s and fits in 900 s left; an estimate scaled by n^2 would
+    be 1,200 s and stop the run before clustering. The fixture above has one
+    series, where the two scalings agree."""
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    _frozen(monkeypatch)
+    calls = _count_clustering(monkeypatch, advance_s=7.0)
+    _seed_status(tmp_path, cluster_s=600.0, cluster_n=10, cluster_sum_n2=50)
+    assert gs.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                   "--logs-dir", str(logs), "--cutoff", cutoff,
+                   "--deadline-hours", str(900.0 / 3600)]) == 0
+    st = _status(tmp_path)
+    assert calls == [1] and st["stopped_at_deadline"] is False
+    assert (st["cluster_s"], st["cluster_n"], st["cluster_sum_n2"]) == (7.0, 10, 50)
+    assert st["cluster_max_cell_n"] == 5
+
+
 def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
     """The guard's stamp says the task began 6 h ago: a 5.75 h deadline is
     already spent before the series pass, so nothing is computed."""
