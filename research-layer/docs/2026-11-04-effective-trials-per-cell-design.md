@@ -47,6 +47,9 @@ the 30-day mean of 484 a day and L = 1,308 it would be about 12-13). The drop do
 the TradingView desktop app, running since 2026-10-29 10:07, held 13.2 GB
 working set / 16.0 GB private at 11:35 on 11-04. Restarting it is Coen's
 action. This design removes the n^2 term whatever the cause.
+Update 2026-11-05: free memory at the 01:00 run recovered to 34,277 MB (n
+30,140). The TradingView app stays the lead for the earlier drop, not
+proven. The 12-03 planning date stands as written.
 
 ## 2. What the count feeds today (verified at source 2026-11-04)
 
@@ -310,6 +313,43 @@ about 3e-5.
 Scripts and raw output (scratchpad, not committed):
 `measure_per_cell.py`, `measure_variants.py`, `per_cell_result.json`,
 `variants_result.json`.
+
+### Addendum 2026-11-05: rehearsal on the live registry
+
+The figures above are kept as history. The built code was run report-only
+on a copy of the chain on 2026-11-05 (`tools/stats_rehearsal.py`, live data
+and simcache read only, nothing chained), re-statting the 300 verdicts of
+that night's 01:00 run on the same registry, vintage and data. Run report:
+`stewartandco-agents/hubs/intelligence/research-layer-internals/docs/runs/2026-11-05-effective-trials-rehearsal.md`.
+
+| figure | 11-04 (above, scipy estimate) | 11-05 (built code) |
+|---|---|---|
+| n (series clustered) | 29,180 | 30,140 |
+| partitions (intraday) | 63 (0) | 111 (36) |
+| largest partition | IWM 1,068 | IWM 1,068 |
+| L (aligned days) | 1,308 | 1,003 |
+| registry-wide method k / SR* (= the chain floors) | 3,046 / 0.10317 | 4,320 / 0.12533 |
+| per-cell raw k | 6,082 | 6,183 |
+| trials_sr_var | 0.000878 | 0.001293 |
+| per-cell SR* raw | 0.1108 | 0.13453 |
+| never-traded rows (partitions) | 273 (15) | 375 (15) |
+| late merges | not measured | 0 |
+| DSR median, same verdicts, old -> new | about 3e-5 (no shift measured) | 1.42e-5 -> 3.83e-6, all 300 fall |
+| DSR >= 0.95 | 0 | 0 before, 0 after |
+| clustering memory | 9,875 MB need (old method) | +332 MB measured (old method's need 9,831 MB) |
+
+Why the numbers moved: the first intraday registrations (Switch 2, from
+11-02) start later than the daily cells, so the intersection-aligned window
+shortened from 1,308 to 1,003 days. Every partition's correlations moved
+with it, and the shorter window raised the pooled variance of the cluster
+representatives (0.000878 to 0.001293), which raises SR*. The registry-wide
+method saw the same shorter window the same night: its own k and SR* rose to
+4,320 and 0.12533, and those are the chain floors the per-cell figures are
+compared with. The per-cell k and SR* sit above both floors, so the first
+per-cell entries would record the per-cell figures. scipy's average linkage
+cut at the same distance agreed in all 111 partitions. The memory constant
+for the aligned copies was re-measured at the same time (`CLUSTER_BYTES_PER_ALIGNED_NL`
+10.0 -> 11.5 B per n L).
 
 ## 10. Left to the builder
 
