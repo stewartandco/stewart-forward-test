@@ -110,7 +110,9 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                # train windows as views (memory spec s3.1)
                "train_view_fallbacks",
                # the gate on physical AND commit (memory spec s3.2)
-               "avail_commit_mb", "series_mb", "series_n", "series_rate_hist"}
+               "avail_commit_mb", "series_mb", "series_n", "series_rate_hist",
+               # each checkpoint's own figures (Controller Ruling 8)
+               "gate_need_mb", "series_charge_mb", "avail_commit_series_mb"}
 
 
 def _status(tmp_path):
@@ -2229,6 +2231,62 @@ def test_need_includes_post_cluster_margin(tmp_path, monkeypatch):
     _two_readings(monkeypatch, edge, edge)
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert calls == [1]
+
+
+def test_status_records_both_checkpoints_on_a_run_that_clusters(tmp_path, monkeypatch):
+    """Controller Ruling 8: a run that clusters records gate_need_mb (the
+    need compared, cluster_need_mb + 512), series_charge_mb (the charge the
+    series checkpoint compared) and avail_commit_series_mb (that checkpoint's
+    commit reading); avail_commit_mb stays the LAST reading."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 1000)
+    _seed_status(tmp_path, series_rate_hist=[30.0])
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: 100_000)
+    commit = iter([90_000, 80_000])
+    monkeypatch.setattr(gs, "available_commit_mb", lambda: next(commit))
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0 and calls == [1]
+    st = _status(tmp_path)
+    assert (st["cluster_need_mb"], st["gate_need_mb"]) == (
+        1000, 1000 + gs.POST_CLUSTER_NEED_MB)
+    assert st["series_charge_mb"] == gs.series_charge_mb([30.0], 1, 0)
+    assert (st["avail_commit_series_mb"], st["avail_commit_mb"]) == (90_000, 80_000)
+
+
+def test_series_deferral_records_the_charge_and_leaves_gate_need_null(
+        tmp_path, monkeypatch):
+    """A checkpoint-1 deferral records series_charge_mb and
+    avail_commit_series_mb; the clustering checkpoint was never reached, so
+    gate_need_mb and cluster_need_mb stay null."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    _seed_status(tmp_path, series_rate_hist=[600.0])
+    charge = gs.series_charge_mb([600.0], 1, 0)
+    _two_readings(monkeypatch, 100_000, charge - 1)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deferred_memory"
+    assert (st["series_charge_mb"], st["avail_commit_series_mb"]) == (charge, charge - 1)
+    assert st["gate_need_mb"] is None and st["cluster_need_mb"] is None
+
+
+def test_cluster_deferral_records_gate_need_with_the_margin(tmp_path, monkeypatch):
+    """A checkpoint-2 deferral records gate_need_mb = cluster_need_mb + 512,
+    beside the series checkpoint's figures from earlier in the same run."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
+    _two_readings(monkeypatch, 1400, 100_000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deferred_memory"
+    assert (st["cluster_need_mb"], st["gate_need_mb"]) == (4500, 4500 + 512)
+    assert st["avail_commit_series_mb"] == 100_000
+    assert isinstance(st["series_charge_mb"], int) and st["series_charge_mb"] > 0
 
 
 def test_series_charge_scales_with_n():

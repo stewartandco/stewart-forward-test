@@ -111,10 +111,12 @@ free commit cover cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L +
 11.5 n L bytes (n_max the largest partition, read from the specs before
 clustering; L bounded by the shortest cached series) plus
 POST_CLUSTER_NEED_MB. An unknown reading never blocks, on either limit.
-Status: avail_commit_mb (the last checkpoint's reading), series_mb and
-series_n (the last completed pass's raw figures, display only),
-series_rate_hist (what checkpoint 1 charges by its max), and
-train_view_fallbacks (below).
+Status: avail_commit_mb (the last checkpoint's reading), series_charge_mb
+and avail_commit_series_mb (checkpoint 1's charge and commit reading),
+gate_need_mb (checkpoint 2's need, cluster_need_mb plus
+POST_CLUSTER_NEED_MB), series_mb and series_n (the last completed pass's raw
+figures, display only), series_rate_hist (what checkpoint 1 charges by its
+max), and train_view_fallbacks (below).
 
 Train windows (spec 2026-11-05 s3.1): held as zero-copy views of the cached
 series (simcache.Series.train_view), a Python list built only inside each
@@ -205,9 +207,12 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # L aligned days): the first two are the largest partition's matrix and its
 # n_max x L copies, the last is cluster_registry_by_cell's aligned copies of
 # ALL n series (built up front, alive through the pass). The status's
-# `cluster_need_mb` is that clustering figure alone (the Ops Sentinel's
-# headroom ratio reads it). Both readings are taken after the series pass,
-# so memory already held is not charged again.
+# `cluster_need_mb` is that clustering figure alone; `gate_need_mb` is the
+# need the checkpoint actually compares (cluster_need_mb plus
+# POST_CLUSTER_NEED_MB), and the Ops Sentinel's two headroom ratios read it
+# (falling back to cluster_need_mb on a status written before it existed).
+# Both readings are taken after the series pass, so memory already held is
+# not charged again.
 # HAZARD, not covered: the merge history's member sets are a further
 # n_max^2-shaped term (about 0.01 n^2 entries measured on the registry-wide
 # pass, more if the merge tree turns chain-like), inside the margin only.
@@ -327,7 +332,15 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  # series_rate_hist (MiB per strategy of the last
                  # SERIES_RATE_HIST_MAX completed passes, newest last) is what
                  # the series checkpoint charges by its max
-                 "avail_commit_mb", "series_mb", "series_n", "series_rate_hist")
+                 "avail_commit_mb", "series_mb", "series_n", "series_rate_hist",
+                 # each checkpoint's own figures, null when not reached:
+                 # series_charge_mb / avail_commit_series_mb are what the
+                 # series checkpoint compared (charge, commit reading);
+                 # gate_need_mb is the clustering checkpoint's real need,
+                 # cluster_need_mb + POST_CLUSTER_NEED_MB (cluster_need_mb
+                 # stays the clustering figure alone). The Ops Sentinel's
+                 # headroom WARNs read gate_need_mb and the series pair.
+                 "gate_need_mb", "series_charge_mb", "avail_commit_series_mb")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -928,6 +941,9 @@ def run(argv: list[str] | None = None) -> int:
               "avail_commit_mb": None,
               "series_mb": prior_series_mb, "series_n": prior_series_n,
               "series_rate_hist": prior_rate_hist,
+              # this run's checkpoint figures, when it got that far
+              "gate_need_mb": None, "series_charge_mb": None,
+              "avail_commit_series_mb": None,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -1030,6 +1046,8 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                  if hist else "no measurement yet: the fallback estimate")
         commit_mb = available_commit_mb()
         status["avail_commit_mb"] = commit_mb
+        status["series_charge_mb"] = charge_mb
+        status["avail_commit_series_mb"] = commit_mb
         if commit_mb is not None and commit_mb < charge_mb:
             print(f"MEMORY: series pass over {n_reg} registered strategies needs "
                   f"~{charge_mb} MB of commit ({basis}) and {commit_mb} MB of "
@@ -1106,6 +1124,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         avail_mb = available_phys_mb()
         commit_mb = available_commit_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
+        status["gate_need_mb"] = total_mb
         status["avail_commit_mb"] = commit_mb
         short = []
         if avail_mb is not None and avail_mb < total_mb:

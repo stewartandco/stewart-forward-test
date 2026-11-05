@@ -968,15 +968,23 @@ of it.
   `memo_ceiling` item in `degraded_quarantine.json` (the Sentinel WARNs, and
   FAILs after 3 days).
   **Early warning.** The Ops Sentinel's `gauntlet_queue` check WARNs when
-  `cluster_need_mb` >= `cluster_headroom_warn` (0.6) x `avail_phys_mb`
+  the clustering need >= `cluster_headroom_warn` (0.6) x `avail_phys_mb`
   (sc-ops-sentinel `ac61861`, 2026-11-04); it reads the status's need and so
   works unchanged on the per-cell need. The n line (`cluster_n_warn`
   46,000, plan 5, `9bf6637`) is retired in the same cutover as the per-cell
   change (sc-ops-sentinel branch `feat/retire-cluster-n-warn`): n no longer
   drives the need. Its twin on commit, `commit_headroom_warn` (0.6): WARN
-  when `cluster_need_mb` >= 0.6 x `avail_commit_mb` (sc-ops-sentinel branch
-  `feat/commit-headroom-warn`, merged in the train-window cutover). All are
-  warnings, not stops.
+  when the clustering need >= 0.6 x `avail_commit_mb`, and under the same
+  key when `series_charge_mb` >= 0.6 x `avail_commit_series_mb` (the series
+  pass, the binding commit need: about 3.7 to 4.4 GB against a clustering
+  need of 348 to 570 MB) (sc-ops-sentinel branch
+  `feat/commit-headroom-warn`, merged in the train-window cutover). The
+  clustering need both ratios compare is `gate_need_mb` (`cluster_need_mb`
+  + 512, what the gate compares), falling back to `cluster_need_mb` on a
+  status written before that field existed (Controller Ruling 8): against
+  the 512-less figure a WARN led a deferral only when the need was over
+  768 MB, so at today's need it fired only on nights the gate had already
+  deferred. All are warnings, not stops.
   The memory is one n_max x n_max float64 matrix at a time (the largest
   partition's), plus the merge history's member sets (about 0.01 n^2
   entries measured on the registry-wide pass, so about 0.01 n_max^2 per
@@ -1056,8 +1064,22 @@ of it.
   nothing. `train_view_fallbacks`: how many series took the mask copy
   because their dates were not non-decreasing; 0 on a clean run, anything
   else is a corrupt or legacy cache entry worth a look (the values are
-  still right). The status's `cluster_need_mb` excludes the 512, so the
-  Sentinel's two headroom ratios keep their meaning.
+  still right). `cluster_need_mb` is the clustering figure alone (it
+  excludes the 512). The three checkpoint fields (Controller Ruling 8), each
+  null when its checkpoint was not reached: `gate_need_mb`, the need the
+  clustering checkpoint actually compares (`cluster_need_mb` +
+  `POST_CLUSTER_NEED_MB`); `series_charge_mb`, the charge the series
+  checkpoint compared; `avail_commit_series_mb`, that checkpoint's commit
+  reading (`avail_commit_mb` stays the LAST reading). A series-pass deferral
+  records the series pair and leaves `gate_need_mb` and `cluster_need_mb`
+  null. The Sentinel's headroom WARNs read `gate_need_mb` and the series
+  pair (bullet "Early warning" above).
+  **Morning check: a higher `series_mb` is not a regression by itself.** It
+  grows with the intraday cell set (Switch 2: 228 intraday files, about 5.7M
+  bars held as dicts) and with each new registered cell, not with n alone.
+  The charge reads the rates of passes already completed, so after a
+  cell-set jump it lags one night: the first night on the larger set is
+  charged at the old rate, and the next night's charge includes it.
   **HAZARDS.** (a) `train_sharpe`'s `.tolist()` is REQUIRED for
   bit-identity: Python's `sum()` compensates exact Python floats only and
   adds np.float64 items plainly, so handing it the view moves the train
@@ -1255,7 +1277,9 @@ of it.
   when it did not cluster); since the train-window change `avail_commit_mb`
   (the last memory checkpoint's reading), `series_mb` / `series_n` (carried
   forward, display only), `series_rate_hist` (the last 8 passes' rates, what
-  the series checkpoint charges by its max) and `train_view_fallbacks`
+  the series checkpoint charges by its max), `gate_need_mb` /
+  `series_charge_mb` / `avail_commit_series_mb` (this run's checkpoint
+  figures, null when not reached) and `train_view_fallbacks`
   (bullet "Train windows as views"). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
