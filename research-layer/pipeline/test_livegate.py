@@ -410,11 +410,31 @@ def test_assess_default_unchanged():
     assert all(not (HOLD_KEYS & set(r)) for r in default.values())
 
 
+def _beta_case(sid, seed):
+    """Equity tracks price up to ROUNDING: the strategy is its hold, but the
+    price is quoted at 100, so the hold's rebased returns differ from the
+    equity's in the last bits -- the realistic case of a book long the whole
+    window (fix round 1: such noise once read as signal, p_hold 0.023)."""
+    rows, eq, px = [], 1.0, 100.0
+    for i, r_i in enumerate(_pinned(200, 3.0, 0.01, seed=seed)):
+        eq *= 1 + r_i
+        px *= 1 + r_i
+        r = row(sid, f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}", "BTCUSD", eq)
+        r["price"] = px
+        rows.append(r)
+    return {"sid": sid, "rows": rows, "train_contributions": FLAT_CONTRIBS}
+
+
 def test_hold_arm_blocks_beta_strategy():
-    """Equity tracks price exactly: the strategy IS its hold. In a rising
-    market v1 graduates it on PSR alone; v2 asks it to beat the hold too."""
-    rets = _pinned(200, 3.0, 0.01, seed=1)
-    case = priced_case("beta", rets, rets)
+    """In a rising market v1 graduates a pure-beta book on PSR alone; v2 asks
+    it to beat the hold too, and rounding noise must not count as beating it."""
+    from .livegate import daily_returns
+    from .beats_hold import forward_hold_series
+    case = _beta_case("beta", seed=1)
+    a = daily_returns(forward_series(case["rows"]))
+    b = daily_returns(forward_hold_series(case["rows"]))
+    assert a != b, "fixture must differ by rounding or the test is vacuous"
+    assert max(abs(x - y) for x, y in zip(a, b)) < 1e-12
     v1 = assess([case], min_days=60)
     v2 = assess([case], min_days=60, hold_arm=True)
     assert v1["beta"]["verdict"] == "live", v1["beta"]
@@ -423,7 +443,11 @@ def test_hold_arm_blocks_beta_strategy():
     assert v2["beta"]["p_zero"] == pytest.approx(1 - v1["beta"]["psr"])
     assert v2["beta"]["p"] == max(v2["beta"]["p_zero"], v2["beta"]["p_hold"])
     assert v2["beta"]["strategy_sr"] == pytest.approx(v2["beta"]["hold_sr"])
-    assert v2["beta"]["strategy_sr"] == pytest.approx(3.0, rel=0.02)
+    # 199 returns (the first is folded into the first mark): near 3.0
+    assert v2["beta"]["strategy_sr"] == pytest.approx(3.0, rel=0.05)
+    for seed in range(2, 22):
+        out = assess([_beta_case("b", seed)], min_days=60, hold_arm=True)["b"]
+        assert out["p_hold"] == 1.0 and out["verdict"] == "hold", (seed, out)
 
 
 def test_hold_arm_never_graduates_a_flat_book():

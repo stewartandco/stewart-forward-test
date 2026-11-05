@@ -287,3 +287,20 @@ def test_pvalue_full_bootstrap_worse_strategy_is_not_rejected():
     strat = [h - 0.001 + e for h, e in zip(hold, _noise(300, 0.004, 13))]
     p = paired_sharpe_pvalue(strat, hold, seed=5)
     assert 0.5 < p < 1.0
+
+
+@pytest.mark.parametrize("c", [0.3, 1.0, 2.5])
+def test_pvalue_scaled_copy_is_one(c):
+    # constant exposure (pure beta): SR(c * hold) == SR(hold) exactly, so the
+    # observed difference is rounding only and must never reject
+    hold = _noise(250, 0.01, 14)
+    assert paired_sharpe_pvalue([c * h for h in hold], hold, seed=3) == 1.0
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_pvalue_rounding_noise_copy_is_one(seed):
+    hold = _noise(250, 0.01, 100 + seed)
+    strat = [h + 1e-17 * e for h, e in zip(hold, _noise(250, 1.0, 200 + seed))]
+    diff = max(abs(x - y) for x, y in zip(strat, hold))
+    assert 0 < diff < 1e-15, "fixture must differ by rounding only"
+    assert paired_sharpe_pvalue(strat, hold, seed=seed) == 1.0

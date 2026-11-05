@@ -14,6 +14,11 @@ import numpy as np
 
 HOLD_BLOCK_LEN = 5       # circular block length (days) of the paired test
 HOLD_TEST_PATHS = 2000   # bootstrap resamples of the paired test
+# An observed per-period Sharpe difference below this is rounding, not
+# evidence: a constant-exposure book (returns = c x the hold's, c > 0) has a
+# difference of about 1e-16 and an se of the same order, so its t is noise
+# over noise and about 5% of such books would reject by chance.
+SR_DIFF_TOL = 1e-9
 
 
 def _class_and_spec(spec: dict) -> tuple[str, dict]:
@@ -145,7 +150,8 @@ def paired_sharpe_pvalue(strat: list[float], hold: list[float], seed: int,
     PAIRED series (Ledoit-Wolf 2008, studentized circular block bootstrap).
 
     Returns 1.0 (cannot reject) when the record is shorter than 2*block,
-    either sample variance is <= 0, se(y) <= 0, or t_obs is non-finite. A
+    either sample variance is <= 0, |SR difference| < SR_DIFF_TOL, se(y) <= 0,
+    or t_obs is non-finite. A
     resample whose variance or se* is <= 0, or whose t* is non-finite,
     contributes t* = +inf. Mismatched lengths are a caller bug: ValueError.
     """
@@ -167,6 +173,8 @@ def paired_sharpe_pvalue(strat: list[float], hold: list[float], seed: int,
         m = y.mean(axis=0)
         f, grad, va, vb = _delta_and_grad(m)
         if va <= 0 or vb <= 0:
+            return 1.0
+        if abs(f) < SR_DIFF_TOL:
             return 1.0
         se = _block_se(y, m, grad, block)
         if se <= 0:
