@@ -63,9 +63,9 @@ Method, figure by figure (docs/2026-09-30-gauntlet-at-scale-design.md 4.2):
   trials_sr_var stays this run's (every partition's cluster representatives
   pooled in one sample variance). Each entry also records trials_partitions,
   trials_largest_partition_n and trials_cut_rho (cluster_cells.CUT_RHO,
-  changed only by a new chained note); the per-partition table goes to the
-  --report file and the run log, never onto an entry. See _View.on_entry for
-  what counts.
+  changed only by a new chained note); the full per-partition table goes to
+  the --report file and the 20 largest partitions to the run log; neither
+  goes onto an entry. See _View.on_entry for what counts.
 - the expected maximum Sharpe SR* is FLOORED too (step 7, Coen option a,
   gauntlet-protocol-v6.1-amendment-1): SR* scales with sqrt(trials_sr_var),
   and the variance moves by orders of magnitude between the silhouette
@@ -901,6 +901,10 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         status["cluster_max_cell_n"] = clustered["largest_partition_n"]
         status["cluster_sum_n2"] = clustered["sum_n2"]
         status["cut_late_merges"] = clustered["late_merges"]
+        if clustered["late_merges"]:
+            print(f"WARN cut_late_merges {clustered['late_merges']}: merges at "
+                  f"or under the cut after the first over it (not counted)",
+                  flush=True)
         # Per-partition detail: the FULL table to the report (spec s6), the
         # top 20 by n to the run log; never on a chain entry (spec s3).
         extra["by_partition"] = clustered["by_partition"]

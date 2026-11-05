@@ -1858,3 +1858,30 @@ def test_the_deadline_counts_from_the_task_start(tmp_path, monkeypatch):
                                      - timedelta(hours=6)).isoformat())
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     assert not calls and _status(tmp_path)["exit_reason"] == "deadline"
+
+
+
+def _late_merges_run(tmp_path, monkeypatch, capsys, late):
+    from . import gauntlet
+    real = gauntlet.cluster_registry_by_cell
+
+    def stub(*a, **k):
+        return {**real(*a, **k), "late_merges": late}
+    monkeypatch.setattr(gs, "cluster_registry_by_cell", stub)
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    capsys.readouterr()
+    assert gs.run(_stat_args(reg, data, logs, cutoff)) == 0
+    out = capsys.readouterr().out
+    st = json.loads((logs / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
+    return out, st
+
+
+def test_late_merges_print_one_warn_line(tmp_path, monkeypatch, capsys):
+    """Final review M4: a run whose cut found late merges says so in the run
+    log, once; a run with none prints no such line."""
+    out, st = _late_merges_run(tmp_path / "one", monkeypatch, capsys, 1)
+    line = ("WARN cut_late_merges 1: merges at or under the cut after the "
+            "first over it (not counted)")
+    assert out.count(line) == 1 and st["cut_late_merges"] == 1
+    out, st = _late_merges_run(tmp_path / "zero", monkeypatch, capsys, 0)
+    assert "WARN cut_late_merges" not in out and st["cut_late_merges"] == 0
