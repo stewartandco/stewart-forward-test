@@ -167,6 +167,20 @@ class Series:
         pairs."""
         return self.rets[self.dates <= date_ordinal(cutoff)].tolist()
 
+    def train_view(self, cutoff: str) -> tuple[np.ndarray, bool]:
+        """The same window as `train`, as a zero-copy float64 prefix view of
+        `rets` (no Python-float list). Returns `(window, fell_back)`. When
+        `dates` is non-decreasing the window is the prefix `rets[:k]`, k from
+        a right-side searchsorted (the cutoff date is included, `<=`). An
+        unsorted `dates` (a corrupt or legacy entry) falls back to the mask
+        copy `train` uses, with `fell_back` True so the caller can count it.
+        Read-only by contract: never write into the result."""
+        ordinal = date_ordinal(cutoff)
+        if bool(np.all(self.dates[1:] >= self.dates[:-1])):
+            k = int(np.searchsorted(self.dates, ordinal, side="right"))
+            return self.rets[:k], False
+        return self.rets[self.dates <= ordinal], True
+
     def sha256(self) -> str:
         h = hashlib.sha256()
         h.update(self.dates.tobytes())

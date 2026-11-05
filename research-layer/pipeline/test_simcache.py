@@ -261,6 +261,44 @@ def test_series_train_matches_the_date_only_slice():
         assert ser.train(cutoff) == [r for d, r in pairs if _date_le(d, cutoff)], cutoff
 
 
+def _rand_series(n=60, seed=3):
+    rng = np.random.default_rng(seed)
+    dates = (date_ordinal("2024-01-01") + np.arange(n)).astype(np.int32)
+    return Series(dates, rng.normal(0, 0.01, n))
+
+
+def test_train_view_equals_train_elementwise():
+    s = _rand_series()
+    for c in ("2024-01-01", "2024-01-10", "2024-02-01", "2024-02-29", "2025-01-01"):
+        view, fell_back = s.train_view(c)
+        assert view.tolist() == s.train(c), c
+        assert fell_back is False
+        assert np.shares_memory(view, s.rets)
+
+
+def test_train_view_includes_the_cutoff_date():
+    s = _rand_series()
+    view, _ = s.train_view("2024-01-10")
+    assert len(view) == 10
+    assert view[-1] == s.rets[9]
+
+
+def test_train_view_empty_before_first_date():
+    s = _rand_series()
+    view, fell_back = s.train_view("2023-12-31")
+    assert len(view) == 0 and view.tolist() == [] and fell_back is False
+
+
+def test_train_view_falls_back_on_unsorted_dates():
+    s = _rand_series()
+    perm = np.random.default_rng(9).permutation(len(s))
+    u = Series(s.dates[perm].copy(), s.rets[perm].copy())
+    for c in ("2024-01-10", "2024-02-01"):
+        view, fell_back = u.train_view(c)
+        assert view.tolist() == u.train(c)
+        assert fell_back is True
+
+
 def test_legacy_json_entry_is_served_once_then_lives_on_as_npz(tmp_path):
     cache = SimCache(tmp_path / "simcache")
     key = cache_key("sid1", {"BTCUSD": "aaa"}, ENGINE_REV, 365)
