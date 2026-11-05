@@ -280,8 +280,10 @@ def test_pvalue_length_mismatch_raises():
 
 
 def test_pvalue_full_bootstrap_worse_strategy_is_not_rejected():
-    # non-degenerate pair, strat's Sharpe clearly BELOW hold's: the one-sided
-    # test of SR(strat) > SR(hold) must not reject
+    # non-degenerate pair, strat's Sharpe clearly BELOW hold's (about 0.21
+    # against 0.29 per day): the one-sided test of SR(strat) > SR(hold) must
+    # not reject. p < 1.0 proves the bootstrap ran (every early return is 1.0)
     hold = [h + 0.002 for h in _noise(300, 0.01, 12)]
-    strat = [h - 0.004 + e for h, e in zip(hold, _noise(300, 0.002, 13))]
-    assert paired_sharpe_pvalue(strat, hold, seed=5) > 0.5
+    strat = [h - 0.001 + e for h, e in zip(hold, _noise(300, 0.004, 13))]
+    p = paired_sharpe_pvalue(strat, hold, seed=5)
+    assert 0.5 < p < 1.0
