@@ -69,3 +69,60 @@ def test_refusals(tmp_path):
     assert sr.main(["--registry", str(ok), "--scratch", str(tmp_path / "s"),
                     *base, "--", "--chain"]) == 2
     assert not (live / "logs").exists() and not (tmp_path / "s").exists()
+
+
+def _refused(tmp_path, *passthrough):
+    ok = tmp_path / "copy.jsonl"
+    ok.write_text("")
+    return sr.main(["--registry", str(ok), "--data-dir", str(tmp_path),
+                    "--simcache-dir", str(tmp_path), "--scratch",
+                    str(tmp_path / "s"), "--", *passthrough])
+
+
+def test_passthrough_is_an_allow_list(tmp_path, capsys):
+    """gauntlet_stats' argparse takes `--chai` as --chain and lets a repeated
+    --registry / --logs-dir win, so only --cutoff, --deadline-hours and
+    --pbo-null-draws pass through; everything else refuses (exit 2) before
+    anything runs."""
+    for tokens in (["--chai"], ["--ch"], ["--chain"],
+                   ["--registry", "X"], ["--reg=X"], ["--logs-dir=X"],
+                   ["--logs", "X"], ["--report", "X"], ["--data-dir", "X"],
+                   ["--simcache-dir=X"], ["--cutoff"],
+                   ["--cutoff", "--chain"], ["--cutoff=2026-01-01", "--chai"],
+                   ["--cutoff=2026-01-01", "stray"], ["-c", "2026-01-01"],
+                   ["--cutoff="]):
+        assert _refused(tmp_path, *tokens) == 2, tokens
+        assert "REFUSED: passthrough" in capsys.readouterr().out, tokens
+    assert not (tmp_path / "s").exists()
+
+
+def test_check_passthrough_accepts_the_allowed_options():
+    ok, why = sr.check_passthrough(["--cutoff", "2026-01-01", "--deadline-hours=2",
+                                    "--pbo-null-draws", "10",
+                                    "--deadline-hours", "-1"])
+    assert why is None
+    assert ok == ["--cutoff=2026-01-01", "--deadline-hours=2",
+                  "--pbo-null-draws=10", "--deadline-hours=-1"]
+    assert sr.check_passthrough([]) == ([], None)
+
+
+def test_an_allowed_passthrough_reaches_the_job(tmp_path, monkeypatch):
+    """`--cutoff 2026-01-01` is accepted and handed to gauntlet_stats.run in
+    `--opt=value` form after the wrapper's own paths."""
+    seen = {}
+
+    def fake_run(argv):
+        seen["argv"] = argv
+        return 0
+    monkeypatch.setattr(gauntlet_stats, "run", fake_run)
+    ok = tmp_path / "copy.jsonl"
+    ok.write_text("")
+    rc = sr.main(["--registry", str(ok), "--data-dir", str(tmp_path),
+                  "--simcache-dir", str(tmp_path), "--scratch",
+                  str(tmp_path / "s"), "--no-fingerprint",
+                  "--", "--cutoff", "2026-01-01"])
+    assert rc == 0
+    assert seen["argv"][-1] == "--cutoff=2026-01-01"
+    assert "--chain" not in seen["argv"]
+    assert seen["argv"].count("--registry") == 1
+    assert seen["argv"].count("--logs-dir") == 1

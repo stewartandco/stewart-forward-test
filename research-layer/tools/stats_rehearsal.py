@@ -19,9 +19,14 @@ aborts the run (exit 2) and leaves the cache as it was. A data or sim-cache
 directory fingerprint (file count, bytes, newest mtime) is taken before and
 after and must match.
 
-Refusals (exit 2, nothing run): --chain in the passthrough, a --registry or
-any output path inside a directory that also holds `registry_log.d` (the
-live layout), or a --registry that resolves to this layer's own chain.
+Refusals (exit 2, nothing run): any passthrough token (after --) other than
+--cutoff, --deadline-hours and --pbo-null-draws with their values (an
+ALLOW-list: gauntlet_stats' argparse takes option prefixes such as --chai
+and lets a repeated option win, so --chain, --registry, --data-dir,
+--simcache-dir, --logs-dir and --report, or any prefix of them, are refused
+there), a --registry or any output path inside a directory that also holds
+`registry_log.d` (the live layout), or a --registry that resolves to this
+layer's own chain.
 
 Writes ONLY under --scratch: logs/ (the job's status, PBO cache and instance
 lock), report.md (the job's report), rehearsal.json (this tool's summary),
@@ -168,6 +173,50 @@ def _live_layout(p: Path) -> bool:
     return False
 
 
+# The ONLY gauntlet_stats options a rehearsal passes through. gauntlet_stats'
+# argparse accepts any unambiguous prefix of an option (`--chai` is --chain)
+# and the last of a repeated option wins (`--registry LIVE` after the
+# wrapper's own), so a deny-list cannot hold: every other token is refused.
+PASSTHROUGH_ALLOWED = ("--cutoff", "--deadline-hours", "--pbo-null-draws")
+
+
+def _is_number(s: str) -> bool:
+    try:
+        float(s)
+    except ValueError:
+        return False
+    return True
+
+
+def check_passthrough(tokens: list[str]) -> tuple[list[str] | None, str | None]:
+    """(normalised tokens, None) when every token is an allowed option with
+    its value (`--opt value` or `--opt=value`), else (None, the reason). The
+    normalised form is always `--opt=value`, so gauntlet_stats can never read
+    a value as an option."""
+    out: list[str] = []
+    i = 1 if tokens[:1] == ["--"] else 0     # an argparse that keeps the --
+    while i < len(tokens):
+        tok = tokens[i]
+        name, eq, value = tok.partition("=")
+        if name not in PASSTHROUGH_ALLOWED:
+            what = "option" if tok.startswith("-") else "argument"
+            return None, (f"passthrough {what} {tok!r} is not allowed (only "
+                          f"{', '.join(PASSTHROUGH_ALLOWED)}, each with its value)")
+        if not eq:
+            if i + 1 >= len(tokens):
+                return None, f"passthrough option {tok!r} has no value"
+            value = tokens[i + 1]
+            if value.startswith("-") and not _is_number(value):
+                return None, (f"passthrough option {tok!r} takes a value, "
+                              f"not {value!r}")
+            i += 1
+        if value == "":
+            return None, f"passthrough option {name!r} has an empty value"
+        out.append(f"{name}={value}")
+        i += 1
+    return out, None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path, required=True)
@@ -181,8 +230,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("passthrough", nargs="*",
                     help="extra gauntlet_stats arguments after --")
     a = ap.parse_args(argv)
-    if "--chain" in a.passthrough:
-        print("REFUSED: a rehearsal never chains (--chain)", flush=True)
+    passthrough, why = check_passthrough(a.passthrough)
+    if passthrough is None:
+        print(f"REFUSED: {why}; a rehearsal never chains and its registry, "
+              f"data, sim cache, logs and report paths are its own", flush=True)
         return 2
     if a.registry.resolve() == (LAYER / "registry_log.jsonl").resolve():
         print(f"REFUSED: {a.registry} is this layer's own chain", flush=True)
@@ -256,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     cluster_cells.cut_partition = cut
     argv_run = ["--registry", str(a.registry), "--data-dir", str(a.data_dir),
                 "--simcache-dir", str(a.simcache_dir), "--logs-dir", str(logs_dir),
-                "--report", str(report), *a.passthrough]
+                "--report", str(report), *passthrough]
     t0 = time.perf_counter()
     rc, refused = None, None
     try:
