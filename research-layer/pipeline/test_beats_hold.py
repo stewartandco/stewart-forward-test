@@ -277,3 +277,11 @@ def test_pvalue_degenerate_resamples_count_against_rejection():
 def test_pvalue_length_mismatch_raises():
     with pytest.raises(ValueError):
         paired_sharpe_pvalue([0.01, 0.02] * 10, [0.01] * 21, seed=1)
+
+
+def test_pvalue_full_bootstrap_worse_strategy_is_not_rejected():
+    # non-degenerate pair, strat's Sharpe clearly BELOW hold's: the one-sided
+    # test of SR(strat) > SR(hold) must not reject
+    hold = [h + 0.002 for h in _noise(300, 0.01, 12)]
+    strat = [h - 0.004 + e for h, e in zip(hold, _noise(300, 0.002, 13))]
+    assert paired_sharpe_pvalue(strat, hold, seed=5) > 0.5

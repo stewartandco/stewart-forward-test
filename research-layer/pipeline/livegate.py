@@ -19,14 +19,21 @@ So the gate has two arms with different horizons:
             gauntlet -- with the threshold set by Benjamini-Hochberg over the
             cohort under simultaneous assessment.
 
+quarantine-live-protocol-v2 (design 2026-11-05 section 4) adds a second test to
+GRADUATE, armed by its chained note: the record must also beat its own asset's
+buy-and-hold (a paired Sharpe test), and its p is the larger of the two.
+
 This module WRITES NOTHING. It returns a report; chaining any state change from
 it is a separate, Coen-gated step.
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import defaultdict
 
+from .beats_hold import forward_hold_series, paired_sharpe_pvalue
+from .protocols import LIVE_V2, NOTE_LIVE_V2
 from .stats import moments, sharpe, percentile, psr
 
 KILL_PCTILE = 0.01       # burial line on the rebuilt cone; 1 percent, not 5
@@ -150,7 +157,8 @@ def benjamini_hochberg(pvalues: list[float], q: float = BH_Q) -> set[int]:
     return set(order[:largest_k])
 
 
-def assess(cases: list[dict], min_days: int, q: float = BH_Q) -> dict:
+def assess(cases: list[dict], min_days: int, q: float = BH_Q,
+           hold_arm: bool = False) -> dict:
     """Judge every quarantined strategy. Returns a report; writes nothing.
 
     `cases` are {sid, rows, train_contributions}. A strategy is eligible once
@@ -158,9 +166,17 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q) -> dict:
     strategy; graduation runs over the ELIGIBLE COHORT, because the
     concurrent-confirmation burden is a property of the cohort rather than of
     any strategy in it.
+
+    `hold_arm` (quarantine-live-protocol-v2): each surviving eligible strategy
+    must ALSO beat its own asset's hold. Its row gains p_zero (1 - PSR, the v1
+    test), p_hold (paired Sharpe test against the forward hold), p = the larger
+    of the two, which is what Benjamini-Hochberg sees, and the two annualized
+    Sharpes, which are recorded only and decide nothing.
     """
     report: dict[str, dict] = {}
     cones: dict[str, dict | None] = {}
+    rets_by_sid: dict[str, list[float]] = {}
+    rows_by_sid: dict[str, list[dict]] = {}
     for case in cases:
         sid = case["sid"]
         series = forward_series(case["rows"])
@@ -171,8 +187,10 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q) -> dict:
         # expressions stay in sync, which is a silent-divergence waiting to
         # happen on a gate that buries strategies.
         cone = rebuilt_cone(case["train_contributions"], n_trades,
-                            seed=int(sid, 16) % (2 ** 31) if _is_hex(sid) else 0)
+                            seed=_seed(sid))
         cones[sid] = cone
+        rets_by_sid[sid] = rets
+        rows_by_sid[sid] = case["rows"]
         terminal = series[-1][1] if series else 1.0
         report[sid] = {
             "eligible": len(series) >= min_days,
@@ -195,12 +213,37 @@ def assess(cases: list[dict], min_days: int, q: float = BH_Q) -> dict:
 
     survivors = [s for s in eligible if report[s]["verdict"] == "hold"]
     if survivors:
-        pvals = [1.0 - report[s]["psr"] for s in survivors]
+        if hold_arm:
+            for s in survivors:
+                report[s].update(_hold_test(s, rets_by_sid[s], rows_by_sid[s],
+                                            report[s]["psr"]))
+            pvals = [report[s]["p"] for s in survivors]
+        else:
+            pvals = [1.0 - report[s]["psr"] for s in survivors]
         for idx in benjamini_hochberg(pvals, q):
             report[survivors[idx]]["verdict"] = "live"
         for s in survivors:
             report[s]["cohort_size"] = len(survivors)
     return report
+
+
+def _hold_test(sid: str, rets: list[float], rows: list[dict],
+               psr_value: float) -> dict:
+    """The v2 arm's fields for one survivor. A strategy whose equity touched
+    0 has a step dropped by daily_returns, so its record no longer pairs with
+    the hold's: that cannot be tested, so p_hold = 1.0 (never an error)."""
+    hold = daily_returns(forward_hold_series(rows))
+    p_zero = 1.0 - psr_value
+    p_hold = (paired_sharpe_pvalue(rets, hold, _seed(sid))
+              if len(rets) == len(hold) else 1.0)
+    return {"p_zero": p_zero, "p_hold": p_hold, "p": max(p_zero, p_hold),
+            "strategy_sr": sharpe(rets) * math.sqrt(TRADING_DAYS) if rets else 0.0,
+            "hold_sr": sharpe(hold) * math.sqrt(TRADING_DAYS) if hold else 0.0}
+
+
+def _seed(sid: str) -> int:
+    """The per-strategy seed shared by the rebuilt cone and the paired test."""
+    return int(sid, 16) % (2 ** 31) if _is_hex(sid) else 0
 
 
 def _is_hex(s: str) -> bool:
@@ -267,10 +310,13 @@ def train_contributions(spec: dict, data_dir, cutoff: str) -> list[float]:
                           if t["entry_date"][:10] <= cutoff[:10]])
 
 
-def write_report(out_dir, report: dict, min_days: int, q: float):
+def write_report(out_dir, report: dict, min_days: int, q: float,
+                 hold_arm: bool = False):
     """<out_dir>/<UTC date>-livegate-assessment.md: one row per quarantined
     strategy, the cohort size the graduation arm judged against, and the
-    protocol name. Markdown, read-only with respect to the chain."""
+    protocol name. Markdown, read-only with respect to the chain. Under
+    `hold_arm` (v2) the header names v2 and its rule and the table gains the
+    hold test's columns; without it the file is exactly the v1 report."""
     from datetime import datetime, timezone
     from pathlib import Path
     out_dir = Path(out_dir)
@@ -279,17 +325,31 @@ def write_report(out_dir, report: dict, min_days: int, q: float):
     path = out_dir / f"{today}-livegate-assessment.md"
     n_elig = sum(1 for r in report.values() if r["eligible"])
     cohort = max((r.get("cohort_size") or 0 for r in report.values()), default=0)
-    lines = [f"# Live-gate assessment {today}", "",
-             f"Protocol: `{PROTOCOL}`. Kill arm from {min_days} trading days; "
-             f"graduation = PSR vs 0 with Benjamini-Hochberg at q={q}.", "",
-             f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
-             "| strategy | days | trades | terminal | cone p01 | PSR | verdict |",
-             "|---|---:|---:|---:|---:|---:|---|"]
+    if hold_arm:
+        head = [f"Protocol: `{LIVE_V2}`. Kill arm from {min_days} trading days; "
+                f"graduation = beats zero AND own-asset hold: p = max(1 - PSR vs 0, "
+                f"paired Sharpe test vs the hold) with Benjamini-Hochberg at q={q}.",
+                "",
+                f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
+                "| strategy | days | trades | terminal | cone p01 | PSR | p_hold | p "
+                "| SR | hold SR | verdict |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    else:
+        head = [f"Protocol: `{PROTOCOL}`. Kill arm from {min_days} trading days; "
+                f"graduation = PSR vs 0 with Benjamini-Hochberg at q={q}.", "",
+                f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
+                "| strategy | days | trades | terminal | cone p01 | PSR | verdict |",
+                "|---|---:|---:|---:|---:|---:|---|"]
+    lines = [f"# Live-gate assessment {today}", ""] + head
     for sid in sorted(report):
         r = report[sid]
         cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
+        extra = ""
+        if hold_arm:
+            extra = "".join("n/a | " if r.get(k) is None else f"{r[k]:.4f} | "
+                            for k in ("p_hold", "p", "strategy_sr", "hold_sr"))
         lines.append(f"| `{sid}` | {r['forward_days']} | {r['forward_trades']} | "
-                     f"{r['terminal']:.4f} | {cone} | {r['psr']:.4f} | "
+                     f"{r['terminal']:.4f} | {cone} | {r['psr']:.4f} | {extra}"
                      f"**{r['verdict'].upper()}**{'' if r['eligible'] else ' (not yet eligible)'} |")
     lines += ["", "HOLD moves nothing. LIVE is a lifecycle state, not capital: "
                   "money at risk is Coen's separate decision (the note's own words)."]
@@ -319,13 +379,21 @@ def run(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     registry = Registry(args.registry)
-    if not args.dry_run and not any(
-            e["entry_type"] == "note"
-            and str(e["payload"].get("text", "")).startswith(PROTOCOL)
-            for e in registry.entries()):
+    # ONE chain pass reads both notes. The v1 refusal is exactly as before; a
+    # chained quarantine-live-protocol-v2 note (prefix with its colon) arms the
+    # hold test by itself, and without one every output is the v1 output.
+    has_v1 = v2 = False
+    for e in registry.entries():
+        if e["entry_type"] != "note":
+            continue
+        text = str(e["payload"].get("text", ""))
+        has_v1 = has_v1 or text.startswith(PROTOCOL)
+        v2 = v2 or text.startswith(NOTE_LIVE_V2)
+    if not args.dry_run and not has_v1:
         print(f"REFUSED: no '{PROTOCOL}' note on the chain. Chain the gate "
               f"before it may move a single strategy.")
         return 1
+    protocol = LIVE_V2 if v2 else PROTOCOL
 
     specs = quarantined_specs(registry)
     rows = quarantine_rows(registry)
@@ -338,20 +406,23 @@ def run(argv: list[str] | None = None) -> int:
               "train_contributions": train_contributions(spec, args.data_dir,
                                                          args.cutoff)}
              for sid, spec in sorted(specs.items())]
-    report = assess(cases, min_days=args.min_days, q=args.q)
+    report = assess(cases, min_days=args.min_days, q=args.q, hold_arm=v2)
 
     for sid in sorted(report):
         r = report[sid]
         cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
         print(f"{sid}  days={r['forward_days']:>4} trades={r['forward_trades']:>3} "
               f"terminal={r['terminal']:.4f} cone_p01={cone:>7} "
-              f"psr={r['psr']:.4f}  -> {r['verdict'].upper()}"
+              f"psr={r['psr']:.4f}"
+              + (f" p_hold={r['p_hold']:.4f} p={r['p']:.4f}" if "p_hold" in r else "")
+              + f"  -> {r['verdict'].upper()}"
               + ("" if r["eligible"] else "  (not yet eligible)"))
 
     n_live = sum(1 for r in report.values() if r["verdict"] == "live")
     n_dead = sum(1 for r in report.values() if r["verdict"] == "graveyard")
     if args.report is not None:
-        out = write_report(args.report, report, args.min_days, args.q)
+        out = write_report(args.report, report, args.min_days, args.q,
+                           hold_arm=v2)
         print(f"report: {out}")
     if args.dry_run:
         print(f"\nDRY RUN - {len(report)} assessed, {n_live} would go live, "
@@ -368,7 +439,7 @@ def run(argv: list[str] | None = None) -> int:
         return 0
     from .chainlock import ChainLock, ChainLockHeld
     lock = ChainLock(args.registry.resolve().parent / "logs", holder="livegate",
-                     purpose=f"{PROTOCOL} assessment")
+                     purpose=f"{protocol} assessment")
     try:
         lock.acquire()
     except ChainLockHeld:
@@ -386,17 +457,21 @@ def run(argv: list[str] | None = None) -> int:
             r = report[sid]
             if r["verdict"] == "hold":
                 continue
+            metrics = ({k: r[k] for k in ("forward_days", "forward_trades",
+                                          "terminal", "cone_p01", "psr",
+                                          "eligible")}
+                       | {"protocol": protocol, "cohort_size": r.get("cohort_size")})
+            if v2:
+                # a buried strategy was never hold-tested: its p fields are None
+                metrics |= {k: r.get(k) for k in ("p_zero", "p_hold", "p")}
             registry.record_verdict(
                 sid, "live_gate", "pass" if r["verdict"] == "live" else "fail",
-                {k: r[k] for k in ("forward_days", "forward_trades", "terminal",
-                                   "cone_p01", "psr", "eligible")}
-                | {"protocol": PROTOCOL, "cohort_size": r.get("cohort_size")},
-                "0" * 64)
+                metrics, "0" * 64)
             written += 1
         for sid in sorted(report):
             r = report[sid]
             if r["verdict"] == "live":
-                registry.record_state_change(sid, "live", f"{PROTOCOL} pass")
+                registry.record_state_change(sid, "live", f"{protocol} pass")
                 written += 1
             elif r["verdict"] == "graveyard":
                 registry.record_state_change(
