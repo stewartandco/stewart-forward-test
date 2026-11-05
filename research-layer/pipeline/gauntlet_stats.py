@@ -103,13 +103,34 @@ written by the registry-wide method; CLUSTER_PRIOR_S before any
 measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
 Memory (spec 2026-11-05 s3.2): two checkpoints, each exit 3 when short. (1)
-Before the bars load, free commit must cover the series pass's charge (the
-highest per-strategy rate of the last SERIES_RATE_HIST_MAX completed passes
-x tonight's n plus 10%, else a fallback estimate). (2) Clustering then
-starts only when BOTH available physical memory and free commit cover
-cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n_max the largest partition, read from the
-specs before clustering; L bounded by the shortest cached series) plus
-POST_CLUSTER_NEED_MB. An unknown reading never blocks.
+Before the bars load, free commit (only) must cover the series pass's charge
+(the highest per-strategy rate of the last SERIES_RATE_HIST_MAX completed
+passes x tonight's n x SERIES_CHARGE_MARGIN, else the fallback estimate).
+(2) Clustering then starts only when BOTH available physical memory and
+free commit cover cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L +
+11.5 n L bytes (n_max the largest partition, read from the specs before
+clustering; L bounded by the shortest cached series) plus
+POST_CLUSTER_NEED_MB. An unknown reading never blocks, on either limit.
+Status: avail_commit_mb (the last checkpoint's reading), series_mb and
+series_n (the last completed pass's raw figures, display only),
+series_rate_hist (what checkpoint 1 charges by its max), and
+train_view_fallbacks (below).
+
+Train windows (spec 2026-11-05 s3.1): held as zero-copy views of the cached
+series (simcache.Series.train_view), a Python list built only inside each
+consumer. Before this the lists of every strategy were the job's peak
+(11,745 MiB at n 30,140, ungated); measured after it, 4,069 MiB on the same
+inputs with every payload byte-identical. A series whose dates are not
+non-decreasing gets the old mask copy, counted in train_view_fallbacks.
+HAZARDS: (a) train_sharpe's .tolist() is required for bit-identity: sum()
+compensates exact Python floats only and adds np.float64 items plainly.
+(b) group_pbo's source is hashed by pbo_code_sha(), which keys the PBO
+cache: never edit it (or pipeline/pbo.py, stats.percentile) without
+re-pinning BASE_PBO_CODE_SHA in the tests; the list conversion lives in
+family_train for that reason. (c) The tests pin the BASE code's payload
+digests and pbo_inputs_sha; re-pin them only for a deliberate payload or
+key change. (d) The no-history series fallback was calibrated on a warm
+pass (Ruling 7): the cutover's first night must not be a vintage-roll night.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
@@ -249,7 +270,8 @@ POST_CLUSTER_NEED_MB = 512
 # raised to 1.75 by the Task 4 rehearsal (Controller Ruling 6, 2026-11-05):
 # at n 30,140 with the real 74.4 MiB of cell CSVs, 1.25 gave 3,112 MB, under
 # the measured series_mb 3,324 x 1.25 = 4,155; 1.75 gives 4,356 (1.70, the
-# least passing step of 0.05, would give 4,231). About 4.3 GB at n 30,140.
+# least passing step of 0.05, would give 4,232: 4,231.04 rounded up). About
+# 4.3 GB at n 30,140.
 SERIES_CHARGE_MARGIN = 1.10
 SERIES_RATE_HIST_MAX = 8
 SERIES_FALLBACK_BYTES_PER_POINT = 12
@@ -709,7 +731,8 @@ def _prior_series(logs_dir: Path) -> tuple[int | None, int | None]:
     """(series_mb, series_n) carried forward from the last status: the series
     pass's peak commit growth and the registered n it was measured at. Each
     is None when missing, unreadable or not a positive int (a status from
-    before the commit gate has neither)."""
+    before the commit gate has neither). Display only since Controller
+    Ruling 5: the series charge reads series_rate_hist, never this pair."""
     try:
         st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1002,7 +1025,8 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         hist = status["series_rate_hist"]
         charge_mb = series_charge_mb(hist, n_reg, fallback_mb)
         basis = (f"max rate {max(hist):.4f} MB per strategy over the last "
-                 f"{len(hist)} pass(es) x n {n_reg} plus 10%"
+                 f"{len(hist)} pass(es) x n {n_reg} plus "
+                 f"{(SERIES_CHARGE_MARGIN - 1) * 100:.0f}%"
                  if hist else "no measurement yet: the fallback estimate")
         commit_mb = available_commit_mb()
         status["avail_commit_mb"] = commit_mb
