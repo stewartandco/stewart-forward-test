@@ -1632,12 +1632,13 @@ def test_partition_helpers_count_the_series_that_exist():
 
 def test_need_uses_the_largest_partition():
     """Spec s5: one n_max x n_max matrix at a time, plus the aligned copies
-    of ALL n series (10 B per n L). 29,180 series, largest partition 1,068,
-    1,308 aligned days: 438 MiB."""
-    assert gs.CLUSTER_BYTES_PER_ALIGNED_NL == 10.0
-    assert gs.cluster_need_mb(29180, 1068, 1308) == 438
+    of ALL n series (11.5 B per n L, re-measured by the Task 6 rehearsal on
+    2026-11-05). 29,180 series, largest partition 1,068, 1,308 aligned days:
+    493 MiB."""
+    assert gs.CLUSTER_BYTES_PER_ALIGNED_NL == 11.5
+    assert gs.cluster_need_mb(29180, 1068, 1308) == 493
     assert gs.cluster_need_mb(29180, 1068, 1308) == math.ceil(
-        (9.0 * 1068 ** 2 + 48.0 * 1068 * 1308 + 10.0 * 29180 * 1308) / 2**20)
+        (9.0 * 1068 ** 2 + 48.0 * 1068 * 1308 + 11.5 * 29180 * 1308) / 2**20)
     assert gs.cluster_need_mb(0, 0, 1303) == 0
 
 
@@ -1646,9 +1647,9 @@ def test_need_grows_with_n_max_squared_not_n():
     base = gs.cluster_need_mb(10000, 1000, 1300)
     doubled = gs.cluster_need_mb(20000, 1000, 1300)
     assert doubled - base in (
-        math.ceil(10.0 * 10000 * 1300 / 2**20) - 1,
-        math.ceil(10.0 * 10000 * 1300 / 2**20),
-        math.ceil(10.0 * 10000 * 1300 / 2**20) + 1)
+        math.ceil(11.5 * 10000 * 1300 / 2**20) - 1,
+        math.ceil(11.5 * 10000 * 1300 / 2**20),
+        math.ceil(11.5 * 10000 * 1300 / 2**20) + 1)
     # doubling n_max at a fixed n quadruples the matrix term
     quad = gs.cluster_need_mb(10000, 2000, 1300) - gs.cluster_need_mb(10000, 0, 1300)
     one = gs.cluster_need_mb(10000, 1000, 1300) - gs.cluster_need_mb(10000, 0, 1300)

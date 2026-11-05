@@ -150,12 +150,17 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # 1.4 GB free, killed after 90 min). So the pass starts only when AVAILABLE
 # PHYSICAL memory covers the need; otherwise the run stops (exit
 # DEFERRED_MEMORY_EXIT, `deferred_memory`) and the next one retries.
-# need = 9 n_max^2 + 48 n_max L + 10 n L bytes (n series in all, L aligned
+# need = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all, L aligned
 # days): the first two are the largest partition's matrix and its n_max x L
 # copies, the last is cluster_registry_by_cell's aligned copies of ALL n
 # series (built up front, alive through the pass). `available_phys_mb` is
 # read after the series pass, so memory already held is not charged again.
-# The 10 B per aligned n L is provisional (Task 6 re-measures it).
+# 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
+# copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
+# added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
+# per n L) and at most 39.1 MB a single partition's cut (33.1 MB the largest,
+# under the n_max terms' 58.8 MB, so 9 and 48 stay); the rest scales with n,
+# so (332.3 - 33.1) MB = 10.4 B per n L, plus about 10%.
 # History: 14 n^2 (2026-10-11, one reading at n = 13,730) became 9 n^2 +
 # 48 n L on 2026-11-01 (real matrix n = 26,835, L = 1,303: peak 6,896 MB =
 # 8.4 n^2 + 34 n L, plus 8 B per n L for the aligned copies, ~10% margin).
@@ -163,7 +168,7 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # status carries `cluster_sum_n2` forward like `cluster_s`).
 CLUSTER_BYTES_PER_N2 = 9.0
 CLUSTER_BYTES_PER_NL = 48.0
-CLUSTER_BYTES_PER_ALIGNED_NL = 10.0
+CLUSTER_BYTES_PER_ALIGNED_NL = 11.5
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
