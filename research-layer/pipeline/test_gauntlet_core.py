@@ -160,3 +160,23 @@ def test_record_benchmark_false_skips_only_the_control(tmp_path):
     assert "benchmark_relative" in with_b["metrics"]
     with_b["metrics"].pop("benchmark_relative")
     assert with_b == without
+
+
+def test_process_memory_mb_shape():
+    """Memory spec s3.2 item 3: (PrivateUsage, PeakPagefileUsage) in MiB from
+    GetProcessMemoryInfo (PROCESS_MEMORY_COUNTERS_EX). On Windows two
+    positive ints, the peak at or above the current private commit; growing
+    the process by 64 MiB raises the peak by about that much. None off
+    Windows."""
+    import os
+    got = gauntlet_core.process_memory_mb()
+    if os.name != "nt":
+        assert got is None
+        return
+    private, peak = got
+    assert type(private) is int and type(peak) is int
+    assert private > 0 and peak >= private
+    blob = bytearray(64 * 2**20)                # committed and touched
+    private2, peak2 = gauntlet_core.process_memory_mb()
+    assert private2 >= private + 60 and peak2 >= private2
+    del blob

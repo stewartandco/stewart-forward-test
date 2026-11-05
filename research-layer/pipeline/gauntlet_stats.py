@@ -102,19 +102,25 @@ it was measured at; unscaled when the status has no cluster_sum_n2, as one
 written by the registry-wide method; CLUSTER_PRIOR_S before any
 measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
-Memory: clustering then starts only when available physical memory covers
-cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes
-(n_max the largest partition, read from the specs before clustering; L
-bounded by the shortest cached series); otherwise exit 3.
+Memory (spec 2026-11-05 s3.2): two checkpoints, each exit 3 when short. (1)
+Before the bars load, free commit must cover the series pass's charge (the
+last measured series_mb scaled to tonight's n plus 10%, else a fallback
+estimate). (2) Clustering then starts only when BOTH available physical
+memory and free commit cover cluster_need_mb(n, n_max, L) = 9 n_max^2 +
+48 n_max L + 11.5 n L bytes (n_max the largest partition, read from the
+specs before clustering; L bounded by the shortest cached series) plus
+POST_CLUSTER_NEED_MB. An unknown reading never blocks.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
 another instance running (that one owns the status file; it is not touched).
 Exit 1: the data or the chain refused the run, the clustering refused, or
 the run crashed (status exit_reason says which).
-Exit 3: not enough free physical memory to cluster (`deferred_memory`); the
-series are cached and the next run retries. Nonzero on purpose, so the Ops
-Sentinel FAILs the digest the same morning (Coen, 2026-10-11).
+Exit 3: not enough free physical memory or commit to run safely
+(`deferred_memory`; the MEMORY line names the short limit and the
+checkpoint); series already simulated are cached and the next run retries.
+Nonzero on purpose, so the Ops Sentinel FAILs the digest the same morning
+(Coen, 2026-10-11).
 """
 from __future__ import annotations
 
@@ -139,7 +145,8 @@ from .stats import (moments, sharpe, psr, expected_max_sharpe, percentile,
 from .pbo import cscv_pbo, distinct_configs, permutation_null, percentile_of
 from .plateau import qualifies
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
-                            _annualized_sharpe_from_returns, available_phys_mb)
+                            _annualized_sharpe_from_returns, available_phys_mb,
+                            available_commit_mb, process_memory_mb)
 from .taskguard import task_started
 # Module-level names on purpose: the tests replace them to prove the job
 # calls the gauntlet's own functions rather than a copy.
@@ -165,13 +172,21 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # Its merge loop touches every page of that matrix every merge: if any of it
 # is paged out the pass thrashes (2026-10-11: 19,092 series, ~4.9 GB needed,
 # 1.4 GB free, killed after 90 min). So the pass starts only when AVAILABLE
-# PHYSICAL memory covers the need; otherwise the run stops (exit
-# DEFERRED_MEMORY_EXIT, `deferred_memory`) and the next one retries.
-# need = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all, L aligned
-# days): the first two are the largest partition's matrix and its n_max x L
-# copies, the last is cluster_registry_by_cell's aligned copies of ALL n
-# series (built up front, alive through the pass). `available_phys_mb` is
-# read after the series pass, so memory already held is not charged again.
+# PHYSICAL memory covers the need, AND free COMMIT covers it too (memory
+# spec s3.2, Coen 2026-11-05: by day the box had 10-12 GB of commit left with
+# about 31 GB of RAM free, so a physical-only gate would let a tight-commit
+# night die of MemoryError, `crashed`, instead of deferring). Otherwise the
+# run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`), the MEMORY line
+# names the short limit, and the next one retries. An unknown reading (None)
+# never blocks, on either limit.
+# need = cluster_need_mb(n, n_max, L) + POST_CLUSTER_NEED_MB, where
+# cluster_need_mb = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all,
+# L aligned days): the first two are the largest partition's matrix and its
+# n_max x L copies, the last is cluster_registry_by_cell's aligned copies of
+# ALL n series (built up front, alive through the pass). The status's
+# `cluster_need_mb` is that clustering figure alone (the Ops Sentinel's
+# headroom ratio reads it). Both readings are taken after the series pass,
+# so memory already held is not charged again.
 # HAZARD, not covered: the merge history's member sets are a further
 # n_max^2-shaped term (about 0.01 n^2 entries measured on the registry-wide
 # pass, more if the merge tree turns chain-like), inside the margin only.
@@ -179,9 +194,13 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # nonzero series there) is far heavier and is not covered by this gate; the
 # per-cell design never takes it: cluster_cells raises ConstantNonzeroRow
 # for such a row and the run refuses (`cluster_refused`, exit 1).
-# Not gated either: the whole job's peak AFTER clustering (11,745 MB at n
-# 30,140 on 2026-11-05: the train-window float lists for every strategy, the
-# PBO pass and the verdict loop) grows linearly with n (follow-up).
+# After clustering: POST_CLUSTER_NEED_MB, the work that follows the pass
+# (the train windows, now zero-copy views of the cached series, memory spec
+# s3.1; one family's transient float lists at a time for PBO; the verdict
+# loop), plus about 10%. Before the views it was the job's peak: 11,745 MB
+# private at n 30,140 (2026-11-05), the train windows as Python float lists
+# for every strategy, growing linearly with n and covered by no gate. 512 is
+# PROVISIONAL: the plan's Task 4 rehearsal re-measures it.
 # 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
 # copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
 # added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
@@ -196,6 +215,28 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 CLUSTER_BYTES_PER_N2 = 9.0
 CLUSTER_BYTES_PER_NL = 48.0
 CLUSTER_BYTES_PER_ALIGNED_NL = 11.5
+POST_CLUSTER_NEED_MB = 512
+# The series-pass checkpoint (memory spec s3.2 item 3, the builder's call):
+# the bars load and the series pass commit about 2.8 GB BEFORE the clustering
+# gate is reached, so a tight-commit night could still crash there. Before
+# load_cell_data the run therefore defers (exit 3) when free COMMIT is under
+# the pass's charge; physical memory is not tested here (commit is the
+# binding limit for allocations; residency matters for the merge loop only).
+# The charge is the last measured `series_mb` (the PEAK commit growth of the
+# span: PeakPagefileUsage after the pass minus PrivateUsage just before
+# load_cell_data, in-process, MiB; carried forward like `cluster_s` with the
+# registered n it was measured at, `series_n`; a pass stopped at the deadline
+# records nothing) scaled linearly to tonight's n, plus 10%.
+# No measurement yet (the first night after cutover): the spec's "12 B per
+# cached point" cannot be summed before the pass (the cache entries' lengths
+# are what the pass reads), so the plan's call is 12 B x registered n x 7,000
+# points (the measured mean is about 7,600 points a strategy, rounded down),
+# plus the summed byte size of the cell CSVs load_cell_data will read (a
+# stand-in for bars_by_cell), x 1.25. About 3.5 GB at n 30,140.
+SERIES_CHARGE_MARGIN = 1.10
+SERIES_FALLBACK_BYTES_PER_POINT = 12
+SERIES_FALLBACK_POINTS = 7000
+SERIES_FALLBACK_MARGIN = 1.25
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
@@ -236,7 +277,14 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  # train windows held as views (memory spec s3.1): how many
                  # series took train_view's mask-copy fallback (dates not
                  # non-decreasing); 0 on a clean run
-                 "train_view_fallbacks")
+                 "train_view_fallbacks",
+                 # the gate on physical AND commit (memory spec s3.2):
+                 # avail_commit_mb is the LAST checkpoint's reading (the
+                 # series pass's, then the clustering's), null when unknown or
+                 # not reached; series_mb / series_n (the series pass's peak
+                 # commit growth and the registered n it was measured at) are
+                 # carried forward like cluster_s / cluster_n
+                 "avail_commit_mb", "series_mb", "series_n")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -636,6 +684,54 @@ def _prior_cluster_sum_n2(logs_dir: Path) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
+def _prior_series(logs_dir: Path) -> tuple[int | None, int | None]:
+    """(series_mb, series_n) carried forward from the last status: the series
+    pass's peak commit growth and the registered n it was measured at. Each
+    is None when missing, unreadable or not a positive int (a status from
+    before the commit gate has neither)."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(st, dict):
+        return None, None
+
+    def pos(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+    return pos(st.get("series_mb")), pos(st.get("series_n"))
+
+
+def series_charge_mb(prior_mb: int | None, prior_n: int | None, n: int,
+                     fallback_mb: int) -> int:
+    """MiB of commit the bars load and series pass are charged before they
+    start: the last measured peak growth scaled linearly to tonight's
+    registered n, plus SERIES_CHARGE_MARGIN; `fallback_mb` when either half of
+    the measurement is missing."""
+    if not prior_mb or not prior_n:
+        return fallback_mb
+    return math.ceil(prior_mb * n / prior_n * SERIES_CHARGE_MARGIN)
+
+
+def series_fallback_mb(n: int, csv_bytes: int) -> int:
+    """The series charge with no measurement: SERIES_FALLBACK_BYTES_PER_POINT
+    x n x SERIES_FALLBACK_POINTS for the cached series, plus the cell CSVs'
+    bytes for the bars, x SERIES_FALLBACK_MARGIN, in MiB."""
+    return math.ceil((SERIES_FALLBACK_BYTES_PER_POINT * n * SERIES_FALLBACK_POINTS
+                      + csv_bytes) * SERIES_FALLBACK_MARGIN / 2**20)
+
+
+def _cell_csv_bytes(data_dir: Path, cells_needed) -> int:
+    """Summed size of the price files load_cell_data will read; a file that
+    cannot be stat'ed counts 0 here (load_cell_data then raises as before)."""
+    total = 0
+    for asset, tf in sorted(set(cells_needed)):
+        try:
+            total += (data_dir / f"{asset}_{tf}.csv").stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def cluster_estimate_s(prior_s: float | None, prior_sum_n2: int | None,
                        sum_n2: int) -> float:
     """The clustering pass's expected duration: the last measured one scaled
@@ -734,6 +830,7 @@ def run(argv: list[str] | None = None) -> int:
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     prior_cluster_n = _prior_cluster_n(a.logs_dir)
     prior_cluster_sum_n2 = _prior_cluster_sum_n2(a.logs_dir)
+    prior_series_mb, prior_series_n = _prior_series(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -757,6 +854,11 @@ def run(argv: list[str] | None = None) -> int:
               "cut_late_merges": None,
               # train_view mask-copy fallbacks this run (memory spec s3.1)
               "train_view_fallbacks": 0,
+              # memory spec s3.2: the last checkpoint's commit reading, and
+              # the series pass's measurement, carried forward until this
+              # run completes a pass and measures its own
+              "avail_commit_mb": None,
+              "series_mb": prior_series_mb, "series_n": prior_series_n,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -845,6 +947,28 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
 
         # Every registered spec's cells, cut at the vintage Sunday.
         cells_needed, class_of = comparable_cells(all_specs)
+        # Memory spec s3.2 item 3: the bars load and the series pass commit
+        # gigabytes before the clustering gate, so free commit must cover
+        # their charge first. Unknown commit (None) never blocks.
+        n_reg = len(all_specs)
+        fallback_mb = series_fallback_mb(n_reg, _cell_csv_bytes(a.data_dir,
+                                                                 cells_needed))
+        charge_mb = series_charge_mb(status["series_mb"], status["series_n"],
+                                     n_reg, fallback_mb)
+        basis = (f"measured {status['series_mb']} MB at n {status['series_n']}, "
+                 f"scaled to n {n_reg} plus 10%"
+                 if status["series_mb"] and status["series_n"]
+                 else "no measurement yet: the fallback estimate")
+        commit_mb = available_commit_mb()
+        status["avail_commit_mb"] = commit_mb
+        if commit_mb is not None and commit_mb < charge_mb:
+            print(f"MEMORY: series pass over {n_reg} registered strategies needs "
+                  f"~{charge_mb} MB of commit ({basis}) and {commit_mb} MB of "
+                  f"commit is available; commit is short, not started (an "
+                  f"allocation would fail). Nothing simulated; the next run "
+                  f"retries.", flush=True)
+            return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
+        mem_before = process_memory_mb()
         bars_by_cell, _, _ = load_cell_data(a.data_dir, cells_needed, "9999-12-31")
         bars_by_cell = truncate_bars(
             bars_by_cell, {cells.cell_id(asset, tf): vintage for asset, tf in bars_by_cell})
@@ -875,6 +999,13 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             dated.update(d)
             eq_len.update(e)
             hits, misses = hits + h, misses + m
+        # The pass completed: record its peak commit growth with the n it was
+        # measured at (a deadline stop above returned first and keeps the
+        # prior pair; unreadable counters keep it too).
+        mem_after = process_memory_mb()
+        if mem_before is not None and mem_after is not None:
+            status["series_mb"] = max(0, mem_after[1] - mem_before[0])
+            status["series_n"] = n_reg
         bars_by_cell.clear()
         print(f"sim cache: {hits} hit(s), {misses} miss(es) over {len(all_specs)} "
               f"registered strategies", flush=True)
@@ -898,13 +1029,23 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
         need_mb = cluster_need_mb(n_cluster, n_max, cluster_days_bound(dated))
+        total_mb = need_mb + POST_CLUSTER_NEED_MB
         avail_mb = available_phys_mb()
+        commit_mb = available_commit_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
-        if avail_mb is not None and avail_mb < need_mb:
+        status["avail_commit_mb"] = commit_mb
+        short = []
+        if avail_mb is not None and avail_mb < total_mb:
+            short.append(f"physical memory is short ({avail_mb} MB available; "
+                         f"it would page and thrash)")
+        if commit_mb is not None and commit_mb < total_mb:
+            short.append(f"commit is short ({commit_mb} MB available; an "
+                         f"allocation would fail)")
+        if short:
             print(f"MEMORY: clustering {n_cluster} series (largest partition "
-                  f"{n_max}) needs ~{need_mb} MB of physical memory and "
-                  f"{avail_mb} MB is available; not started (it would page and "
-                  f"thrash). Series are cached; the next run retries.",
+                  f"{n_max}) needs ~{total_mb} MB ({need_mb} clustering + "
+                  f"{POST_CLUSTER_NEED_MB} after it); {' and '.join(short)}; "
+                  f"not started. Series are cached; the next run retries.",
                   flush=True)
             return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()

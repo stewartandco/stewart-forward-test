@@ -4,6 +4,8 @@ import math
 import shutil
 from datetime import date
 
+import pytest
+
 from . import gauntlet_stats as gs
 
 # Ruling 35 (ii): --chain refuses until the amendment note is on the chain,
@@ -13,6 +15,14 @@ V61_AMEND1 = gs.AMENDMENT_NOTE_PREFIX + " test anchor"
 # Amendment 2 (per-cell effective trials, spec s6): --chain refuses without it
 # as well, so every chaining fixture carries both notes.
 V61_AMEND2 = gs.AMENDMENT2_NOTE_PREFIX + " test anchor"
+
+
+@pytest.fixture(autouse=True)
+def _commit_unknown_by_default(monkeypatch):
+    """Memory spec s3.2: the job reads free commit at two checkpoints. Every
+    test here sees it as unknown (None never blocks) unless it stubs a value,
+    so no result depends on this box's commit headroom at test time."""
+    monkeypatch.setattr(gs, "available_commit_mb", lambda: None)
 
 
 def _amend(reg):
@@ -98,7 +108,9 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                # per-cell effective trials (spec s6)
                "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges",
                # train windows as views (memory spec s3.1)
-               "train_view_fallbacks"}
+               "train_view_fallbacks",
+               # the gate on physical AND commit (memory spec s3.2)
+               "avail_commit_mb", "series_mb", "series_n"}
 
 
 def _status(tmp_path):
@@ -2102,3 +2114,275 @@ def test_payloads_match_the_base_codes_digests(tmp_path, monkeypatch, capsys):
     assert _payloads_sha(v4) == BASE_PAYLOADS_SHA_V4
     assert (_payloads_sha({role: mixed[sid] for role, sid in sids.items()})
             == BASE_PAYLOADS_SHA_MIXED)
+
+
+
+# ---- memory spec s3.2: the gate on physical AND commit; series checkpoint ----
+
+def _two_readings(monkeypatch, phys, commit):
+    monkeypatch.setattr(gs, "available_phys_mb", lambda: phys)
+    monkeypatch.setattr(gs, "available_commit_mb", lambda: commit)
+
+
+def _memory_line(capsys):
+    return next(ln for ln in capsys.readouterr().out.splitlines()
+                if ln.startswith("MEMORY:"))
+
+
+def test_short_commit_defers_naming_commit(tmp_path, monkeypatch, capsys):
+    """Plenty of RAM, short of commit at the clustering checkpoint: exit 3
+    deferred_memory (an allocation would fail), the MEMORY line names commit
+    and the clustering, not physical memory. The series pass ran (its charge,
+    the fallback for one strategy, fits), so the shortfall is the later one."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    n = sum(1 for _ in reg.entries())
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
+    _two_readings(monkeypatch, 100_000, 1000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    assert not calls and sum(1 for _ in reg.entries()) == n
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["cluster_need_mb"], st["avail_phys_mb"],
+            st["avail_commit_mb"]) == ("deferred_memory", 4500, 100_000, 1000)
+    line = _memory_line(capsys)
+    assert line.startswith("MEMORY: clustering") and "commit" in line
+    assert "physical" not in line
+
+
+def test_short_phys_defers_naming_physical(tmp_path, monkeypatch, capsys):
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
+    _two_readings(monkeypatch, 1400, 100_000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    assert not calls
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["avail_phys_mb"], st["avail_commit_mb"]) == (
+        "deferred_memory", 1400, 100_000)
+    line = _memory_line(capsys)
+    assert line.startswith("MEMORY: clustering") and "physical" in line
+    assert "commit" not in line
+
+
+def test_both_short_names_both(tmp_path, monkeypatch, capsys):
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
+    _two_readings(monkeypatch, 1400, 1000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    line = _memory_line(capsys)
+    assert "physical" in line and "commit" in line
+
+
+def test_unknown_commit_never_blocks(tmp_path, monkeypatch):
+    """Review Focus 5: both readings unknown (a non-Windows host, a failed
+    call): neither checkpoint blocks, however large the charge; the run
+    clusters and finishes, exit 0, and the status says unknown (null)."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 10 ** 9)
+    _seed_status(tmp_path, series_mb=10 ** 9, series_n=1)
+    _two_readings(monkeypatch, None, None)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    st = _status(tmp_path)
+    assert calls == [1] and st["exit_reason"] == "done"
+    assert st["avail_phys_mb"] is None and st["avail_commit_mb"] is None
+
+
+def test_one_unknown_reading_leaves_the_other_limit(tmp_path, monkeypatch):
+    """One reading unknown: the other limit still applies."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 4500)
+    _two_readings(monkeypatch, 1400, None)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    _two_readings(monkeypatch, None, 1000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3
+    _two_readings(monkeypatch, 100_000, None)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+
+
+def test_need_includes_post_cluster_margin(tmp_path, monkeypatch):
+    """Spec s3.2 item 2: the need compared at the clustering checkpoint is
+    cluster_need_mb(...) + POST_CLUSTER_NEED_MB, on BOTH limits. The status's
+    cluster_need_mb stays the clustering figure (the Sentinel's ratio)."""
+    from .test_gauntlet_worker import _run
+    assert gs.POST_CLUSTER_NEED_MB == 512
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    calls = _count_clustering(monkeypatch)
+    monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 1000)
+    edge = 1000 + gs.POST_CLUSTER_NEED_MB
+    for phys, commit in ((edge - 1, 100_000), (100_000, edge - 1)):
+        _two_readings(monkeypatch, phys, commit)
+        assert _stats_run(reg, data, tmp_path, 5.75) == 3, (phys, commit)
+        assert _status(tmp_path)["cluster_need_mb"] == 1000
+    assert not calls
+    _two_readings(monkeypatch, edge, edge)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert calls == [1]
+
+
+def test_series_charge_scales_with_n():
+    """Spec s3.2 item 3: series_mb x n / series_n, plus 10%."""
+    assert gs.series_charge_mb(3000, 100, 200, 0) == math.ceil(3000 * 2 * 1.10)
+    assert gs.series_charge_mb(3000, 100, 100, 0) == math.ceil(3000 * 1.10)
+    # no prior (or half of one): the fallback, unscaled
+    assert gs.series_charge_mb(None, None, 200, 777) == 777
+    assert gs.series_charge_mb(3000, None, 200, 777) == 777
+    assert gs.series_charge_mb(None, 100, 200, 777) == 777
+
+
+def test_series_fallback_is_points_plus_csv_bytes_plus_25pct():
+    """No measurement yet: 12 B x registered n x 7,000 points, plus the cell
+    CSVs' bytes, x 1.25, in MiB (the constraints' fallback)."""
+    assert (gs.SERIES_FALLBACK_BYTES_PER_POINT, gs.SERIES_FALLBACK_POINTS,
+            gs.SERIES_FALLBACK_MARGIN) == (12, 7000, 1.25)
+    assert gs.series_fallback_mb(30140, 2 * 2**30) == math.ceil(
+        (12 * 30140 * 7000 + 2 * 2**30) * 1.25 / 2**20)
+    assert gs.series_fallback_mb(0, 0) == 0
+
+
+def test_prior_series_reads_only_positive_ints(tmp_path):
+    assert gs._prior_series(tmp_path / "logs") == (None, None)       # no status
+    for bad in (None, 0, -5, True, 1.5, "9"):
+        _seed_status(tmp_path, series_mb=bad, series_n=bad)
+        assert gs._prior_series(tmp_path / "logs") == (None, None), bad
+    _seed_status(tmp_path, series_mb=3000, series_n=100)
+    assert gs._prior_series(tmp_path / "logs") == (3000, 100)
+
+
+def _spy_load_cell_data(monkeypatch):
+    calls = []
+    real = gs.load_cell_data
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(gs, "load_cell_data", spy)
+    return calls
+
+
+def test_series_check_defers_before_the_pass(tmp_path, monkeypatch, capsys):
+    """Spec s3.2 item 3: a prior series_mb of 3,000 measured at half of
+    tonight's registered n charges ceil(3,000 x 2 x 1.10) = 6,601 MB of
+    commit; with 5,000 available the run defers (exit 3 deferred_memory)
+    BEFORE load_cell_data, and the MEMORY line names the series pass and
+    commit. With 7,000 it runs. (The brief's 100 -> 200 is 5 -> 10 here: the
+    fixture registers 10 strategies; the ratio is the same.)"""
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    args = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--logs-dir", str(logs), "--cutoff", cutoff]
+    loads = _spy_load_cell_data(monkeypatch)
+    n = sum(1 for _ in reg.entries())
+    _seed_status(tmp_path, series_mb=3000, series_n=5)
+    _two_readings(monkeypatch, 100_000, 5000)
+    assert gs.run(args) == 3
+    assert not loads and sum(1 for _ in reg.entries()) == n
+    st = _status(tmp_path)
+    assert (st["exit_reason"], st["avail_commit_mb"]) == ("deferred_memory", 5000)
+    assert (st["series_mb"], st["series_n"]) == (3000, 5)         # carried
+    assert st["cluster_need_mb"] is None and st["avail_phys_mb"] is None
+    line = _memory_line(capsys)
+    assert line.startswith("MEMORY: series pass") and "commit" in line
+    assert "6601" in line and "physical" not in line
+    _two_readings(monkeypatch, 100_000, 7000)
+    assert gs.run(args) == 0 and loads == [1]
+
+
+def test_series_check_uses_the_fallback_without_a_prior(tmp_path, monkeypatch, capsys):
+    """Review Focus 4: the first night after cutover reads a status with no
+    series_mb / series_n. The early checkpoint charges the fallback (12 B x
+    n x 7,000 + the cell CSVs' bytes, x 1.25) and never blocks on the
+    missing value: at exactly the fallback it runs; one MB under it defers."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    _seed_status(tmp_path, cluster_s=1.0, cluster_n=1)        # an old status
+    csv_bytes = sum(p.stat().st_size for p in data.glob("*.csv"))
+    fallback = gs.series_fallback_mb(1, csv_bytes)
+    assert fallback == math.ceil((12 * 7000 + csv_bytes) * 1.25 / 2**20)
+    loads = _spy_load_cell_data(monkeypatch)
+    _two_readings(monkeypatch, 100_000, fallback - 1)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 3 and not loads
+    line = _memory_line(capsys)
+    assert line.startswith("MEMORY: series pass") and "fallback" in line
+    # exactly the fallback at the series checkpoint, plenty at clustering's
+    commit = iter([fallback, 100_000])
+    monkeypatch.setattr(gs, "available_commit_mb", lambda: next(commit))
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0 and loads == [1]
+    assert _status(tmp_path)["avail_commit_mb"] == 100_000    # the last reading
+
+
+def test_series_fallback_counts_only_the_cells_loaded(tmp_path, monkeypatch):
+    """The CSV term is the files load_cell_data will read (the registered
+    cells), not every file in the data dir."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    csv_bytes = sum(p.stat().st_size for p in data.glob("*.csv"))
+    (data / "ZZZUSDT_1d.csv").write_bytes(b"x" * (64 * 2**20))  # not registered
+    seen = []
+    real = gs.series_fallback_mb
+    monkeypatch.setattr(gs, "series_fallback_mb",
+                        lambda n, b: seen.append((n, b)) or real(n, b))
+    _two_readings(monkeypatch, 100_000, 100_000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    assert seen == [(1, csv_bytes)]
+
+
+def test_series_mb_recorded_and_carried_forward(tmp_path, monkeypatch):
+    """Spec s3.2 item 3: series_mb = PeakPagefileUsage after the series pass
+    minus PrivateUsage just before load_cell_data (MiB), recorded with the
+    registered n. A deadline stop INSIDE the pass records nothing and keeps
+    the prior pair; a run that cannot read the counters keeps it too."""
+    import time as real_time
+    reg, data, logs, cutoff = _live_family_v61(tmp_path)
+    args = ["--registry", str(reg.log_path), "--data-dir", str(data),
+            "--logs-dir", str(logs), "--cutoff", cutoff]
+    _two_readings(monkeypatch, 100_000, 100_000)
+    order = []
+    real_load = gs.load_cell_data
+    monkeypatch.setattr(gs, "load_cell_data",
+                        lambda *a, **k: order.append("load") or real_load(*a, **k))
+    readings = iter([(100, 150), (400, 900)])
+    monkeypatch.setattr(gs, "process_memory_mb",
+                        lambda: order.append("mem") or next(readings))
+    _seed_status(tmp_path, series_mb=777, series_n=3)
+    assert gs.run(args) == 0
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "done" and order == ["mem", "load", "mem"]
+    assert (st["series_mb"], st["series_n"]) == (900 - 100, 10)
+    # a deadline stop inside the pass: the second chunk finds the clock spent;
+    # the pair measured above stays
+    clock = _frozen(monkeypatch)
+    monkeypatch.setattr(gs, "SERIES_CHUNK", 1)
+    real_series = gs.registry_series
+
+    def series(*a, **k):
+        out = real_series(*a, **k)
+        clock.now += 10 ** 6
+        return out
+    monkeypatch.setattr(gs, "registry_series", series)
+    readings = iter([(100, 150), (5000, 99_000)])
+    assert gs.run(args + ["--deadline-hours", "1"]) == 0
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "deadline" and st["stopped_at_deadline"] is True
+    assert (st["series_mb"], st["series_n"]) == (800, 10)
+    # counters unknown: nothing recorded, the prior stays
+    monkeypatch.setattr(gs, "registry_series", real_series)
+    monkeypatch.setattr(gs, "time", real_time)
+    monkeypatch.setattr(gs, "process_memory_mb", lambda: None)
+    _seed_status(tmp_path, series_mb=800, series_n=10)
+    assert gs.run(args) == 0
+    st = _status(tmp_path)
+    assert st["exit_reason"] == "done"
+    assert (st["series_mb"], st["series_n"]) == (800, 10)
