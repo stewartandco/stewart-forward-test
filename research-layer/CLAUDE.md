@@ -1235,7 +1235,11 @@ at BOTH stages. Rehearsal readout: `docs/runs/2026-11-05-beats-hold-rehearsal.md
   Drafts: `docs/notes/gauntlet-protocol-v6.2.md` and
   `docs/notes/quarantine-live-protocol-v2.md`. Chain them VERBATIM after
   Coen approves the exact text, with `python -m tools.grid_switch
-  chain-note --prefix <name>:`. Never edit a note after it is chained.
+  chain-note --prefix <name>:`. `--prefix` takes `<name>:` (the tool
+  refuses one not ending in ":"), but the note's text must start
+  `<name>: ` (colon AND space) to arm, because the arming check includes
+  the space: a note chained as `<name>:text` passes the tool and arms
+  nothing. Never edit a note after it is chained.
 - **Gauntlet (v6.2): an OPT-IN battery, never an edit of `FAIL_ORDER`.**
   `gauntlet_core.evaluate_standalone(..., battery="v6.1")` is the default.
   It is the six gates, with a result byte-identical to before (the parity
@@ -1265,8 +1269,22 @@ at BOTH stages. Rehearsal readout: `docs/runs/2026-11-05-beats-hold-rehearsal.md
     quarantine rows' prices, rebased at the first forward row, with no
     cost charged.
   Seed `int(sid,16) % 2**31` (0 for a non-hex id). The report gains
-  p_hold, p, SR and hold-SR columns. A record that cannot be paired (its
-  equity touched 0) gets p_hold = 1.0 and never graduates; it never raises.
+  p_hold, paths, p, SR and hold-SR columns; the console line gains
+  `p_hold`, `p_hold_paths` and `p`; a v2 verdict's metrics gain `p_zero`,
+  `p_hold`, `p` and `p_hold_paths` (all null on a burial). A record that
+  cannot be paired (its equity touched 0) gets p_hold = 1.0 and never
+  graduates; so does one where any asset's FIRST row price is 0 or below
+  (the registry requires a finite price only; `forward_hold_series`
+  returns `[]`, final review M1). Neither raises.
+  - **The floor refinement (final review I1, `beats_hold.hold_pvalue`).**
+    2000 paths floor p_hold at 1/2001, and BH needs p <= q/m for a lone
+    rejection, so above about 100 survivors no single strategy could
+    graduate (the cohort is heading toward ~900). Two stages: every
+    survivor is tested at `HOLD_TEST_PATHS`; one whose p_hold is EXACTLY
+    1/2001 is redrawn with the same seed and `refined_paths(m, q)` =
+    ceil(2 m / q) paths (m = survivors hold-tested this assessment, q the
+    `--q` passed to `assess`), only when that exceeds 2000. Any other p is
+    kept. `p_hold_paths` records which. Under v1 nothing changes.
 - **Constants (the plan's calls, recorded in the v2 note; changing one is
   a protocol change):** `beats_hold.HOLD_BLOCK_LEN = 5` (days),
   `HOLD_TEST_PATHS = 2000`, numpy `default_rng(seed)`, `SR_DIFF_TOL =
@@ -1274,7 +1292,14 @@ at BOTH stages. Rehearsal readout: `docs/runs/2026-11-05-beats-hold-rehearsal.md
   Without that floor a pure-beta or scaled-copy book (difference 0 up to
   rounding) would graduate about 5% of the time by noise. A constant
   series, or one with zero variance, also gets 1.0. One test call at T=500
-  takes about 0.05 s.
+  takes about 0.05 s. `HOLD_CHUNK_PATHS = 2000` (also in the note) bounds
+  memory: every block start is drawn first in ONE `rng.integers(0, T,
+  size=(paths, ceil(T/5)))` call, then the rows are evaluated 2000 at a
+  time, so the chunk size never changes a p-value and a call at <= 2000
+  paths is bit-identical to the unchunked code (pinned by recorded values
+  in `test_beats_hold.py`). One refined call at T=500, m=900 (36,000
+  paths) takes about 0.95 s with a traced peak of about 107 MB; unchunked
+  its (paths, T, 4) array alone would be about 576 MB.
 - **`pipeline/protocols.py` holds the names.** `V61_FAMILY =
   (gauntlet-protocol-v6.1, gauntlet-protocol-v6.2)` is what every
   exact-match on a verdict's `metrics.protocol` accepts:
@@ -1289,16 +1314,32 @@ at BOTH stages. Rehearsal readout: `docs/runs/2026-11-05-beats-hold-rehearsal.md
   loop FAILs `gauntlet_orphan` (`test_protocols.py` greps for stray
   literals). The note-prefix checks that arm v6.1 rules stay keyed on
   `PROTOCOL_V61` alone.
-- **Rollback.** Before either note is chained, reverting the MERGE is
-  safe: behaviour is unchanged (parity-proven). After the FIRST v6.2
-  verdict is chained, roll back with a forward commit ONLY, never a
-  revert. `V61_FAMILY` must keep reading those verdicts. Otherwise
-  verifier invariant 11 rejects their `gauntlet_stats` entries (chain
-  INVALID), and the loop's `gauntlet_orphan` check counts any that is
-  still in `gauntlet` state. The forward commit disarms the switch (for
-  example by ignoring the note) and keeps `PROTOCOL_V62` in `V61_FAMILY`.
-  Nothing matches `live_gate` verdicts by protocol string, so live v2 has
-  no family tuple.
+- **Rollback, in three stages (each switch on its own note).**
+  1. **Before a note is chained:** a revert of the MERGE is safe.
+     Behaviour is unchanged (parity-proven) and nothing on the chain names
+     v6.2 or live v2.
+  2. **After a note is chained:** ANY rollback, revert, or forward disarm
+     of that switch (for example code that ignores the note) needs a
+     SUPERSEDING chained note FIRST, approved by Coen. The chained text
+     says the next run judges under it, so code that stops doing so would
+     judge under a chained protocol that says otherwise; same as the
+     amendment-2 rule ("Effective trials per cell"). Gauntlet: after the
+     v6.2 note, the worker must not label or judge v6.1 again until a note
+     says so. **Live v2 equivalent:** after the
+     `quarantine-live-protocol-v2: ` note, the live gate must not assess
+     under v1 again (graduation by PSR alone, or without the floor
+     refinement) until a superseding note is chained. v2 TIGHTENS v1, so
+     going back is a LOOSENING, and v1's standing rule applies: the
+     evidence and the argument go on the chain before the results they
+     would affect exist. This holds even if no live_gate verdict has been
+     chained under v2 yet.
+  3. **After the FIRST v6.2 verdict is chained:** additionally, a forward
+     commit ONLY, never a revert, keeping `PROTOCOL_V62` in `V61_FAMILY`.
+     Otherwise verifier invariant 11 rejects those verdicts'
+     `gauntlet_stats` entries (chain INVALID), and the loop's
+     `gauntlet_orphan` check counts any that is still in `gauntlet` state.
+     Nothing matches `live_gate` verdicts by protocol string, so live v2
+     has no family tuple and no stage 3: stage 2 is its whole rule.
 
 ## Sweep rotation, sibling queues, re-trials (SP5 P2-T4: D6 / D10 / D9)
 - **D6 rotation.** `loop.ROTATION_SIZE` = 12 (spec s5); `loop.ROTATION_CLASSES`
