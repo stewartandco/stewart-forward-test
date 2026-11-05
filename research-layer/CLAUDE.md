@@ -1252,7 +1252,11 @@ of it.
   floor); `cluster_n` / `cluster_s` / `cluster_sum_n2` (carried forward),
   `cluster_need_mb` / `avail_phys_mb` (this run's memory gate) and
   `cluster_max_cell_n` / `cut_late_merges` (this run's per-cell shape, null
-  when it did not cluster). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
+  when it did not cluster); since the train-window change `avail_commit_mb`
+  (the last memory checkpoint's reading), `series_mb` / `series_n` (carried
+  forward, display only), `series_rate_hist` (the last 8 passes' rates, what
+  the series checkpoint charges by its max) and `train_view_fallbacks`
+  (bullet "Train windows as views"). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
@@ -1275,8 +1279,9 @@ of it.
   clustering refused (`cluster_refused`, e.g. a constant nonzero series in
   a partition), or the run crashed (`crashed`);
   2 = argparse usage error; 3 = not
-  enough free physical memory to cluster (`deferred_memory`, FAILs the
-  digest on purpose).
+  enough free physical memory OR commit to run safely, at the series-pass
+  checkpoint (commit only) or the clustering one (both) (`deferred_memory`,
+  FAILs the digest on purpose; the `MEMORY:` line names which).
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
   Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry
