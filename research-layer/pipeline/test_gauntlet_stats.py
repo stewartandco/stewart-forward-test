@@ -110,7 +110,7 @@ STATUS_KEYS = {"ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                # train windows as views (memory spec s3.1)
                "train_view_fallbacks",
                # the gate on physical AND commit (memory spec s3.2)
-               "avail_commit_mb", "series_mb", "series_n"}
+               "avail_commit_mb", "series_mb", "series_n", "series_rate_hist"}
 
 
 def _status(tmp_path):
@@ -2188,7 +2188,7 @@ def test_unknown_commit_never_blocks(tmp_path, monkeypatch):
     assert _run(reg, data, tmp_path) == 0
     calls = _count_clustering(monkeypatch)
     monkeypatch.setattr(gs, "cluster_need_mb", lambda n_series, n_max, days: 10 ** 9)
-    _seed_status(tmp_path, series_mb=10 ** 9, series_n=1)
+    _seed_status(tmp_path, series_rate_hist=[10.0 ** 9])
     _two_readings(monkeypatch, None, None)
     assert _stats_run(reg, data, tmp_path, 5.75) == 0
     st = _status(tmp_path)
@@ -2232,13 +2232,36 @@ def test_need_includes_post_cluster_margin(tmp_path, monkeypatch):
 
 
 def test_series_charge_scales_with_n():
-    """Spec s3.2 item 3: series_mb x n / series_n, plus 10%."""
-    assert gs.series_charge_mb(3000, 100, 200, 0) == math.ceil(3000 * 2 * 1.10)
-    assert gs.series_charge_mb(3000, 100, 100, 0) == math.ceil(3000 * 1.10)
-    # no prior (or half of one): the fallback, unscaled
-    assert gs.series_charge_mb(None, None, 200, 777) == 777
-    assert gs.series_charge_mb(3000, None, 200, 777) == 777
-    assert gs.series_charge_mb(None, 100, 200, 777) == 777
+    """Spec s3.2 item 3 + Controller Ruling 5: the HIGHEST per-strategy rate
+    in the history x tonight's n, plus 10%; the brief's 3,000 MB at n 100 is
+    a rate of 30 MB a strategy, so n 200 charges ceil(3,000 x 2 x 1.10)."""
+    assert gs.series_charge_mb([30.0], 200, 0) == math.ceil(3000 * 2 * 1.10)
+    assert gs.series_charge_mb([0.05, 0.12, 0.06], 10_000, 0) == 1320
+    assert gs.series_charge_mb([0.05, 0.12, 0.06], 10_000, 0) == math.ceil(
+        0.12 * 10_000 * 1.10)
+    # the newest (warm) night does not lower it; the max governs
+    assert gs.series_charge_mb([0.12, 0.01], 10_000, 0) == 1320
+    # no history, or nothing usable in it: the fallback, unscaled
+    for none in (None, [], [0, -1.0, True, "9", None, float("nan")], "0.12"):
+        assert gs.series_charge_mb(none, 10_000, 777) == 777, none
+    # bad entries are ignored one by one
+    assert gs.series_charge_mb([0.12, "x", -5, float("inf")], 10_000, 0) == 1320
+
+
+def test_prior_series_rate_hist_sanitises_entry_by_entry(tmp_path):
+    logs = tmp_path / "logs"
+    assert gs._prior_series_rate_hist(logs) == []                     # no status
+    for bad in (None, 0.12, "0.12", {"a": 1}):
+        _seed_status(tmp_path, series_rate_hist=bad)
+        assert gs._prior_series_rate_hist(logs) == [], bad
+    _seed_status(tmp_path, series_rate_hist=[0.1, -1, 0, True, "x", None, 0.2])
+    assert gs._prior_series_rate_hist(logs) == [0.1, 0.2]
+    (logs / gs.STATUS_NAME).write_text('{"series_rate_hist": [NaN, Infinity, 0.3]}',
+                                       encoding="utf-8")
+    assert gs._prior_series_rate_hist(logs) == [0.3]
+    _seed_status(tmp_path, series_rate_hist=[float(i) for i in range(1, 11)])
+    assert gs._prior_series_rate_hist(logs) == [float(i) for i in range(3, 11)]
+    assert gs.SERIES_RATE_HIST_MAX == 8
 
 
 def test_series_fallback_is_points_plus_csv_bytes_plus_25pct():
@@ -2272,24 +2295,27 @@ def _spy_load_cell_data(monkeypatch):
 
 
 def test_series_check_defers_before_the_pass(tmp_path, monkeypatch, capsys):
-    """Spec s3.2 item 3: a prior series_mb of 3,000 measured at half of
-    tonight's registered n charges ceil(3,000 x 2 x 1.10) = 6,601 MB of
-    commit; with 5,000 available the run defers (exit 3 deferred_memory)
-    BEFORE load_cell_data, and the MEMORY line names the series pass and
-    commit. With 7,000 it runs. (The brief's 100 -> 200 is 5 -> 10 here: the
-    fixture registers 10 strategies; the ratio is the same.)"""
+    """Spec s3.2 item 3: a prior pass of 3,000 MB at half of tonight's
+    registered n (a rate of 600 MB a strategy) charges ceil(600 x 10 x 1.10)
+    = 6,601 MB of commit, even though the newest (warm) night's rate is
+    lower (Ruling 5: the max of the history); with 5,000 available the run
+    defers (exit 3 deferred_memory) BEFORE load_cell_data, and the MEMORY
+    line names the series pass and commit. With 7,000 it runs. (The brief's
+    100 -> 200 is 5 -> 10 here: the fixture registers 10 strategies.)"""
     reg, data, logs, cutoff = _live_family_v61(tmp_path)
     args = ["--registry", str(reg.log_path), "--data-dir", str(data),
             "--logs-dir", str(logs), "--cutoff", cutoff]
     loads = _spy_load_cell_data(monkeypatch)
     n = sum(1 for _ in reg.entries())
-    _seed_status(tmp_path, series_mb=3000, series_n=5)
+    _seed_status(tmp_path, series_mb=500, series_n=5,
+                 series_rate_hist=[600.0, 100.0])
     _two_readings(monkeypatch, 100_000, 5000)
     assert gs.run(args) == 3
     assert not loads and sum(1 for _ in reg.entries()) == n
     st = _status(tmp_path)
     assert (st["exit_reason"], st["avail_commit_mb"]) == ("deferred_memory", 5000)
-    assert (st["series_mb"], st["series_n"]) == (3000, 5)         # carried
+    assert (st["series_mb"], st["series_n"]) == (500, 5)          # carried
+    assert st["series_rate_hist"] == [600.0, 100.0]
     assert st["cluster_need_mb"] is None and st["avail_phys_mb"] is None
     line = _memory_line(capsys)
     assert line.startswith("MEMORY: series pass") and "commit" in line
@@ -2356,11 +2382,14 @@ def test_series_mb_recorded_and_carried_forward(tmp_path, monkeypatch):
     readings = iter([(100, 150), (400, 900)])
     monkeypatch.setattr(gs, "process_memory_mb",
                         lambda: order.append("mem") or next(readings))
-    _seed_status(tmp_path, series_mb=777, series_n=3)
+    old_hist = [float(i) for i in range(1, 9)]          # already 8 entries
+    _seed_status(tmp_path, series_mb=777, series_n=3, series_rate_hist=old_hist)
     assert gs.run(args) == 0
     st = _status(tmp_path)
     assert st["exit_reason"] == "done" and order == ["mem", "load", "mem"]
     assert (st["series_mb"], st["series_n"]) == (900 - 100, 10)
+    # the 9th append drops the oldest; the new rate is 800 MB / 10 strategies
+    assert st["series_rate_hist"] == old_hist[1:] + [80.0]
     # a deadline stop inside the pass: the second chunk finds the clock spent;
     # the pair measured above stays
     clock = _frozen(monkeypatch)
@@ -2377,12 +2406,27 @@ def test_series_mb_recorded_and_carried_forward(tmp_path, monkeypatch):
     st = _status(tmp_path)
     assert st["exit_reason"] == "deadline" and st["stopped_at_deadline"] is True
     assert (st["series_mb"], st["series_n"]) == (800, 10)
+    assert st["series_rate_hist"] == old_hist[1:] + [80.0]         # nothing added
     # counters unknown: nothing recorded, the prior stays
     monkeypatch.setattr(gs, "registry_series", real_series)
     monkeypatch.setattr(gs, "time", real_time)
     monkeypatch.setattr(gs, "process_memory_mb", lambda: None)
-    _seed_status(tmp_path, series_mb=800, series_n=10)
+    _seed_status(tmp_path, series_mb=800, series_n=10, series_rate_hist=[80.0])
     assert gs.run(args) == 0
     st = _status(tmp_path)
     assert st["exit_reason"] == "done"
-    assert (st["series_mb"], st["series_n"]) == (800, 10)
+    assert (st["series_mb"], st["series_n"], st["series_rate_hist"]) == (800, 10, [80.0])
+
+
+def test_first_pass_starts_the_history(tmp_path, monkeypatch):
+    """No history (the first night after cutover): the fallback is charged,
+    and the completed pass starts the history with its own rate."""
+    from .test_gauntlet_worker import _run
+    reg, spec, data = _setup(tmp_path)
+    assert _run(reg, data, tmp_path) == 0
+    readings = iter([(100, 150), (130, 400)])
+    monkeypatch.setattr(gs, "process_memory_mb", lambda: next(readings))
+    _two_readings(monkeypatch, 100_000, 100_000)
+    assert _stats_run(reg, data, tmp_path, 5.75) == 0
+    st = _status(tmp_path)
+    assert (st["series_mb"], st["series_n"], st["series_rate_hist"]) == (300, 1, [300.0])

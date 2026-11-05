@@ -104,10 +104,10 @@ measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
 Memory (spec 2026-11-05 s3.2): two checkpoints, each exit 3 when short. (1)
 Before the bars load, free commit must cover the series pass's charge (the
-last measured series_mb scaled to tonight's n plus 10%, else a fallback
-estimate). (2) Clustering then starts only when BOTH available physical
-memory and free commit cover cluster_need_mb(n, n_max, L) = 9 n_max^2 +
-48 n_max L + 11.5 n L bytes (n_max the largest partition, read from the
+highest per-strategy rate of the last SERIES_RATE_HIST_MAX completed passes
+x tonight's n plus 10%, else a fallback estimate). (2) Clustering then
+starts only when BOTH available physical memory and free commit cover
+cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n_max the largest partition, read from the
 specs before clustering; L bounded by the shortest cached series) plus
 POST_CLUSTER_NEED_MB. An unknown reading never blocks.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
@@ -222,11 +222,18 @@ POST_CLUSTER_NEED_MB = 512
 # load_cell_data the run therefore defers (exit 3) when free COMMIT is under
 # the pass's charge; physical memory is not tested here (commit is the
 # binding limit for allocations; residency matters for the merge loop only).
-# The charge is the last measured `series_mb` (the PEAK commit growth of the
-# span: PeakPagefileUsage after the pass minus PrivateUsage just before
-# load_cell_data, in-process, MiB; carried forward like `cluster_s` with the
-# registered n it was measured at, `series_n`; a pass stopped at the deadline
-# records nothing) scaled linearly to tonight's n, plus 10%.
+# Each completed pass measures `series_mb`, the PEAK commit growth of the
+# span (PeakPagefileUsage after the pass minus PrivateUsage just before
+# load_cell_data, in-process, MiB), at the registered n `series_n`; both
+# stay in the status as the last night's raw figures. Its per-strategy rate
+# series_mb / series_n is appended to `series_rate_hist` (newest last, the
+# last SERIES_RATE_HIST_MAX kept; a pass stopped at the deadline appends
+# nothing). The charge is ceil(max(series_rate_hist) x tonight's n x 1.10)
+# (Controller Ruling 5): the MAX, so a warm night (mostly cache hits) never
+# lowers the charge below the cold night of a new vintage, whose simulation
+# transients sit above the retained arrays; 8 completed passes span at least
+# 8 nights, so the last vintage roll's cold pass stays in the window for a
+# week after it completed.
 # No measurement yet (the first night after cutover): the spec's "12 B per
 # cached point" cannot be summed before the pass (the cache entries' lengths
 # are what the pass reads), so the plan's call is 12 B x registered n x 7,000
@@ -234,6 +241,7 @@ POST_CLUSTER_NEED_MB = 512
 # plus the summed byte size of the cell CSVs load_cell_data will read (a
 # stand-in for bars_by_cell), x 1.25. About 3.5 GB at n 30,140.
 SERIES_CHARGE_MARGIN = 1.10
+SERIES_RATE_HIST_MAX = 8
 SERIES_FALLBACK_BYTES_PER_POINT = 12
 SERIES_FALLBACK_POINTS = 7000
 SERIES_FALLBACK_MARGIN = 1.25
@@ -281,10 +289,13 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  # the gate on physical AND commit (memory spec s3.2):
                  # avail_commit_mb is the LAST checkpoint's reading (the
                  # series pass's, then the clustering's), null when unknown or
-                 # not reached; series_mb / series_n (the series pass's peak
-                 # commit growth and the registered n it was measured at) are
-                 # carried forward like cluster_s / cluster_n
-                 "avail_commit_mb", "series_mb", "series_n")
+                 # not reached; series_mb / series_n (the last completed series
+                 # pass's peak commit growth and the registered n it was
+                 # measured at) are carried forward like cluster_s / cluster_n;
+                 # series_rate_hist (MiB per strategy of the last
+                 # SERIES_RATE_HIST_MAX completed passes, newest last) is what
+                 # the series checkpoint charges by its max
+                 "avail_commit_mb", "series_mb", "series_n", "series_rate_hist")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -701,15 +712,38 @@ def _prior_series(logs_dir: Path) -> tuple[int | None, int | None]:
     return pos(st.get("series_mb")), pos(st.get("series_n"))
 
 
-def series_charge_mb(prior_mb: int | None, prior_n: int | None, n: int,
-                     fallback_mb: int) -> int:
+def _valid_rates(hist) -> list[float]:
+    """The usable entries of a series rate history, in order: finite
+    positive numbers (bool excluded); anything else is dropped entry by
+    entry, and a non-list is no history at all."""
+    if not isinstance(hist, list):
+        return []
+    return [float(v) for v in hist
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v > 0]
+
+
+def _prior_series_rate_hist(logs_dir: Path) -> list[float]:
+    """`series_rate_hist` from the last status, sanitised (_valid_rates) and
+    cut to the newest SERIES_RATE_HIST_MAX; [] when there is none."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(st, dict):
+        return []
+    return _valid_rates(st.get("series_rate_hist"))[-SERIES_RATE_HIST_MAX:]
+
+
+def series_charge_mb(rate_hist: list[float] | None, n: int, fallback_mb: int) -> int:
     """MiB of commit the bars load and series pass are charged before they
-    start: the last measured peak growth scaled linearly to tonight's
-    registered n, plus SERIES_CHARGE_MARGIN; `fallback_mb` when either half of
-    the measurement is missing."""
-    if not prior_mb or not prior_n:
+    start: the HIGHEST per-strategy rate in the history x tonight's
+    registered n x SERIES_CHARGE_MARGIN (Controller Ruling 5: a warm night
+    never lowers it); `fallback_mb` when the history has no usable entry."""
+    rates = _valid_rates(rate_hist)
+    if not rates:
         return fallback_mb
-    return math.ceil(prior_mb * n / prior_n * SERIES_CHARGE_MARGIN)
+    return math.ceil(max(rates) * n * SERIES_CHARGE_MARGIN)
 
 
 def series_fallback_mb(n: int, csv_bytes: int) -> int:
@@ -831,6 +865,7 @@ def run(argv: list[str] | None = None) -> int:
     prior_cluster_n = _prior_cluster_n(a.logs_dir)
     prior_cluster_sum_n2 = _prior_cluster_sum_n2(a.logs_dir)
     prior_series_mb, prior_series_n = _prior_series(a.logs_dir)
+    prior_rate_hist = _prior_series_rate_hist(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -859,6 +894,7 @@ def run(argv: list[str] | None = None) -> int:
               # run completes a pass and measures its own
               "avail_commit_mb": None,
               "series_mb": prior_series_mb, "series_n": prior_series_n,
+              "series_rate_hist": prior_rate_hist,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -953,12 +989,11 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         n_reg = len(all_specs)
         fallback_mb = series_fallback_mb(n_reg, _cell_csv_bytes(a.data_dir,
                                                                  cells_needed))
-        charge_mb = series_charge_mb(status["series_mb"], status["series_n"],
-                                     n_reg, fallback_mb)
-        basis = (f"measured {status['series_mb']} MB at n {status['series_n']}, "
-                 f"scaled to n {n_reg} plus 10%"
-                 if status["series_mb"] and status["series_n"]
-                 else "no measurement yet: the fallback estimate")
+        hist = status["series_rate_hist"]
+        charge_mb = series_charge_mb(hist, n_reg, fallback_mb)
+        basis = (f"max rate {max(hist):.4f} MB per strategy over the last "
+                 f"{len(hist)} pass(es) x n {n_reg} plus 10%"
+                 if hist else "no measurement yet: the fallback estimate")
         commit_mb = available_commit_mb()
         status["avail_commit_mb"] = commit_mb
         if commit_mb is not None and commit_mb < charge_mb:
@@ -1006,6 +1041,10 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         if mem_before is not None and mem_after is not None:
             status["series_mb"] = max(0, mem_after[1] - mem_before[0])
             status["series_n"] = n_reg
+            if n_reg > 0 and status["series_mb"] > 0:
+                status["series_rate_hist"] = (
+                    status["series_rate_hist"]
+                    + [status["series_mb"] / n_reg])[-SERIES_RATE_HIST_MAX:]
         bars_by_cell.clear()
         print(f"sim cache: {hits} hit(s), {misses} miss(es) over {len(all_specs)} "
               f"registered strategies", flush=True)
