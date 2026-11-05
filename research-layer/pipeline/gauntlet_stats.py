@@ -964,6 +964,8 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             sid = s["strategy_id"]
             train[sid], fell_back = dated[sid].train_view(a.cutoff)
             status["train_view_fallbacks"] += int(fell_back)
+        # .tolist() is required for bit-identity: sum() compensates exact
+        # Python floats only (np.float64 items get plain addition).
         train_sharpe = {sid: _annualized_sharpe_from_returns(r.tolist())
                         for sid, r in train.items()}
         family_by_group, grids_by_group = sibling_families(

@@ -2071,3 +2071,34 @@ def test_train_view_fallbacks_counted(tmp_path, monkeypatch, capsys):
                     .read_text(encoding="utf-8"))
     assert swapped and st["train_view_fallbacks"] == 1
     assert clean and fell == clean
+
+
+# Fix round 1 (Ruling 4): the two-arm test above runs the same consumer code
+# in both arms. These digests pin the payloads to the BASE code (49e8e0fb2),
+# computed once there on the same fixtures (report-only v4 sweep; the mixed
+# twin keyed by role, its sids hash the clock). Only `data_vintage` is
+# excluded: it is date.today()'s vintage Sunday, so it moves weekly.
+BASE_PAYLOADS_SHA_V4 = "7eac768d727bde59d6eea523de84b7df62cdef46915103b505f549b3c692e439"
+BASE_PAYLOADS_SHA_MIXED = "c35ca38971aecba462759cf8d6cbf68c65377ce6d65bac35187847e42f908db4"
+
+
+def _payloads_sha(by_key: dict) -> str:
+    import hashlib
+    body = {k: {f: v for f, v in json.loads(p).items() if f != "data_vintage"}
+            for k, p in by_key.items()}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def test_payloads_match_the_base_codes_digests(tmp_path, monkeypatch, capsys):
+    reg, data, logs, cutoff = _v61_sweep(tmp_path)
+    with monkeypatch.context() as m:
+        v4 = _spy_payloads(m)
+        assert _report_only(reg, data, tmp_path / "logs_pin", cutoff) == 0
+    with monkeypatch.context() as m:
+        mixed = _spy_payloads(m)
+        _, sids = _mixed_twin(tmp_path, "pin", drop_eur_row=False)
+    capsys.readouterr()
+    assert len(v4) == 5 and len(mixed) == 3
+    assert _payloads_sha(v4) == BASE_PAYLOADS_SHA_V4
+    assert (_payloads_sha({role: mixed[sid] for role, sid in sids.items()})
+            == BASE_PAYLOADS_SHA_MIXED)
