@@ -138,6 +138,7 @@ from .stats import (moments, sharpe, psr, expected_max_sharpe, percentile,
                     harvey_liu_haircut)
 from .pbo import cscv_pbo, distinct_configs, permutation_null, percentile_of
 from .plateau import qualifies
+from .protocols import V61_FAMILY
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
                             _annualized_sharpe_from_returns, available_phys_mb)
 from .taskguard import task_started
@@ -377,7 +378,7 @@ class _View:
             if isinstance(m, dict) and m.get("protocol") in FLOOR_PROTOCOLS:
                 self._floor_candidate(m.get("trials_n"), e)
                 self._sr_floor_candidate(m.get("expected_max_sharpe"), e)
-            if isinstance(m, dict) and m.get("protocol") == PROTOCOL_V61:
+            if isinstance(m, dict) and m.get("protocol") in V61_FAMILY:
                 self.verdicts.append({"vh": entry_hash(e), "sid": p["strategy_id"],
                                       "verdict": p.get("verdict"),
                                       "ts_utc": e.get("ts_utc")})

@@ -39,6 +39,7 @@ from .taskguard import task_started
 from .registry import ChainMoved, ChainSnapshot, Registry, UnstableEntry
 from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
+from .protocols import V61_FAMILY
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
                             write_gauntlet_artifacts, _spec_bars,
                             GAUNTLET_PRIOR_S_PER_CANDIDATE, prior_s_for,
@@ -198,7 +199,7 @@ class _View:
     def orphans(self, snap: ChainSnapshot) -> list[tuple[str, dict]]:
         return [(sid, v) for sid, v in self.verdicts.items()
                 if snap.states.get(sid) == "gauntlet"
-                and (v.get("metrics") or {}).get("protocol") == PROTOCOL_V61]
+                and (v.get("metrics") or {}).get("protocol") in V61_FAMILY]
 
 
 def _read(registry: Registry) -> tuple[ChainSnapshot, _View]:

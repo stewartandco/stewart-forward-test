@@ -28,7 +28,7 @@ from .bars import daily_marks, daily_bars, bars_per_day, IntradayUnsupported
 if TYPE_CHECKING:                       # annotation only; the worker opens it
     from .series_cache import SeriesCache
 
-PROTOCOL_V61 = "gauntlet-protocol-v6.1"
+from .protocols import PROTOCOL_V61   # noqa: E402,F401  (re-exported: gauntlet, worker, stats import it here)
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
