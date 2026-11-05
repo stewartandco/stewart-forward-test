@@ -2264,13 +2264,18 @@ def test_prior_series_rate_hist_sanitises_entry_by_entry(tmp_path):
     assert gs.SERIES_RATE_HIST_MAX == 8
 
 
-def test_series_fallback_is_points_plus_csv_bytes_plus_25pct():
+def test_series_fallback_is_points_plus_csv_bytes_plus_75pct():
     """No measurement yet: 12 B x registered n x 7,000 points, plus the cell
-    CSVs' bytes, x 1.25, in MiB (the constraints' fallback)."""
+    CSVs' bytes, x 1.75, in MiB (the constraints' fallback, its 1.25 margin
+    raised by the Task 4 rehearsal, Ruling 6: the fallback must cover the
+    measured series_mb x 1.25 at n 30,140)."""
     assert (gs.SERIES_FALLBACK_BYTES_PER_POINT, gs.SERIES_FALLBACK_POINTS,
-            gs.SERIES_FALLBACK_MARGIN) == (12, 7000, 1.25)
+            gs.SERIES_FALLBACK_MARGIN) == (12, 7000, 1.75)
     assert gs.series_fallback_mb(30140, 2 * 2**30) == math.ceil(
-        (12 * 30140 * 7000 + 2 * 2**30) * 1.25 / 2**20)
+        (12 * 30140 * 7000 + 2 * 2**30) * 1.75 / 2**20)
+    # the rehearsal's own figures: n 30,140, 77,987,724 B of cell CSVs,
+    # measured series_mb 3,324 MB
+    assert gs.series_fallback_mb(30140, 77_987_724) == 4356 >= 3324 * 1.25
     assert gs.series_fallback_mb(0, 0) == 0
 
 
@@ -2327,7 +2332,7 @@ def test_series_check_defers_before_the_pass(tmp_path, monkeypatch, capsys):
 def test_series_check_uses_the_fallback_without_a_prior(tmp_path, monkeypatch, capsys):
     """Review Focus 4: the first night after cutover reads a status with no
     series_mb / series_n. The early checkpoint charges the fallback (12 B x
-    n x 7,000 + the cell CSVs' bytes, x 1.25) and never blocks on the
+    n x 7,000 + the cell CSVs' bytes, x 1.75) and never blocks on the
     missing value: at exactly the fallback it runs; one MB under it defers."""
     from .test_gauntlet_worker import _run
     reg, spec, data = _setup(tmp_path)
@@ -2335,7 +2340,7 @@ def test_series_check_uses_the_fallback_without_a_prior(tmp_path, monkeypatch, c
     _seed_status(tmp_path, cluster_s=1.0, cluster_n=1)        # an old status
     csv_bytes = sum(p.stat().st_size for p in data.glob("*.csv"))
     fallback = gs.series_fallback_mb(1, csv_bytes)
-    assert fallback == math.ceil((12 * 7000 + csv_bytes) * 1.25 / 2**20)
+    assert fallback == math.ceil((12 * 7000 + csv_bytes) * 1.75 / 2**20)
     loads = _spy_load_cell_data(monkeypatch)
     _two_readings(monkeypatch, 100_000, fallback - 1)
     assert _stats_run(reg, data, tmp_path, 5.75) == 3 and not loads

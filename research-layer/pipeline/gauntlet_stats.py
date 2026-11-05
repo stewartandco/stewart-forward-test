@@ -200,7 +200,13 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # loop), plus about 10%. Before the views it was the job's peak: 11,745 MB
 # private at n 30,140 (2026-11-05), the train windows as Python float lists
 # for every strategy, growing linearly with n and covered by no gate. 512 is
-# PROVISIONAL: the plan's Task 4 rehearsal re-measures it.
+# kept by measurement (plan Task 4 rehearsal, 2026-11-05, n 30,140 on the
+# 11-05 prefix): after the clustering the private commit rose at most 2.6
+# MB (10 ms sampler) and never set a new process peak, so the growth is
+# bounded by 219 MB (peak minus the after-clustering private); both under
+# 512 with the 10% on top. Every PBO null was served from the cache in that
+# run, so a computed family's transients (its float lists, spec s3.1 about
+# 13 MB at the largest family, and the CSCV null) are inside the margin only.
 # 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
 # copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
 # added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
@@ -239,12 +245,16 @@ POST_CLUSTER_NEED_MB = 512
 # are what the pass reads), so the plan's call is 12 B x registered n x 7,000
 # points (the measured mean is about 7,600 points a strategy, rounded down),
 # plus the summed byte size of the cell CSVs load_cell_data will read (a
-# stand-in for bars_by_cell), x 1.25. About 3.5 GB at n 30,140.
+# stand-in for bars_by_cell), x SERIES_FALLBACK_MARGIN. The plan's 1.25 was
+# raised to 1.75 by the Task 4 rehearsal (Controller Ruling 6, 2026-11-05):
+# at n 30,140 with the real 74.4 MiB of cell CSVs, 1.25 gave 3,112 MB, under
+# the measured series_mb 3,324 x 1.25 = 4,155; 1.75 gives 4,356 (1.70, the
+# least passing step of 0.05, would give 4,231). About 4.3 GB at n 30,140.
 SERIES_CHARGE_MARGIN = 1.10
 SERIES_RATE_HIST_MAX = 8
 SERIES_FALLBACK_BYTES_PER_POINT = 12
 SERIES_FALLBACK_POINTS = 7000
-SERIES_FALLBACK_MARGIN = 1.25
+SERIES_FALLBACK_MARGIN = 1.75
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
