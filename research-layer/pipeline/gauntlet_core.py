@@ -29,6 +29,8 @@ if TYPE_CHECKING:                       # annotation only; the worker opens it
     from .series_cache import SeriesCache
 
 from .protocols import PROTOCOL_V61   # noqa: E402,F401  (re-exported: gauntlet, worker, stats import it here)
+from .protocols import PROTOCOL_V62   # noqa: E402
+from .beats_hold import gauntlet_beats_hold   # noqa: E402  (imports this module only inside its functions)
 DECAY_MIN_PCT = -25.0
 MC_PATHS = 2000
 MC_P05_MIN = 1.0
@@ -58,6 +60,13 @@ PURGE_BARS = 200     # >= the grammar's longest lookback (ma_cross.slow = 200)
 # founding principle and needs its own pre-declared chained note saying so.
 FAIL_ORDER = ("sharpe_floor", "oos_negative", "edge_decay", "mc_p05",
               "p_ruin", "cost_stress")
+# protocol-v6.2 (beats-hold, docs/2026-11-05-beats-hold-design.md): the six
+# gates above, unchanged and in the same order, then beats_hold LAST. It is
+# applied by evaluate_standalone(battery="v6.2") after evaluate_gates, never
+# inside it: FAIL_ORDER and evaluate_gates are shared with the hand-run
+# pipeline/gauntlet.py and must stay the v6.1 battery.
+FAIL_ORDER_V62 = FAIL_ORDER + ("beats_hold",)
+BATTERIES = ("v6.1", "v6.2")
 
 
 def _date_le(a: str, b: str) -> bool:
@@ -369,7 +378,8 @@ def evaluate_gates(is_trades, oos_trades, stress_oos_trades, is_vol: float,
 
 def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
                         perturb: bool, *, record_benchmark: bool = True,
-                        series_cache: SeriesCache | None = None) -> dict:
+                        series_cache: SeriesCache | None = None,
+                        battery: str = "v6.1") -> dict:
     """One candidate, end to end, from its own bars only: the verdict and
     every per-strategy metric _evaluate_candidate records, minus the group
     ones (plateau_ok, haircut, trials, sibling_group_n, sim_cache,
@@ -391,7 +401,21 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
     cost or a threshold recomputes no indicator series, and the gauntlet
     worker's disk cache carries them across candidates on one cell. None =
     each run_spec makes its own private memory-only cache, as before.
-    Bit-identical either way."""
+    Bit-identical either way.
+
+    battery (beats-hold): "v6.1", the default, is the six gates and a
+    result byte-identical to before the keyword existed. "v6.2" adds
+    beats_hold LAST (FAIL_ORDER_V62), computed after the six gates from the
+    same dated returns, so no six-gate value is recomputed: metrics.protocol
+    becomes PROTOCOL_V62, metrics.beats_hold is recorded whenever the class
+    declares benchmark "self" (absent otherwise: not applicable), and the
+    verdict passes only if the six gates AND beats_hold pass. A six-gate
+    failure keeps its own reason; "beats_hold" is the reason only when it
+    alone failed. The gauntlet worker passes "v6.2" once a
+    `gauntlet-protocol-v6.2: ` note is on the chain."""
+    if battery not in BATTERIES:
+        raise ValueError(f"unknown gauntlet battery {battery!r}; expected one of "
+                         f"{BATTERIES}")
     sid = spec["strategy_id"]
     res = run_spec(spec, spec_bars, series_cache=series_cache)
     stress_res = run_spec(stressed(spec), spec_bars, series_cache=series_cache)
@@ -417,6 +441,13 @@ def evaluate_standalone(spec: dict, spec_bars: dict, cutoff: str,
           if record_benchmark else None)
     if br is not None:
         metrics["benchmark_relative"] = br
+    if battery == "v6.2":
+        bh_passed, bh = gauntlet_beats_hold(spec, spec_bars, dated, cutoff)
+        if bh is not None:
+            metrics["beats_hold"] = bh
+        metrics["protocol"] = PROTOCOL_V62
+        if passed and not bh_passed:
+            passed, reason = False, "beats_hold"
     train_dates = [d for d, _ in daily_marks(res["equity"]) if _date_le(d, cutoff)]
     metrics["walkforward"] = dict(
         walkforward_report([t for t in res["trades"]

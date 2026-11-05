@@ -39,7 +39,7 @@ from .taskguard import task_started
 from .registry import ChainMoved, ChainSnapshot, Registry, UnstableEntry
 from .screen import (load_cell_data, assert_cells_comparable, bundle_hash,
                      comparable_cells)
-from .protocols import V61_FAMILY
+from .protocols import NOTE_V62, PROTOCOL_V62, V61_FAMILY
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, evaluate_standalone,
                             write_gauntlet_artifacts, _spec_bars,
                             GAUNTLET_PRIOR_S_PER_CANDIDATE, prior_s_for,
@@ -173,6 +173,9 @@ class _View:
 
     def __init__(self) -> None:
         self.has_note = False
+        # beats-hold: armed by the first note whose text starts with
+        # NOTE_V62 (prefix AND colon-space); a mere mention arms nothing
+        self.has_note_v62 = False
         self.specs: dict[str, dict] = {}       # sid -> spec, registry order
         self.verdicts: dict[str, dict] = {}    # sid -> last gauntlet verdict
         self.entered: dict[str, str] = {}      # sid -> ts of its move to 'gauntlet'
@@ -188,8 +191,12 @@ class _View:
                 self.specs.pop(p["strategy_id"], None)
         elif et == "verdict" and p.get("stage") == "gauntlet":
             self.verdicts[p["strategy_id"]] = p
-        elif et == "note" and str(p.get("text", "")).startswith(PROTOCOL_V61 + ":"):
-            self.has_note = True
+        elif et == "note":
+            text = str(p.get("text", ""))
+            if text.startswith(PROTOCOL_V61 + ":"):
+                self.has_note = True
+            if text.startswith(NOTE_V62):
+                self.has_note_v62 = True
 
     def queue(self, snap: ChainSnapshot) -> list[dict]:
         return [spec for sid, spec in self.specs.items()
@@ -271,7 +278,8 @@ def _evaluate_payload(payload: dict) -> dict:
     return evaluate_standalone(payload["spec"], payload["spec_bars"],
                                payload["cutoff"], payload["perturb"],
                                series_cache=_series_cache(
-                                   payload.get("series_cache_dir")))
+                                   payload.get("series_cache_dir")),
+                               battery=payload.get("battery", "v6.1"))
 
 
 def _record_bundle(logs_dir: Path, repo_root: Path, bundle: Path) -> None:
@@ -380,6 +388,10 @@ def run(argv: list[str] | None = None) -> int:
         if not view.has_note:
             print(f"REFUSED: no '{PROTOCOL_V61}:' note on the chain.", flush=True)
             return finish(1, "refused_no_protocol_note")
+        # beats-hold: the battery is read from the SAME read; a v6.2 note
+        # chained mid-run takes effect at the next run
+        v62 = view.has_note_v62
+        battery, protocol = ("v6.2", PROTOCOL_V62) if v62 else ("v6.1", PROTOCOL_V61)
         try:
             status["repaired"], snap = _repair(registry, a.logs_dir, snap, view)
         except ChainLockHeld:
@@ -401,6 +413,9 @@ def run(argv: list[str] | None = None) -> int:
         chunk_size = 1 if max_workers <= 1 else max_workers * GAUNTLET_CHUNK_PER_WORKER
         print(f"gauntlet_worker: {len(todo)} queued, {max_workers} worker(s), "
               f"deadline in {a.deadline_minutes:g} min", flush=True)
+        if v62:   # printed only when armed: a v6.1 run's log is unchanged
+            print(f"gauntlet_worker: '{NOTE_V62.strip()}' note chained: judging "
+                  f"with the v6.2 battery (beats_hold last)", flush=True)
 
         # gitignored beside simcache/ (the registry's directory is the layer
         # in production; a test's tmp registry keeps its cache in tmp)
@@ -428,7 +443,8 @@ def run(argv: list[str] | None = None) -> int:
                 return None
             return {"payload": {"spec": spec, "spec_bars": _spec_bars(bars, spec),
                                 "cutoff": a.cutoff, "perturb": a.perturb,
-                                "series_cache_dir": series_cache_dir},
+                                "series_cache_dir": series_cache_dir,
+                                "battery": battery},
                     "hashes": hashes, "data_end": data_end}
 
         def write(item: dict) -> str:
@@ -462,7 +478,7 @@ def run(argv: list[str] | None = None) -> int:
                     bundle = write_gauntlet_artifacts(
                         a.artifacts_dir, spec, r["oos_trades"], r["mc_summary"],
                         r["metrics"], a.cutoff, item["hashes"], item["data_end"],
-                        {}, protocol=PROTOCOL_V61)
+                        {}, protocol=protocol)
                     to, reason = (("quarantine", "gauntlet pass") if r["passed"]
                                   else ("graveyard", r["reason"]))
                     try:

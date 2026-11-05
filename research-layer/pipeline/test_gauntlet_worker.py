@@ -843,10 +843,10 @@ def test_worker_payload_carries_the_cache_dir_and_perturbations_share_it(
     payloads, handed = [], []
     real_eval = gw.evaluate_standalone
 
-    def spy(spec, spec_bars, cutoff, perturb, *, series_cache=None):
+    def spy(spec, spec_bars, cutoff, perturb, *, series_cache=None, **kw):
         handed.append(series_cache)
         return real_eval(spec, spec_bars, cutoff, perturb,
-                         series_cache=series_cache)
+                         series_cache=series_cache, **kw)
 
     real_payload = gw._evaluate_payload
 
@@ -1190,3 +1190,92 @@ def test_an_all_1d_queue_is_unchanged_except_its_unmeasured_first_chunk(
     assert rounds == [("1d", 6), ("1d", 24), ("1d", 1)]
     assert submitted == sids
     assert _status(tmp_path)["evaluated"] == 31
+
+
+# ---- beats-hold T3: the worker switches to v6.2 once its note is chained ----
+
+V62 = "gauntlet-protocol-v6.2: test"
+
+
+def _bundle_protocol(tmp_path, sid):
+    cfg = tmp_path / "art" / sid / "gauntlet" / "config.json"
+    return json.loads(cfg.read_text(encoding="utf-8"))["protocol"]
+
+
+def test_no_v62_note_judges_v61(tmp_path):
+    reg, spec, data = _setup(tmp_path, note=True)
+    assert _run(reg, data, tmp_path) == 0
+    (v,) = _verdicts(reg)
+    assert v["payload"]["metrics"]["protocol"] == "gauntlet-protocol-v6.1"
+    assert "beats_hold" not in v["payload"]["metrics"]
+    assert _bundle_protocol(tmp_path, spec["strategy_id"]) == "gauntlet-protocol-v6.1"
+
+
+def test_v62_note_switches_next_run(tmp_path):
+    reg, spec, data = _setup(tmp_path, note=True)
+    reg.append("note", {"text": V62})
+    assert _run(reg, data, tmp_path) == 0
+    (v,) = _verdicts(reg)
+    m = v["payload"]["metrics"]
+    assert m["protocol"] == "gauntlet-protocol-v6.2"
+    assert m["beats_hold"]["window"] == "oos"
+    assert _bundle_protocol(tmp_path, spec["strategy_id"]) == "gauntlet-protocol-v6.2"
+    assert reg.strategy_states()[spec["strategy_id"]] in ("quarantine", "graveyard")
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_second_v62_note_changes_nothing(tmp_path):
+    regs = []
+    for name, copies in (("one", 1), ("two", 2)):
+        d = tmp_path / name
+        d.mkdir()
+        reg, spec, data = _setup(d, note=True)
+        for _ in range(copies):
+            reg.append("note", {"text": V62})
+        assert _run(reg, data, d) == 0
+        regs.append(reg)
+    m1, m2 = (_verdicts(r)[0]["payload"]["metrics"] for r in regs)
+    assert m1["protocol"] == m2["protocol"] == "gauntlet-protocol-v6.2"
+    assert m1["beats_hold"] == m2["beats_hold"]
+
+
+@pytest.mark.parametrize("text", ["see gauntlet-protocol-v6.2 later",
+                                  "gauntlet-protocol-v6.2 later",
+                                  "gauntlet-protocol-v6.2:no space"])
+def test_v62_mention_does_not_arm(tmp_path, text):
+    reg, spec, data = _setup(tmp_path, note=True)
+    reg.append("note", {"text": text})
+    assert _run(reg, data, tmp_path) == 0
+    (v,) = _verdicts(reg)
+    assert v["payload"]["metrics"]["protocol"] == "gauntlet-protocol-v6.1"
+    assert "beats_hold" not in v["payload"]["metrics"]
+    assert _bundle_protocol(tmp_path, spec["strategy_id"]) == "gauntlet-protocol-v6.1"
+
+
+def test_a_v62_run_buries_a_strategy_that_only_loses_to_its_hold(tmp_path):
+    """End to end on the zigzag calendar: six gates pass, the hold's Sharpe
+    is higher, so the verdict fails with reason beats_hold and the strategy
+    goes to the graveyard with it. The chain stays VALID."""
+    from .test_gauntlet import V4_CUTOFF
+    from .test_gauntlet_core import _zigzag_bars
+    reg, spec, _ = _setup(tmp_path, note=True)
+    (tmp_path / "zz").mkdir()
+    data = write_data_dir(tmp_path / "zz", {"BTCUSD": _zigzag_bars()})
+    reg.append("note", {"text": V62})
+    assert _run(reg, data, tmp_path, "--cutoff", V4_CUTOFF) == 0
+    (v,) = _verdicts(reg)
+    p = v["payload"]
+    assert (p["verdict"], p["metrics"]["fail_reason"]) == ("fail", "beats_hold")
+    assert p["metrics"]["beats_hold"]["strategy_sharpe"] <         p["metrics"]["beats_hold"]["hold_sharpe"]
+    assert reg.strategy_states()[spec["strategy_id"]] == "graveyard"
+    assert run_verifier(reg.log_path).returncode == 0
+
+
+def test_a_v62_note_alone_still_refuses(tmp_path):
+    """The v6.2 note arms the seventh gate; it does not stand in for the
+    v6.1 note the worker refuses without."""
+    reg, spec, data = _setup(tmp_path, note=False)
+    reg.append("note", {"text": V62})
+    assert _run(reg, data, tmp_path) == 1
+    assert _status(tmp_path)["exit_reason"] == "refused_no_protocol_note"
+    assert not _verdicts(reg)

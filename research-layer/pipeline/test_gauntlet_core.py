@@ -160,3 +160,112 @@ def test_record_benchmark_false_skips_only_the_control(tmp_path):
     assert "benchmark_relative" in with_b["metrics"]
     with_b["metrics"].pop("benchmark_relative")
     assert with_b == without
+
+
+# ---- beats-hold T3: the opt-in v6.2 battery --------------------------------
+
+def _long_fixture(tmp_path, bars, slippage=None):
+    """The screening spec (single-asset crypto, benchmark "self") on a
+    1000-day calendar whose OOS window (after V4_CUTOFF) is 270 days, enough
+    for both Sharpes in the beats_hold comparison."""
+    import json
+    _, spec = screening_registry(tmp_path)
+    if slippage is not None:
+        spec = json.loads(json.dumps(spec))
+        spec["cost_model"]["slippage_ticks"] = slippage
+    return spec, gauntlet_core._spec_bars({("BTCUSD", "1d"): bars}, spec)
+
+
+def _zigzag_bars(n=1000):
+    """A noisy uptrend: closes alternate +2% / -0.5%. Every breakout trade of
+    the screening spec wins (six gates pass), but holding the asset has the
+    higher Sharpe (beats_hold fails)."""
+    from datetime import datetime, timedelta
+    bars, px = [], 100.0
+    for i in range(n):
+        o = px
+        px *= 1.02 if i % 2 == 0 else 0.995
+        bars.append({"date": (datetime(2022, 1, 1) + timedelta(days=i)).strftime("%Y-%m-%d"),
+                     "open": o, "high": max(o, px), "low": min(o, px),
+                     "close": px, "volume": 1.0})
+    return bars
+
+
+def test_default_battery_is_byte_identical(tmp_path):
+    import json
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, v4_bars())
+    default = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.1")
+    assert json.dumps(default, sort_keys=True) == json.dumps(v61, sort_keys=True)
+    assert "beats_hold" not in default["metrics"]
+    assert default["metrics"]["protocol"] == "gauntlet-protocol-v6.1"
+
+
+def test_v62_six_gate_fields_equal_v61(tmp_path):
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, v4_bars())
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    for k, v in v61["metrics"].items():
+        if k != "protocol":
+            assert v62["metrics"][k] == v, k
+    assert set(v62["metrics"]) - set(v61["metrics"]) == {"beats_hold"}
+    assert v62["metrics"]["protocol"] == "gauntlet-protocol-v6.2"
+    # this fixture beats its hold, so the verdict is the six gates' own
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] > bh["hold_sharpe"] and bh["window"] == "oos"
+    assert (v62["passed"], v62["reason"]) == (v61["passed"], v61["reason"]) == (True, None)
+    assert v62["mc_summary"] == v61["mc_summary"]
+    assert v62["oos_trades"] == v61["oos_trades"]
+    assert gauntlet_core.FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
+                                        "mc_p05", "p_ruin", "cost_stress")
+    assert gauntlet_core.FAIL_ORDER_V62 == gauntlet_core.FAIL_ORDER + ("beats_hold",)
+
+
+def test_v62_fails_beats_hold_only_when_six_gates_pass(tmp_path):
+    from .test_gauntlet import V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, _zigzag_bars())
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert (v61["passed"], v61["reason"]) == (True, None)
+    assert (v62["passed"], v62["reason"]) == (False, "beats_hold")
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] < bh["hold_sharpe"]
+
+    # doubled slippage loses money here: cost_stress fails first and keeps
+    # the reason, though the hold still wins (and is still recorded)
+    spec, sb = _long_fixture(tmp_path / "cs", _zigzag_bars(), slippage=0.015)
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert (v61["passed"], v61["reason"]) == (False, "cost_stress")
+    assert (v62["passed"], v62["reason"]) == (False, "cost_stress")
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] < bh["hold_sharpe"]
+
+
+def test_v62_on_a_class_without_a_self_benchmark_records_nothing(tmp_path, monkeypatch):
+    """Not applicable (benchmark is not "self"): no beats_hold key, the
+    six gates decide, and the protocol is still v6.2."""
+    from . import cells
+    from .test_gauntlet import V4_CUTOFF
+    monkeypatch.setitem(cells.CLASSES, "crypto",
+                        dict(cells.CLASSES["crypto"], benchmark=None))
+    spec, sb = _long_fixture(tmp_path, _zigzag_bars())
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert "beats_hold" not in v62["metrics"]
+    assert (v62["passed"], v62["reason"]) == (True, None)
+    assert v62["metrics"]["protocol"] == "gauntlet-protocol-v6.2"
+
+
+def test_an_unknown_battery_is_refused(tmp_path):
+    import pytest
+    spec, sb = _fixture(tmp_path)
+    with pytest.raises(ValueError, match="battery"):
+        gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False,
+                                          battery="v6.3")
