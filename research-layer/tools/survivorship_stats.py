@@ -24,7 +24,12 @@ B_STRATA = ("S", "F", "N", "D")
 
 def matrix(rows: list[dict], tkeys: list[str], pairs: list[str]) -> np.ndarray:
     """Templates x cells matrix of m. Raises ValueError on a missing cell."""
-    cell = {(r["tkey"], r["pair"]): float(r["m"]) for r in rows}
+    cell = {}
+    for r in rows:
+        k = (r["tkey"], r["pair"])
+        if k in cell:
+            raise ValueError(f"duplicate cell: template {k[0]!r} pair {k[1]!r}")
+        cell[k] = float(r["m"])
     out = np.empty((len(tkeys), len(pairs)), dtype=float)
     for i, t in enumerate(tkeys):
         for j, p in enumerate(pairs):
@@ -162,7 +167,8 @@ def report(result: dict) -> str:
     r = result
     sec = r["secondaries"]
     out = [f"# Survivorship study report: {r['tf']} arm", "",
-           f"**Verdict: {r['verdict']}**", "",
+           f"**Verdict: {r['verdict']}**" + (
+               "" if r["tf"] == "1d" else " (secondary, not decision-bearing)"), "",
            f"- G = {_f(r['G'])}",
            f"- 95% interval [L, U] = [{_f(r['L'])}, {_f(r['U'])}]",
            f"- tau = {r['tau']:.2f}"]

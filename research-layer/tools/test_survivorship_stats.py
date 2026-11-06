@@ -25,6 +25,7 @@ def _ab(idx):
     ((0.05, -0.02, 0.0999), "NOT MATERIAL"),
     ((-0.05, -0.1, -0.001), "REVERSE"),
     ((0.05, -0.02, 0.10), "INCONCLUSIVE"),
+    ((0.12, -0.01, 0.09), "NOT MATERIAL"),
 ])
 def test_verdict_boundaries(args, want):
     assert ss.verdict(*args) == want
@@ -149,3 +150,44 @@ def test_report_states_required_lines():
     for needle in ("INCONCLUSIVE", "0.0500", "-0.0200", "0.1200", "0.10",
                    "66", "secondary, not decision-bearing", "1d"):
         assert needle in text
+
+
+def test_bootstrap_matches_reference_procedure():
+    idx = _idx(S=6, R=2, F=2, N=2, D=2)
+    m = np.random.default_rng(42).normal(size=(5, 14))
+    got = ss.bootstrap(m, idx, resamples=5, seed=ss.SEED)
+    rng = np.random.default_rng(ss.SEED)
+    want = []
+    for _ in range(5):
+        t = rng.integers(0, 5, 5)
+        d = {}
+        for s in ss.STRATA:
+            n = len(idx[s])
+            d[s] = idx[s][rng.integers(0, n, n)]
+        a = list(d["S"]) + list(d["R"])
+        b = list(d["S"]) + list(d["F"]) + list(d["N"]) + list(d["D"])
+        want.append(np.mean([m[ti, a].mean() - m[ti, b].mean() for ti in t]))
+    assert np.allclose(got, np.array(want), rtol=0, atol=1e-12)
+
+
+def _res(tf):
+    sec = ss.secondaries(*_merged())
+    return {"tf": tf, "verdict": "NOT MATERIAL", "G": 0.01, "L": -0.02,
+            "U": 0.05, "tau": 0.10,
+            "stratum_sizes": {"S": 1, "R": 1, "F": 1, "N": 0, "D": 0},
+            "stratum_means": {"S": 0.5}, "secondaries": sec}
+
+
+def test_report_labels_non_1d_verdict_line():
+    label = "secondary, not decision-bearing"
+    line4 = next(l for l in ss.report(_res("4h")).splitlines() if "Verdict" in l)
+    line1 = next(l for l in ss.report(_res("1d")).splitlines() if "Verdict" in l)
+    assert label in line4
+    assert label not in line1
+
+
+def test_matrix_raises_on_duplicate_cell():
+    rows = [{"tkey": "t1", "pair": "AAA", "m": 1.0},
+            {"tkey": "t1", "pair": "AAA", "m": 2.0}]
+    with pytest.raises(ValueError, match="t1.*AAA|AAA.*t1"):
+        ss.matrix(rows, ["t1"], ["AAA"])
