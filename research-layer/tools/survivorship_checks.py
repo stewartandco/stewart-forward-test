@@ -34,6 +34,8 @@ def parity(archive: list[dict], pipeline: list[dict]) -> list[str]:
     out: list[str] = []
     a = _index(archive, "archive", out)
     p = _index(pipeline, "pipeline", out)
+    if not (set(a) & set(p)):
+        out.append("no shared dates between archive and pipeline")
     for d in sorted(set(a) & set(p)):
         for f in _FIELDS:
             if a[d][f] != p[d][f]:
@@ -56,13 +58,17 @@ def splice(pred: list[dict], succ: list[dict], swap_date: str, ratio: float) -> 
             for f in ("open", "high", "low", "close"):
                 nb[f] = b[f] * ratio
             tail.append(nb)
-    if head and tail:
-        pc, sc = head[-1]["close"], tail[0]["close"]
-        if pc <= 0 or sc <= 0 or abs(math.log(sc / pc)) >= SPLICE_TOL:
-            raise SpliceBreak(
-                f"splice break at {swap_date}: predecessor last close {pc} "
-                f"({head[-1]['date']}) vs successor first close x ratio {sc} "
-                f"({tail[0]['date']}), ratio {ratio}")
+    if not head:
+        raise SpliceBreak(f"no predecessor bars dated before swap_date {swap_date}")
+    if not tail:
+        raise SpliceBreak(f"no successor bars dated on or after swap_date {swap_date}")
+    pc, sc = head[-1]["close"], tail[0]["close"]
+    if (not (math.isfinite(pc) and math.isfinite(sc)) or pc <= 0 or sc <= 0
+            or abs(math.log(sc / pc)) >= SPLICE_TOL):
+        raise SpliceBreak(
+            f"splice break at {swap_date}: predecessor last close {pc} "
+            f"({head[-1]['date']}) vs successor first close x ratio {sc} "
+            f"({tail[0]['date']}), ratio {ratio}")
     return head + tail
 
 
@@ -71,12 +77,15 @@ def hidden_splices(bars: list[dict]) -> list[str]:
     for prev, cur in zip(bars, bars[1:]):
         if _day(cur) < _day(prev):
             raise ValueError(f"bars not sorted: {_day(prev)} then {_day(cur)}")
+    for b in bars:
+        if not math.isfinite(b["close"]) or b["close"] <= 0:
+            flags.append(f"invalid close {b['close']} on {_day(b)}")
     for prev, cur in zip(bars, bars[1:]):
         gap = (_date.fromisoformat(_day(cur)) - _date.fromisoformat(_day(prev))).days
         if gap > GAP_DAYS:
             flags.append(f"gap of {gap} days before {_day(cur)} (after {_day(prev)})")
         pc, cc = prev["close"], cur["close"]
-        if pc > 0 and cc > 0:
+        if math.isfinite(pc) and math.isfinite(cc) and pc > 0 and cc > 0:
             r = cc / pc
             if r > JUMP_RATIO or r < 1.0 / JUMP_RATIO:
                 flags.append(f"close jump x{r:.4g} on {_day(cur)} ({pc} -> {cc})")

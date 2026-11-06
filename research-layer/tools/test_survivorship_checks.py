@@ -81,3 +81,35 @@ def test_apply_cut():
     bars = [bar("2021-01-01"), bar("2021-01-02"), bar("2021-01-03")]
     assert [b["date"][:10] for b in apply_cut(bars, "2021-01-02")] == [
         "2021-01-02", "2021-01-03"]
+
+
+def test_splice_empty_sides_raise():
+    pred = [bar("2024-09-01", 1200.0)]
+    succ = [bar("2024-09-03", 0.05)]
+    with pytest.raises(SpliceBreak, match="predecessor"):
+        splice(pred, succ, "2024-08-01", 24000.0)
+    with pytest.raises(SpliceBreak, match="successor"):
+        splice(pred, succ, "2024-10-01", 24000.0)
+
+
+def test_splice_nonfinite_or_nonpositive_close_raises():
+    pred = [bar("2024-09-01", 1200.0)]
+    for c in (float("nan"), float("inf"), 0.0, -1.0):
+        with pytest.raises(SpliceBreak):
+            splice(pred, [bar("2024-09-03", c)], "2024-09-03", 24000.0)
+    with pytest.raises(SpliceBreak):
+        splice([bar("2024-09-01", float("nan"))], [bar("2024-09-03", 0.05)],
+               "2024-09-03", 24000.0)
+
+
+def test_hidden_splices_flags_invalid_close():
+    out = hidden_splices([bar("2022-05-10", 100.0), bar("2022-05-11", 0.0)])
+    assert any("2022-05-11" in s for s in out)
+    out = hidden_splices([bar("2022-05-10", 100.0), bar("2022-05-11", float("nan"))])
+    assert any("2022-05-11" in s for s in out)
+
+
+def test_parity_no_shared_dates_fails():
+    assert parity([bar("2021-01-01")], [bar("2021-02-01")])
+    assert parity([], [bar("2021-02-01")])
+    assert parity([], [])
