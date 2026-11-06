@@ -106,10 +106,15 @@ from tools.gauntlet_parity import (classify_drift, load_repins, ulp_distance,
                                    ENGINE_CHANGE_UTC, ULP_MAX)
 
 REPINS = [{"id": "EFA", "repinned_utc": "2026-10-04T11:53:18Z",
-           "changed": [{"date": "2014-07-03"}]},
+           "changed": [{"date": "2014-07-03", "ohlc": {"close": 69.22}}]},
           {"id": "EEM", "repinned_utc": "2026-10-25T00:52:20Z", "changed": []}]
 CELLS = [("EFA", "1d", "2026-09-29T00:00:00Z")]
 ULPS_3 = (0.1, 0.1 + 3 * 1.3877787807814457e-17)     # 3 ulps apart at 0.1
+
+
+def snapshot_has_repin(asset, tf, d):
+    """The --data-dir copy holds the re-pinned close (it has taken the re-pin)."""
+    return {("EFA", "1d", "2014-07-03"): 69.22}.get((asset, tf, d))
 
 
 def test_ulp_distance_counts_representable_steps():
@@ -132,20 +137,36 @@ def test_a_verdict_change_is_never_excused():
 def test_drift_on_a_cell_revised_after_the_verdict_is_excused_and_named():
     ok, cause = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
                                "2026-09-29T12:00:00Z", CELLS, REPINS,
-                               verdict_match=True)
+                               verdict_match=True, bar_close=snapshot_has_repin)
     assert ok and "restated" in cause and "EFA 2014-07-03" in cause
+
+
+def test_a_revision_the_snapshot_has_not_taken_excuses_nothing():
+    # the manifest says re-pinned, but the data the re-run read still holds
+    # the old bar (or no bar), so the revision cannot be what moved the metrics
+    for close in (66.48, None):
+        ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                               "2026-09-29T12:00:00Z", CELLS, REPINS,
+                               verdict_match=True,
+                               bar_close=lambda a, tf, d, c=close: c)
+        assert not ok
+    ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                           "2026-09-29T12:00:00Z", CELLS, REPINS, verdict_match=True)
+    assert not ok                       # no snapshot reader: fail closed
 
 
 def test_a_revision_before_the_verdict_excuses_nothing():
     ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
-                           "2026-10-05T00:00:00Z", CELLS, REPINS, verdict_match=True)
+                           "2026-10-05T00:00:00Z", CELLS, REPINS, verdict_match=True,
+                           bar_close=snapshot_has_repin)
     assert not ok
 
 
 def test_a_revised_bar_after_the_recorded_data_end_excuses_nothing():
     cells = [("EFA", "1d", "2014-07-02T00:00:00Z")]
     ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
-                           "2014-07-02T12:00:00Z", cells, REPINS, verdict_match=True)
+                           "2014-07-02T12:00:00Z", cells, REPINS, verdict_match=True,
+                           bar_close=snapshot_has_repin)
     assert not ok
 
 
@@ -202,3 +223,14 @@ def test_load_repins_reads_the_manifest_and_tolerates_its_absence(tmp_path):
     assert load_repins(p) == REPINS
     p.write_text(json.dumps({"series": []}), encoding="utf-8")
     assert load_repins(p) == []
+
+
+def test_csv_close_reads_one_dated_bar(tmp_path):
+    from tools.gauntlet_parity import csv_close
+    rows = ["date,open,high,low,close,volume",
+            "2014-07-02 00:00:00,1,1,1,68.68,1",
+            "2014-07-03 00:00:00,69.06,69.29,69.03,69.22,7"]
+    (tmp_path / "EFA_1d.csv").write_text(chr(10).join(rows) + chr(10), encoding="utf-8")
+    assert csv_close(tmp_path, "EFA_1d", "2014-07-03") == 69.22
+    assert csv_close(tmp_path, "EFA_1d", "2014-07-04") is None
+    assert csv_close(tmp_path, "NOPE_1d", "2014-07-03") is None

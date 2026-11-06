@@ -1341,7 +1341,8 @@ of it.
   a named cause, printed in the report's "drift cause" column: `restated`
   (a bar at or before the recorded data_end re-pinned by
   `tasks.repin_free_series` AFTER the verdict, read from the trading-systems
-  `results/tradfi/free_universe_manifest.json` `repins`, override `--repins`)
+  `results/tradfi/free_universe_manifest.json` `repins`, override `--repins`,
+  and only when the `--data-dir` CSV already holds the re-pinned close)
   or `rounding` (verdict before 2026-08-26T23:19Z and every difference within
   `ULP_MAX` = 32 ulps). A verdict change, a verdict with no timestamp, or any
   other drift is UNEXCUSED, and the exit is 0 only when none is. 2026-11-06

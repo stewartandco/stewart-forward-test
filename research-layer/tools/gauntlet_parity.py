@@ -47,15 +47,17 @@ GATE_KEYS = ("is_edge_per_trade", "oos_edge_per_trade", "edge_decay_pct",
              "is_edge_raw", "oos_edge_raw", "is_vol", "oos_vol")
 
 __all__ = ["GATE_KEYS", "truncate_bars", "chained_base_pass", "classify_drift",
-           "load_repins", "ulp_distance", "main"]
+           "csv_close", "load_repins", "ulp_distance", "main"]
 
 # Excused drift (Coen 2026-11-06). A metric mismatch is EXCUSED only for a
 # cause named here, and the report prints the cause beside the row; every
 # other mismatch is unexcused and keeps the exit at 1. A verdict change is
 # never excused. The two causes:
 #  - restated: a cell of the strategy had a bar at or before its recorded
-#    data_end revised by tasks.repin_free_series AFTER the verdict was chained,
-#    so the re-run reads different history (the manifest's `repins` records);
+#    data_end revised by tasks.repin_free_series AFTER the verdict was chained
+#    (the manifest's `repins` records), AND the --data-dir copy the re-run
+#    read already holds the re-pinned close, so the re-run reads different
+#    history; a re-pin the snapshot has not taken yet excuses nothing;
 #  - rounding: the verdict was chained before the 2026-08-26T23:19Z engine
 #    change (commit 74b9703b) and every differing metric is within ULP_MAX
 #    representable steps (17 was the largest seen, CLAUDE.md "Parity tool").
@@ -80,17 +82,33 @@ def load_repins(path: Path) -> list[dict] | None:
     return json.loads(path.read_text(encoding="utf-8")).get("repins", [])
 
 
+def csv_close(data_dir: Path, cell_id: str, day: str) -> float | None:
+    """Close of the `day` bar in data_dir/<cell_id>.csv; None when absent."""
+    path = Path(data_dir) / f"{cell_id}.csv"
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as f:
+        header = f.readline().strip().split(",")
+        col = header.index("close")
+        for line in f:
+            if line.startswith(day):
+                return float(line.split(",")[col])
+    return None
+
+
 def _is_float(x) -> bool:
     return isinstance(x, float) or (isinstance(x, int) and not isinstance(x, bool))
 
 
 def classify_drift(diffs, verdict_ts: str, cells, repins,
-                   *, verdict_match: bool) -> tuple[bool, str]:
+                   *, verdict_match: bool, bar_close=None) -> tuple[bool, str]:
     """(excused, cause) for one mismatching row.
 
     `cells` is [(asset, timeframe, recorded data_end)], `repins` the manifest
-    records (None or empty when unknown). Restated history is checked first,
-    because a revised bar explains drift of any size and rounding does not.
+    records (None or empty when unknown), `bar_close(asset, timeframe, day)`
+    the close the re-run's data holds for that day (None: no restated excuse
+    at all). Restated history is checked first, because a revised bar
+    explains drift of any size and rounding does not.
     """
     if not verdict_match:
         return False, "verdict changed"
@@ -102,7 +120,10 @@ def classify_drift(diffs, verdict_ts: str, cells, repins,
             if r.get("id") != asset or not r.get("repinned_utc", "") > verdict_ts:
                 continue
             for c in r.get("changed", []):
-                if c.get("date", "9999") <= end[:10]:
+                want = (c.get("ohlc") or {}).get("close")
+                if (c.get("date", "9999") <= end[:10] and bar_close is not None
+                        and want is not None
+                        and bar_close(asset, _tf, c["date"]) == want):
                     restated.append(f"{asset} {c['date']} "
                                     f"(repinned {r['repinned_utc'][:10]})")
     if restated:
@@ -214,7 +235,9 @@ def main(argv=None) -> int:
             exc, cause = classify_drift(
                 diffs, verdict_ts[sid],
                 [(x, tf, rec[i]) for (x, tf), i in zip(cell_list, ids)],
-                repins, verdict_match=new["passed"] == old_base_pass)
+                repins, verdict_match=new["passed"] == old_base_pass,
+                bar_close=lambda x, tf, d: csv_close(
+                    a.data_dir, _cells.cell_id(x, tf), d))
             excused += exc
             causes[sid] = ("excused: " if exc else "UNEXCUSED: ") + cause
         rows.append((sid, chained, old["metrics"].get("pbo_family_kill"),
