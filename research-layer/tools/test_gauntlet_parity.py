@@ -90,7 +90,7 @@ def test_a_legacy_pooled_crypto_verdict_reruns_without_error(tmp_path):
                "--artifacts-dir", str(tmp_path / "art"), "--sids", sid,
                "--min-compared", "0", "--out", str(out)])
     assert rc == 0, out.read_text(encoding="utf-8")
-    assert "compared 1, mismatches 0, not comparable 0" in out.read_text(encoding="utf-8")
+    assert "compared 1, mismatches 0 (excused 0, unexcused 0), not comparable 0" in out.read_text(encoding="utf-8")
 
 
 def test_legacy_pooled_crypto_is_only_the_multi_asset_crypto_book():
@@ -99,3 +99,106 @@ def test_legacy_pooled_crypto_is_only_the_multi_asset_crypto_book():
     assert legacy_pooled_crypto(u(["BTCUSD", "ETHUSD"]))
     assert not legacy_pooled_crypto(u(["SOLUSDT"]))
     assert not legacy_pooled_crypto(u(["EUR"], "fx"))
+
+# -- excused drift (Coen 2026-11-06): known causes are named, never hidden ----
+
+from tools.gauntlet_parity import (classify_drift, load_repins, ulp_distance,
+                                   ENGINE_CHANGE_UTC, ULP_MAX)
+
+REPINS = [{"id": "EFA", "repinned_utc": "2026-10-04T11:53:18Z",
+           "changed": [{"date": "2014-07-03"}]},
+          {"id": "EEM", "repinned_utc": "2026-10-25T00:52:20Z", "changed": []}]
+CELLS = [("EFA", "1d", "2026-09-29T00:00:00Z")]
+ULPS_3 = (0.1, 0.1 + 3 * 1.3877787807814457e-17)     # 3 ulps apart at 0.1
+
+
+def test_ulp_distance_counts_representable_steps():
+    import math
+    assert ulp_distance(1.0, 1.0) == 0
+    assert ulp_distance(1.0, math.nextafter(1.0, 2.0)) == 1
+    assert ulp_distance(-1.0, math.nextafter(-1.0, -2.0)) == 1
+    assert ulp_distance(*ULPS_3) == 3
+    # across zero: the smallest subnormals either side are 2 steps apart
+    assert ulp_distance(-5e-324, 5e-324) == 2
+    assert ulp_distance(-0.0, 0.0) == 0
+
+
+def test_a_verdict_change_is_never_excused():
+    ok, cause = classify_drift([("train_sharpe", 0.5, 0.6)], "2026-09-29T12:00:00Z",
+                               CELLS, REPINS, verdict_match=False)
+    assert not ok and "verdict" in cause
+
+
+def test_drift_on_a_cell_revised_after_the_verdict_is_excused_and_named():
+    ok, cause = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                               "2026-09-29T12:00:00Z", CELLS, REPINS,
+                               verdict_match=True)
+    assert ok and "restated" in cause and "EFA 2014-07-03" in cause
+
+
+def test_a_revision_before_the_verdict_excuses_nothing():
+    ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                           "2026-10-05T00:00:00Z", CELLS, REPINS, verdict_match=True)
+    assert not ok
+
+
+def test_a_revised_bar_after_the_recorded_data_end_excuses_nothing():
+    cells = [("EFA", "1d", "2014-07-02T00:00:00Z")]
+    ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                           "2014-07-02T12:00:00Z", cells, REPINS, verdict_match=True)
+    assert not ok
+
+
+def test_a_revision_with_no_changed_bar_excuses_nothing():
+    cells = [("EEM", "1d", "2026-09-29T00:00:00Z")]
+    ok, _ = classify_drift([("is_edge_per_trade", 0.0071, 0.0072)],
+                           "2026-09-29T12:00:00Z", cells, REPINS, verdict_match=True)
+    assert not ok
+
+
+def test_pre_engine_change_rounding_is_excused_up_to_ulp_max():
+    before = "2026-08-21T00:00:00Z"
+    assert before < ENGINE_CHANGE_UTC
+    cells = [("EWZ", "1d", "2026-08-21T00:00:00Z")]
+    ok, cause = classify_drift([("train_sharpe", *ULPS_3)], before, cells, REPINS,
+                               verdict_match=True)
+    assert ok and "rounding" in cause and "3 ulps" in cause
+    import math
+    far = 0.1
+    for _ in range(ULP_MAX + 1):
+        far = math.nextafter(far, 1.0)
+    ok, _ = classify_drift([("train_sharpe", 0.1, far)], before, cells, REPINS,
+                           verdict_match=True)
+    assert not ok
+
+
+def test_rounding_after_the_engine_change_is_not_excused():
+    cells = [("EWZ", "1d", "2026-09-29T00:00:00Z")]
+    ok, _ = classify_drift([("train_sharpe", *ULPS_3)], "2026-09-29T12:00:00Z",
+                           cells, REPINS, verdict_match=True)
+    assert not ok
+
+
+def test_a_verdict_without_a_timestamp_excuses_nothing():
+    for ts in (None, ""):
+        ok, cause = classify_drift([("train_sharpe", *ULPS_3)], ts, CELLS, REPINS,
+                                   verdict_match=True)
+        assert not ok and "timestamp" in cause
+
+
+def test_a_missing_or_non_float_metric_is_not_rounding():
+    cells = [("EWZ", "1d", "2026-08-21T00:00:00Z")]
+    for o, n in ((None, 0.1), (0.1, None), (True, False)):
+        ok, _ = classify_drift([("p_ruin", o, n)], "2026-08-21T00:00:00Z", cells,
+                               REPINS, verdict_match=True)
+        assert not ok
+
+
+def test_load_repins_reads_the_manifest_and_tolerates_its_absence(tmp_path):
+    import json
+    assert load_repins(tmp_path / "nope.json") is None
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"series": [], "repins": REPINS}), encoding="utf-8")
+    assert load_repins(p) == REPINS
+    p.write_text(json.dumps({"series": []}), encoding="utf-8")
+    assert load_repins(p) == []

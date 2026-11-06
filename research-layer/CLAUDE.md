@@ -1337,6 +1337,17 @@ of it.
   commit 74b9703b), the eleven metrics differed by at most 17 ulps (train_sharpe);
   six of the 17 were bit-identical on them. All 48 compared verdicts after the
   change were bit-identical on them.
+  **Excused drift (Coen 2026-11-06):** a metric mismatch is excused only for
+  a named cause, printed in the report's "drift cause" column: `restated`
+  (a bar at or before the recorded data_end re-pinned by
+  `tasks.repin_free_series` AFTER the verdict, read from the trading-systems
+  `results/tradfi/free_universe_manifest.json` `repins`, override `--repins`)
+  or `rounding` (verdict before 2026-08-26T23:19Z and every difference within
+  `ULP_MAX` = 32 ulps). A verdict change, a verdict with no timestamp, or any
+  other drift is UNEXCUSED, and the exit is 0 only when none is. 2026-11-06
+  run (seed 20260930, 60 compared): 13 mismatches, all excused (9 rounding,
+  max 17 ulps; 4 restated: 3 EFA, 1 QQQ), exit 0; without the manifest the
+  4 restated rows are unexcused and the exit is 1.
 
 ## Beats-hold (gauntlet v6.2 / live gate v2, 2026-11-05)
 Design: `docs/2026-11-05-beats-hold-design.md` (BH1-BH5, Coen's calls). A
@@ -1351,10 +1362,12 @@ at BOTH stages. Rehearsal readout: `docs/runs/2026-11-05-beats-hold-rehearsal.md
   worker) and `quarantine-live-protocol-v2: ` (live gate). A note that
   only mentions the name, or a second copy of the note, changes nothing
   (tests pin both). The two notes are independent: either can go first.
-  Drafts: `docs/notes/gauntlet-protocol-v6.2.md` and
-  `docs/notes/quarantine-live-protocol-v2.md`. Chain them VERBATIM after
-  Coen approves the exact text, with `python -m tools.grid_switch
-  chain-note --prefix <name>:`. `--prefix` takes `<name>:` (the tool
+  Texts: `docs/notes/gauntlet-protocol-v6.2.md` and
+  `docs/notes/quarantine-live-protocol-v2.md`, both CHAINED 2026-11-06
+  (entries 191,597 and 191,598), so both switches are armed. A superseding
+  note is chained the same way, verbatim after Coen approves its text, with
+  `python -m tools.grid_switch chain-note --prefix <name>:`.
+  `--prefix` takes `<name>:` (the tool
   refuses one not ending in ":"), but the note's text must start
   `<name>: ` (colon AND space) to arm, because the arming check includes
   the space: a note chained as `<name>:text` passes the tool and arms
