@@ -79,6 +79,21 @@ def _done_keys(out: Path) -> set[str]:
     return keys
 
 
+def _trim_torn_tail(out: Path) -> None:
+    """Drop a torn final fragment (no trailing newline): it was never a
+    complete record, and appending after it would glue the next line on."""
+    if not out.exists() or out.stat().st_size == 0:
+        return
+    data = out.read_bytes()
+    if data.endswith(b"\n"):
+        return
+    keep = data.rfind(b"\n") + 1
+    with out.open("r+b") as f:
+        f.truncate(keep)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _chunk_ok(now, n: int, est_s: float) -> bool:
     t = now().astimezone(CLOCK)
     if not (WINDOW_START <= t.time() < WINDOW_END):
@@ -92,6 +107,7 @@ def run_arm(rows_in: list[dict], job, out: Path, workers: int, now=_now,
             chunk: int = 50, est_s_per_item: float = 2.0) -> dict:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    _trim_torn_tail(out)
     done_keys = _done_keys(out)
     todo = [r for r in rows_in if r["key"] not in done_keys]
     summary = {"done": 0, "skipped": len(rows_in) - len(todo),

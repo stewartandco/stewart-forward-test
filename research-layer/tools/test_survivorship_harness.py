@@ -128,6 +128,30 @@ def test_partial_last_line_ignored(tmp_path):
     out.write_text(json.dumps({"key": rows[0]["key"]}) + "\n" + '{"key": "t1|P')
     r = h.run_arm(rows, _job, out, 1, now=lambda: _perth(10), chunk=5)
     assert r["skipped"] == 1 and r["done"] == 2
+    for line in out.read_text().splitlines():
+        json.loads(line)
+    assert h._done_keys(out) == {r_["key"] for r_ in rows}
+    r2 = h.run_arm(rows, _job, out, 1, now=lambda: _perth(10), chunk=5)
+    assert r2["done"] == 0 and r2["skipped"] == 3
+
+
+def _sec(hh, mm, ss):
+    return datetime(2026, 11, 9, hh, mm, ss, tzinfo=PERTH)
+
+
+def test_window_boundaries(tmp_path):
+    cases = [
+        (_perth(8, 39), 2.0, False),
+        (_perth(8, 40), 2.0, True),
+        (_perth(20, 0), 2.0, False),
+        (_sec(19, 59, 58), 1.0, True),    # ends 19:59:59
+        (_sec(19, 59, 58), 2.0, False),   # ends exactly 20:00:00
+    ]
+    for i, (t, est, ok) in enumerate(cases):
+        r = h.run_arm(_rows(1), _job, tmp_path / f"b{i}.jsonl", 1,
+                      now=lambda t=t: t, chunk=5, est_s_per_item=est)
+        assert (r["done"] == 1) is ok, (t, est)
+        assert r["stopped_at_window"] is (not ok)
 
 
 def _bad(item):
