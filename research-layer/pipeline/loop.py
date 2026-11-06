@@ -1424,11 +1424,11 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     state_path = logs_dir / "loop_state.json"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    reason = _halt.halt_reason(logs_dir)
-    if reason is not None:
-        return _report_halt(logs_dir, reason, "run start")
-
     if args.seed_watermarks:
+        reason = _halt.halt_reason(logs_dir)       # D35: seeding writes loop_state
+        if reason is not None:
+            print(f"loop: {_halt.describe(reason)}; watermarks not seeded", flush=True)
+            return 0
         return _seed_watermarks(layer, registry_path, state_path)
 
     # Window check BEFORE the cycle: a killed cycle leaves no evidence, so
@@ -1503,6 +1503,11 @@ def _run_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       spent=_spent(logs_dir), state=state)
         return 0
     try:
+        # D35 run-start check, once loop.lock is ours: a second instance never
+        # overwrites the holder's pipeline_status.json with `halted`.
+        reason = _halt.halt_reason(logs_dir)
+        if reason is not None:
+            return _report_halt(logs_dir, reason, "run start")
         return _run_locked_cycle(args, runner, layer, logs_dir, registry_path,
                                  state_path, state)
     finally:

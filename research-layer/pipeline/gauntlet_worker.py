@@ -616,6 +616,11 @@ def run(argv: list[str] | None = None) -> int:
 
         if halted_mid is None:
             final_drain()                 # a halt writes nothing more to the chain
+        if halted_mid is not None:
+            for item in pending:
+                print(f"{item['spec']['strategy_id']}  not written: halted by "
+                      f"pipeline.halted; stays queued", flush=True)
+            pending.clear()               # dropped by the halt, not a lock deferral
         for item in pending:
             print(f"{item['spec']['strategy_id']}  deferred: chain.lock held "
                   f"through the run; not written, stays queued", flush=True)

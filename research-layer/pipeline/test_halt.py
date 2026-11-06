@@ -61,6 +61,7 @@ def test_loop_halted_at_start_runs_no_stage(tmp_path):
     assert fr.calls == []
     st = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
     assert st["items"]["outcome"] == "halted" and st["overall"] == "WARN"
+    assert st["items"]["halted_at"] == "run start"            # before any preflight or stage
     assert "coen: spend review" in st["items"]["halted"]
     assert "halted_by_coen" in st["escalations"]
 
@@ -132,6 +133,109 @@ def test_worker_halted_between_chunks_chains_only_the_finished_one(tmp_path, mon
     st = _gw_status(tmp_path)
     assert st["exit_reason"] == "halted" and st["evaluated"] == 1
     assert len(_verdicts(reg)) == 1 and st["queued"] == 1      # the second stays queued
+
+
+# ---------------------------------------------------------------- cold review 2026-11-06 additions
+
+def test_a_second_loop_instance_never_writes_halted_over_the_holders_status(tmp_path):
+    layer, _ = _mk_layer(tmp_path, accepted_fx=30)
+    from .chainlock import ChainLock
+    holder = ChainLock(layer / "logs", holder="loop-instance", purpose="other", name="loop.lock")
+    holder.acquire()
+    try:
+        _halt(layer / "logs")
+        assert loop.run(["--once", "--layer", str(layer)], runner=FakeRunner()) == 0
+    finally:
+        holder.release()
+    st = json.loads((layer / "logs" / "pipeline_status.json").read_text(encoding="utf-8"))
+    assert st["items"]["outcome"] == "deferred_instance"      # the halt is the holder's to report
+
+
+def test_quarantine_halted_writes_nothing_review_still_runs(tmp_path, capsys):
+    from . import quarantine
+    reg_path = tmp_path / "registry_log.jsonl"                 # absent: a non-halted run would REFUSE (1)
+    args = ["--registry", str(reg_path), "--data-dir", str(tmp_path / "data")]
+    assert quarantine.run(args + ["--date", "2026-11-05"]) == 1
+    _halt(tmp_path / "logs")
+    for mode in (["--date", "2026-11-05"], ["--catch-up"], ["--fetch-owed"]):
+        assert quarantine.run(args + mode) == 0, mode
+    assert "halted by pipeline.halted" in capsys.readouterr().out
+    assert not reg_path.exists()
+    assert quarantine.run(args + ["--review"]) == 1            # --review is not halted (writes nothing)
+
+
+def test_gauntlet_stats_halted_at_start_writes_halted_status_and_nothing_else(tmp_path):
+    from . import gauntlet_stats
+    reg, spec, data = _gw_setup(tmp_path)
+    before = len(list(reg.entries()))
+    _halt(tmp_path / "logs")
+    rc = gauntlet_stats.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                             "--logs-dir", str(tmp_path / "logs"), "--chain"])
+    assert rc == 0 and len(list(reg.entries())) == before
+    st = json.loads((tmp_path / "logs" / "gauntlet_stats_status.json").read_text(encoding="utf-8"))
+    assert st["exit_reason"] == "halted" and "halted" in st
+
+
+def test_screen_halted_before_its_first_batch_writes_nothing(tmp_path, monkeypatch):
+    from . import screen
+    from .screen import run as screen_run
+    monkeypatch.setattr(screen, "run_all", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a batch was evaluated after the halt")))
+    from .test_screen import chain_protocol_note, dated_target_hit_bars, screening_registry, write_data_dir
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    chain_protocol_note(reg)
+    _halt(tmp_path / "logs")
+    assert screen_run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art")]) == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "proposed"
+    assert not [e for e in reg.entries() if e["entry_type"] == "verdict"]
+
+
+def test_screen_halted_after_evaluating_does_not_write_the_batch(tmp_path, monkeypatch):
+    from . import screen
+    from .test_screen import chain_protocol_note, dated_target_hit_bars, screening_registry, write_data_dir
+    reg, spec = screening_registry(tmp_path)
+    data = write_data_dir(tmp_path, {"BTCUSD": dated_target_hit_bars()})
+    chain_protocol_note(reg)
+    real = screen.run_all
+
+    def run_then_halt(*a, **kw):
+        out = real(*a, **kw)
+        _halt(tmp_path / "logs", "mid-screen")
+        return out
+
+    monkeypatch.setattr(screen, "run_all", run_then_halt)
+    assert screen.run(["--registry", str(reg.log_path), "--data-dir", str(data),
+                       "--artifacts-dir", str(tmp_path / "art")]) == 0
+    assert reg.strategy_states()[spec["strategy_id"]] == "proposed"   # flush refused to start
+
+
+def test_triage_stops_paying_for_panels_once_halted(tmp_path):
+    from . import triage_batch as tb
+    from .test_triage_batch import _Meter
+    _halt(tmp_path)
+
+    class NoClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                raise AssertionError("a panel was paid for after the halt")
+
+    pending = {"p1": {"claim": "x", "quote": "q", "source": {}}}
+    out = tb.build_decisions(NoClient(), "m", pending, {}, _Meter(), halt_dir=tmp_path)
+    assert out["stopped"] == "halted" and "p1" not in out["decisions"]
+
+
+def test_every_chain_writing_bat_skips_sync_and_commit_while_halted():
+    import pathlib
+    tasks = pathlib.Path(halt.__file__).resolve().parent.parent / "tasks"
+    for name in ("run_quarantine.bat", "run_gauntlet_worker.bat", "run_gauntlet_stats.bat"):
+        src = (tasks / name).read_text(encoding="utf-8")
+        guard = src.find('if exist "%LAYER%\\logs\\pipeline.halted"')
+        sync = src.find("pipeline.chain_mirror sync")
+        assert guard != -1 and sync != -1 and guard < sync, name
+        assert b"\r\n" in (tasks / name).read_bytes(), name
 
 
 # ---------------------------------------------------------------- the livegate

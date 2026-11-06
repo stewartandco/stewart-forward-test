@@ -157,6 +157,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from . import halt as _halt
 from . import cells
 from . import simcache
 from .chainlock import ChainLock, ChainLockHeld
@@ -986,6 +987,11 @@ def run(argv: list[str] | None = None) -> int:
         except ChainLockHeld:
             return finish(0, "deferred_instance", write=False)
     try:
+        # D35 (pipeline/halt.py): once the instance lock is ours, before any chain read
+        reason = _halt.halt_reason(a.logs_dir)
+        if reason is not None:
+            status["halted"] = _halt.describe(reason)
+            return finish(0, "halted")
         return _run_locked(a, t_end, vintage, simcache_dir, status, extra, done,
                            pending, finish, prior_cluster_s, prior_null_s)
     finally:
@@ -1233,6 +1239,11 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                 items = []
                 return None
             while items:
+                # D35: between batches. Unchained entries are recomputed by the next run.
+                why = _halt.halt_reason(a.logs_dir)
+                if why is not None:
+                    status["halted"] = _halt.describe(why)
+                    return "halted"
                 chunk, rest = items[:STATS_BATCH_MAX], items[STATS_BATCH_MAX:]
                 try:
                     with ChainLock(a.logs_dir, "gauntlet-stats",
@@ -1337,13 +1348,20 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             # a full batch (kept entries from a held flush included): one
             # non-blocking attempt now, before the next family starts
             if len(items) >= STATS_BATCH_MAX:
-                if flush() == "chain_refused":
+                r = flush()
+                if r == "chain_refused":
                     return finish(1, "chain_refused")
+                if r == "halted":
+                    return finish(0, "halted")
         out = flush()
         if out == "chain_refused":
             return finish(1, "chain_refused")
-        if out == "held" and final_drain() == "chain_refused":
-            return finish(1, "chain_refused")
+        if out == "held":
+            out = final_drain()
+            if out == "chain_refused":
+                return finish(1, "chain_refused")
+        if out == "halted":
+            return finish(0, "halted")
         if items:
             status["deferred_lock"] = len(items)
             print(f"chain.lock held through the run: {len(items)} computed stats "

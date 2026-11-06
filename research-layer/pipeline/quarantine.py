@@ -1771,6 +1771,16 @@ def run(argv: list[str] | None = None, *, report: "DateReport | None" = None,
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 1
 
+    # D35 (pipeline/halt.py): every writing mode stops on the halt artifact (--review
+    # writes nothing and still runs). Catch-up re-enters run() per date, so this is
+    # also "between dates". Owed dates are recorded by --catch-up once Coen lifts it.
+    if not args.review:
+        from . import halt as _halt
+        why = _halt.halt_reason(args.registry.parent / "logs")
+        if why is not None:
+            print(f"quarantine: {_halt.describe(why)}; nothing fetched or written", flush=True)
+            return 0
+
     # A missing path must never read as "nothing to do": Registry.entries()
     # returns silently on a missing file, so a wrong path, a moved cwd or a
     # scheduler quirk would otherwise report success and leave an invisible
