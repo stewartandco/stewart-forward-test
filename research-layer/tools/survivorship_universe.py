@@ -46,6 +46,13 @@ DELISTED: dict[str, str | None] = {
 # pair -> first usable date (confirmed at G2)
 CUTS: dict[str, str] = {"LUNAUSDT": "2022-05-31"}
 
+# pair -> reason: a declared exclusion (design P4; Coen's call, declared BEFORE
+# the pre-registration note). The walk records the pair as excluded and it
+# takes NO slot: the walk continues to TARGET. Hashed into the manifest like
+# RENAMES/DELISTED/CUTS and listed in the note. A change after the note needs
+# a superseding chained note AND a code change (design s4 step 3).
+EXCLUDED: dict[str, str] = {}
+
 
 def pair_for(symbol: str) -> str:
     return SYMBOL_MAP.get(symbol, symbol).upper() + "USDT"
@@ -103,11 +110,14 @@ def span_for(pair: str, spans: dict, cuts: dict | None = None):
 
 
 def pit_walk(cmc: list[dict], spans: dict, target: int = TARGET,
-             cuts: dict | None = None) -> tuple[list[str], list[dict]]:
+             cuts: dict | None = None,
+             excluded_pairs: dict | None = None) -> tuple[list[str], list[dict]]:
     """Walk CMC ranks ascending until `target` pairs are admitted. Admission
-    order: stable/classifier, no pair, first bar > HISTORY_FLOOR, last bar <
-    ACTIVE_FROM, else admit. Raises RuntimeError on a duplicate pair among
-    survivors (the selector's rule). Returns (admitted pairs, excluded rows)."""
+    order: stable/classifier, declared exclusion (EXCLUDED), no pair, first
+    bar > HISTORY_FLOOR, last bar < ACTIVE_FROM, else admit. An excluded row
+    takes no slot. Raises RuntimeError on a duplicate pair among survivors
+    (the selector's rule). Returns (admitted pairs, excluded rows)."""
+    excluded_pairs = EXCLUDED if excluded_pairs is None else excluded_pairs
     admitted: list[str] = []
     excluded: list[dict] = []
     seen: dict[str, dict] = {}
@@ -124,6 +134,9 @@ def pit_walk(cmc: list[dict], spans: dict, target: int = TARGET,
                 "id": row["slug"], "symbol": row["symbol"].lower(),
                 "current_price": row["price"]}) is not None:
             drop("stable")
+            continue
+        if pair in excluded_pairs:
+            drop(f"declared exclusion: {excluded_pairs[pair]}")
             continue
         sp = span_for(pair, spans, cuts)
         if sp is None:

@@ -253,6 +253,8 @@ def _refuse_none_declared() -> None:
             bad.append(f"RENAMES[{k}] = {v!r}")
     bad += [f"DELISTED[{k}] = None" for k, v in su.DELISTED.items() if v is None]
     bad += [f"CUTS[{k}] = None" for k, v in su.CUTS.items() if v is None]
+    bad += [f"EXCLUDED[{k}] = {v!r} (a reason is required)"
+            for k, v in su.EXCLUDED.items() if not (isinstance(v, str) and v.strip())]
     if bad:
         raise Refused("declared facts not filled (confirm from Binance announcements "
                       "first, design P3/P4): " + "; ".join(bad))
@@ -260,7 +262,8 @@ def _refuse_none_declared() -> None:
 
 def _declared() -> dict:
     return {"renames": {k: list(v) for k, v in su.RENAMES.items()},
-            "delisted": dict(su.DELISTED), "cuts": dict(su.CUTS)}
+            "delisted": dict(su.DELISTED), "cuts": dict(su.CUTS),
+            "excluded": dict(su.EXCLUDED)}
 
 
 def _design_bytes() -> bytes:
@@ -289,7 +292,15 @@ def _git_head() -> str | None:
 
 def _check_strata(u: dict) -> None:
     """universe.json's strata must be the pure function of A, B and the hashed
-    RENAMES/DELISTED (I1): a hand-edited stratum is refused."""
+    RENAMES/DELISTED (I1): a hand-edited stratum is refused. B must have been
+    walked under the current EXCLUDED (I8), and holds none of its pairs."""
+    if u.get("declared_exclusions") != dict(su.EXCLUDED):
+        raise Refused("universe.json was walked under other declared exclusions "
+                      "than EXCLUDED now; re-run universe")
+    inside = sorted(set(u["B"]) & set(su.EXCLUDED))
+    if inside:
+        raise Refused(f"universe.json B holds declared exclusion(s) {inside}; "
+                      f"re-run universe")
     want = su.strata(u["A"], u["B"])
     have = u.get("strata") or {}
     if have != want:
@@ -334,6 +345,7 @@ def _input_hashes(study: Path, copy) -> dict:
         "renames": _sha_canon(d["renames"]),
         "delisted": _sha_canon(d["delisted"]),
         "cuts": _sha_canon(d["cuts"]),
+        "excluded": _sha_canon(d["excluded"]),
         "first_bars": _sha_canon(pf["first_bars"]),
         "data_1d": _sha_canon(pf["data_sha256"]),
         "design_doc_sha256": _sha(_design_bytes()),
@@ -418,7 +430,8 @@ def _gate(args, study: Path, tf: str):
     pf = _load_json(study / f"preflight_{tf}.json", f"run preflight --tf {tf} first")
     _check_pf_pairs(pf, u, tf)
     if tf != "1d" and pf.get("declared") != _declared():
-        raise Refused(f"preflight_{tf}.json ran under other RENAMES/DELISTED/CUTS: "
+        raise Refused(f"preflight_{tf}.json ran under other RENAMES/DELISTED/CUTS/"
+                      f"EXCLUDED: "
                       f"re-run preflight --tf {tf}")
     if pf.get("passed") is not True:
         raise Refused(f"preflight_{tf}.json did not pass: a failed precondition "
@@ -654,7 +667,8 @@ def cmd_universe(args, fetch) -> int:
     cmc_bytes = cmc_path.read_bytes()
     cmc = _cmc_rows(cmc_path)
     try:
-        B, excluded = su.pit_walk(cmc, spans, target=su.TARGET, cuts=su.CUTS)
+        B, excluded = su.pit_walk(cmc, spans, target=su.TARGET, cuts=su.CUTS,
+                                  excluded_pairs=su.EXCLUDED)
     except RuntimeError as exc:
         print(f"universe: FAIL {exc}")
         return FAIL
@@ -663,6 +677,7 @@ def cmd_universe(args, fetch) -> int:
     sizes = {s: sum(1 for v in strata.values() if v == s) for s in su.STRATA}
     _write_json(study / "universe.json", {
         "A": A, "B": B, "strata": strata, "excluded": excluded,
+        "declared_exclusions": dict(su.EXCLUDED),
         "target": su.TARGET, "cmc_sha256": _sha(cmc_bytes),
         "spans": {k: list(v) for k, v in sorted(spans.items())},
         "stratum_sizes": sizes})
@@ -912,7 +927,8 @@ def cmd_freeze(args, fetch) -> int:
         raise Refused(f"preflight ran P2 at upto {pf.get('upto')}; re-run preflight "
                       f"with --upto {args.upto}")
     if pf.get("declared") != _declared():
-        raise Refused("RENAMES/DELISTED/CUTS changed since preflight: re-run preflight")
+        raise Refused("RENAMES/DELISTED/CUTS/EXCLUDED changed since preflight: "
+                      "re-run preflight")
     _check_pf_pairs(pf, u, "1d")
     copy = st.read_copy(reg, args.upto)
     if not (0 < args.upto <= copy.n_entries):
@@ -971,7 +987,6 @@ def cmd_draft_note(args, fetch) -> int:
     manifest = _load_json(study / "manifest.json", "run freeze first")
     copy = st.read_copy(reg, int(manifest["upto"]))
     _verify_inputs(study, copy, manifest)
-    pf = _load_json(study / "preflight_1d.json", "run preflight --tf 1d first")
     inp = manifest["inputs"]
     accepted = manifest.get("accepted_counts") is True
     dc = manifest.get("design_counts") or DESIGN_COUNTS
@@ -981,7 +996,7 @@ def cmd_draft_note(args, fetch) -> int:
         "chained before any study outcome number exists (design s4 step 2) and fixes "
         "the decision rule below (design s5, verbatim), the frozen inputs by sha256 "
         "(design P5), the pinned registry entry index for the templates, the splice "
-        "and death list and the P4 cuts. It arms nothing in the pipeline: only the "
+        "and death list, the P4 cuts and the declared exclusions. It arms nothing in the pipeline: only the "
         "study tool (tools/survivorship.py) reads it, as the gate that refuses every "
         "outcome computation until this note is on the chain.",
         "",
@@ -994,7 +1009,8 @@ def cmd_draft_note(args, fetch) -> int:
         f"Each hash is the sha256 of the UTF-8 canonical JSON {CANON_RULE}, except "
         "cmc, the sha256 of the raw CMC response bytes. templates = per timeframe, "
         "template key -> sorted registered strategy ids; cells_A / cells_B = the "
-        "ordered pair lists; renames / delisted / cuts = the declared lists below; "
+        "ordered pair lists; renames / delisted / cuts / excluded = the declared "
+        "lists below; "
         "first_bars = pair -> first bar date of each 1d cell; data_1d = pair -> "
         "sha256 of each 1d study CSV; design_doc_sha256 = the sha256 of the design "
         "doc's LF-normalised bytes (the file s5 above is quoted from); study_code = "
@@ -1041,9 +1057,11 @@ def cmd_draft_note(args, fetch) -> int:
     out += ["", "## P4 cuts and exclusions", ""]
     out += [f"- {p}: cut to first usable date {d}"
             for p, d in sorted(inp["cuts"].items())] or ["- cuts: none"]
-    p4 = pf.get("checks", {}).get("P4", {})
-    out += [f"- P4 flag {p}: {'; '.join(v)}" for p, v in sorted(p4.items())] \
-        or ["- exclusions: none"]
+    out += [f"- declared exclusion {p}: {why}"
+            for p, why in sorted(inp["excluded"].items())] or ["- exclusions: none"]
+    if inp["excluded"]:
+        out.append("- a declared exclusion takes no slot in the point-in-time walk: "
+                   "the walk continues until B holds its target")
     text = "\n".join(out) + "\n"
     path = layer / NOTE_REL
     _write_lf(path, text)

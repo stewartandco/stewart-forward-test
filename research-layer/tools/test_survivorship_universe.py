@@ -160,3 +160,25 @@ def test_load_cmc_accepts_tagged_usdt_and_usdc(tmp_path):
     rows = su.load_cmc(_cmc(tmp_path, [("BTC", []), ("USDT", ["stablecoin", "x"]),
                                        ("USDC", ["stablecoin"])]))
     assert [r["stable"] for r in rows] == [False, True, True]
+
+
+def test_walk_skips_a_declared_exclusion_without_taking_a_slot():
+    # final review I8
+    rows = [_row(i, f"C{i:03d}") for i in range(1, 6)]
+    spans = {f"C{i:03d}USDT": OK for i in range(1, 6)}
+    admitted, excluded = su.pit_walk(rows, spans, target=3,
+                                     excluded_pairs={"C002USDT": "ticker reuse"})
+    assert admitted == ["C001USDT", "C003USDT", "C004USDT"]
+    assert excluded == [{"rank": 2, "symbol": "C002", "pair": "C002USDT",
+                         "reason": "declared exclusion: ticker reuse"}]
+
+
+def test_walk_reads_the_declared_exclusions_by_default(monkeypatch):
+    monkeypatch.setattr(su, "EXCLUDED", {"C001USDT": "halt"})
+    rows = [_row(i, f"C{i:03d}") for i in range(1, 4)]
+    admitted, _ex = su.pit_walk(rows, {f"C{i:03d}USDT": OK for i in range(1, 4)}, target=2)
+    assert admitted == ["C002USDT", "C003USDT"]
+
+
+def test_no_exclusion_is_declared_yet():
+    assert su.EXCLUDED == {}

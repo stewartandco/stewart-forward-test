@@ -131,6 +131,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
+    monkeypatch.setattr(su, "EXCLUDED", {}, raising=False)
     monkeypatch.setattr(su, "END", STOP.isoformat())    # the fixture's common end
     # the fixture's own counts stand in for the design's 80/960 and strata
     monkeypatch.setattr(cli, "DESIGN_COUNTS", {
@@ -151,7 +152,8 @@ def env(tmp_path, monkeypatch):
     A, B = ["AAAUSDT", "BBBUSDT"], ["AAAUSDT", "CCCUSDT"]
     (study / "universe.json").write_text(json.dumps({
         "A": A, "B": B, "strata": su.strata(A, B), "excluded": [], "target": 2,
-        "cmc_sha256": hashlib.sha256(cmc).hexdigest()}), encoding="utf-8")
+        "cmc_sha256": hashlib.sha256(cmc).hexdigest(),
+        "declared_exclusions": {}}), encoding="utf-8")
     specs = [_spec("AAAUSDT"), _spec("BBBUSDT"), _spec("AAAUSDT", 5, 20)]
     entries = []
     for s in specs:
@@ -321,6 +323,7 @@ def s3env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
     monkeypatch.setattr(su, "TARGET", 3)
+    monkeypatch.setattr(su, "EXCLUDED", {}, raising=False)
     monkeypatch.setattr(su, "declared_assets", lambda: ["AAAUSDT", "BBBUSDT"])
     series = {
         "AAAUSDT": _bars(date(2022, 1, 1), date(2025, 2, 28)),
@@ -692,7 +695,7 @@ def test_freeze_writes_canonical_hashes(env):
     assert m["hashes"]["first_bars"] == sha(canon(_pf(env)["first_bars"]))
     assert set(m["hashes"]) == {"templates", "cells_A", "cells_B", "cmc", "renames",
                                 "delisted", "cuts", "first_bars", "data_1d",
-                                "design_doc_sha256", "study_code"}
+                                "design_doc_sha256", "study_code", "excluded"}
 
 
 # --------------------------------------------------------------- draft-note
@@ -1417,3 +1420,74 @@ def test_fetch_cmc_refuses_a_listing_without_stablecoin_tags(s3env):
     assert _run("fetch-cmc", "--study-dir", s3env.study, "--now", NOW,
                 fetch=lambda u: bad) == 1
     assert not (s3env.study / cli.CMC_FILE).exists()
+
+
+# ------------------------------------- declared exclusions (final review I8)
+
+def test_universe_walk_refills_past_a_declared_exclusion(s3env, monkeypatch):
+    s, f = s3env.study, s3env.fake
+    monkeypatch.setattr(su, "EXCLUDED", {"CCCUSDT": "ticker reuse (Coen 2026-11-06)"})
+    assert _run("fetch-cmc", "--study-dir", s, "--now", NOW, fetch=f) == 0
+    assert _run("plan-fetch", "--study-dir", s, "--tf", "1d", fetch=f) == 0
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now", NOW, fetch=f) == 0
+    assert _run("universe", "--study-dir", s, fetch=f) == 0
+    u = json.loads((s / "universe.json").read_text(encoding="utf-8"))
+    assert u["B"] == ["AAAUSDT", "FFFUSDT", "GGGUSDT"]        # GGG takes CCC's slot
+    assert {e["symbol"]: e["reason"] for e in u["excluded"]}["CCC"] == \
+        "declared exclusion: ticker reuse (Coen 2026-11-06)"
+    assert u["declared_exclusions"] == {"CCCUSDT": "ticker reuse (Coen 2026-11-06)"}
+
+
+def test_the_manifest_hash_changes_when_excluded_changes(env, monkeypatch):
+    _chain(env, _frozen(env))
+    copy = st.read_copy(env.reg, 6)
+    before = cli._input_hashes(env.study, copy)
+    monkeypatch.setattr(su, "EXCLUDED", {"ZZZUSDT": "ticker reuse"})
+    after = cli._input_hashes(env.study, copy)
+    assert sorted(k for k in before if before[k] != after[k]) == ["excluded"]
+    calls = _trap_engine(monkeypatch)
+    assert _run("run", *_base(env), "--registry", env.reg) == 2
+    assert calls == []
+
+
+def test_freeze_refuses_a_universe_built_under_other_exclusions(env, monkeypatch):
+    assert _preflight(env) == 0
+    monkeypatch.setattr(su, "EXCLUDED", {"ZZZUSDT": "ticker reuse"})
+    assert _freeze(env) == 2
+    assert not (env.study / "manifest.json").exists()
+
+
+def test_freeze_refuses_an_empty_exclusion_reason(env, monkeypatch):
+    monkeypatch.setattr(su, "EXCLUDED", {"ZZZUSDT": ""})
+    _set_universe(env, declared_exclusions={"ZZZUSDT": ""})
+    assert _preflight(env) == 0
+    assert _freeze(env) == 2
+
+
+def test_draft_note_lists_every_declared_exclusion(env, monkeypatch):
+    ex = {"ZZZUSDT": "ticker reuse inside the used span", "YYYUSDT": "halt 2024-03"}
+    monkeypatch.setattr(su, "EXCLUDED", ex)
+    _set_universe(env, declared_exclusions=ex)
+    text = _frozen(env)
+    assert "- declared exclusion YYYUSDT: halt 2024-03" in text
+    assert "- declared exclusion ZZZUSDT: ticker reuse inside the used span" in text
+    assert "P4 flag" not in text
+    m = _manifest(env)
+    assert m["inputs"]["excluded"] == ex
+    assert f"excluded: {m['hashes']['excluded']}" in text
+
+
+def test_draft_note_says_no_exclusions_when_none_are_declared(env):
+    text = _frozen(env)
+    assert "- exclusions: none" in text and "P4 flag" not in text
+
+
+def test_preflight_refuses_a_universe_walked_under_other_exclusions(env, monkeypatch):
+    # an EXCLUDED edit after `universe` would otherwise reach preflight and freeze
+    # with a B that was never walked under it
+    monkeypatch.setattr(su, "EXCLUDED", {"ZZZUSDT": "ticker reuse"})
+    assert _preflight(env) == 2
+    assert not (env.study / "preflight_1d.json").exists()
+    _set_universe(env, B=["AAAUSDT", "CCCUSDT"], declared_exclusions={"CCCUSDT": "x"})
+    monkeypatch.setattr(su, "EXCLUDED", {"CCCUSDT": "x"})
+    assert _preflight(env) == 2                        # B holds an excluded pair
