@@ -14,8 +14,9 @@ still matches the inputs on disk.
 Exit codes: 0 ok, 1 a check failed, 2 refused, 3 stopped at the run window
 (fetch, preflight's P2, run, gauntlet; resume later). Every network call goes
 through an injectable `fetch(url) -> bytes`. `--now` is a test clock: it is
-refused unless the environment sets SURVIVORSHIP_TEST_CLOCK=1. The tool never opens a live chain
-(`--registry` passes refuse_live first) and never writes research-layer/data/.
+refused unless the environment sets SURVIVORSHIP_TEST_CLOCK=1. The tool never
+opens a live chain (`--registry` passes refuse_live first) and never writes
+research-layer/data/.
 """
 from __future__ import annotations
 
@@ -1029,9 +1030,9 @@ def cmd_draft_note(args, fetch) -> int:
         "chained before any study outcome number exists (design s4 step 2) and fixes "
         "the decision rule below (design s5, verbatim), the frozen inputs by sha256 "
         "(design P5), the pinned registry entry index for the templates, the splice "
-        "and death list, the P4 cuts and the declared exclusions. It arms nothing in the pipeline: only the "
-        "study tool (tools/survivorship.py) reads it, as the gate that refuses every "
-        "outcome computation until this note is on the chain.",
+        "and death list, the P4 cuts and the declared exclusions. It arms nothing "
+        "in the pipeline: only the study tool's gate (tools/survivorship.py) reads "
+        "it, refusing every outcome computation until this note is on the chain.",
         "",
         _s5(),
         "",
