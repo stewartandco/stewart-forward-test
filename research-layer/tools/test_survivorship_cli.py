@@ -131,7 +131,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
-    monkeypatch.setattr(su, "EXCLUDED", {}, raising=False)
+    monkeypatch.setattr(su, "EXCLUDED", {})
     monkeypatch.setattr(su, "END", STOP.isoformat())    # the fixture's common end
     # the fixture's own counts stand in for the design's 80/960 and strata
     monkeypatch.setattr(cli, "DESIGN_COUNTS", {
@@ -139,6 +139,9 @@ def env(tmp_path, monkeypatch):
         "strata": {"S": 1, "R": 1, "F": 1, "N": 0, "D": 0}})
     study, pipe, layer = tmp_path / "study", tmp_path / "pipe", tmp_path / "layer"
     (layer / "docs").mkdir(parents=True)
+    # the committed note the gate byte-compares with (the tool's own layer in a
+    # real run; draft-note writes it there with --layer-dir here)
+    monkeypatch.setattr(cli, "NOTE_FILE", layer / cli.NOTE_REL)
     shutil.copyfile(DESIGN, layer / cli.DESIGN_REL)
     series = {"AAAUSDT": _bars(START, STOP, 0.0), "BBBUSDT": _bars(START, STOP, 1.0),
               "CCCUSDT": _bars(START, STOP, 2.0)}
@@ -323,7 +326,7 @@ def s3env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
     monkeypatch.setattr(su, "TARGET", 3)
-    monkeypatch.setattr(su, "EXCLUDED", {}, raising=False)
+    monkeypatch.setattr(su, "EXCLUDED", {})
     monkeypatch.setattr(su, "declared_assets", lambda: ["AAAUSDT", "BBBUSDT"])
     series = {
         "AAAUSDT": _bars(date(2022, 1, 1), date(2025, 2, 28)),
@@ -769,9 +772,11 @@ def _manifest(env):
     return json.loads((env.study / "manifest.json").read_text(encoding="utf-8"))
 
 
-def test_require_note_boundaries():
+def test_require_note_boundaries(tmp_path, monkeypatch):
     m = {"upto": 6, "hashes": {"a": "aa11", "b": "bb22"}}
     good = cli.NOTE_PREFIX + "x aa11 bb22"
+    monkeypatch.setattr(cli, "NOTE_FILE", tmp_path / "note.md")
+    (tmp_path / "note.md").write_bytes(good.encode("utf-8"))
     assert cli.require_note(st.Copy(notes=[(6, good)]), m)[0] == 6
     assert cli.require_note(st.Copy(notes=[(9, "other"), (7, good)]), m)[0] == 7
     for notes in ([], [(5, good)], [(8, cli.NOTE_PREFIX + "aa11 only")],
@@ -1493,3 +1498,70 @@ def test_preflight_refuses_a_universe_walked_under_other_exclusions(env, monkeyp
     _set_universe(env, B=["AAAUSDT", "CCCUSDT"], declared_exclusions={"CCCUSDT": "x"})
     monkeypatch.setattr(su, "EXCLUDED", {"CCCUSDT": "x"})
     assert _preflight(env) == 2                        # B holds an excluded pair
+
+
+
+# ------------------------------------------------ minors (M-g, M-j)
+
+def test_require_note_compares_the_chained_text_with_the_committed_note(env, monkeypatch):
+    text = _frozen(env)
+    _chain(env, text)
+    m = _manifest(env)
+    copy = st.read_copy(env.reg, 6)
+    assert cli.require_note(copy, m)[0] == 6
+    f = env.layer / cli.NOTE_REL
+    f.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))      # CRLF checkout: same
+    assert cli.require_note(copy, m)[0] == 6
+    f.write_bytes((text + "an edit after chaining\n").encode("utf-8"))
+    with pytest.raises(cli.NoteMissing):
+        cli.require_note(copy, m)
+    calls = _trap_engine(monkeypatch)
+    assert _run("run", *_base(env), "--registry", env.reg) == 2
+    assert calls == []
+    f.unlink()
+    with pytest.raises(cli.NoteMissing):
+        cli.require_note(copy, m)
+
+
+def test_require_note_reads_the_note_file_of_the_tools_own_layer():
+    assert cli.NOTE_FILE == cli.LAYER / cli.NOTE_REL
+
+
+def test_write_json_refuses_nan(tmp_path):
+    with pytest.raises(ValueError):
+        cli._write_json(tmp_path / "x.json", {"a": float("nan")})
+    assert not (tmp_path / "x.json").exists()
+
+
+def test_analyse_writes_empty_strata_statistics_as_null(env, monkeypatch):
+    _chain(env, _frozen(env))
+    monkeypatch.setattr(h, "gauntlet_job", lambda item: {
+        "sid": item[0]["strategy_id"], "passed": False, "reason": "f", "beats_hold": None})
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("gauntlet", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("analyse", *_base(env), "--registry", env.reg, "--layer-dir", env.layer) == 0
+    raw = (env.layer / "docs" / "runs" / "2026-11-07-survivorship-1d.json").read_text(
+        encoding="utf-8")
+
+    def no_constant(c):
+        raise AssertionError(f"non-JSON constant {c}")
+
+    res = json.loads(raw, parse_constant=no_constant)
+    assert res["stratum_means"]["N"] is None and res["stratum_means"]["D"] is None
+    assert res["stratum_means"]["S"] is not None
+
+
+def test_analyse_writes_a_nan_secondary_as_null(env, monkeypatch):
+    # e.g. (m minus hold) over a universe whose every hold Sharpe is None
+    _chain(env, _frozen(env))
+    real = cli.ss.secondaries
+    monkeypatch.setattr(cli.ss, "secondaries", lambda *a: dict(
+        real(*a), m_minus_hold_gap=float("nan")))
+    monkeypatch.setattr(h, "gauntlet_job", lambda item: {
+        "sid": item[0]["strategy_id"], "passed": False, "reason": "f", "beats_hold": None})
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("gauntlet", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("analyse", *_base(env), "--registry", env.reg, "--layer-dir", env.layer) == 0
+    res = json.loads((env.layer / "docs" / "runs" / "2026-11-07-survivorship-1d.json")
+                     .read_text(encoding="utf-8"))
+    assert res["secondaries"]["m_minus_hold_gap"] is None

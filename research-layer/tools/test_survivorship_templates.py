@@ -124,3 +124,16 @@ def test_cell_spec_transplant_id_is_content_id(tmp_path):
     strip = lambda s: {k: v for k, v in s.items() if k not in ("name", "strategy_id")} | {
         "universe": {k: v for k, v in s["universe"].items() if k != "assets"}}
     assert strip(out) == strip(a)
+
+
+
+def test_cell_spec_verbatim_is_a_deep_copy(tmp_path):
+    # final review M-f: a caller mutating the spec must not change the frozen copy
+    a = _spec("a", "AUSDT", B1)
+    c = _copy_of(tmp_path, [a])
+    tkey, sids = next(iter(st.templates(c, "1d").items()))
+    out = st.cell_spec(c, tkey, sids, "AUSDT", "1d")
+    before = _copy.deepcopy(c.specs)
+    out["universe"]["assets"].append("ZUSDT")
+    out["blocks"][0]["params"]["x"] = 1
+    assert c.specs == before

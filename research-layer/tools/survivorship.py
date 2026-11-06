@@ -48,6 +48,9 @@ LAYER = Path(__file__).resolve().parent.parent
 DESIGN_REL = "docs/2026-11-06-crypto-survivorship-study-design.md"
 NOTE_REL = "docs/notes/survivorship-study-v1.md"
 RESULT_REL = "docs/notes/survivorship-study-v1-result.md"
+# The committed pre-registration note in the tool's OWN layer (never
+# --layer-dir): the gate byte-compares the chained text with it (M-j).
+NOTE_FILE = LAYER / NOTE_REL
 NOTE_PREFIX = "survivorship-study-v1: "
 RESULT_PREFIX = "survivorship-study-v1-result: "
 CMC_FILE = "cmc_20231231.json"
@@ -96,8 +99,21 @@ def _load_json(path: Path, hint: str):
 
 
 def _write_json(path: Path, obj) -> None:
+    """Strict JSON (allow_nan=False: a NaN is a ValueError, nothing written)."""
+    text = json.dumps(obj, indent=2, sort_keys=True, allow_nan=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes((json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    path.write_bytes(text.encode("utf-8"))
+
+
+def _denan(obj):
+    """A statistic over an empty group (NaN) becomes None, so it is null."""
+    if isinstance(obj, float) and obj != obj:
+        return None
+    if isinstance(obj, dict):
+        return {k: _denan(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_denan(v) for v in obj]
+    return obj
 
 
 def _write_lf(path: Path, text: str) -> None:
@@ -376,6 +392,15 @@ def _line_sha(registry: Path, idx: int, text: str) -> str:
     raise NoteMissing(f"{registry} has no entry {idx}")
 
 
+def _committed_note() -> str | None:
+    """NOTE_FILE's text, LF-normalised (a CRLF checkout reads the same), or
+    None when it does not exist."""
+    try:
+        return NOTE_FILE.read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+    except FileNotFoundError:
+        return None
+
+
 def require_note(copy, manifest: dict, registry: Path | None = None) -> tuple:
     """The gate (design s4 step 3). Returns (entry index, sha256 of that
     entry's exact JSONL line; None without `registry`) of the chained
@@ -383,7 +408,9 @@ def require_note(copy, manifest: dict, registry: Path | None = None) -> tuple:
     starts with NOTE_PREFIX, holds every manifest hash, and sits after the
     frozen registry prefix. `upto` is the first EXCLUDED entry index (the
     templates are the registrations at entries 0..upto-1), so a note at
-    index >= upto comes after every frozen registration."""
+    index >= upto comes after every frozen registration. The chained text
+    must also equal, byte for byte (LF-normalised), the committed note file
+    docs/notes/survivorship-study-v1.md of the tool's own layer."""
     want = list(manifest["hashes"].values())
     upto = int(manifest["upto"])
     why = []
@@ -397,6 +424,13 @@ def require_note(copy, manifest: dict, registry: Path | None = None) -> tuple:
         if idx < upto:
             why.append(f"note at entry {idx} sits inside the frozen registry "
                        f"prefix (upto {upto})")
+            continue
+        committed = _committed_note()
+        if committed is None:
+            why.append(f"the committed note {NOTE_FILE} is missing")
+            continue
+        if text != committed:
+            why.append(f"note at entry {idx} differs from the committed {NOTE_FILE}")
             continue
         return idx, (None if registry is None else _line_sha(Path(registry), idx, text))
     raise NoteMissing(
@@ -1143,9 +1177,12 @@ def cmd_analyse(args, fetch) -> int:
     prim = ss.primary(m, sidx)
     merged = {k: {**res[k], **train[k], **gaunt.get(k, {})} for k in keys}
     family = {t: copy.specs[tmpl[t][0]]["family"] for t in tkeys}
-    sec = ss.secondaries(merged, strata, family)
+    # an empty group's statistic (NaN) is written as null (M-g); the primary
+    # G/L/U are left as they are, so a NaN there refuses to be written
+    sec = _denan(ss.secondaries(merged, strata, family))
+    means = {s: sec["stratum_mean_m"].get(s) for s in su.STRATA}
     result = {**prim, "tf": tf, "stratum_sizes": {s: len(sidx[s]) for s in su.STRATA},
-              "stratum_means": sec["stratum_mean_m"], "secondaries": sec,
+              "stratum_means": means, "secondaries": sec,
               "n_templates": len(tkeys), "n_cells": len(pairs),
               "resamples": ss.RESAMPLES, "seed": ss.SEED, "note_index": note_idx,
               "note_line_sha256": note_sha,
@@ -1159,7 +1196,6 @@ def cmd_analyse(args, fetch) -> int:
     print(f"analyse {tf}: {ss.verdict_text(prim['verdict'])}, G {_f(prim['G'])} "
           f"[{_f(prim['L'])}, {_f(prim['U'])}]; wrote {md}")
     if _result_note_for(tf):
-        means = sec["stratum_mean_m"]
         lines = [
             RESULT_PREFIX + "result of the pre-registered crypto survivorship study "
             f"(note {NOTE_PREFIX.strip()} at registry entry {note_idx}); 1d arm, the "

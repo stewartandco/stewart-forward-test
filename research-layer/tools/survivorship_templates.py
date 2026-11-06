@@ -77,7 +77,7 @@ def templates(copy: Copy, tf: str) -> dict[str, list[str]]:
 def cell_spec(copy: Copy, tkey: str, sids: list[str], pair: str, tf: str) -> dict:
     for sid in sorted(sids):
         if copy.specs[sid]["universe"]["assets"] == [pair]:
-            return copy.specs[sid]
+            return _copy.deepcopy(copy.specs[sid])
     spec = _copy.deepcopy(copy.specs[min(sids)])
     spec["universe"]["assets"] = [pair]
     spec["name"] = _build_name([pair], spec["family"], spec["blocks"], tf)
