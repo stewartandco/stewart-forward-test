@@ -44,3 +44,6 @@ docs/diagnostics/
 docs/PROMPT-*.md
 sources/discovery_queue.jsonl
 sources/*.bak-*
+
+# Survivorship study scratch (downloads/derived CSVs), never the record.
+_scratch_survivorship/
