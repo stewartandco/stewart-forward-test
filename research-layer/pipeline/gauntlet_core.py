@@ -596,6 +596,42 @@ def available_phys_mb() -> int | None:
         return None
 
 
+def process_memory_mb() -> tuple[int, int] | None:
+    """(PrivateUsage, PeakPagefileUsage) of THIS process in MiB (Windows
+    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX): its private commit now
+    and the highest it has been. The statistics job measures a span's peak
+    commit growth as the peak after it minus the private commit before it.
+    None off Windows or on any failure. Private prototypes on purpose: the
+    shared ctypes.windll function objects are left as they are, because
+    gauntlet.private_commit_mb and the stats rehearsal's sampler thread set
+    their own argtypes on them."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32)] + [
+                (n, ctypes.c_size_t) for n in (
+                    "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                    "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                    "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
+                    "PrivateUsage")]
+        current = ctypes.WINFUNCTYPE(ctypes.c_void_p)(
+            ("GetCurrentProcess", ctypes.windll.kernel32))
+        info = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p,
+                                  wintypes.DWORD)(
+            ("GetProcessMemoryInfo", ctypes.windll.psapi))
+        m = _PMC()
+        m.cb = ctypes.sizeof(m)
+        if not info(current(), ctypes.addressof(m), m.cb):
+            return None
+        return int(m.PrivateUsage // 2**20), int(m.PeakPagefileUsage // 2**20)
+    except Exception:
+        return None
+
+
 @contextlib.contextmanager
 def worker_env():
     """Set WORKER_BLAS_ENV for the duration of a pool. Spawned workers read

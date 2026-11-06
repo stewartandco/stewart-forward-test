@@ -912,14 +912,18 @@ of it.
   `cluster_sum_n2`, as the one the registry-wide method wrote, gives the
   UNSCALED `cluster_s`: the first night after cutover never deadline-stops a
   pass that takes seconds), **and the pass starts only when AVAILABLE
-  PHYSICAL memory covers `CLUSTER_BYTES_PER_N2` (9) x n_max^2 +
-  `CLUSTER_BYTES_PER_NL` (48) x n_max x L + `CLUSTER_BYTES_PER_ALIGNED_NL`
-  (11.5) x n x L bytes** (`cluster_need_mb(n, n_max, days)`; n_max = the
-  largest cell partition's series count, read from the specs BEFORE
+  PHYSICAL memory AND free COMMIT each cover `CLUSTER_BYTES_PER_N2` (9) x
+  n_max^2 + `CLUSTER_BYTES_PER_NL` (48) x n_max x L +
+  `CLUSTER_BYTES_PER_ALIGNED_NL` (11.5) x n x L bytes, plus
+  `POST_CLUSTER_NEED_MB` (512)** (`cluster_need_mb(n, n_max, days)` is the
+  clustering part alone, and so is the status's `cluster_need_mb`; n_max =
+  the largest cell partition's series count, read from the specs BEFORE
   clustering; n = all series, whose aligned copies live through the pass; L
   bounded above by the shortest cached series, `cluster_days_bound`;
-  `gauntlet_core.available_phys_mb`, read after the series pass; unknown =
-  no block). 11.5 measured 2026-11-05 (rehearsal on a chain copy, n 30,140,
+  `gauntlet_core.available_phys_mb` and `available_commit_mb`, both read
+  after the series pass; unknown = no block, on either limit; a second,
+  earlier checkpoint guards the series pass, bullet "Train windows as views"
+  below). 11.5 measured 2026-11-05 (rehearsal on a chain copy, n 30,140,
   L 1,003, n_max 1,068): the pass added 332 MB, 257 MB of it the aligned
   copies; (332 - 33 MB for the largest cut) / n L = 10.4 B, plus about 10%.
   The need was 9,831 MB the same night under the old method. Before the
@@ -932,8 +936,9 @@ of it.
   merge loop touches every page of its matrix on every merge, so a
   partly paged-out pass thrashes: on 2026-10-11 n = 19,092 needed ~4.9 GB
   with 1.4 GB free, sat 5.8 GB committed / 44 MB resident, and outlived
-  PT6H. Short of memory = **exit 3** `deferred_memory` (status
-  `cluster_need_mb`, `avail_phys_mb`; the series stay cached; the next run
+  PT6H. Short of memory, physical OR commit, at either checkpoint =
+  **exit 3** `deferred_memory` (status `cluster_need_mb`, `avail_phys_mb`,
+  `avail_commit_mb`; series already simulated stay cached; the next run
   retries). **Nonzero on purpose (Coen, 2026-10-11, option b): task 28 is
   `daily` in the Sentinel with no tolerated codes, so a memory deferral
   FAILs the 09:15 digest the same morning** instead of surfacing only as
@@ -943,13 +948,15 @@ of it.
   stopped fitting near n 46,850 at about 23 GB free (planning date
   2026-12-03; 34,277 MB free at 01:00 on 2026-11-05); per cell, the need at
   n 30,140 is about 390 to 570 MB and grows with n_max^2 plus a linear n L
-  term. **FOLLOW-UP (not gated): the whole job's peak AFTER clustering**
-  (11,745 MB private at n 30,140, measured 2026-11-05: the train-window
-  float lists `gauntlet_stats` builds for every strategy, the PBO pass and
-  the verdict loop) grows LINEARLY with n and no gate covers it; at about
-  23 GB free it crosses near n 86,000, at 34 GB near 127,000 (about
-  2027-02 to 04). It is the next memory wall to watch. The old method's
-  whole peak was about 13.4 GB, so the per-cell change lowers it.
+  term. **DONE 2026-11-05 (was a FOLLOW-UP): the whole job's peak AFTER
+  clustering.** It was 11,745 MB private at n 30,140, ungated and growing
+  linearly with n (it would have crossed the 01:00 free memory around
+  2027-02 to 04). Cause: the train windows held as Python float lists
+  (about 40 B a value, 206.7M values) for every strategy. Fix: the windows
+  are zero-copy numpy views, a list built only inside each consumer
+  (bullet "Train windows as views" below). Measured on the same 11-05
+  prefix: whole-process peak private 4,069 MiB, set in the bars load and
+  series pass, never exceeded after clustering.
   **A second clock beside it: the full-bars memo ceiling (final review M3).**
   Task 12 measured 5,741,210 bars over the 228 intraday files (data to
   2026-10-31); they grow 2,432 a day (76 cells x 32 bars), so once every
@@ -961,12 +968,23 @@ of it.
   `memo_ceiling` item in `degraded_quarantine.json` (the Sentinel WARNs, and
   FAILs after 3 days).
   **Early warning.** The Ops Sentinel's `gauntlet_queue` check WARNs when
-  `cluster_need_mb` >= `cluster_headroom_warn` (0.6) x `avail_phys_mb`
+  the clustering need >= `cluster_headroom_warn` (0.6) x `avail_phys_mb`
   (sc-ops-sentinel `ac61861`, 2026-11-04); it reads the status's need and so
   works unchanged on the per-cell need. The n line (`cluster_n_warn`
   46,000, plan 5, `9bf6637`) is retired in the same cutover as the per-cell
   change (sc-ops-sentinel branch `feat/retire-cluster-n-warn`): n no longer
-  drives the need. Both are warnings, not stops.
+  drives the need. Its twin on commit, `commit_headroom_warn` (0.6): WARN
+  when the clustering need >= 0.6 x `avail_commit_mb`, and under the same
+  key when `series_charge_mb` >= 0.6 x `avail_commit_series_mb` (the series
+  pass, the binding commit need: about 3.7 to 4.4 GB against a clustering
+  need of 348 to 570 MB) (sc-ops-sentinel branch
+  `feat/commit-headroom-warn`, merged in the train-window cutover). The
+  clustering need both ratios compare is `gate_need_mb` (`cluster_need_mb`
+  + 512, what the gate compares), falling back to `cluster_need_mb` on a
+  status written before that field existed (Controller Ruling 8): against
+  the 512-less figure a WARN led a deferral only when the need was over
+  768 MB, so at today's need it fired only on nights the gate had already
+  deferred. All are warnings, not stops.
   The memory is one n_max x n_max float64 matrix at a time (the largest
   partition's), plus the merge history's member sets (about 0.01 n^2
   entries measured on the registry-wide pass, so about 0.01 n_max^2 per
@@ -980,15 +998,109 @@ of it.
   without changing the clustering's float results (a row-blocked Gram
   differs from the full one in the last bit and changes the merge history,
   measured 2026-11-01), which is why the count itself changed (bullet
-  "Effective trials per cell" below). Each deferral comes only after the full series pass and FAILs
-  that morning's digest (exit 3). A digest FAIL whose task-28 result is 3
-  means "not enough RAM to cluster", not a crash: read the `MEMORY:` line
-  in `logs/gauntlet-stats-run.log`. One instance at a time
+  "Effective trials per cell" below). A clustering deferral comes only
+  after the full series pass, a series-pass deferral before anything is
+  simulated; either FAILs that morning's digest (exit 3). A digest FAIL
+  whose task-28 result is 3 means "not enough memory (physical or commit)
+  to run safely", not a crash: read the `MEMORY:` line in
+  `logs/gauntlet-stats-run.log`, which names the checkpoint and the short
+  limit. One instance at a time
   (`logs/gauntlet_stats.lock`): a second one, e.g. a hand `--chain` run beside
   the 01:00 task, defers with exit 0 and never touches the status file.
   The status reports `trials_n_raw` (this run's per-cell sum of k; the
   registry-wide argmax before the per-cell change) and
   `trials_n_effective` (the floored N the entries use).
+- **Train windows as views + the memory gate on physical AND commit (design
+  `docs/2026-11-05-stats-train-window-memory-design.md`, Coen 2026-11-05).**
+  No recorded number, PBO cache key or method changes: no chain note, and a
+  rollback is a revert of the merge. `simcache.Series.train_view(cutoff)`
+  returns `(window, fell_back)`: the zero-copy prefix `rets[:k]` (k from a
+  right-side searchsorted, so the cutoff date is included) when the dates
+  are non-decreasing, else the old mask copy with `fell_back` True. The job
+  keeps every window as a view and builds a Python list only inside each
+  consumer, dropped after it: one at a time for `train_sharpe`, one
+  family's in `family_train` (at `group_pbo`'s call site), per member in
+  `pbo_inputs_sha`, and the verdict's own. Nothing writes into a view.
+  Identity measured 2026-11-05 (stats rehearsal on the 11-05 prefix, n
+  30,140, report stewartandco-agents
+  `hubs/intelligence/research-layer-internals/docs/runs/2026-11-05-stats-train-window-rehearsal.md`):
+  all 300 payloads and 30,140 `moments` rows byte-identical to the current
+  method's, same `data_digest`; peak private 4,069 MiB against 11,745;
+  `series_mb` 3,324 MiB.
+  **Two checkpoints, each exit 3 `deferred_memory` when short.** (1) Before
+  `load_cell_data`, COMMIT only (residency matters to the merge loop, not
+  to an allocation): free commit must cover the series charge,
+  ceil(max(`series_rate_hist`) x tonight's registered n x
+  `SERIES_CHARGE_MARGIN` 1.10), or with no history the fallback (12 B x n x
+  7,000 points + the summed bytes of the cell CSVs to load) x
+  `SERIES_FALLBACK_MARGIN` 1.75, 4,356 MiB at n 30,140 (the plan's 1.25
+  gave 3,112, under the measured 3,324 x 1.25; Ruling 6). Nothing has been
+  simulated when it defers. (2) Before clustering, physical AND commit,
+  each against `cluster_need_mb` + `POST_CLUSTER_NEED_MB` (512, kept by
+  the rehearsal: after clustering the private commit rose at most 2.6 MiB
+  sampled every 10 ms and never set a new peak, so the growth is bounded
+  by 219 MiB). Exit 3 means physical OR commit was short at either point.
+  An unknown reading (None: off Windows or a failed call) never blocks, on
+  either limit, at either checkpoint. The `MEMORY:` line names the
+  checkpoint and the short limit: `MEMORY: series pass over N registered
+  strategies needs ~X MB of commit (<basis>) and Y MB of commit is
+  available; commit is short ...` (basis: the max rate, the pass count, n
+  and the margin, or "no measurement yet: the fallback estimate"), or
+  `MEMORY: clustering N series (largest partition M) needs ~T MB (C
+  clustering + 512 after it); physical memory is short (...)` and/or
+  `commit is short (...)`.
+  **Status fields.** `avail_commit_mb`: the LAST checkpoint's reading (the
+  series pass's, then the clustering's), null when unknown or not reached.
+  `series_mb` / `series_n`: the last completed pass's peak commit growth
+  (`PeakPagefileUsage` after the pass minus `PrivateUsage` just before
+  `load_cell_data`, `gauntlet_core.process_memory_mb`, in-process MiB) and
+  the registered n it was measured at; raw last-night figures, carried
+  forward like `cluster_s` / `cluster_n` until a pass completes, display
+  only (the charge does not read them). `series_rate_hist`: MiB per
+  strategy of the last `SERIES_RATE_HIST_MAX` (8) completed passes, newest
+  last; the charge reads its MAX (Ruling 5), so a warm night (cache hits)
+  never lowers the charge below the last vintage roll's cold pass, which
+  stays in the window for at least a week; a deadline-stopped pass appends
+  nothing. `train_view_fallbacks`: how many series took the mask copy
+  because their dates were not non-decreasing; 0 on a clean run, anything
+  else is a corrupt or legacy cache entry worth a look (the values are
+  still right). `cluster_need_mb` is the clustering figure alone (it
+  excludes the 512). The three checkpoint fields (Controller Ruling 8), each
+  null when its checkpoint was not reached: `gate_need_mb`, the need the
+  clustering checkpoint actually compares (`cluster_need_mb` +
+  `POST_CLUSTER_NEED_MB`); `series_charge_mb`, the charge the series
+  checkpoint compared; `avail_commit_series_mb`, that checkpoint's commit
+  reading (`avail_commit_mb` stays the LAST reading). A series-pass deferral
+  records the series pair and leaves `gate_need_mb` and `cluster_need_mb`
+  null. The Sentinel's headroom WARNs read `gate_need_mb` and the series
+  pair (bullet "Early warning" above).
+  **Morning check: a higher `series_mb` is not a regression by itself.** It
+  grows with the intraday cell set (Switch 2: 228 intraday files, about 5.7M
+  bars held as dicts) and with each new registered cell, not with n alone.
+  The charge reads the rates of passes already completed, so after a
+  cell-set jump it lags one night: the first night on the larger set is
+  charged at the old rate, and the next night's charge includes it.
+  **HAZARDS.** (a) `train_sharpe`'s `.tolist()` is REQUIRED for
+  bit-identity: Python's `sum()` compensates exact Python floats only and
+  adds np.float64 items plainly, so handing it the view moves the train
+  Sharpe in the last bits (`test_recorded_stats_match_the_v6_gauntlets_own_numbers`
+  and the BASE payload digest pin fail). `pbo_inputs_sha`'s `.tolist()` is
+  kept to match the spec, though `array("d", view)` gives the same bytes.
+  (b) Never edit `group_pbo`'s source (nor `pipeline/pbo.py` or
+  `stats.percentile`) without re-pinning `BASE_PBO_CODE_SHA`:
+  `pbo_code_sha()` hashes them and keys the PBO cache, so an edit
+  recomputes every cached null; that is why the list conversion lives in
+  `family_train`, not in `group_pbo`. (c) `BASE_PAYLOADS_SHA_V4` /
+  `BASE_PAYLOADS_SHA_MIXED` and `BASE_PBO_INPUTS_SHA` in
+  `test_gauntlet_stats.py` pin the BASE code's (`49e8e0fb2`) payloads and
+  cache key: re-pin them only for a DELIBERATE payload or key change, never
+  to make a refactor pass. (d) The first night after cutover charges the
+  fallback, which the rehearsal calibrated on a WARM pass (30,140 cache
+  hits, no simulation transients); a cold vintage-roll night peaks higher.
+  So the cutover's first night must never be a vintage-roll night (Ruling
+  7: merge by day so a warm night records a measured rate first). An
+  under-charge there only reproduces the old behaviour (no commit check on
+  the series pass), on that one night.
 - **Effective trials per cell (design
   `docs/2026-11-04-effective-trials-per-cell-design.md`, Coen 2026-11-04;
   `pipeline/cluster_cells.py`, `gauntlet.cluster_registry_by_cell`).** The
@@ -1162,7 +1274,13 @@ of it.
   floor); `cluster_n` / `cluster_s` / `cluster_sum_n2` (carried forward),
   `cluster_need_mb` / `avail_phys_mb` (this run's memory gate) and
   `cluster_max_cell_n` / `cut_late_merges` (this run's per-cell shape, null
-  when it did not cluster). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
+  when it did not cluster); since the train-window change `avail_commit_mb`
+  (the last memory checkpoint's reading), `series_mb` / `series_n` (carried
+  forward, display only), `series_rate_hist` (the last 8 passes' rates, what
+  the series checkpoint charges by its max), `gate_need_mb` /
+  `series_charge_mb` / `avail_commit_series_mb` (this run's checkpoint
+  figures, null when not reached) and `train_view_fallbacks`
+  (bullet "Train windows as views"). Sentinel `gauntlet_queue` check (sc-ops-sentinel `master`): FAIL when the worker
   status is missing or stale, when `exit_reason` is `crashed`,
   `refused_no_protocol_note` or unknown, or when `oldest_queued_age_hours` >
   48; WARN when the statistics lag exceeds 7 days. `27_GauntletWorker` is in
@@ -1185,8 +1303,9 @@ of it.
   clustering refused (`cluster_refused`, e.g. a constant nonzero series in
   a partition), or the run crashed (`crashed`);
   2 = argparse usage error; 3 = not
-  enough free physical memory to cluster (`deferred_memory`, FAILs the
-  digest on purpose).
+  enough free physical memory OR commit to run safely, at the series-pass
+  checkpoint (commit only) or the clustering one (both) (`deferred_memory`,
+  FAILs the digest on purpose; the `MEMORY:` line names which).
 - **Verifier.** Invariant 11: a `gauntlet_stats` entry must point at an EARLIER
   v6.1 gauntlet verdict of the same strategy, at most one per verdict.
   Invariant 12: from the v6.1 note's line onward no gauntlet verdict may carry

@@ -102,19 +102,48 @@ it was measured at; unscaled when the status has no cluster_sum_n2, as one
 written by the registry-wide method; CLUSTER_PRIOR_S before any
 measurement); each PBO null likewise (pbo_null_mean_s, else
 gauntlet.PBO_NULL_PRIOR_S). A pass that does not fit is a deadline stop.
-Memory: clustering then starts only when available physical memory covers
-cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L + 11.5 n L bytes
-(n_max the largest partition, read from the specs before clustering; L
-bounded by the shortest cached series); otherwise exit 3.
+Memory (spec 2026-11-05 s3.2): two checkpoints, each exit 3 when short. (1)
+Before the bars load, free commit (only) must cover the series pass's charge
+(the highest per-strategy rate of the last SERIES_RATE_HIST_MAX completed
+passes x tonight's n x SERIES_CHARGE_MARGIN, else the fallback estimate).
+(2) Clustering then starts only when BOTH available physical memory and
+free commit cover cluster_need_mb(n, n_max, L) = 9 n_max^2 + 48 n_max L +
+11.5 n L bytes (n_max the largest partition, read from the specs before
+clustering; L bounded by the shortest cached series) plus
+POST_CLUSTER_NEED_MB. An unknown reading never blocks, on either limit.
+Status: avail_commit_mb (the last checkpoint's reading), series_charge_mb
+and avail_commit_series_mb (checkpoint 1's charge and commit reading),
+gate_need_mb (checkpoint 2's need, cluster_need_mb plus
+POST_CLUSTER_NEED_MB), series_mb and series_n (the last completed pass's raw
+figures, display only), series_rate_hist (what checkpoint 1 charges by its
+max), and train_view_fallbacks (below).
+
+Train windows (spec 2026-11-05 s3.1): held as zero-copy views of the cached
+series (simcache.Series.train_view), a Python list built only inside each
+consumer. Before this the lists of every strategy were the job's peak
+(11,745 MiB at n 30,140, ungated); measured after it, 4,069 MiB on the same
+inputs with every payload byte-identical. A series whose dates are not
+non-decreasing gets the old mask copy, counted in train_view_fallbacks.
+HAZARDS: (a) train_sharpe's .tolist() is required for bit-identity: sum()
+compensates exact Python floats only and adds np.float64 items plainly.
+(b) group_pbo's source is hashed by pbo_code_sha(), which keys the PBO
+cache: never edit it (or pipeline/pbo.py, stats.percentile) without
+re-pinning BASE_PBO_CODE_SHA in the tests; the list conversion lives in
+family_train for that reason. (c) The tests pin the BASE code's payload
+digests and pbo_inputs_sha; re-pin them only for a deliberate payload or
+key change. (d) The no-history series fallback was calibrated on a warm
+pass (Ruling 7): the cutover's first night must not be a vintage-roll night.
 One instance at a time (logs/gauntlet_stats.lock); a second one defers.
 
 Exit 0: done, nothing to do, stopped at the deadline, chain.lock held, or
 another instance running (that one owns the status file; it is not touched).
 Exit 1: the data or the chain refused the run, the clustering refused, or
 the run crashed (status exit_reason says which).
-Exit 3: not enough free physical memory to cluster (`deferred_memory`); the
-series are cached and the next run retries. Nonzero on purpose, so the Ops
-Sentinel FAILs the digest the same morning (Coen, 2026-10-11).
+Exit 3: not enough free physical memory or commit to run safely
+(`deferred_memory`; the MEMORY line names the short limit and the
+checkpoint); series already simulated are cached and the next run retries.
+Nonzero on purpose, so the Ops Sentinel FAILs the digest the same morning
+(Coen, 2026-10-11).
 """
 from __future__ import annotations
 
@@ -140,7 +169,8 @@ from .pbo import cscv_pbo, distinct_configs, permutation_null, percentile_of
 from .plateau import qualifies
 from .protocols import V61_FAMILY
 from .gauntlet_core import (PROTOCOL_V61, DEFAULT_CUTOFF, truncate_bars,
-                            _annualized_sharpe_from_returns, available_phys_mb)
+                            _annualized_sharpe_from_returns, available_phys_mb,
+                            available_commit_mb, process_memory_mb)
 from .taskguard import task_started
 # Module-level names on purpose: the tests replace them to prove the job
 # calls the gauntlet's own functions rather than a copy.
@@ -166,13 +196,24 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # Its merge loop touches every page of that matrix every merge: if any of it
 # is paged out the pass thrashes (2026-10-11: 19,092 series, ~4.9 GB needed,
 # 1.4 GB free, killed after 90 min). So the pass starts only when AVAILABLE
-# PHYSICAL memory covers the need; otherwise the run stops (exit
-# DEFERRED_MEMORY_EXIT, `deferred_memory`) and the next one retries.
-# need = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all, L aligned
-# days): the first two are the largest partition's matrix and its n_max x L
-# copies, the last is cluster_registry_by_cell's aligned copies of ALL n
-# series (built up front, alive through the pass). `available_phys_mb` is
-# read after the series pass, so memory already held is not charged again.
+# PHYSICAL memory covers the need, AND free COMMIT covers it too (memory
+# spec s3.2, Coen 2026-11-05: by day the box had 10-12 GB of commit left with
+# about 31 GB of RAM free, so a physical-only gate would let a tight-commit
+# night die of MemoryError, `crashed`, instead of deferring). Otherwise the
+# run stops (exit DEFERRED_MEMORY_EXIT, `deferred_memory`), the MEMORY line
+# names the short limit, and the next one retries. An unknown reading (None)
+# never blocks, on either limit.
+# need = cluster_need_mb(n, n_max, L) + POST_CLUSTER_NEED_MB, where
+# cluster_need_mb = 9 n_max^2 + 48 n_max L + 11.5 n L bytes (n series in all,
+# L aligned days): the first two are the largest partition's matrix and its
+# n_max x L copies, the last is cluster_registry_by_cell's aligned copies of
+# ALL n series (built up front, alive through the pass). The status's
+# `cluster_need_mb` is that clustering figure alone; `gate_need_mb` is the
+# need the checkpoint actually compares (cluster_need_mb plus
+# POST_CLUSTER_NEED_MB), and the Ops Sentinel's two headroom ratios read it
+# (falling back to cluster_need_mb on a status written before it existed).
+# Both readings are taken after the series pass, so memory already held is
+# not charged again.
 # HAZARD, not covered: the merge history's member sets are a further
 # n_max^2-shaped term (about 0.01 n^2 entries measured on the registry-wide
 # pass, more if the merge tree turns chain-like), inside the margin only.
@@ -180,9 +221,19 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 # nonzero series there) is far heavier and is not covered by this gate; the
 # per-cell design never takes it: cluster_cells raises ConstantNonzeroRow
 # for such a row and the run refuses (`cluster_refused`, exit 1).
-# Not gated either: the whole job's peak AFTER clustering (11,745 MB at n
-# 30,140 on 2026-11-05: the train-window float lists for every strategy, the
-# PBO pass and the verdict loop) grows linearly with n (follow-up).
+# After clustering: POST_CLUSTER_NEED_MB, the work that follows the pass
+# (the train windows, now zero-copy views of the cached series, memory spec
+# s3.1; one family's transient float lists at a time for PBO; the verdict
+# loop), plus about 10%. Before the views it was the job's peak: 11,745 MB
+# private at n 30,140 (2026-11-05), the train windows as Python float lists
+# for every strategy, growing linearly with n and covered by no gate. 512 is
+# kept by measurement (plan Task 4 rehearsal, 2026-11-05, n 30,140 on the
+# 11-05 prefix): after the clustering the private commit rose at most 2.6
+# MB (10 ms sampler) and never set a new process peak, so the growth is
+# bounded by 219 MB (peak minus the after-clustering private); both under
+# 512 with the 10% on top. Every PBO null was served from the cache in that
+# run, so a computed family's transients (its float lists, spec s3.1 about
+# 13 MB at the largest family, and the CSCV null) are inside the margin only.
 # 11.5 B per aligned n L: measured 2026-11-05 (Task 6 rehearsal on a chain
 # copy, n 30,140, L 1,003, n_max 1,068, tools/stats_rehearsal.py): the pass
 # added 332.3 MB of private bytes, 257.1 MB of it the aligned copies (8.9 B
@@ -197,6 +248,41 @@ CLUSTER_PRIOR_S = 2 * 3600.0
 CLUSTER_BYTES_PER_N2 = 9.0
 CLUSTER_BYTES_PER_NL = 48.0
 CLUSTER_BYTES_PER_ALIGNED_NL = 11.5
+POST_CLUSTER_NEED_MB = 512
+# The series-pass checkpoint (memory spec s3.2 item 3, the builder's call):
+# the bars load and the series pass commit about 2.8 GB BEFORE the clustering
+# gate is reached, so a tight-commit night could still crash there. Before
+# load_cell_data the run therefore defers (exit 3) when free COMMIT is under
+# the pass's charge; physical memory is not tested here (commit is the
+# binding limit for allocations; residency matters for the merge loop only).
+# Each completed pass measures `series_mb`, the PEAK commit growth of the
+# span (PeakPagefileUsage after the pass minus PrivateUsage just before
+# load_cell_data, in-process, MiB), at the registered n `series_n`; both
+# stay in the status as the last night's raw figures. Its per-strategy rate
+# series_mb / series_n is appended to `series_rate_hist` (newest last, the
+# last SERIES_RATE_HIST_MAX kept; a pass stopped at the deadline appends
+# nothing). The charge is ceil(max(series_rate_hist) x tonight's n x 1.10)
+# (Controller Ruling 5): the MAX, so a warm night (mostly cache hits) never
+# lowers the charge below the cold night of a new vintage, whose simulation
+# transients sit above the retained arrays; 8 completed passes span at least
+# 8 nights, so the last vintage roll's cold pass stays in the window for a
+# week after it completed.
+# No measurement yet (the first night after cutover): the spec's "12 B per
+# cached point" cannot be summed before the pass (the cache entries' lengths
+# are what the pass reads), so the plan's call is 12 B x registered n x 7,000
+# points (the measured mean is about 7,600 points a strategy, rounded down),
+# plus the summed byte size of the cell CSVs load_cell_data will read (a
+# stand-in for bars_by_cell), x SERIES_FALLBACK_MARGIN. The plan's 1.25 was
+# raised to 1.75 by the Task 4 rehearsal (Controller Ruling 6, 2026-11-05):
+# at n 30,140 with the real 74.4 MiB of cell CSVs, 1.25 gave 3,112 MB, under
+# the measured series_mb 3,324 x 1.25 = 4,155; 1.75 gives 4,356 (1.70, the
+# least passing step of 0.05, would give 4,232: 4,231.04 rounded up). About
+# 4.3 GB at n 30,140.
+SERIES_CHARGE_MARGIN = 1.10
+SERIES_RATE_HIST_MAX = 8
+SERIES_FALLBACK_BYTES_PER_POINT = 12
+SERIES_FALLBACK_POINTS = 7000
+SERIES_FALLBACK_MARGIN = 1.75
 # Coen, 2026-10-11 (option b): a memory deferral is NONZERO so the Sentinel
 # FAILs the 09:15 digest (task 28 is `daily`, no tolerated codes) the same
 # morning, instead of only the 7-day stats-lag WARN. 3, not 1: 1 means the
@@ -233,7 +319,29 @@ STATUS_FIELDS = ("ts_utc", "vintage", "verdicts_without_stats", "stats_written",
                  # null when it did not cluster; cluster_sum_n2 (sum of n^2
                  # over partitions) is carried forward like cluster_n and
                  # cluster_s, the figure the time estimate scales by
-                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges")
+                 "cluster_max_cell_n", "cluster_sum_n2", "cut_late_merges",
+                 # train windows held as views (memory spec s3.1): how many
+                 # series took train_view's mask-copy fallback (dates not
+                 # non-decreasing); 0 on a clean run
+                 "train_view_fallbacks",
+                 # the gate on physical AND commit (memory spec s3.2):
+                 # avail_commit_mb is the LAST checkpoint's reading (the
+                 # series pass's, then the clustering's), null when unknown or
+                 # not reached; series_mb / series_n (the last completed series
+                 # pass's peak commit growth and the registered n it was
+                 # measured at) are carried forward like cluster_s / cluster_n;
+                 # series_rate_hist (MiB per strategy of the last
+                 # SERIES_RATE_HIST_MAX completed passes, newest last) is what
+                 # the series checkpoint charges by its max
+                 "avail_commit_mb", "series_mb", "series_n", "series_rate_hist",
+                 # each checkpoint's own figures, null when not reached:
+                 # series_charge_mb / avail_commit_series_mb are what the
+                 # series checkpoint compared (charge, commit reading);
+                 # gate_need_mb is the clustering checkpoint's real need,
+                 # cluster_need_mb + POST_CLUSTER_NEED_MB (cluster_need_mb
+                 # stays the clustering figure alone). The Ops Sentinel's
+                 # headroom WARNs read gate_need_mb and the series pair.
+                 "gate_need_mb", "series_charge_mb", "avail_commit_series_mb")
 # T7 flush (step 7): computed entries a flush could not chain because
 # chain.lock was held are kept and retried in the same run. Once that has
 # happened the family loop starts nothing that would eat into this reserve,
@@ -431,6 +539,15 @@ def group_pbo(g: str, fam: list[dict], train: dict, live: bool,
     return out
 
 
+def family_train(fam: list[dict], train: dict) -> dict[str, list[float]]:
+    """One family's train windows as the Python float lists group_pbo's
+    pure-Python PBO reads, built from the run's views for this family only
+    and dropped after its PBO (memory spec s3.1). The conversion lives here,
+    not in group_pbo: pbo_code_sha() hashes group_pbo's source, so an edit
+    there would re-key every cached null (spec s2 anti-goal)."""
+    return {s["sid"]: _as_list(train[s["sid"]]) for s in fam}
+
+
 def pbo_code_sha() -> str:
     """The code-and-constants part of the PBO cache key: PBO_CACHE_REV, the
     PBO constants, and the source of pipeline/pbo.py, group_pbo and
@@ -452,10 +569,12 @@ def pbo_code_sha() -> str:
 def pbo_inputs_sha(g: str, fam: list[dict], train: dict, draws: int) -> str:
     """Everything group_pbo's result depends on: the family id (it seeds the
     null), the draw count, CSCV_SPLITS, and each member's train series, in
-    sorted member order."""
+    sorted member order. A member's window is a list or a train view; either
+    becomes array("d", its .tolist()), so the key bytes do not depend on
+    which (memory spec s3.1)."""
     h = hashlib.sha256(json.dumps([g, draws, CSCV_SPLITS]).encode("utf-8"))
     for sid in sorted(s["sid"] for s in fam):
-        r = array("d", train[sid])
+        r = array("d", _as_list(train[sid]))
         h.update(f"\n{sid}:{len(r)}:".encode("utf-8"))
         h.update(r.tobytes())
     return h.hexdigest()
@@ -622,6 +741,78 @@ def _prior_cluster_sum_n2(logs_dir: Path) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
+def _prior_series(logs_dir: Path) -> tuple[int | None, int | None]:
+    """(series_mb, series_n) carried forward from the last status: the series
+    pass's peak commit growth and the registered n it was measured at. Each
+    is None when missing, unreadable or not a positive int (a status from
+    before the commit gate has neither). Display only since Controller
+    Ruling 5: the series charge reads series_rate_hist, never this pair."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(st, dict):
+        return None, None
+
+    def pos(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+    return pos(st.get("series_mb")), pos(st.get("series_n"))
+
+
+def _valid_rates(hist) -> list[float]:
+    """The usable entries of a series rate history, in order: finite
+    positive numbers (bool excluded); anything else is dropped entry by
+    entry, and a non-list is no history at all."""
+    if not isinstance(hist, list):
+        return []
+    return [float(v) for v in hist
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v > 0]
+
+
+def _prior_series_rate_hist(logs_dir: Path) -> list[float]:
+    """`series_rate_hist` from the last status, sanitised (_valid_rates) and
+    cut to the newest SERIES_RATE_HIST_MAX; [] when there is none."""
+    try:
+        st = json.loads((logs_dir / STATUS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(st, dict):
+        return []
+    return _valid_rates(st.get("series_rate_hist"))[-SERIES_RATE_HIST_MAX:]
+
+
+def series_charge_mb(rate_hist: list[float] | None, n: int, fallback_mb: int) -> int:
+    """MiB of commit the bars load and series pass are charged before they
+    start: the HIGHEST per-strategy rate in the history x tonight's
+    registered n x SERIES_CHARGE_MARGIN (Controller Ruling 5: a warm night
+    never lowers it); `fallback_mb` when the history has no usable entry."""
+    rates = _valid_rates(rate_hist)
+    if not rates:
+        return fallback_mb
+    return math.ceil(max(rates) * n * SERIES_CHARGE_MARGIN)
+
+
+def series_fallback_mb(n: int, csv_bytes: int) -> int:
+    """The series charge with no measurement: SERIES_FALLBACK_BYTES_PER_POINT
+    x n x SERIES_FALLBACK_POINTS for the cached series, plus the cell CSVs'
+    bytes for the bars, x SERIES_FALLBACK_MARGIN, in MiB."""
+    return math.ceil((SERIES_FALLBACK_BYTES_PER_POINT * n * SERIES_FALLBACK_POINTS
+                      + csv_bytes) * SERIES_FALLBACK_MARGIN / 2**20)
+
+
+def _cell_csv_bytes(data_dir: Path, cells_needed) -> int:
+    """Summed size of the price files load_cell_data will read; a file that
+    cannot be stat'ed counts 0 here (load_cell_data then raises as before)."""
+    total = 0
+    for asset, tf in sorted(set(cells_needed)):
+        try:
+            total += (data_dir / f"{asset}_{tf}.csv").stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def cluster_estimate_s(prior_s: float | None, prior_sum_n2: int | None,
                        sum_n2: int) -> float:
     """The clustering pass's expected duration: the last measured one scaled
@@ -720,6 +911,8 @@ def run(argv: list[str] | None = None) -> int:
     prior_cluster_s, prior_null_s = _prior_timings(a.logs_dir)
     prior_cluster_n = _prior_cluster_n(a.logs_dir)
     prior_cluster_sum_n2 = _prior_cluster_sum_n2(a.logs_dir)
+    prior_series_mb, prior_series_n = _prior_series(a.logs_dir)
+    prior_rate_hist = _prior_series_rate_hist(a.logs_dir)
     status = {"vintage": vintage, "verdicts_without_stats": 0, "stats_written": 0,
               # T7 flush: written on a retry after a held flush / still
               # unwritten (dropped) at the end of the run
@@ -741,6 +934,17 @@ def run(argv: list[str] | None = None) -> int:
               # carried forward until this run clusters, like cluster_s
               "cluster_sum_n2": prior_cluster_sum_n2,
               "cut_late_merges": None,
+              # train_view mask-copy fallbacks this run (memory spec s3.1)
+              "train_view_fallbacks": 0,
+              # memory spec s3.2: the last checkpoint's commit reading, and
+              # the series pass's measurement, carried forward until this
+              # run completes a pass and measures its own
+              "avail_commit_mb": None,
+              "series_mb": prior_series_mb, "series_n": prior_series_n,
+              "series_rate_hist": prior_rate_hist,
+              # this run's checkpoint figures, when it got that far
+              "gate_need_mb": None, "series_charge_mb": None,
+              "avail_commit_series_mb": None,
               "exit_reason": None}
     extra: dict = {}
     done: set[str] = set()                    # verdict hashes chained this run
@@ -829,6 +1033,30 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
 
         # Every registered spec's cells, cut at the vintage Sunday.
         cells_needed, class_of = comparable_cells(all_specs)
+        # Memory spec s3.2 item 3: the bars load and the series pass commit
+        # gigabytes before the clustering gate, so free commit must cover
+        # their charge first. Unknown commit (None) never blocks.
+        n_reg = len(all_specs)
+        fallback_mb = series_fallback_mb(n_reg, _cell_csv_bytes(a.data_dir,
+                                                                 cells_needed))
+        hist = status["series_rate_hist"]
+        charge_mb = series_charge_mb(hist, n_reg, fallback_mb)
+        basis = (f"max rate {max(hist):.4f} MB per strategy over the last "
+                 f"{len(hist)} pass(es) x n {n_reg} plus "
+                 f"{(SERIES_CHARGE_MARGIN - 1) * 100:.0f}%"
+                 if hist else "no measurement yet: the fallback estimate")
+        commit_mb = available_commit_mb()
+        status["avail_commit_mb"] = commit_mb
+        status["series_charge_mb"] = charge_mb
+        status["avail_commit_series_mb"] = commit_mb
+        if commit_mb is not None and commit_mb < charge_mb:
+            print(f"MEMORY: series pass over {n_reg} registered strategies needs "
+                  f"~{charge_mb} MB of commit ({basis}) and {commit_mb} MB of "
+                  f"commit is available; commit is short, not started (an "
+                  f"allocation would fail). Nothing simulated; the next run "
+                  f"retries.", flush=True)
+            return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
+        mem_before = process_memory_mb()
         bars_by_cell, _, _ = load_cell_data(a.data_dir, cells_needed, "9999-12-31")
         bars_by_cell = truncate_bars(
             bars_by_cell, {cells.cell_id(asset, tf): vintage for asset, tf in bars_by_cell})
@@ -859,6 +1087,17 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
             dated.update(d)
             eq_len.update(e)
             hits, misses = hits + h, misses + m
+        # The pass completed: record its peak commit growth with the n it was
+        # measured at (a deadline stop above returned first and keeps the
+        # prior pair; unreadable counters keep it too).
+        mem_after = process_memory_mb()
+        if mem_before is not None and mem_after is not None:
+            status["series_mb"] = max(0, mem_after[1] - mem_before[0])
+            status["series_n"] = n_reg
+            if n_reg > 0 and status["series_mb"] > 0:
+                status["series_rate_hist"] = (
+                    status["series_rate_hist"]
+                    + [status["series_mb"] / n_reg])[-SERIES_RATE_HIST_MAX:]
         bars_by_cell.clear()
         print(f"sim cache: {hits} hit(s), {misses} miss(es) over {len(all_specs)} "
               f"registered strategies", flush=True)
@@ -882,13 +1121,24 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                   f"({cluster_est:.0f}s); the next run starts there.", flush=True)
             return finish(0, "deadline")
         need_mb = cluster_need_mb(n_cluster, n_max, cluster_days_bound(dated))
+        total_mb = need_mb + POST_CLUSTER_NEED_MB
         avail_mb = available_phys_mb()
+        commit_mb = available_commit_mb()
         status["cluster_need_mb"], status["avail_phys_mb"] = need_mb, avail_mb
-        if avail_mb is not None and avail_mb < need_mb:
+        status["gate_need_mb"] = total_mb
+        status["avail_commit_mb"] = commit_mb
+        short = []
+        if avail_mb is not None and avail_mb < total_mb:
+            short.append(f"physical memory is short ({avail_mb} MB available; "
+                         f"it would page and thrash)")
+        if commit_mb is not None and commit_mb < total_mb:
+            short.append(f"commit is short ({commit_mb} MB available; an "
+                         f"allocation would fail)")
+        if short:
             print(f"MEMORY: clustering {n_cluster} series (largest partition "
-                  f"{n_max}) needs ~{need_mb} MB of physical memory and "
-                  f"{avail_mb} MB is available; not started (it would page and "
-                  f"thrash). Series are cached; the next run retries.",
+                  f"{n_max}) needs ~{total_mb} MB ({need_mb} clustering + "
+                  f"{POST_CLUSTER_NEED_MB} after it); {' and '.join(short)}; "
+                  f"not started. Series are cached; the next run retries.",
                   flush=True)
             return finish(DEFERRED_MEMORY_EXIT, "deferred_memory")
         t_cluster0 = time.time()
@@ -936,9 +1186,21 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
         extra["expected_max_sharpe_floor"] = sr_floor
         extra["expected_max_sharpe_floor_entry_hash"] = sr_floor_hash
 
-        train = {s["strategy_id"]: dated[s["strategy_id"]].train(a.cutoff)
-                 for s in all_specs}
-        train_sharpe = {sid: _annualized_sharpe_from_returns(r)
+        # Memory spec s3.1: each train window is a zero-copy view of its
+        # series (float64, 8 B a value, not a ~40 B Python float). A list is
+        # built only inside each consumer and dropped after it: here one at a
+        # time, one family's in family_train, pbo_inputs_sha's per member,
+        # and the verdict's own. Read-only by contract: nothing writes into
+        # a view. A series whose dates are not non-decreasing gets the mask
+        # copy instead, counted in the status.
+        train = {}
+        for s in all_specs:
+            sid = s["strategy_id"]
+            train[sid], fell_back = dated[sid].train_view(a.cutoff)
+            status["train_view_fallbacks"] += int(fell_back)
+        # .tolist() is required for bit-identity: sum() compensates exact
+        # Python floats only (np.float64 items get plain addition).
+        train_sharpe = {sid: _annualized_sharpe_from_returns(r.tolist())
                         for sid, r in train.items()}
         family_by_group, grids_by_group = sibling_families(
             all_specs, train_sharpe, view.screen_tc_fail)
@@ -1048,8 +1310,9 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                 status["pbo_nulls_cached"] += pbo["pbo_null_draws"] > 0
             else:
                 n_nulls = len(null_times)
-                pbo = group_pbo(g, fam, train, True, a.pbo_null_draws,
-                                null_fits=null_fits, null_times=null_times)
+                pbo = group_pbo(g, fam, family_train(fam, train), True,
+                                a.pbo_null_draws, null_fits=null_fits,
+                                null_times=null_times)
                 if pbo is not None:
                     status["pbo_nulls_computed"] += len(null_times) - n_nulls
                     pbo_cache.put(g, inputs_sha, pbo)
@@ -1067,7 +1330,7 @@ def _run_locked(a, t_end: float, vintage: str, simcache_dir: Path, status: dict,
                 sibling = next(x for x in fam if x["sid"] == sid)
                 ok, _ = qualifies(sibling, fam, grids)
                 items.append((sid, v["vh"], verdict_stats(
-                    sid, clustered["returns_by_id"][sid], train[sid],
+                    sid, clustered["returns_by_id"][sid], train[sid].tolist(),
                     train_sharpe[sid], clustered,
                     pbo, ok, vintage, data_digest, own_ends(sid),
                     floor, floor_hash, sr_floor, sr_floor_hash)))

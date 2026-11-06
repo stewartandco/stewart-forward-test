@@ -269,3 +269,23 @@ def test_an_unknown_battery_is_refused(tmp_path):
     with pytest.raises(ValueError, match="battery"):
         gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False,
                                           battery="v6.3")
+
+
+def test_process_memory_mb_shape():
+    """Memory spec s3.2 item 3: (PrivateUsage, PeakPagefileUsage) in MiB from
+    GetProcessMemoryInfo (PROCESS_MEMORY_COUNTERS_EX). On Windows two
+    positive ints, the peak at or above the current private commit; touching
+    a fresh 64 MiB buffer raises the private commit by at least 60 MiB, and
+    the peak stays at or above it. None off Windows."""
+    import os
+    got = gauntlet_core.process_memory_mb()
+    if os.name != "nt":
+        assert got is None
+        return
+    private, peak = got
+    assert type(private) is int and type(peak) is int
+    assert private > 0 and peak >= private
+    blob = bytearray(64 * 2**20)                # committed and touched
+    private2, peak2 = gauntlet_core.process_memory_mb()
+    assert private2 >= private + 60 and peak2 >= private2
+    del blob
