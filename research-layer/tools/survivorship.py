@@ -116,10 +116,17 @@ def _require_window(args) -> None:
                       f"(now {t.isoformat()}); start inside it")
 
 
+def _real_now() -> datetime:
+    return datetime.now(h.CLOCK)
+
+
 def _now_fn(args):
+    """The run clock for run_arm. With --now it is an OFFSET clock: it starts
+    at --now and advances with real time, so a long run started with --now
+    still stops at 20:00 by its own reckoning."""
     if getattr(args, "now", None):
-        fixed = _now(args)
-        return lambda: fixed
+        fixed, t0 = _now(args), _real_now()
+        return lambda: fixed + (_real_now() - t0)
     return h._now
 
 
@@ -219,6 +226,16 @@ def _declared() -> dict:
             "delisted": dict(su.DELISTED), "cuts": dict(su.CUTS)}
 
 
+def _design_bytes() -> bytes:
+    """The design doc of the tool's OWN layer, LF-normalised (the git blob's
+    bytes under core.autocrlf). Never read from --layer-dir."""
+    return (LAYER / DESIGN_REL).read_bytes().replace(b"\r\n", b"\n")
+
+
+def _sid_counts(tl: dict) -> dict:
+    return {tf: sum(len(v) for v in t.values()) for tf, t in tl.items()}
+
+
 def _template_list(copy) -> dict:
     tfs = sorted({s["universe"].get("timeframe", "1d") for s in copy.specs.values()})
     return {tf: st.templates(copy, tf) for tf in tfs}
@@ -239,6 +256,7 @@ def _input_hashes(study: Path, copy) -> dict:
         "cuts": _sha_canon(d["cuts"]),
         "first_bars": _sha_canon(pf["first_bars"]),
         "data_1d": _sha_canon(pf["data_sha256"]),
+        "design_doc_sha256": _sha(_design_bytes()),
     }
 
 
@@ -252,8 +270,23 @@ def _verify_inputs(study: Path, copy, manifest: dict) -> None:
                       "After the note, only a superseding chained note may change one")
 
 
-def require_note(copy, manifest: dict) -> int:
-    """The gate (design s4 step 3). Returns the entry index of the chained
+def _line_sha(registry: Path, idx: int, text: str) -> str:
+    """sha256 of entry `idx`'s exact JSONL line, without its line terminator
+    (CRLF on the live file, LF in registry_log.d: the same hash either way)."""
+    with open(registry, "rb") as f:
+        for i, line in enumerate(f):
+            if i == idx:
+                line = line.rstrip(b"\n").rstrip(b"\r")
+                e = json.loads(line)
+                if e.get("entry_type") != "note" or e.get("payload", {}).get("text") != text:
+                    raise NoteMissing(f"entry {idx} of {registry} is not the matched note")
+                return _sha(line)
+    raise NoteMissing(f"{registry} has no entry {idx}")
+
+
+def require_note(copy, manifest: dict, registry: Path | None = None) -> tuple:
+    """The gate (design s4 step 3). Returns (entry index, sha256 of that
+    entry's exact JSONL line; None without `registry`) of the chained
     pre-registration note; raises NoteMissing unless a note in copy.notes
     starts with NOTE_PREFIX, holds every manifest hash, and sits after the
     frozen registry prefix. `upto` is the first EXCLUDED entry index (the
@@ -273,7 +306,7 @@ def require_note(copy, manifest: dict) -> int:
             why.append(f"note at entry {idx} sits inside the frozen registry "
                        f"prefix (upto {upto})")
             continue
-        return idx
+        return idx, (None if registry is None else _line_sha(Path(registry), idx, text))
     raise NoteMissing(
         f"no chained note starting {NOTE_PREFIX!r} matches manifest.json"
         + (": " + "; ".join(why) if why else "") +
@@ -281,14 +314,29 @@ def require_note(copy, manifest: dict) -> int:
         "then run again")
 
 
+def _check_pf_pairs(pf: dict, u: dict, tf: str) -> None:
+    want = _pairs(u)
+    if pf.get("pairs") != want:
+        raise Refused(f"preflight_{tf}.json checked pairs {len(pf.get('pairs') or [])} "
+                      f"that are not universe.json's A + B-only list ({len(want)}): "
+                      f"re-run preflight --tf {tf}")
+    if set(pf.get("data_sha256", {})) != set(want):
+        raise Refused(f"preflight_{tf}.json built data for a different pair set than "
+                      f"universe.json: re-run preflight --tf {tf}")
+
+
 def _gate(args, study: Path, tf: str):
     """Everything run/gauntlet/analyse check before any engine call or result
     read. refuse_live has already run."""
     manifest = _load_json(study / "manifest.json", "run freeze first")
     copy = st.read_copy(Path(args.registry), int(manifest["upto"]))
-    note_idx = require_note(copy, manifest)
+    note_idx, note_sha = require_note(copy, manifest, Path(args.registry))
     _verify_inputs(study, copy, manifest)
     pf = _load_json(study / f"preflight_{tf}.json", f"run preflight --tf {tf} first")
+    _check_pf_pairs(pf, _load_universe(study), tf)
+    if tf != "1d" and pf.get("declared") != _declared():
+        raise Refused(f"preflight_{tf}.json ran under other RENAMES/DELISTED/CUTS: "
+                      f"re-run preflight --tf {tf}")
     if pf.get("passed") is not True:
         raise Refused(f"preflight_{tf}.json did not pass: a failed precondition "
                       f"stops the {tf} arm")
@@ -300,7 +348,7 @@ def _gate(args, study: Path, tf: str):
         f = data_dir / f"{pair}_{tf}.csv"
         if not f.exists() or _sha(f.read_bytes()) != want:
             raise Refused(f"{f} differs from what preflight built and checked")
-    return copy, manifest, note_idx, pf
+    return copy, manifest, note_idx, note_sha, pf
 
 
 def _rows(study: Path, copy, tf: str):
@@ -571,13 +619,17 @@ def _p2(copy, tf: str, A: list[str], built: dict, data_dir: Path, workers: int) 
 
 def cmd_preflight(args, fetch) -> int:
     reg = _refuse_live(args)
+    s_res = Path(args.study_dir).resolve()
+    pipe_dir = Path(args.pipeline_data_dir).resolve()
+    if pipe_dir == s_res or s_res in pipe_dir.parents or pipe_dir in s_res.parents:
+        raise Refused(f"--pipeline-data-dir {pipe_dir} and --study-dir {s_res} must "
+                      f"not contain one another (the pipeline data is read only)")
     study = _study(args)
     _require_window(args)
     tf = args.tf
-    pipe_dir = Path(args.pipeline_data_dir).resolve()
     data_dir = study / f"data_{tf}"
-    if pipe_dir == data_dir.resolve() or study in pipe_dir.parents or pipe_dir == study:
-        raise Refused(f"--pipeline-data-dir {pipe_dir} must be outside the study dir")
+    if data_dir.resolve().parent != study:
+        raise Refused(f"--tf {tf!r} does not name a data dir inside the study")
     u = _load_universe(study)
     upto = args.upto
     mpath = study / "manifest.json"
@@ -597,6 +649,10 @@ def cmd_preflight(args, fetch) -> int:
     copy = st.read_copy(reg, upto)
     if upto is None:
         upto = copy.n_entries
+    if data_dir.is_dir():
+        for f in data_dir.iterdir():
+            if f.is_file():
+                f.unlink()            # a stale CSV from an earlier universe never survives
     checks = {"build": {}, "P1": {}, "P3": {}, "P4": {}}
     built = {}
     a = set(u["A"])
@@ -648,6 +704,7 @@ def cmd_freeze(args, fetch) -> int:
                       f"with --upto {args.upto}")
     if pf.get("declared") != _declared():
         raise Refused("RENAMES/DELISTED/CUTS changed since preflight: re-run preflight")
+    _check_pf_pairs(pf, u, "1d")
     copy = st.read_copy(reg, args.upto)
     if not (0 < args.upto <= copy.n_entries):
         raise Refused(f"--upto {args.upto} outside 1..{copy.n_entries}")
@@ -660,25 +717,28 @@ def cmd_freeze(args, fetch) -> int:
     manifest = {
         "upto": args.upto, "hashes": hashes, "canonical_json": CANON_RULE,
         "inputs": {"n_templates": {tf: len(v) for tf, v in tl.items()},
+                   "n_sids": _sid_counts(tl),
                    "A": u["A"], "B": u["B"],
                    "stratum_sizes": {s: sum(1 for v in u["strata"].values() if v == s)
                                      for s in su.STRATA},
                    **_declared(), "first_bars": pf["first_bars"]}}
     _write_json(study / "manifest.json", manifest)
     print(f"freeze: wrote {study / 'manifest.json'} (upto {args.upto})")
+    for tf, n in sorted(manifest["inputs"]["n_templates"].items()):
+        print(f"  templates {tf}: {n} templates, "
+              f"{manifest['inputs']['n_sids'][tf]} strategy ids")
     for k in sorted(hashes):
         print(f"  {k}: {hashes[k]}")
     return OK
 
 
-def _s5(layer: Path) -> str:
-    text = (layer / DESIGN_REL).read_bytes().decode("utf-8").replace("\r\n", "\n")
-    lines = text.split("\n")
+def _s5() -> str:
+    lines = _design_bytes().decode("utf-8").split("\n")
     try:
         start = next(i for i, x in enumerate(lines) if x.startswith("## 5."))
         end = next(i for i, x in enumerate(lines) if i > start and x.startswith("## 6."))
     except StopIteration:
-        raise Refused(f"{layer / DESIGN_REL}: no '## 5.' .. '## 6.' section") from None
+        raise Refused(f"{LAYER / DESIGN_REL}: no '## 5.' .. '## 6.' section") from None
     return "\n".join(lines[start:end]).strip("\n")
 
 
@@ -701,7 +761,7 @@ def cmd_draft_note(args, fetch) -> int:
         "study tool (tools/survivorship.py) reads it, as the gate that refuses every "
         "outcome computation until this note is on the chain.",
         "",
-        _s5(layer),
+        _s5(),
         "",
         CLARIFICATION,
         "",
@@ -712,7 +772,8 @@ def cmd_draft_note(args, fetch) -> int:
         "template key -> sorted registered strategy ids; cells_A / cells_B = the "
         "ordered pair lists; renames / delisted / cuts = the declared lists below; "
         "first_bars = pair -> first bar date of each 1d cell; data_1d = pair -> "
-        "sha256 of each 1d study CSV.",
+        "sha256 of each 1d study CSV; design_doc_sha256 = the sha256 of the design "
+        "doc's LF-normalised bytes (the file s5 above is quoted from).",
         "",
     ]
     out += [f"- {k}: {v}" for k, v in sorted(manifest["hashes"].items())]
@@ -721,7 +782,8 @@ def cmd_draft_note(args, fetch) -> int:
         f"- upto: {manifest['upto']} (0-based registry entry index; the templates are "
         f"the single-asset crypto strategies registered at entries 0..{manifest['upto'] - 1})",
         "- templates per timeframe: " + ", ".join(
-            f"{tf} {n}" for tf, n in sorted(inp["n_templates"].items())),
+            f"{tf} {n} templates, {inp['n_sids'][tf]} strategy ids"
+            for tf, n in sorted(inp["n_templates"].items())),
         f"- cells: A {len(inp['A'])}, B {len(inp['B'])}; strata " + ", ".join(
             f"{s} {inp['stratum_sizes'].get(s, 0)}" for s in su.STRATA),
         "",
@@ -751,7 +813,7 @@ def cmd_run(args, fetch) -> int:
     _refuse_live(args)
     study = _study(args)
     _require_window(args)
-    copy, manifest, note_idx, _pf = _gate(args, study, args.tf)
+    copy, manifest, note_idx, _ns, _pf = _gate(args, study, args.tf)
     rows, _t, _p, _u = _rows(study, copy, args.tf)
     workers = h.default_workers(args.workers)
     s = h.run_arm(rows, h.full_job, study / f"results_{args.tf}.jsonl", workers,
@@ -764,7 +826,7 @@ def cmd_gauntlet(args, fetch) -> int:
     _refuse_live(args)
     study = _study(args)
     _require_window(args)
-    copy, manifest, note_idx, _pf = _gate(args, study, args.tf)
+    copy, manifest, note_idx, _ns, _pf = _gate(args, study, args.tf)
     rows, _t, _p, _u = _rows(study, copy, args.tf)
     workers = h.default_workers(args.workers)
     train_out = study / f"train_{args.tf}.jsonl"
@@ -796,7 +858,7 @@ def cmd_analyse(args, fetch) -> int:
     study = _study(args)
     layer = _layer(args)
     tf = args.tf
-    copy, manifest, note_idx, pf = _gate(args, study, tf)
+    copy, manifest, note_idx, note_sha, pf = _gate(args, study, tf)
     rows, tmpl, pairs, u = _rows(study, copy, tf)
     keys = [r["key"] for r in rows]
     res, d1 = _read_jsonl(study / f"results_{tf}.jsonl")
@@ -830,11 +892,13 @@ def cmd_analyse(args, fetch) -> int:
               "stratum_means": sec["stratum_mean_m"], "secondaries": sec,
               "n_templates": len(tkeys), "n_cells": len(pairs),
               "resamples": ss.RESAMPLES, "seed": ss.SEED, "note_index": note_idx,
+              "note_line_sha256": note_sha,
               "upto": manifest["upto"], "manifest_hashes": manifest["hashes"],
               "preflight_passed": pf["passed"]}
     day = _now(args).date().isoformat()
     md = layer / "docs" / "runs" / f"{day}-survivorship-{tf}.md"
-    _write_lf(md, ss.report(result))
+    note_line = f"pre-registration note: entry {note_idx}, line sha256 {note_sha}"
+    _write_lf(md, ss.report(result) + "\n## Pre-registration\n\n" + note_line + "\n")
     _write_json(md.with_suffix(".json"), result)
     print(f"analyse {tf}: {_verdict_text(prim['verdict'])}, G {_f(prim['G'])} "
           f"[{_f(prim['L'])}, {_f(prim['U'])}]; wrote {md}")
@@ -859,6 +923,8 @@ def cmd_analyse(args, fetch) -> int:
             f"{pf['checks']['P2']['checked']} registered screen verdicts exactly, P3 "
             f"splices, P4 no hidden splices); P5 inputs frozen at upto "
             f"{manifest['upto']} and every manifest hash matched at analysis.",
+            "",
+            note_line,
         ]
         path = layer / RESULT_REL
         _write_lf(path, "\n".join(lines) + "\n")

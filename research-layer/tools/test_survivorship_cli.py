@@ -177,7 +177,7 @@ def _frozen(env, upto=6):
 
 
 def _chain(env, text):
-    with env.reg.open("a", encoding="utf-8") as f:
+    with env.reg.open("a", encoding="utf-8", newline="") as f:
         f.write(json.dumps(_entry("note", {"text": text})) + "\n")
 
 
@@ -529,10 +529,40 @@ def test_preflight_refuses_a_none_swap_date(env, monkeypatch):
 
 
 def test_preflight_refuses_live_chain(env, monkeypatch):
+    reg = _live_copy(env)
     calls = _trap_engine(monkeypatch)
-    (env.study / "registry_log.d").mkdir()
-    assert _preflight(env) == 2
+    assert _run("preflight", *_base(env), "--registry", reg, "--pipeline-data-dir",
+                env.pipe, "--workers", "1") == 2
     assert calls == []
+    assert not (env.study / "preflight_1d.json").exists()
+
+
+@pytest.mark.parametrize("where", ["study_inside_pipe", "pipe_inside_study"])
+def test_preflight_refuses_nested_study_and_pipeline_dirs(env, monkeypatch, where):
+    calls = _trap_engine(monkeypatch)
+    if where == "study_inside_pipe":
+        # the pipeline dir CONTAINS the study dir: preflight must not write
+        # archive/ or data_1d/ into a pipeline data dir
+        pipe = env.tmp
+        for f in env.pipe.iterdir():
+            shutil.copyfile(f, pipe / f.name)
+    else:
+        pipe = env.study / "pipe"
+        shutil.copytree(env.pipe, pipe)
+    assert _run("preflight", *_base(env), "--registry", env.reg, "--pipeline-data-dir",
+                pipe, "--workers", "1") == 2
+    assert calls == []
+    assert not (env.study / "data_1d").exists()
+    assert not (env.study / "preflight_1d.json").exists()
+
+
+def test_preflight_empties_its_data_dir_before_building(env):
+    stale = env.study / "data_1d" / "STALEUSDT_1d.csv"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("date,open,high,low,close,volume\n", encoding="utf-8")
+    assert _preflight(env) == 0
+    assert sorted(f.name for f in (env.study / "data_1d").iterdir()) == [
+        "AAAUSDT_1d.csv", "BBBUSDT_1d.csv", "CCCUSDT_1d.csv"]
 
 
 # ------------------------------------------------------------------- freeze
@@ -564,6 +594,57 @@ def test_freeze_refuses_without_a_passed_preflight(env):
     assert not (env.study / "manifest.json").exists()
 
 
+def test_freeze_refuses_a_universe_changed_after_preflight(env):
+    assert _preflight(env) == 0
+    u = json.loads((env.study / "universe.json").read_text(encoding="utf-8"))
+    u["B"] = ["AAAUSDT", "EEEUSDT"]            # a re-run universe: a never-checked pair
+    u["strata"] = su.strata(u["A"], u["B"])
+    (env.study / "universe.json").write_text(json.dumps(u), encoding="utf-8")
+    assert _freeze(env) == 2
+    assert not (env.study / "manifest.json").exists()
+
+
+def _fake_arm(env, tf, drop=None, declared=None):
+    """preflight_<tf>.json + data_<tf>/ cloned from the 1d arm (same bytes)."""
+    pf = _pf(env)
+    pf["tf"] = tf
+    d = env.study / f"data_{tf}"
+    d.mkdir()
+    for p in list(pf["data_sha256"]):
+        if p == drop:
+            pf["pairs"].remove(p)
+            del pf["data_sha256"][p]
+            continue
+        shutil.copyfile(env.study / "data_1d" / f"{p}_1d.csv", d / f"{p}_{tf}.csv")
+    if declared is not None:
+        pf["declared"] = declared
+    (env.study / f"preflight_{tf}.json").write_text(json.dumps(pf), encoding="utf-8")
+
+
+@pytest.mark.parametrize("case", ["pair_missing", "declared_changed"])
+def test_gate_refuses_an_arm_whose_preflight_disagrees(env, case):
+    _chain(env, _frozen(env))
+    args = SimpleNamespace(registry=str(env.reg))
+    cli._gate(args, env.study, "1d")                      # the 1d arm is consistent
+    if case == "pair_missing":
+        _fake_arm(env, "4h", drop="CCCUSDT")
+    else:
+        _fake_arm(env, "4h", declared={
+            "renames": {"OLDUSDT": ["NEWUSDT", "2024-01-01", 1.0, "u"]},
+            "delisted": {}, "cuts": {}})
+    with pytest.raises(cli.Refused):
+        cli._gate(args, env.study, "4h")
+
+
+def test_gate_refuses_1d_preflight_pairs_that_differ_from_the_universe(env):
+    _chain(env, _frozen(env))
+    pf = _pf(env)
+    pf["pairs"] = ["AAAUSDT", "CCCUSDT", "BBBUSDT"]        # same set, other order
+    (env.study / "preflight_1d.json").write_text(json.dumps(pf), encoding="utf-8")
+    with pytest.raises(cli.Refused):
+        cli._gate(SimpleNamespace(registry=str(env.reg)), env.study, "1d")
+
+
 def test_freeze_refuses_an_upto_preflight_did_not_use(env):
     assert _preflight(env) == 0
     assert _freeze(env, upto=4) == 2
@@ -584,7 +665,8 @@ def test_freeze_writes_canonical_hashes(env):
     assert m["hashes"]["renames"] == sha(canon({}))
     assert m["hashes"]["first_bars"] == sha(canon(_pf(env)["first_bars"]))
     assert set(m["hashes"]) == {"templates", "cells_A", "cells_B", "cmc", "renames",
-                                "delisted", "cuts", "first_bars", "data_1d"}
+                                "delisted", "cuts", "first_bars", "data_1d",
+                                "design_doc_sha256"}
 
 
 # --------------------------------------------------------------- draft-note
@@ -624,6 +706,26 @@ def test_draft_note_lists_splices_deaths_and_cuts(env, monkeypatch):
     assert "LUNAUSDT" in text and "2022-05-31" in text
 
 
+def test_draft_note_reads_the_design_doc_from_its_own_layer(env):
+    doc = env.layer / cli.DESIGN_REL
+    doc.write_bytes(doc.read_bytes().replace(b"**MATERIAL**", b"**TAMPERED**"))
+    text = _frozen(env)
+    assert "**TAMPERED**" not in text and "**MATERIAL**" in text
+    lf = DESIGN.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(lf).hexdigest()
+    assert _manifest(env)["hashes"]["design_doc_sha256"] == digest
+    assert f"design_doc_sha256: {digest}" in text
+
+
+def test_freeze_and_note_state_template_and_sid_counts(env, capsys):
+    assert _preflight(env) == 0
+    assert _freeze(env) == 0
+    assert "templates 1d: 2 templates, 3 strategy ids" in capsys.readouterr().out
+    assert _draft(env) == 0
+    assert "- templates per timeframe: 1d 2 templates, 3 strategy ids" in \
+        _note_bytes(env).decode("utf-8")
+
+
 def test_draft_note_refuses_a_stale_manifest(env, monkeypatch):
     _frozen(env)
     monkeypatch.setattr(su, "CUTS", {"LUNAUSDT": "2022-05-31"})
@@ -639,13 +741,32 @@ def _manifest(env):
 def test_require_note_boundaries():
     m = {"upto": 6, "hashes": {"a": "aa11", "b": "bb22"}}
     good = cli.NOTE_PREFIX + "x aa11 bb22"
-    assert cli.require_note(st.Copy(notes=[(6, good)]), m) == 6
-    assert cli.require_note(st.Copy(notes=[(9, "other"), (7, good)]), m) == 7
+    assert cli.require_note(st.Copy(notes=[(6, good)]), m)[0] == 6
+    assert cli.require_note(st.Copy(notes=[(9, "other"), (7, good)]), m)[0] == 7
     for notes in ([], [(5, good)], [(8, cli.NOTE_PREFIX + "aa11 only")],
                   [(8, "survivorship-study-v1-result: aa11 bb22")],
                   [(8, "x " + good)]):
         with pytest.raises(cli.NoteMissing):
             cli.require_note(st.Copy(notes=notes), m)
+
+
+def _note_line_sha(reg, idx):
+    line = reg.read_bytes().split(b"\n")[idx].rstrip(b"\r")
+    return hashlib.sha256(line).hexdigest()
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n"])
+def test_require_note_returns_the_exact_line_sha(env, eol):
+    text = _frozen(env)
+    _chain(env, text)
+    raw = env.reg.read_bytes().replace(b"\r\n", b"\n")
+    # the same entries LF-terminated, and CRLF-terminated as the live chain is
+    env.reg.write_bytes(raw if eol == b"\n" else raw.replace(b"\n", b"\r\n"))
+    m = _manifest(env)
+    idx, digest = cli.require_note(st.read_copy(env.reg, 6), m, env.reg)
+    assert idx == 6
+    assert digest == _note_line_sha(env.reg, 6)
+    assert digest == hashlib.sha256(raw.split(b"\n")[6]).hexdigest()
 
 
 @pytest.mark.parametrize("cmd", ["run", "gauntlet", "analyse"])
@@ -686,15 +807,40 @@ def test_run_refuses_on_data_drift_after_the_note(env, monkeypatch):
     assert calls == []
 
 
+def _live_copy(env):
+    """The registry copy, byte for byte, in a separate directory that holds
+    registry_log.d (the live layout); the study dir stays clean, so only
+    refuse_live can refuse."""
+    live = env.tmp / "live"
+    (live / "registry_log.d").mkdir(parents=True)
+    reg = live / "registry_copy.jsonl"
+    shutil.copyfile(env.reg, reg)
+    return reg
+
+
 def test_run_refuses_live_chain(env, monkeypatch):
     _chain(env, _frozen(env))
+    reg = _live_copy(env)
     calls = _trap_engine(monkeypatch)
-    (env.study / "registry_log.d").mkdir()
     for cmd in ("run", "gauntlet", "analyse", "freeze", "draft-note"):
         extra = ["--upto", "6"] if cmd == "freeze" else []
-        assert _run(cmd, *_base(env), "--registry", env.reg, "--layer-dir", env.layer,
+        assert _run(cmd, *_base(env), "--registry", reg, "--layer-dir", env.layer,
                     *extra) == 2
     assert calls == []
+    assert not list(env.study.glob("results_*")) and not list(env.study.glob("train_*"))
+
+
+def test_analyse_refuses_live_chain_with_complete_results(env, monkeypatch):
+    # every result is on disk, so only refuse_live can stop analyse
+    _chain(env, _frozen(env))
+    monkeypatch.setattr(h, "gauntlet_job", lambda item: {
+        "sid": item[0]["strategy_id"], "passed": False, "reason": "f", "beats_hold": None})
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("gauntlet", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    reg = _live_copy(env)
+    assert _run("analyse", *_base(env), "--registry", reg, "--layer-dir", env.layer) == 2
+    assert not (env.layer / "docs" / "runs").exists()
+    assert not (env.layer / cli.RESULT_REL).exists()
 
 
 def test_run_refuses_a_note_inside_the_frozen_prefix(env, monkeypatch):
@@ -730,8 +876,19 @@ def test_run_writes_every_template_cell_and_resumes(env):
     assert len(_results(env, "results_1d.jsonl")) == 6
 
 
-def test_run_stops_at_the_window_with_exit_3(env):
+def test_now_override_is_an_offset_clock(monkeypatch):
+    t0 = datetime(2026, 11, 7, 1, 0, tzinfo=timezone.utc)
+    ticks = iter([t0, t0 + timedelta(seconds=90), t0 + timedelta(hours=1)])
+    monkeypatch.setattr(cli, "_real_now", lambda: next(ticks))
+    fn = cli._now_fn(SimpleNamespace(now="2026-11-07T19:59:00+08:00"))
+    assert fn().isoformat() == "2026-11-07T20:00:30+08:00"
+    assert fn().isoformat() == "2026-11-07T20:59:00+08:00"
+
+
+def test_run_stops_at_the_window_with_exit_3(env, monkeypatch):
     _chain(env, _frozen(env))
+    still = datetime.now(timezone.utc)
+    monkeypatch.setattr(cli, "_real_now", lambda: still)      # no real time passes
     rc = _run("run", "--study-dir", env.study, "--now", "2026-11-07T19:59:50+08:00",
               "--registry", env.reg, "--workers", "1")
     assert rc == 3
@@ -805,6 +962,11 @@ def test_analyse_writes_report_json_and_result_note(env, monkeypatch):
     text = raw.decode("utf-8")
     assert text.startswith(cli.RESULT_PREFIX)
     assert f"{res['G']:.4f}" in text and "tau = 0.10" in text and "preflight" in text
+    digest = _note_line_sha(env.reg, 6)
+    line = f"pre-registration note: entry 6, line sha256 {digest}"
+    assert res["note_index"] == 6 and res["note_line_sha256"] == digest
+    assert line in md.read_text(encoding="utf-8").split("\n")
+    assert line in text.split("\n")
 
 
 def test_only_the_1d_arm_drafts_the_result_note():
