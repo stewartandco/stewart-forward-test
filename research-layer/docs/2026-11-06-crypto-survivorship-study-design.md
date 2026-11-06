@@ -1,6 +1,6 @@
 # Crypto survivorship study: measure first (design)
 
-**Status: DRAFT 2026-11-06. Design only: no code, no chain write, no protocol note, nothing committed or pushed. Coen's nine calls are in s0. A fresh reviewer builder-checked the doc against the code (5 questions; 1 went to Coen as SV9, 4 settled in s10; 2 code descriptions corrected). The decision rule (s5) is fixed here, before any study number exists. The pre-registration note (s9) is chained verbatim, after Coen approves its exact text, before any outcome number exists (s4 sets the order).**
+**Status: APPROVED by Coen 2026-11-06 and built on branch `feat/survivorship-study` (the study tool `tools/survivorship*.py`); Phase R (fetch, preflight, the note, the run) has not run. This doc is hashed into the study manifest (`design_doc_sha256`), so every edit to it lands before freeze. Coen's nine calls are in s0. A fresh reviewer builder-checked the doc against the code (5 questions; 1 went to Coen as SV9, 4 settled in s10; 2 code descriptions corrected). The decision rule (s5) is fixed here, before any study number exists. The pre-registration note (s9) is chained verbatim, after Coen approves its exact text, before any outcome number exists (s4 sets the order).**
 
 Origin: beats-hold design BH3 (`docs/2026-11-05-beats-hold-design.md` s0): "a measure-first crypto SURVIVORSHIP study ... is a SEPARATE, later design". The honesty limit it follows up is in `tools_select_crypto_universe.py` `RULE` and in the `CLASSES["crypto"]` comment in `pipeline/cells.py`: *"today's top-100 backtested to listing date is winners picked after the race. Declared, not corrected; forward quarantine is the honest arbiter."* This study measures how big that limit is.
 
@@ -14,7 +14,7 @@ Origin: beats-hold design BH3 (`docs/2026-11-05-beats-hold-design.md` s0): "a me
 | SV3 | Materiality threshold | **tau = 0.10 annualised Sharpe** (a quarter of the 0.4 `SR_FLOOR`) |
 | SV4 | Timeframes | **1d decides.** 4h, 12h and 1h run under the same rule and are reported, never decision-bearing |
 | SV5 | Renamed pairs | **Splice to the successor ticker**, ratio-adjusted, from a declared and dated list fixed before any outcome number. They are fallers or survivors, not deaths |
-| SV6 | Proof the rule came first | **Chain a `survivorship-study-v1: ` note** (arms nothing) before any outcome number exists. The result is chained afterwards as an evidence note |
+| SV6 | Proof the rule came first | **Chain a `survivorship-study-v1: ` note** (it arms nothing in the pipeline; only the study tool's gate (`tools/survivorship.py`) reads it) before any outcome number exists. The result is chained afterwards as an evidence note |
 | SV7 | If MATERIAL | **A follow-up design only.** Nothing changes automatically. The strata readout (s6) tells that design which fix fits |
 | SV8 | Train-window deaths (LUNA classic, SRM, FTT's 2022 under an earlier pseudo-cutoff) | **Not in v1.** Under the real 2023-12-31 cutoff a pair dead before it could never reach the gauntlet. An earlier cutoff is a different protocol and a possible later study |
 
@@ -90,14 +90,14 @@ What the study speaks to:
 ## 3. The measurement
 
 **Templates (frozen).**
-- T = the 80 distinct `blocks` lists (canonical JSON, sorted keys) among registered per-cell crypto strategies at 1d: 16 families, registered 2026-10-18 .. 2026-11-04, each on 12 registered cells (960 = 80 x 12). They are taken as of a pinned registry entry index named in the pre-registration note.
-- Intraday arms: the 20 distinct templates at each of 4h, 12h and 1h (4 families, registered 2026-11-04).
-- A template-cell spec is a registered spec of that template with `universe.assets` replaced by the target cell and every other field unchanged. The cost model is `cells.CLASSES["crypto"]["cost_model"]` (10 bps commission + 5 bps slippage per side) for every cell. Its strategy id is the composer's own content id for that spec (s10.4), so on a template's own 12 cells it IS the registered id.
+- T = the 80 distinct `blocks` lists (canonical JSON, sorted keys) among registered per-cell crypto strategies at 1d: 16 families, registered 2026-10-18 .. 2026-11-04, each on 12 registered cells (960 = 80 x 12). They are taken as of a pinned registry entry index named in the pre-registration note: `upto`, the first entry index excluded from the frozen prefix (the templates are the registrations at entries 0..upto-1), and the note's own entry index must be >= upto.
+- Intraday arms: the 20 distinct templates at each of 4h, 12h and 1h (4 families, registered 2026-11-04). Their data CSVs are pinned by `preflight_<tf>.json` (that arm's preflight runs after the note; the gate checks every CSV's sha256 against it); their sources and declared lists (templates, both cell lists, the CMC snapshot, RENAMES/DELISTED/CUTS/EXCLUDED) are pinned by the manifest.
+- A template-cell spec is a registered spec of that template with `universe.assets` replaced by the target cell and every other field unchanged. The harness uses each spec's own `cost_model`, unchanged. Every registered per-cell crypto spec carries the class model, `cells.CLASSES["crypto"]["cost_model"]` (10 bps commission + 5 bps slippage per side; verified 2026-11-06 by the final reviewer), so every cell runs at that cost. Its strategy id is the composer's own content id for that spec (s10.4), so on a template's own 12 cells it IS the registered id.
 
 **Cells and bars.**
 - A = the 76 of `ACTIVE_CELLS["crypto"]`; B = the 100 of s1.2. Formation date = the cutoff, 2023-12-31.
 - Every cell runs to a common end of **2026-10-31** (the last complete archive month at design time), or to its last bar if earlier (D pairs, and N predecessors before their splice).
-- Each cell's FIRST bar is the later of the archive's first bar and, where one exists, the pipeline's `data/<SYM>_1d.csv` first bar (SUN's pipeline file starts 2021-06-18). That way the harness reproduces the registered train windows (P2). A B-only cell starts at its archive first bar after P4.
+- Each cell's FIRST bar is the later of the archive's first bar and, where one exists, the pipeline's `data/<SYM>_<tf>.csv` first bar for that arm's timeframe (`_1d` for the 1d arm; SUN's 1d pipeline file starts 2021-06-18). That way the harness reproduces the registered train windows (P2). A B-only cell starts at its archive first bar after P4.
 
 **Per template-cell, two engine runs** (`engine.run_spec`, the real engine):
 1. **Train run**, on bars cut at 2023-12-31, exactly as the screen does (`screen.load_bars` + `SpecJob(GATE_MIN_TRADES)`). It gives the screen outcome, train trades and net_pnl. A full-history run cannot give these: its metrics cover the whole span, and an open position is marked to market, not counted as a trade (engine.py:598-599, 842-844).
@@ -110,13 +110,14 @@ What the study speaks to:
 
 ## 4. Preconditions and order (stop rules)
 
-Everything in step 1 below reads data or reproduces numbers ALREADY on the chain. Nothing in it computes an OOS number, a hold return, or any number on a B-only cell.
+Everything in step 1 below reads data or reproduces numbers ALREADY on the chain. Nothing in it runs the engine, or computes a return or Sharpe, on any cell beyond P2's train runs on registered cells. Preflight does build the B-only cells' study CSVs and computes their P4 gaps and close ratios: data checks, not outcomes.
 
 **Step 1: before the pre-registration note.**
 - **P1 One data source, proven equal.** Both universes are built from the archive (`data/spot/monthly/klines/<SYM>/<tf>/`, every zip verified against its `.CHECKSUM`).
   - For the 76 A cells, every archive 1d bar must equal the pipeline's `data/<SYM>_1d.csv` bar on every shared date (OHLCV, float-exact after parse).
   - The archive's spot timestamps switch from milliseconds to **microseconds from 2025-01-01**, and parsing must handle both.
   - Any mismatch: STOP and report. Never pick a source per group.
+  - P1 also applies to each intraday arm (4h, 12h, 1h), against the pipeline's intraday files `data/<SYM>_<tf>.csv`; a failure stops that arm only.
 - **P2 The harness is the engine.** For all 960 registered per-cell 1d crypto strategies on their own cells, the harness's train run must reproduce the chained screen verdict (pass/fail, trades, net_pnl). The train window ends 2023-12-31, so the data vintage at verdict time does not matter, and these numbers are already on the chain. Any miss: STOP.
 - **P3 Splices and deaths declared.** For each of the 7 renames: the swap date, the conversion ratio and its Binance announcement URL.
   - Expected ratios are 1:1 except MKR -> SKY at 1:24,000. The builder confirms every ratio from the announcement.
@@ -126,17 +127,23 @@ Everything in step 1 below reads data or reproduces numbers ALREADY on the chain
 - **P4 No hidden splices.**
   - **LUNAUSDT's archive runs unbroken from 2020-08: it holds Terra Classic, then Luna 2.0.** It is cut to Luna 2.0's listing date (2022-05-31, confirmed from the announcement), which still passes the history test.
   - Within the used span of every cell, any gap of more than 7 days between consecutive daily bars, or any single-day close ratio beyond x10 or /10, flags a ticker reuse or halt: STOP for that cell.
-  - Every exclusion or cut is Coen's call and is recorded in the note.
-- **P5 Inputs frozen.** The note carries the sha256 of:
-  - the template list;
+  - Every exclusion or cut is Coen's call, declared in code BEFORE the note: `CUTS` and `EXCLUDED` (pair -> reason) in `tools/survivorship_universe.py`. An EXCLUDED pair is an excluded row of the PIT walk and takes no slot (the walk continues until 100 are admitted). Both are hashed into the manifest and listed in the note.
+- **P5 Inputs frozen.** `freeze` writes the manifest and the note carries its hashes. It freezes:
+  - the templates (per timeframe, template key -> sorted registered strategy ids);
   - both cell lists (the builder's re-derived exact list; if it differs from s1.2 by more than month-boundary cases, STOP for Coen);
-  - the CMC snapshot response;
-  - the splice and death list;
-  - each cell's first-bar rule.
+  - the strata check: the strata are a pure function of A, B, RENAMES and DELISTED, re-checked at freeze and at every gate;
+  - the CMC snapshot response (raw bytes);
+  - RENAMES, DELISTED, CUTS and EXCLUDED;
+  - each 1d cell's first bar;
+  - `data_1d`, the sha256 of every 1d study CSV;
+  - `design_doc_sha256`, this doc's LF-normalised bytes;
+  - the study code: the sha256 of every `tools/survivorship*.py` (git HEAD is recorded, informational);
+  - `upto`, the pinned registry entry index;
+  - the counts: 80 templates, 960 strategy ids, strata S 66, R 10, F 22, N 7, D 5. `freeze` refuses other counts unless `--accept-counts`, which the manifest records and the note states.
 
 **Step 2: chain the `survivorship-study-v1: ` note** (s9), Coen-approved, verbatim.
 
-**Step 3: only now** run any B-only cell, any full run, any OOS or hold number. A cell found broken after the note is excluded only by a superseding chained note, never silently. The hashed list would otherwise be stale.
+**Step 3: only now** run any B-only cell, any full run, any OOS or hold number. A cell found broken after the note is excluded only by a superseding chained note, never silently. The hashed list would otherwise be stale. Known limit: the study tool accepts only the `survivorship-study-v1: ` prefix and the hashes frozen before it, so a post-note exclusion needs BOTH a superseding chained note AND a code change that accepts its prefix; the tool has no path for one today.
 
 ## 5. Decision rule (pre-registered; written before any study number exists)
 
@@ -153,13 +160,13 @@ Everything in step 1 below reads data or reproduces numbers ALREADY on the chain
 
 The interval [L, U] is the percentile 95% interval.
 
-**Verdict (exhaustive):**
+**Verdict (exhaustive).** The rows are applied top to bottom; the first that matches is the verdict.
 
 | verdict | condition |
 |---|---|
 | **MATERIAL** | G >= 0.10 and L > 0 |
 | **NOT MATERIAL** | U < 0.10 (flagged **REVERSE** when also U < 0: our universe is HARDER than PIT, not easier) |
-| **INCONCLUSIVE** | anything else (G >= 0.10 with L <= 0, or G < 0.10 with U >= 0.10) |
+| **INCONCLUSIVE** | anything else |
 
 Only the 1d arm decides (SV4). The 4h/12h/1h arms are computed and reported with the same formula and interval, and labelled "secondary, not decision-bearing". No secondary can rescue or overturn the 1d verdict. A precondition failure on an intraday arm stops that arm only.
 
@@ -186,8 +193,8 @@ In every row: no outcome changes the screen gate, the gauntlet battery or any qu
 ## 7. Constraints
 
 - **Off-chain and read-only on the pipeline.**
-  - The harness reads a COPY of the registry snapshot. It never touches `registry_log.jsonl`, `registry_log.d/`, `data/`, `artifacts/`, `logs/` or `chain.lock`.
-  - Outputs and downloaded archive files go to a new gitignored study directory (e.g. `research-layer/_scratch_survivorship/`). Archive files go in their own empty subfolder and are read with `python -I`.
+  - The harness reads a COPY of the registry snapshot. It never touches `registry_log.jsonl`, `registry_log.d/`, `artifacts/`, `logs/` or `chain.lock`, and never WRITES `data/`: it reads the live `data/` read-only, for P1.
+  - Outputs and downloaded archive files go to a new gitignored study directory (e.g. `research-layer/_scratch_survivorship/`). Archive files go in their own empty subfolder and are parsed with zipfile/csv only, never imported or executed.
   - It never runs `git clean -x` and never reverts anything.
 - **Chain writes are the two notes in s9 only.** Each is chained with `python -m tools.grid_switch chain-note` after Coen approves the exact text, honouring `logs/chain.lock`.
 - **Zero metered spend.** There are no model calls: the templates come from the chain, so the composer is never invoked. The D41 budget is untouched.
@@ -211,7 +218,7 @@ In every row: no outcome changes the screen gate, the gauntlet battery or any qu
 
 ## 9. Records on the chain (Coen approves each exact text)
 
-1. **After s4 step 1, before any outcome number:** `survivorship-study-v1: ` + the s5 decision rule verbatim, the P5 hashes, the pinned registry entry index for T, the splice and death list, and any P4 cuts or exclusions. The prefix arms nothing: no code reads it.
+1. **After s4 step 1, before any outcome number:** `survivorship-study-v1: ` + the s5 decision rule verbatim, the P5 hashes, the pinned registry entry index for T, the splice and death list, and any P4 cuts or exclusions. The prefix arms nothing in the pipeline; only the study tool's gate (`tools/survivorship.py`) reads it.
 2. **After the run:** `survivorship-study-v1-result: ` + the verdict, G [L, U], the strata means and the precondition outcomes. Evidence only; it changes no protocol.
 
 ## 10. Calls made by Claude (not Coen's decisions; check these)
