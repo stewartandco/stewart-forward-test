@@ -195,6 +195,15 @@ def _require_cmc(study: Path) -> Path:
     return p
 
 
+def _cmc_rows(path: Path) -> list[dict]:
+    """su.load_cmc, a refusal (not a traceback) when the file is unusable."""
+    try:
+        return su.load_cmc(path)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise Refused(f"{path} is not a usable CMC listing: {exc}; delete it and "
+                      f"re-run fetch-cmc") from None
+
+
 def _load_universe(study: Path) -> dict:
     return _load_json(study / "universe.json", "run universe first")
 
@@ -536,7 +545,7 @@ def cmd_fetch_cmc(args, fetch) -> int:
 def _plan_symbols(study: Path, tf: str) -> list[str]:
     cmc_path = _require_cmc(study)
     if tf == "1d":
-        syms = [su.pair_for(r["symbol"]) for r in su.load_cmc(cmc_path)]
+        syms = [su.pair_for(r["symbol"]) for r in _cmc_rows(cmc_path)]
         syms += [v[0] for v in su.RENAMES.values()]
         syms += list(su.declared_assets())
     else:
@@ -643,7 +652,7 @@ def cmd_universe(args, fetch) -> int:
         if bars:
             spans[sym] = (bars[0]["date"][:10], bars[-1]["date"][:10])
     cmc_bytes = cmc_path.read_bytes()
-    cmc = su.load_cmc(cmc_path)
+    cmc = _cmc_rows(cmc_path)
     try:
         B, excluded = su.pit_walk(cmc, spans, target=su.TARGET, cuts=su.CUTS)
     except RuntimeError as exc:
@@ -666,11 +675,39 @@ def cmd_universe(args, fetch) -> int:
     return OK
 
 
+def _plan_months(study: Path, tf: str) -> dict[str, list[str]]:
+    """symbol -> the months plan-fetch planned for it at `tf`."""
+    plan = _load_json(study / f"plan_{tf}.json", f"run plan-fetch --tf {tf} first")
+    months: dict[str, list[str]] = {}
+    for sym, ftf, month in plan["files"]:
+        if ftf == tf:
+            months.setdefault(sym, []).append(month)
+    return months
+
+
+def _missing_months(study: Path, sym: str, tf: str, months: list[str] | None) -> list[str]:
+    if not months:
+        return [f"no planned months for {sym} {tf} in plan_{tf}.json"]
+    folder = study / "archive" / sym / tf
+    return [f"{sym}-{tf}-{m}.zip is planned but not on disk (fetch is incomplete)"
+            for m in sorted(months) if not (folder / f"{sym}-{tf}-{m}.zip").exists()]
+
+
 def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
-                checks: dict) -> dict | None:
+                checks: dict, months: dict, stratum: str) -> dict | None:
     """Builds one cell's study CSV (cuts, splice, first-bar rule, END) and
-    records its P1/P3/P4 findings. Data only: no engine call."""
-    bars = _archive_bars(study, pair, tf)
+    records its P1/P3/P4 findings. Data only: no engine call. Every month
+    plan_<tf>.json lists for the pair (and its rename successor) must be on
+    disk (I5); the last bar must be END for S/R/F/N cells and before END for
+    D cells, or it is a stratum classification error."""
+    succ = su.RENAMES[pair][0] if pair in su.RENAMES else None
+    missing = _missing_months(study, pair, tf, months.get(pair))
+    if succ:
+        missing += _missing_months(study, succ, tf, months.get(succ))
+    if missing:
+        checks["build"][pair] = _cap(missing)
+        return None
+    bars = _archive_bars(study, pair, tf, months=months[pair])
     if not bars:
         checks["build"][pair] = ["no archive bars"]
         return None
@@ -680,7 +717,8 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
     if pair in su.RENAMES:
         succ, swap, ratio, _url = su.RENAMES[pair]
         try:
-            bars = sc.splice(bars, _archive_bars(study, succ, tf), swap, ratio)
+            bars = sc.splice(bars, _archive_bars(study, succ, tf, months=months[succ]),
+                             swap, ratio)
         except sc.SpliceBreak as exc:
             checks["P3"][pair] = [str(exc)]
             return None
@@ -698,6 +736,12 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
     if not bars:
         checks["build"][pair] = [f"no bars left after the first-bar rule and END {su.END}"]
         return None
+    last = bars[-1]["date"][:10]
+    if (last >= su.END) if stratum == "D" else (last != su.END):
+        want = f"before END {su.END}" if stratum == "D" else f"on END {su.END}"
+        checks["P3"].setdefault(pair, []).append(
+            f"stratum classification error: {pair} is stratum {stratum} but its last "
+            f"bar is {last} (want {want}); re-check DELISTED/RENAMES (design P3)")
     flags = []
     dates = [b["date"] for b in bars]
     if len(dates) != len(set(dates)):
@@ -783,6 +827,8 @@ def cmd_preflight(args, fetch) -> int:
     if data_dir.resolve().parent != study:
         raise Refused(f"--tf {tf!r} does not name a data dir inside the study")
     u = _load_universe(study)
+    _check_strata(u)
+    months = _plan_months(study, tf)
     upto = args.upto
     mpath = study / "manifest.json"
     if mpath.exists():
@@ -810,7 +856,8 @@ def cmd_preflight(args, fetch) -> int:
     a = set(u["A"])
     for p in pairs:
         try:
-            b = _build_pair(study, pipe_dir, tf, p, p in a, checks)
+            b = _build_pair(study, pipe_dir, tf, p, p in a, checks, months,
+                            u["strata"][p])
         except Refused:
             raise
         except Exception as exc:      # noqa: BLE001 - one cell must not hide the rest

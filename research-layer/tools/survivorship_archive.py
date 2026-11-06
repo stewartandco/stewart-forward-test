@@ -111,17 +111,21 @@ def parse_zip(path: Path) -> list[dict]:
             if not member.lower().endswith(".csv"):
                 continue
             text = io.TextIOWrapper(z.open(member), encoding="utf-8", newline="")
-            for row in csv.reader(text):
+            for n, row in enumerate(csv.reader(text), 1):
                 if not row or not row[0].strip().isdigit():
                     continue                # header row (or blank line)
-                t = int(row[0])
-                if t >= 10**15:
-                    t //= 1000              # microseconds -> milliseconds
-                date = datetime.fromtimestamp(t / 1000, tz=timezone.utc)
-                bars.append({"date": date.strftime(DATE_FMT),
-                             "open": float(row[1]), "high": float(row[2]),
-                             "low": float(row[3]), "close": float(row[4]),
-                             "volume": float(row[5])})
+                try:
+                    t = int(row[0])
+                    if t >= 10**15:
+                        t //= 1000          # microseconds -> milliseconds
+                    date = datetime.fromtimestamp(t / 1000, tz=timezone.utc)
+                    bars.append({"date": date.strftime(DATE_FMT),
+                                 "open": float(row[1]), "high": float(row[2]),
+                                 "low": float(row[3]), "close": float(row[4]),
+                                 "volume": float(row[5])})
+                except (ValueError, IndexError, OverflowError, OSError) as exc:
+                    raise ValueError(f"{path} member {member} row {n}: "
+                                     f"{type(exc).__name__}: {exc}") from exc
     return bars
 
 

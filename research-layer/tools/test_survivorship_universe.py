@@ -118,9 +118,11 @@ def test_load_cmc(tmp_path):
         {"cmcRank": 1, "symbol": "BTC", "slug": "bitcoin", "tags": [],
          "quotes": [{"name": "BTC", "price": 1.0}, {"name": "USD", "price": 42000.0}]},
         {"cmcRank": 3, "symbol": "X", "slug": "x", "tags": [], "quotes": []},
+        {"cmcRank": 4, "symbol": "USDC", "slug": "usd-coin", "tags": ["stablecoin"],
+         "quotes": [{"name": "USD", "price": 1.0}]},
     ]}))
     rows = su.load_cmc(p)
-    assert [r["rank"] for r in rows] == [1, 2, 3]
+    assert [r["rank"] for r in rows] == [1, 2, 3, 4]
     assert rows[0]["price"] == 42000.0 and rows[0]["stable"] is False
     assert rows[1]["stable"] is True
     assert rows[2]["price"] is None
@@ -130,3 +132,31 @@ def test_load_cmc(tmp_path):
 def test_declared_universe_is_the_active_cells_crypto_assets():
     from pipeline.cells import ACTIVE_CELLS
     assert su.declared_assets() == list(ACTIVE_CELLS["crypto"]["assets"])
+
+
+def _cmc(tmp_path, rows):
+    p = tmp_path / "cmc.json"
+    p.write_text(json.dumps({"data": [
+        {"cmcRank": i + 1, "symbol": sym, "slug": sym.lower(),
+         "quotes": [{"name": "USD", "price": 1.0}], **({} if tags is None else {"tags": tags})}
+        for i, (sym, tags) in enumerate(rows)]}))
+    return p
+
+
+@pytest.mark.parametrize("rows", [
+    [("BTC", None), ("USDT", None), ("USDC", None)],                # no row carries tags
+    [("BTC", []), ("USDT", []), ("USDC", [])],                      # tags all empty
+    [("BTC", ["pow"]), ("USDT", ["stablecoin"]), ("USDC", ["defi"])],   # USDC untagged
+    [("BTC", ["pow"]), ("USDT", ["x"]), ("USDC", ["stablecoin"])],  # USDT untagged
+    [("BTC", ["pow"]), ("USDC", ["stablecoin"])],                   # USDT absent
+])
+def test_load_cmc_refuses_a_listing_without_stablecoin_tags(tmp_path, rows):
+    # final review M-d: without tags the walk would admit stablecoins silently
+    with pytest.raises(ValueError):
+        su.load_cmc(_cmc(tmp_path, rows))
+
+
+def test_load_cmc_accepts_tagged_usdt_and_usdc(tmp_path):
+    rows = su.load_cmc(_cmc(tmp_path, [("BTC", []), ("USDT", ["stablecoin", "x"]),
+                                       ("USDC", ["stablecoin"])]))
+    assert [r["stable"] for r in rows] == [False, True, True]

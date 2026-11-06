@@ -56,11 +56,19 @@ def declared_assets() -> list[str]:
     return list(ACTIVE_CELLS["crypto"]["assets"])
 
 
+STABLE_PROBES = ("USDT", "USDC")
+
+
 def load_cmc(path: Path) -> list[dict]:
     """Rows {"rank","symbol","slug","stable","price"} from a CMC listings
     response, in rank order. Price is the USD quote (else the first quote,
-    else None)."""
+    else None). Raises ValueError when no row carries tags, or when USDT or
+    USDC is not tagged `stablecoin` (final review M-d): the walk's stablecoin
+    rule reads the tags, so a response without them would admit stablecoins."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))["data"]
+    if not any(r.get("tags") for r in data):
+        raise ValueError(f"{path}: no row carries CMC tags; the stablecoin rule "
+                         f"cannot be applied")
     out = []
     for r in data:
         quotes = r.get("quotes") or []
@@ -74,6 +82,10 @@ def load_cmc(path: Path) -> list[dict]:
             "price": None if q is None else q.get("price"),
         })
     out.sort(key=lambda x: x["rank"])
+    for sym in STABLE_PROBES:
+        if not any(r["symbol"] == sym and r["stable"] for r in out):
+            raise ValueError(f"{path}: {sym} is missing or not tagged stablecoin; "
+                             f"the listing's tags cannot be trusted")
     return out
 
 

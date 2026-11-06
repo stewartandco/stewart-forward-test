@@ -86,6 +86,16 @@ def _write_archive(study, sym, bars, tf="1d"):
         (folder / f"{sym}-{tf}-{month}.zip").write_bytes(_zip_bytes(sym, tf, month, mb))
 
 
+def _write_plan(study, tf="1d"):
+    """plan_<tf>.json listing every zip now in the study's archive (what
+    plan-fetch would have planned for it)."""
+    files = sorted((z.parent.parent.name, tf, z.stem[-7:])
+                   for z in (study / "archive").glob(f"*/{tf}/*.zip"))
+    (study / f"plan_{tf}.json").write_text(json.dumps({
+        "tf": tf, "symbols": sorted({f[0] for f in files}), "files": [list(f) for f in files],
+        "sizes": []}), encoding="utf-8")
+
+
 def _spec(pair, fast=10, slow=30):
     s = {"version": 2, "name": f"t{fast}", "family": f"fam{fast}",
          "universe": {"assets": [pair], "asset_class": "crypto",
@@ -121,6 +131,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
+    monkeypatch.setattr(su, "END", STOP.isoformat())    # the fixture's common end
     # the fixture's own counts stand in for the design's 80/960 and strata
     monkeypatch.setattr(cli, "DESIGN_COUNTS", {
         "templates_1d": 2, "sids_1d": 3,
@@ -132,6 +143,7 @@ def env(tmp_path, monkeypatch):
               "CCCUSDT": _bars(START, STOP, 2.0)}
     for sym, bars in series.items():
         _write_archive(study, sym, bars)
+    _write_plan(study)
     for sym in ("AAAUSDT", "BBBUSDT"):
         write_pipeline_csv(series[sym], pipe / f"{sym}_1d.csv")
     cmc = _cmc_bytes([(1, "AAA", False), (2, "CCC", False)])
@@ -321,7 +333,7 @@ def s3env(tmp_path, monkeypatch):
     }
     cmc = _cmc_bytes([(1, "AAA", False), (2, "USDC", True), (3, "CCC", False),
                       (4, "NEW", False), (5, "DDD", False), (6, "EEE", False),
-                      (7, "FFF", False), (8, "GGG", False)])
+                      (7, "FFF", False), (8, "GGG", False), (9, "USDT", True)])
     return SimpleNamespace(study=tmp_path / "study", fake=FakeS3(series, cmc), cmc=cmc)
 
 
@@ -355,7 +367,7 @@ def test_plan_fetch_fetch_universe_end_to_end(s3env, capsys):
     plan = json.loads((s / "plan_1d.json").read_text(encoding="utf-8"))
     # every CMC row's pair, then the 2 A pairs (BBB is not in CMC); deduped
     assert plan["symbols"] == ["AAAUSDT", "USDCUSDT", "CCCUSDT", "NEWUSDT", "DDDUSDT",
-                               "EEEUSDT", "FFFUSDT", "GGGUSDT", "BBBUSDT"]
+                               "EEEUSDT", "FFFUSDT", "GGGUSDT", "USDTUSDT", "BBBUSDT"]
     n_files = sum(len(v) for v in f.listing.values())
     assert len(plan["files"]) == n_files
     out = capsys.readouterr().out
@@ -499,6 +511,7 @@ def test_preflight_p4_flags_a_gap_on_a_b_only_pair(env):
     skip = {date(2023, 3, 1) + timedelta(days=i) for i in range(10)}
     shutil.rmtree(env.study / "archive" / "CCCUSDT")
     _write_archive(env.study, "CCCUSDT", _bars(START, STOP, 2.0, skip=skip))
+    _write_plan(env.study)
     assert _preflight(env) == 1
     p4 = _pf(env)["checks"]["P4"]
     assert list(p4) == ["CCCUSDT"] and "gap of 11 days" in p4["CCCUSDT"][0]
@@ -512,6 +525,7 @@ def _rename_env(env, monkeypatch, swap="2023-09-01", ratio=1.0, scale=1.0):
     shutil.rmtree(env.study / "archive" / "CCCUSDT")
     _write_archive(env.study, "OLDUSDT", old)
     _write_archive(env.study, "NEWUSDT", new)
+    _write_plan(env.study)
     monkeypatch.setattr(su, "RENAMES", {"OLDUSDT": ("NEWUSDT", swap, ratio, "https://x/a")})
     A, B = ["AAAUSDT", "BBBUSDT"], ["AAAUSDT", "OLDUSDT"]
     u = json.loads((env.study / "universe.json").read_text(encoding="utf-8"))
@@ -1301,3 +1315,105 @@ def test_now_is_refused_without_the_test_clock_env(env, monkeypatch):
     assert calls == [] and not (env.study / "preflight_1d.json").exists()
     monkeypatch.setenv("SURVIVORSHIP_TEST_CLOCK", "yes")
     assert _preflight(env) == 2
+
+
+# --------------------------------- data completeness (final review I5, M-d)
+
+def _drop_month(env, sym, month):
+    (env.study / "archive" / sym / "1d" / f"{sym}-1d-{month}.zip").unlink()
+
+
+def test_preflight_fails_on_a_planned_month_missing_from_the_archive(env, capsys):
+    _drop_month(env, "AAAUSDT", "2023-05")          # still in plan_1d.json
+    assert _preflight(env) == 1
+    build = _pf(env)["checks"]["build"]
+    assert list(build) == ["AAAUSDT"] and "2023-05" in build["AAAUSDT"][0]
+    assert "AAAUSDT" in capsys.readouterr().out
+
+
+def test_preflight_fails_a_pair_the_plan_has_no_months_for(env):
+    plan = json.loads((env.study / "plan_1d.json").read_text(encoding="utf-8"))
+    plan["files"] = [f for f in plan["files"] if f[0] != "CCCUSDT"]
+    (env.study / "plan_1d.json").write_text(json.dumps(plan), encoding="utf-8")
+    assert _preflight(env) == 1
+    assert "no planned months" in _pf(env)["checks"]["build"]["CCCUSDT"][0]
+
+
+def test_preflight_refuses_without_a_plan(env):
+    (env.study / "plan_1d.json").unlink()
+    assert _preflight(env) == 2
+
+
+def test_preflight_fails_a_missing_successor_month(env, monkeypatch):
+    _rename_env(env, monkeypatch)
+    _drop_month(env, "NEWUSDT", "2024-03")
+    assert _preflight(env) == 1
+    assert "NEWUSDT" in _pf(env)["checks"]["build"]["OLDUSDT"][0]
+
+
+def _end_early(env, sym, last_month="2024-11"):
+    for z in (env.study / "archive" / sym / "1d").glob("*.zip"):
+        if z.stem[-7:] > last_month:
+            z.unlink()
+    _write_plan(env.study)
+
+
+@pytest.mark.parametrize("sym", ["AAAUSDT", "BBBUSDT", "CCCUSDT"])   # S, R, F
+def test_preflight_fails_a_survivor_whose_last_bar_is_not_end(env, sym):
+    _end_early(env, sym)
+    if sym != "CCCUSDT":
+        write_pipeline_csv(env.series[sym][:-31], env.pipe / f"{sym}_1d.csv")
+    assert _preflight(env) == 1
+    pf = _pf(env)
+    p3 = pf["checks"]["P3"]
+    assert list(p3) == [sym] and "stratum classification error" in p3[sym][0]
+    assert not pf["checks"]["P1"]
+
+
+def test_preflight_fails_a_renamed_pair_that_ends_before_end(env, monkeypatch):
+    _rename_env(env, monkeypatch)
+    _end_early(env, "NEWUSDT")
+    assert _preflight(env) == 1
+    assert "stratum classification error" in _pf(env)["checks"]["P3"]["OLDUSDT"][0]
+
+
+def _delist_ccc(env, monkeypatch):
+    monkeypatch.setattr(su, "DELISTED", {"CCCUSDT": "https://x/ccc"})
+    _set_universe(env, strata=su.strata(["AAAUSDT", "BBBUSDT"], ["AAAUSDT", "CCCUSDT"]))
+
+
+def test_preflight_passes_a_delisted_pair_that_ends_before_end(env, monkeypatch):
+    _end_early(env, "CCCUSDT")
+    _delist_ccc(env, monkeypatch)
+    assert _preflight(env) == 0
+    assert _pf(env)["last_bars"]["CCCUSDT"] == "2024-11-30"
+
+
+def test_preflight_fails_a_delisted_pair_that_trades_to_end(env, monkeypatch):
+    _delist_ccc(env, monkeypatch)
+    assert _preflight(env) == 1
+    p3 = _pf(env)["checks"]["P3"]
+    assert list(p3) == ["CCCUSDT"] and "stratum classification error" in p3["CCCUSDT"][0]
+
+
+def test_preflight_refuses_a_hand_edited_stratum(env):
+    _set_universe(env, strata={"AAAUSDT": "R", "BBBUSDT": "S", "CCCUSDT": "F"})
+    assert _preflight(env) == 2
+
+
+def test_universe_refuses_a_cmc_listing_without_stablecoin_tags(s3env):
+    s, f = s3env.study, s3env.fake
+    assert _run("fetch-cmc", "--study-dir", s, "--now", NOW, fetch=f) == 0
+    assert _run("plan-fetch", "--study-dir", s, "--tf", "1d", fetch=f) == 0
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now", NOW, fetch=f) == 0
+    (s / cli.CMC_FILE).write_bytes(_cmc_bytes([(1, "AAA", False), (2, "USDT", False),
+                                               (3, "USDC", False)]))
+    assert _run("universe", "--study-dir", s) != 0
+    assert not (s / "universe.json").exists()
+
+
+def test_fetch_cmc_refuses_a_listing_without_stablecoin_tags(s3env):
+    bad = _cmc_bytes([(1, "AAA", False), (2, "USDT", False), (3, "USDC", False)])
+    assert _run("fetch-cmc", "--study-dir", s3env.study, "--now", NOW,
+                fetch=lambda u: bad) == 1
+    assert not (s3env.study / cli.CMC_FILE).exists()

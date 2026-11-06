@@ -130,3 +130,16 @@ def test_plan_and_summarise():
                     ("B", "1d", "2024-01"), ("B", "1d", "2024-02")]
     s = sa.summarise(plan)
     assert s["files"] == 4 and s["est_bytes"] == 40
+
+
+@pytest.mark.parametrize("bad", ["1735689600000,abc,1,1,1,1,0,0,0,0,0,0",
+                                 "1735689600000,1.0,2.0"])
+def test_parse_zip_names_the_zip_member_and_row_on_a_bad_row(tmp_path, bad):
+    # final review T1
+    text = _rows(1) + bad + chr(10)
+    p = tmp_path / "bad.zip"
+    p.write_bytes(_zip_bytes(text, name="X-1d-2025-01.csv"))
+    with pytest.raises(ValueError) as e:
+        sa.parse_zip(p)
+    msg = str(e.value)
+    assert str(p) in msg and "X-1d-2025-01.csv" in msg and "row 4" in msg

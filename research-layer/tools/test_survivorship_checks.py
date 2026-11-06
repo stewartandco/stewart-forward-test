@@ -113,3 +113,20 @@ def test_parity_no_shared_dates_fails():
     assert parity([bar("2021-01-01")], [bar("2021-02-01")])
     assert parity([], [bar("2021-02-01")])
     assert parity([], [])
+
+
+def test_parity_reports_dates_missing_from_one_side_inside_the_shared_span():
+    # final review M-c
+    def b(d):
+        return {"date": d + " 00:00:00", "open": 1.0, "high": 1.0, "low": 1.0,
+                "close": 1.0, "volume": 1.0}
+    arch = [b(d) for d in ("2024-01-01", "2024-01-02", "2024-01-03", "2024-01-05",
+                           "2024-01-06")]
+    pipe = [b(d) for d in ("2023-12-30", "2024-01-01", "2024-01-03", "2024-01-04",
+                           "2024-01-05")]
+    out = parity(arch, pipe)
+    assert len(out) == 2
+    assert any("2024-01-02" in x and "pipeline" in x for x in out)
+    assert any("2024-01-04" in x and "archive" in x for x in out)
+    # outside the shared span (2024-01-01 .. 2024-01-05) is not a finding
+    assert not any("2023-12-30" in x or "2024-01-06" in x for x in out)

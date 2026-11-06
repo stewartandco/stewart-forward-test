@@ -34,9 +34,17 @@ def parity(archive: list[dict], pipeline: list[dict]) -> list[str]:
     out: list[str] = []
     a = _index(archive, "archive", out)
     p = _index(pipeline, "pipeline", out)
-    if not (set(a) & set(p)):
+    shared = set(a) & set(p)
+    if not shared:
         out.append("no shared dates between archive and pipeline")
-    for d in sorted(set(a) & set(p)):
+    else:
+        # inside the span both inputs cover, a date in only one is a finding
+        lo, hi = max(min(a), min(p)), min(max(a), max(p))
+        for d in sorted(x for x in set(a) ^ set(p) if lo <= x <= hi):
+            where = ("archive", "pipeline") if d in a else ("pipeline", "archive")
+            out.append(f"{d} in the {where[0]}, missing from the {where[1]} "
+                       f"(inside the shared span {lo} .. {hi})")
+    for d in sorted(shared):
         for f in _FIELDS:
             if a[d][f] != p[d][f]:
                 out.append(f"{d} {f}: archive={a[d][f]!r} pipeline={p[d][f]!r}")
