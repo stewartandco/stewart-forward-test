@@ -191,3 +191,27 @@ def test_matrix_raises_on_duplicate_cell():
             {"tkey": "t1", "pair": "AAA", "m": 2.0}]
     with pytest.raises(ValueError, match="t1.*AAA|AAA.*t1"):
         ss.matrix(rows, ["t1"], ["AAA"])
+
+
+
+def test_verdict_is_first_match_material_wins_over_not_material():
+    # final review I9: rows applied top to bottom; (G >= tau, L > 0, U < tau)
+    # matches MATERIAL first
+    assert ss.verdict(0.15, 0.05, 0.08) == "MATERIAL"
+    assert ss.verdict(0.15, 0.05, -0.01) == "MATERIAL"
+
+
+@pytest.mark.parametrize("v,want", [
+    ("REVERSE", "NOT MATERIAL, flagged REVERSE (U < 0: our universe is harder than PIT)"),
+    ("NOT MATERIAL", "NOT MATERIAL"), ("MATERIAL", "MATERIAL"),
+    ("INCONCLUSIVE", "INCONCLUSIVE")])
+def test_verdict_text(v, want):
+    assert ss.verdict_text(v) == want
+
+
+def test_report_prints_reverse_as_not_material_flagged_reverse():
+    # final review M-a
+    res = dict(_res("1d"), verdict="REVERSE", U=-0.01)
+    line = next(l for l in ss.report(res).splitlines() if "Verdict" in l)
+    assert line == ("**Verdict: NOT MATERIAL, flagged REVERSE (U < 0: our universe is "
+                    "harder than PIT)**")

@@ -50,7 +50,6 @@ NOTE_REL = "docs/notes/survivorship-study-v1.md"
 RESULT_REL = "docs/notes/survivorship-study-v1-result.md"
 NOTE_PREFIX = "survivorship-study-v1: "
 RESULT_PREFIX = "survivorship-study-v1-result: "
-CLARIFICATION = "Where G >= 0.10, L <= 0 and U < 0.10, the verdict is NOT MATERIAL."
 CMC_FILE = "cmc_20231231.json"
 CANON_RULE = 'json.dumps(obj, sort_keys=True, separators=(",", ":"))'
 FINDINGS_CAP = 50
@@ -1002,8 +1001,6 @@ def cmd_draft_note(args, fetch) -> int:
         "",
         _s5(),
         "",
-        CLARIFICATION,
-        "",
         "## Frozen inputs (design P5)",
         "",
         f"Each hash is the sha256 of the UTF-8 canonical JSON {CANON_RULE}, except "
@@ -1105,12 +1102,6 @@ def cmd_gauntlet(args, fetch) -> int:
     return _arm_exit(s2, len(grows), f"gauntlet {args.tf} v6.2 on screen passers")
 
 
-def _verdict_text(v: str) -> str:
-    if v == "REVERSE":
-        return "NOT MATERIAL, flagged REVERSE (U < 0: our universe is harder than PIT)"
-    return v
-
-
 def _f(x) -> str:
     return "n/a" if x is None or x != x else f"{x:.4f}"
 
@@ -1165,14 +1156,14 @@ def cmd_analyse(args, fetch) -> int:
     note_line = f"pre-registration note: entry {note_idx}, line sha256 {note_sha}"
     _write_lf(md, ss.report(result) + "\n## Pre-registration\n\n" + note_line + "\n")
     _write_json(md.with_suffix(".json"), result)
-    print(f"analyse {tf}: {_verdict_text(prim['verdict'])}, G {_f(prim['G'])} "
+    print(f"analyse {tf}: {ss.verdict_text(prim['verdict'])}, G {_f(prim['G'])} "
           f"[{_f(prim['L'])}, {_f(prim['U'])}]; wrote {md}")
     if _result_note_for(tf):
         means = sec["stratum_mean_m"]
         lines = [
             RESULT_PREFIX + "result of the pre-registered crypto survivorship study "
             f"(note {NOTE_PREFIX.strip()} at registry entry {note_idx}); 1d arm, the "
-            f"decision arm. Verdict: {_verdict_text(prim['verdict'])}. G = "
+            f"decision arm. Verdict: {ss.verdict_text(prim['verdict'])}. G = "
             f"{_f(prim['G'])}, 95% interval [L, U] = [{_f(prim['L'])}, {_f(prim['U'])}], "
             f"tau = {prim['tau']:.2f} ({len(tkeys)} templates x {len(pairs)} cells, "
             f"{ss.RESAMPLES} resamples, seed {ss.SEED}). Evidence only: it changes no "

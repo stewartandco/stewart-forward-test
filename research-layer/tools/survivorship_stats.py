@@ -76,12 +76,22 @@ def interval(gstar: np.ndarray) -> tuple[float, float]:
 
 
 def verdict(G: float, L: float, U: float, tau: float = TAU) -> str:
-    """Pre-registered rule (design s5), exhaustive and in this order."""
+    """Pre-registered rule (design s5): the rows are applied top to bottom and
+    the first that matches is the verdict: MATERIAL, then NOT MATERIAL
+    (returned as "REVERSE" when also U < 0), then INCONCLUSIVE (anything
+    else)."""
     if G >= tau and L > 0:
         return "MATERIAL"
     if U < tau:
         return "REVERSE" if U < 0 else "NOT MATERIAL"
     return "INCONCLUSIVE"
+
+
+def verdict_text(v: str) -> str:
+    """How a verdict is printed: REVERSE is NOT MATERIAL with a flag (s5)."""
+    if v == "REVERSE":
+        return "NOT MATERIAL, flagged REVERSE (U < 0: our universe is harder than PIT)"
+    return v
 
 
 def primary(m: np.ndarray, strata_idx: dict, resamples: int = RESAMPLES,
@@ -167,7 +177,7 @@ def report(result: dict) -> str:
     r = result
     sec = r["secondaries"]
     out = [f"# Survivorship study report: {r['tf']} arm", "",
-           f"**Verdict: {r['verdict']}**" + (
+           f"**Verdict: {verdict_text(r['verdict'])}**" + (
                "" if r["tf"] == "1d" else " (secondary, not decision-bearing)"), "",
            f"- G = {_f(r['G'])}",
            f"- 95% interval [L, U] = [{_f(r['L'])}, {_f(r['U'])}]",

@@ -708,14 +708,16 @@ def test_draft_note_is_lf_and_starts_with_prefix(env):
     assert raw.endswith(b"\n")
 
 
-def test_draft_note_carries_s5_verbatim_the_clarification_and_every_hash(env, monkeypatch):
+def test_draft_note_carries_s5_verbatim_and_every_hash(env, monkeypatch):
     monkeypatch.setattr(su, "CUTS", {})
     text = _frozen(env)
     design = DESIGN.read_bytes().decode("utf-8").replace("\r\n", "\n")
     s5 = design[design.index("\n## 5.") + 1:design.index("\n## 6.")].strip("\n")
     assert s5.startswith("## 5. Decision rule") and "**MATERIAL**" in s5
     assert s5 in text
-    assert cli.CLARIFICATION in text.split("\n")
+    # final review I9: s5 itself says first match wins; no extra clarification line
+    assert "Where G >= 0.10, L <= 0 and U < 0.10" not in text
+    assert not hasattr(cli, "CLARIFICATION")
     m = json.loads((env.study / "manifest.json").read_text(encoding="utf-8"))
     for name, digest in m["hashes"].items():
         assert f"{name}: {digest}" in text
