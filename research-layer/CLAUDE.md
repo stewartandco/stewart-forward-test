@@ -1323,8 +1323,10 @@ of it.
   permitted exit set, a NEW strategy id charged to N in full, screened and
   then judged by all six gates from scratch. That replaces the old "once the
   worker is live" trigger. Never move one out of the graveyard by hand.
-- **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6 verdicts with
-  the standalone battery on bars truncated at each verdict's recorded
+- **Parity tool:** `tools/gauntlet_parity.py` re-judges chained v6, v6.1 and
+  v6.2 gauntlet verdicts (since 2026-11-06, Coen; v6 only before), each with
+  the battery that judged it (`BATTERY`: v6 and v6.1 -> "v6.1", the six
+  gates; v6.2 -> "v6.2"), on bars truncated at each verdict's recorded
   `data_end` and compares ELEVEN gate metrics exactly (is_edge_per_trade,
   oos_edge_per_trade, edge_decay_pct, mc_p05_equity, p_ruin,
   cost_stress_net_pnl, train_sharpe, is_edge_raw, oos_edge_raw, is_vol,
@@ -1349,6 +1351,25 @@ of it.
   run (seed 20260930, 60 compared): 13 mismatches, all excused (9 rounding,
   max 17 ulps; 4 restated: 3 EFA, 1 QQQ), exit 0; without the manifest the
   4 restated rows are unexcused and the exit is 1.
+  **Per protocol (2026-11-06):** `--protocol` (v6 / v6.1 / v6.2 / `all`,
+  default all) and `--sample` N PER protocol, each drawn by its own
+  `random.Random(seed)` over its sorted pool, so the v6 sample is the same
+  one as before. A v6.2 verdict also compares `beats_hold.strategy_sharpe`,
+  `.hold_sharpe` and `.n_days` whenever either side records `beats_hold`
+  (`metric_diffs`). A bundle whose `config.json` protocol differs from the
+  verdict's (a later judging rewrote it) is NOT COMPARABLE, never compared.
+  The summary line is the total; one line per protocol follows it. Live run
+  2026-11-06 (seed 20260930, 60 per protocol): v6 60 compared, 13 excused;
+  v6.1 60 compared, 8 mismatches all `restated` (EFA, QQQ, TIP), 52
+  bit-identical; v6.2 none chained yet (fixture-tested only); exit 0. Six
+  intraday v6.1 verdicts (2 each at 1h, 4h, 12h) by `--sids`: all
+  bit-identical.
+  **Exit (`exit_code`):** 0 clean; 1 any unexcused drift, or (with
+  `--sids`) any named strategy missing or NOT COMPARABLE; 3 a sample with
+  fewer than min(`--min-compared`, pool) compared rows in ANY protocol whose
+  pool is not empty (so v6 cannot cover for a protocol whose bundles all
+  failed), or fewer than `--min-compared` in total when every pool is empty.
+  A v6.2-only run before any v6.2 verdict exists needs `--min-compared 0`.
 
 ## Beats-hold (gauntlet v6.2 / live gate v2, 2026-11-05)
 Design: `docs/2026-11-05-beats-hold-design.md` (BH1-BH5, Coen's calls). A
