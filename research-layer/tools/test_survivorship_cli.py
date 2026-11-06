@@ -113,6 +113,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
+    # the fixture's own counts stand in for the design's 80/960 and strata
+    monkeypatch.setattr(cli, "DESIGN_COUNTS", {
+        "templates_1d": 2, "sids_1d": 3,
+        "strata": {"S": 1, "R": 1, "F": 1, "N": 0, "D": 0}})
     study, pipe, layer = tmp_path / "study", tmp_path / "pipe", tmp_path / "layer"
     (layer / "docs").mkdir(parents=True)
     shutil.copyfile(DESIGN, layer / cli.DESIGN_REL)
@@ -666,7 +670,7 @@ def test_freeze_writes_canonical_hashes(env):
     assert m["hashes"]["first_bars"] == sha(canon(_pf(env)["first_bars"]))
     assert set(m["hashes"]) == {"templates", "cells_A", "cells_B", "cmc", "renames",
                                 "delisted", "cuts", "first_bars", "data_1d",
-                                "design_doc_sha256"}
+                                "design_doc_sha256", "study_code"}
 
 
 # --------------------------------------------------------------- draft-note
@@ -972,3 +976,167 @@ def test_analyse_writes_report_json_and_result_note(env, monkeypatch):
 def test_only_the_1d_arm_drafts_the_result_note():
     # an arm other than 1d: report only, never the result note (SV4)
     assert cli._result_note_for("4h") is False and cli._result_note_for("1d") is True
+
+
+# ------------------------------------------- integrity (final review I1-I3, I6)
+
+def _set_universe(env, **kw):
+    p = env.study / "universe.json"
+    u = json.loads(p.read_text(encoding="utf-8"))
+    u.update(kw)
+    p.write_text(json.dumps(u), encoding="utf-8")
+
+
+def test_freeze_refuses_a_hand_edited_stratum(env):
+    assert _preflight(env) == 0
+    # the same stratum sizes (so the I6 count check cannot be what refuses)
+    _set_universe(env, strata={"AAAUSDT": "R", "BBBUSDT": "S", "CCCUSDT": "F"})
+    assert _freeze(env) == 2
+    assert not (env.study / "manifest.json").exists()
+
+
+def test_gate_refuses_a_hand_edited_stratum(env, monkeypatch):
+    _chain(env, _frozen(env))
+    _set_universe(env, strata={"AAAUSDT": "S", "BBBUSDT": "R", "CCCUSDT": "D"})
+    calls = _trap_engine(monkeypatch)
+    for cmd in ("run", "gauntlet", "analyse"):
+        assert _run(cmd, *_base(env), "--registry", env.reg, "--layer-dir", env.layer) == 2
+    assert calls == []
+
+
+def _stamp_want(env):
+    m = _manifest(env)
+    digest = hashlib.sha256(cli.canon(m["hashes"]).encode("utf-8")).hexdigest()
+    return digest, _pf(env)["data_sha256"]
+
+
+def test_written_rows_carry_sid_data_sha_and_manifest_digest(env, monkeypatch):
+    _chain(env, _frozen(env))
+    monkeypatch.setattr(h, "gauntlet_job", lambda item: {
+        "sid": item[0]["strategy_id"], "passed": False, "reason": "f", "beats_hold": None})
+    monkeypatch.setattr(h, "train_job", lambda item, real=h.train_job: dict(
+        real(item), screen_pass=True))
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("gauntlet", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    digest, data = _stamp_want(env)
+    copy = st.read_copy(env.reg, 6)
+    tmpl = st.templates(copy, "1d")
+    for name in ("results_1d.jsonl", "train_1d.jsonl", "gauntlet_1d.jsonl"):
+        rows = _results(env, name)
+        assert rows
+        for r in rows:
+            sid = st.cell_spec(copy, r["tkey"], tmpl[r["tkey"]], r["pair"], "1d")["strategy_id"]
+            assert r["strategy_id"] == sid
+            assert r["data_sha256"] == data[r["pair"]]
+            assert r["manifest_digest"] == digest
+
+
+def test_run_recomputes_a_row_whose_stamp_is_stale(env):
+    _chain(env, _frozen(env))
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    p = env.study / "results_1d.jsonl"
+    rows = _results(env, "results_1d.jsonl")
+    stale = dict(rows[0], manifest_digest="0" * 64, m=123.0)
+    p.write_text("".join(json.dumps(r) + "\n" for r in [stale] + rows[1:]), encoding="utf-8")
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    now = _results(env, "results_1d.jsonl")
+    digest, _d = _stamp_want(env)
+    assert len(now) == 6 and len({r["key"] for r in now}) == 6
+    assert all(r["manifest_digest"] == digest for r in now)
+    assert {r["key"]: r["m"] for r in now}[rows[0]["key"]] == rows[0]["m"]
+    moved = [json.loads(x) for x in (env.study / "results_1d.stale.jsonl")
+             .read_text(encoding="utf-8").splitlines()]
+    assert moved == [stale]
+
+
+@pytest.mark.parametrize("name,field", [("results_1d.jsonl", "data_sha256"),
+                                        ("results_1d.jsonl", "manifest_digest"),
+                                        ("train_1d.jsonl", "strategy_id")])
+def test_analyse_refuses_a_row_whose_stamp_differs(env, monkeypatch, name, field):
+    _chain(env, _frozen(env))
+    monkeypatch.setattr(h, "gauntlet_job", lambda item: {
+        "sid": item[0]["strategy_id"], "passed": False, "reason": "f", "beats_hold": None})
+    assert _run("run", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    assert _run("gauntlet", *_base(env), "--registry", env.reg, "--workers", "1") == 0
+    p = env.study / name
+    rows = _results(env, name)
+    rows[0][field] = "f" * 16
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert _run("analyse", *_base(env), "--registry", env.reg, "--layer-dir", env.layer) == 2
+    assert not (env.layer / "docs" / "runs").exists()
+
+
+def _code_copy(env, monkeypatch):
+    code = env.tmp / "code"
+    code.mkdir()
+    for f in Path(cli.__file__).resolve().parent.glob("survivorship*.py"):
+        shutil.copyfile(f, code / f.name)
+    monkeypatch.setattr(cli, "CODE_DIR", code)
+    return code
+
+
+def test_freeze_pins_the_study_code_and_records_git_head(env, monkeypatch):
+    code = _code_copy(env, monkeypatch)
+    assert _preflight(env) == 0
+    assert _freeze(env) == 0
+    m = _manifest(env)
+    files = {f.name: hashlib.sha256(f.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+             for f in sorted(code.glob("survivorship*.py"))}
+    assert set(files) >= {"survivorship.py", "survivorship_harness.py",
+                          "survivorship_stats.py", "survivorship_universe.py"}
+    assert not any(n.startswith("test_") for n in files)
+    assert m["inputs"]["study_code_files"] == files
+    assert m["hashes"]["study_code"] == hashlib.sha256(
+        cli.canon(files).encode("utf-8")).hexdigest()
+    assert "git_head" in m and "git_head" not in m["hashes"]
+
+
+def test_gate_refuses_study_code_changed_after_freeze(env, monkeypatch):
+    code = _code_copy(env, monkeypatch)
+    _chain(env, _frozen(env))
+    f = code / "survivorship_stats.py"
+    f.write_bytes(f.read_bytes().replace(b"TAU = 0.10", b"TAU = 0.20"))
+    calls = _trap_engine(monkeypatch)
+    assert _run("run", *_base(env), "--registry", env.reg) == 2
+    assert calls == []
+
+
+def test_study_code_hash_ignores_crlf(env, monkeypatch):
+    code = _code_copy(env, monkeypatch)
+    before = cli._study_code_files()
+    f = code / "survivorship_checks.py"
+    f.write_bytes(f.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert cli._study_code_files() == before
+
+
+@pytest.mark.parametrize("change", [
+    {"templates_1d": 80}, {"sids_1d": 960},
+    {"strata": {"S": 66, "R": 10, "F": 22, "N": 7, "D": 5}}])
+def test_freeze_refuses_counts_that_differ_from_the_design(env, monkeypatch, change):
+    monkeypatch.setattr(cli, "DESIGN_COUNTS", {**cli.DESIGN_COUNTS, **change})
+    assert _preflight(env) == 0
+    assert _freeze(env) == 2
+    assert not (env.study / "manifest.json").exists()
+
+
+def test_freeze_accept_counts_records_it_and_the_note_says_so(env, monkeypatch):
+    monkeypatch.setattr(cli, "DESIGN_COUNTS", {
+        "templates_1d": 80, "sids_1d": 960,
+        "strata": {"S": 66, "R": 10, "F": 22, "N": 7, "D": 5}})
+    assert _preflight(env) == 0
+    assert _run("freeze", *_base(env), "--registry", env.reg, "--upto", 6,
+                "--accept-counts") == 0
+    assert _manifest(env)["accepted_counts"] is True
+    assert _draft(env) == 0
+    text = _note_bytes(env).decode("utf-8")
+    assert "differ from the design" in text
+    assert "1d 2 templates, 3 strategy ids (design: 80 templates, 960 strategy ids)" in text
+    assert "strata S 1, R 1, F 1, N 0, D 0 (design: S 66, R 10, F 22, N 7, D 5)" in text
+
+
+def test_freeze_at_the_design_counts_records_accepted_counts_false(env):
+    assert _preflight(env) == 0
+    assert _freeze(env) == 0
+    assert _manifest(env)["accepted_counts"] is False
+    assert _draft(env) == 0
+    assert "differ from the design" not in _note_bytes(env).decode("utf-8")

@@ -22,6 +22,7 @@ import argparse
 import csv
 import hashlib
 import json
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,10 @@ CLARIFICATION = "Where G >= 0.10, L <= 0 and U < 0.10, the verdict is NOT MATERI
 CMC_FILE = "cmc_20231231.json"
 CANON_RULE = 'json.dumps(obj, sort_keys=True, separators=(",", ":"))'
 FINDINGS_CAP = 50
+CODE_DIR = Path(__file__).resolve().parent          # tools/survivorship*.py live here
+# The design's counts (s1.2, s3). freeze refuses others unless --accept-counts.
+DESIGN_COUNTS = {"templates_1d": 80, "sids_1d": 960,
+                 "strata": {"S": 66, "R": 10, "F": 22, "N": 7, "D": 5}}
 
 OK, FAIL, REFUSED, STOPPED = 0, 1, 2, 3
 
@@ -232,6 +237,49 @@ def _design_bytes() -> bytes:
     return (LAYER / DESIGN_REL).read_bytes().replace(b"\r\n", b"\n")
 
 
+def _study_code_files() -> dict:
+    """name -> sha256 of every tools/survivorship*.py (LF-normalised bytes,
+    sorted by name): the study code and its decision constants (TAU, SEED,
+    END, the strata rule ...). Tests are named test_*, so never included."""
+    return {f.name: _sha(f.read_bytes().replace(b"\r\n", b"\n"))
+            for f in sorted(Path(CODE_DIR).glob("survivorship*.py"))}
+
+
+def _git_head() -> str | None:
+    """`git rev-parse HEAD` of the tool's layer: recorded, informational only."""
+    try:
+        r = subprocess.run(["git", "-C", str(LAYER), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
+def _check_strata(u: dict) -> None:
+    """universe.json's strata must be the pure function of A, B and the hashed
+    RENAMES/DELISTED (I1): a hand-edited stratum is refused."""
+    want = su.strata(u["A"], u["B"])
+    have = u.get("strata") or {}
+    if have != want:
+        bad = sorted(p for p in set(want) | set(have) if have.get(p) != want.get(p))
+        raise Refused(f"universe.json strata differ from strata(A, B) under the "
+                      f"declared RENAMES/DELISTED for {len(bad)} pair(s) "
+                      f"({', '.join(bad[:5])}); re-run universe")
+
+
+def _manifest_digest(manifest: dict) -> str:
+    """sha256 of the canonical JSON of the manifest's hashes: every result row
+    carries it, so a row is tied to the frozen inputs it was computed under."""
+    return _sha_canon(manifest["hashes"])
+
+
+def _counts(copy, u: dict) -> dict:
+    tmpl = st.templates(copy, "1d")
+    return {"templates_1d": len(tmpl), "sids_1d": sum(len(v) for v in tmpl.values()),
+            "strata": {s: sum(1 for v in u["strata"].values() if v == s)
+                       for s in su.STRATA}}
+
+
 def _sid_counts(tl: dict) -> dict:
     return {tf: sum(len(v) for v in t.values()) for tf, t in tl.items()}
 
@@ -257,6 +305,7 @@ def _input_hashes(study: Path, copy) -> dict:
         "first_bars": _sha_canon(pf["first_bars"]),
         "data_1d": _sha_canon(pf["data_sha256"]),
         "design_doc_sha256": _sha(_design_bytes()),
+        "study_code": _sha_canon(_study_code_files()),
     }
 
 
@@ -332,8 +381,10 @@ def _gate(args, study: Path, tf: str):
     copy = st.read_copy(Path(args.registry), int(manifest["upto"]))
     note_idx, note_sha = require_note(copy, manifest, Path(args.registry))
     _verify_inputs(study, copy, manifest)
+    u = _load_universe(study)
+    _check_strata(u)
     pf = _load_json(study / f"preflight_{tf}.json", f"run preflight --tf {tf} first")
-    _check_pf_pairs(pf, _load_universe(study), tf)
+    _check_pf_pairs(pf, u, tf)
     if tf != "1d" and pf.get("declared") != _declared():
         raise Refused(f"preflight_{tf}.json ran under other RENAMES/DELISTED/CUTS: "
                       f"re-run preflight --tf {tf}")
@@ -351,21 +402,43 @@ def _gate(args, study: Path, tf: str):
     return copy, manifest, note_idx, note_sha, pf
 
 
-def _rows(study: Path, copy, tf: str):
+def _rows(study: Path, copy, tf: str, manifest: dict, pf: dict):
+    """One row per template-cell. Each carries a `stamp` (I2): the cell spec's
+    strategy id, the cell's study-CSV sha256 from preflight_<tf>.json and the
+    manifest digest. run_arm writes it into every result line and recomputes
+    a line whose stamp differs; analyse refuses one."""
     u = _load_universe(study)
     pairs = _pairs(u)
     tmpl = st.templates(copy, tf)
     if not tmpl:
         raise Refused(f"no frozen templates at {tf}")
     data_dir = str(study / f"data_{tf}")
+    digest = _manifest_digest(manifest)
     rows = []
     for tkey in sorted(tmpl):
         for pair in pairs:
             spec = st.cell_spec(copy, tkey, tmpl[tkey], pair, tf)
             rows.append({"key": f"{tkey}|{pair}|{tf}", "stratum": u["strata"][pair],
                          "tkey": tkey, "pair": pair, "tf": tf,
+                         "stamp": {"strategy_id": spec["strategy_id"],
+                                   "data_sha256": pf["data_sha256"][pair],
+                                   "manifest_digest": digest},
                          "item": (spec, data_dir, tf)})
     return rows, tmpl, pairs, u
+
+
+def _check_stamps(name: str, found: dict, rows: list[dict]) -> None:
+    """analyse refuses any result line not of the current frozen grid or whose
+    stamp differs from the current one (I2)."""
+    want = {r["key"]: r["stamp"] for r in rows}
+    for k, rec in found.items():
+        if k not in want:
+            raise Refused(f"{name}: a row for {k!r}, not a template-cell of the "
+                          f"frozen grid")
+        diff = sorted(f for f, v in want[k].items() if rec.get(f) != v)
+        if diff:
+            raise Refused(f"{name}: the row for {k!r} was computed under other "
+                          f"inputs ({', '.join(diff)} differ); re-run the arm")
 
 
 def _read_jsonl(path: Path):
@@ -696,6 +769,7 @@ def cmd_freeze(args, fetch) -> int:
     u = _load_universe(study)
     if len(u["B"]) != u.get("target"):
         raise Refused(f"universe.json B has {len(u['B'])} pairs, target {u.get('target')}")
+    _check_strata(u)
     pf = _load_json(study / "preflight_1d.json", "run preflight --tf 1d first")
     if pf.get("passed") is not True:
         raise Refused("preflight_1d.json did not pass: every check must pass before freeze")
@@ -712,18 +786,31 @@ def cmd_freeze(args, fetch) -> int:
         raise Refused("no 1d templates in the frozen registry prefix")
     if _sha(_require_cmc(study).read_bytes()) != u["cmc_sha256"]:
         raise Refused("the CMC file differs from the one universe.json was built from")
+    counts = _counts(copy, u)
+    off = sorted(k for k in DESIGN_COUNTS if counts[k] != DESIGN_COUNTS[k])
+    if off and not args.accept_counts:
+        raise Refused("the frozen counts differ from the design's (" + "; ".join(
+            f"{k} {counts[k]}, design {DESIGN_COUNTS[k]}" for k in off) +
+            "); re-check the registry prefix and the universe, or pass "
+            "--accept-counts (the note then states the difference)")
     hashes = _input_hashes(study, copy)
     tl = _template_list(copy)
     manifest = {
         "upto": args.upto, "hashes": hashes, "canonical_json": CANON_RULE,
+        "accepted_counts": bool(off),
+        "design_counts": DESIGN_COUNTS,
+        "git_head": _git_head(),
         "inputs": {"n_templates": {tf: len(v) for tf, v in tl.items()},
                    "n_sids": _sid_counts(tl),
                    "A": u["A"], "B": u["B"],
-                   "stratum_sizes": {s: sum(1 for v in u["strata"].values() if v == s)
-                                     for s in su.STRATA},
-                   **_declared(), "first_bars": pf["first_bars"]}}
+                   "stratum_sizes": counts["strata"],
+                   **_declared(), "first_bars": pf["first_bars"],
+                   "study_code_files": _study_code_files()}}
     _write_json(study / "manifest.json", manifest)
     print(f"freeze: wrote {study / 'manifest.json'} (upto {args.upto})")
+    if off:
+        print("freeze: ACCEPTED counts that differ from the design: " + "; ".join(
+            f"{k} {counts[k]} (design {DESIGN_COUNTS[k]})" for k in off))
     for tf, n in sorted(manifest["inputs"]["n_templates"].items()):
         print(f"  templates {tf}: {n} templates, "
               f"{manifest['inputs']['n_sids'][tf]} strategy ids")
@@ -751,6 +838,8 @@ def cmd_draft_note(args, fetch) -> int:
     _verify_inputs(study, copy, manifest)
     pf = _load_json(study / "preflight_1d.json", "run preflight --tf 1d first")
     inp = manifest["inputs"]
+    accepted = manifest.get("accepted_counts") is True
+    dc = manifest.get("design_counts") or DESIGN_COUNTS
     out = [
         NOTE_PREFIX + "pre-registration of the off-chain crypto survivorship study, "
         f"design doc research-layer/{DESIGN_REL} (Coen approved 2026-11-06). It is "
@@ -773,7 +862,12 @@ def cmd_draft_note(args, fetch) -> int:
         "ordered pair lists; renames / delisted / cuts = the declared lists below; "
         "first_bars = pair -> first bar date of each 1d cell; data_1d = pair -> "
         "sha256 of each 1d study CSV; design_doc_sha256 = the sha256 of the design "
-        "doc's LF-normalised bytes (the file s5 above is quoted from).",
+        "doc's LF-normalised bytes (the file s5 above is quoted from); study_code = "
+        "file name -> sha256 of the LF-normalised bytes of every "
+        "tools/survivorship*.py (the study code and its decision constants). Every "
+        "result row carries its cell spec's strategy id, its cell's study-CSV sha256 "
+        "and the sha256 of the canonical JSON of these hashes; analysis refuses a row "
+        "whose stamp differs.",
         "",
     ]
     out += [f"- {k}: {v}" for k, v in sorted(manifest["hashes"].items())]
@@ -783,9 +877,23 @@ def cmd_draft_note(args, fetch) -> int:
         f"the single-asset crypto strategies registered at entries 0..{manifest['upto'] - 1})",
         "- templates per timeframe: " + ", ".join(
             f"{tf} {n} templates, {inp['n_sids'][tf]} strategy ids"
+            + (f" (design: {dc['templates_1d']} templates, {dc['sids_1d']} strategy ids)"
+               if tf == "1d" and accepted else "")
             for tf, n in sorted(inp["n_templates"].items())),
         f"- cells: A {len(inp['A'])}, B {len(inp['B'])}; strata " + ", ".join(
-            f"{s} {inp['stratum_sizes'].get(s, 0)}" for s in su.STRATA),
+            f"{s} {inp['stratum_sizes'].get(s, 0)}" for s in su.STRATA)
+        + (" (design: " + ", ".join(f"{s} {dc['strata'][s]}" for s in su.STRATA) + ")"
+           if accepted else ""),
+    ]
+    if accepted:
+        out.append("- accepted counts: the frozen counts above differ from the design's "
+                   "(design s1.2 and s3); freeze ran with --accept-counts, and this note "
+                   "pre-registers the counts as frozen, not the design's.")
+    out += [
+        f"- study code: {len(inp['study_code_files'])} files tools/survivorship*.py, "
+        "sha256 of each file's LF-normalised bytes (study_code above hashes this map): "
+        + ", ".join(f"{n} {d}" for n, d in sorted(inp["study_code_files"].items())),
+        f"- git HEAD at freeze (informational, not checked): {manifest.get('git_head')}",
         "",
         "## Splices (renamed pairs, stratum N)",
         "",
@@ -813,8 +921,8 @@ def cmd_run(args, fetch) -> int:
     _refuse_live(args)
     study = _study(args)
     _require_window(args)
-    copy, manifest, note_idx, _ns, _pf = _gate(args, study, args.tf)
-    rows, _t, _p, _u = _rows(study, copy, args.tf)
+    copy, manifest, note_idx, _ns, pf = _gate(args, study, args.tf)
+    rows, _t, _p, _u = _rows(study, copy, args.tf, manifest, pf)
     workers = h.default_workers(args.workers)
     s = h.run_arm(rows, h.full_job, study / f"results_{args.tf}.jsonl", workers,
                   now=_now_fn(args), est_s_per_item=screen_prior_s_for(args.tf),
@@ -826,8 +934,8 @@ def cmd_gauntlet(args, fetch) -> int:
     _refuse_live(args)
     study = _study(args)
     _require_window(args)
-    copy, manifest, note_idx, _ns, _pf = _gate(args, study, args.tf)
-    rows, _t, _p, _u = _rows(study, copy, args.tf)
+    copy, manifest, note_idx, _ns, pf = _gate(args, study, args.tf)
+    rows, _t, _p, _u = _rows(study, copy, args.tf, manifest, pf)
     workers = h.default_workers(args.workers)
     train_out = study / f"train_{args.tf}.jsonl"
     s1 = h.run_arm(rows, h.train_job, train_out, workers, now=_now_fn(args),
@@ -859,13 +967,16 @@ def cmd_analyse(args, fetch) -> int:
     layer = _layer(args)
     tf = args.tf
     copy, manifest, note_idx, note_sha, pf = _gate(args, study, tf)
-    rows, tmpl, pairs, u = _rows(study, copy, tf)
+    rows, tmpl, pairs, u = _rows(study, copy, tf, manifest, pf)
     keys = [r["key"] for r in rows]
     res, d1 = _read_jsonl(study / f"results_{tf}.jsonl")
     train, d2 = _read_jsonl(study / f"train_{tf}.jsonl")
     gaunt, d3 = _read_jsonl(study / f"gauntlet_{tf}.jsonl")
     if d1 or d2 or d3:
         raise Refused(f"duplicate result rows: {sorted(set(d1 + d2 + d3))[:5]}")
+    for name, found in ((f"results_{tf}.jsonl", res), (f"train_{tf}.jsonl", train),
+                        (f"gauntlet_{tf}.jsonl", gaunt)):
+        _check_stamps(name, found, rows)
     miss = [k for k in keys if k not in res]
     if miss:
         raise Refused(f"results_{tf}.jsonl covers {len(keys) - len(miss)} of "
@@ -967,6 +1078,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--upto", type=int, default=None)
     p = add("freeze", cmd_freeze, registry=True, layer=True)
     p.add_argument("--upto", type=int, required=True)
+    p.add_argument("--accept-counts", action="store_true",
+                   help="freeze although the 1d template/sid counts or the stratum "
+                        "sizes differ from the design's (recorded; the note says so)")
     add("draft-note", cmd_draft_note, registry=True, layer=True)
     add("run", cmd_run, tf=True, registry=True, workers=True, layer=True)
     add("gauntlet", cmd_gauntlet, tf=True, registry=True, workers=True, layer=True)
