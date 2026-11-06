@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, time as dtime
+import time
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pipeline.beats_hold import gauntlet_beats_hold
 from pipeline.engine import run_spec
+# worker_env lives in gauntlet_core (research-layer/CLAUDE.md "Gauntlet worker
+# pool must fit the box" names gauntlet.py, which re-exports it); this module
+# already imports gauntlet_core, so it pulls no clustering/PBO module in.
 from pipeline.gauntlet_core import (available_commit_mb, daily_returns_with_dates,
-                                    evaluate_standalone, worker_count)
+                                    evaluate_standalone, worker_count, worker_env)
 from pipeline.parallel import CellError, run_all
 from pipeline.screen import GATE_MIN_TRADES, SpecJob, load_bars
 from tools.survivorship_universe import CUTOFF, END
@@ -57,8 +61,40 @@ def gauntlet_job(item: tuple[dict, str, str]) -> dict:
             "beats_hold": r["metrics"].get("beats_hold")}
 
 
+MAX_WORKERS = 4
+
+
+def default_worker_request() -> int:
+    """The --workers default: half the cores left after two for the box (the
+    half-hourly gauntlet worker and the desktop), at most MAX_WORKERS."""
+    n = os.cpu_count() or 1
+    return min(MAX_WORKERS, max(1, (n - 2) // 2))
+
+
 def default_workers(requested: int) -> int:
     return max(1, min(requested, worker_count(os.cpu_count() or 1, available_commit_mb())))
+
+
+def run_pool(job, items: list, workers: int) -> list:
+    """parallel.run_all inside the pipeline's worker env (one BLAS thread per
+    spawned worker, OPENBLAS/OMP/MKL_NUM_THREADS=1, restored afterwards)."""
+    with worker_env():
+        return run_all(job, items, workers)
+
+
+def eta(seconds: float) -> str:
+    s = max(0, int(round(seconds)))
+    return f"{s // 3600}h{s % 3600 // 60:02d}m{s % 60:02d}s"
+
+
+def progress(label: str, done: int, total: int, new: int, t0: float,
+             unit: str = "items", extra: str = "") -> str:
+    """One progress line: done/total, rate over this run, ETA of the rest."""
+    el = max(time.monotonic() - t0, 1e-9)
+    rate = new / el
+    rest = (total - done) / rate if rate > 0 else float("nan")
+    return (f"{label}: {done}/{total} {unit} ({new} this run{extra}), {rate:.2f} {unit}/s, "
+            f"ETA {eta(rest) if rest == rest else 'n/a'}")
 
 
 def _now() -> datetime:
@@ -138,12 +174,12 @@ def _chunk_ok(now, n: int, est_s: float) -> bool:
     if not (WINDOW_START <= t.time() < WINDOW_END):
         return False
     end = t.replace(hour=WINDOW_END.hour, minute=0, second=0, microsecond=0)
-    from datetime import timedelta
     return t + timedelta(seconds=n * est_s) < end
 
 
 def run_arm(rows_in: list[dict], job, out: Path, workers: int, now=_now,
-            chunk: int = 50, est_s_per_item: float = 2.0) -> dict:
+            chunk: int = 50, est_s_per_item: float = 2.0,
+            label: str | None = None) -> dict:
     """Run `job` over the rows not yet done in `out`, in window-checked chunks,
     appending one JSON line per result. A row's optional `stamp` dict is
     written into its line; a line whose stamp differs from the row's current
@@ -158,12 +194,13 @@ def run_arm(rows_in: list[dict], job, out: Path, workers: int, now=_now,
     todo = [r for r in rows_in if r["key"] not in done_keys]
     summary = {"done": 0, "skipped": len(rows_in) - len(todo),
                "stopped_at_window": False, "errors": [], "stale_moved": n_stale}
+    t0 = time.monotonic()
     for i in range(0, len(todo), chunk):
         batch = todo[i:i + chunk]
         if not _chunk_ok(now, len(batch), est_s_per_item):
             summary["stopped_at_window"] = True
             break
-        results = run_all(job, [r["item"] for r in batch], workers)
+        results = run_pool(job, [r["item"] for r in batch], workers)
         lines = []
         for r, res in zip(batch, results):
             if isinstance(res, CellError):
@@ -180,4 +217,7 @@ def run_arm(rows_in: list[dict], job, out: Path, workers: int, now=_now,
                 f.flush()
                 os.fsync(f.fileno())
         summary["done"] += len(lines)
+        if label:
+            print(progress(label, summary["skipped"] + i + len(batch), len(rows_in),
+                           i + len(batch), t0), flush=True)
     return summary

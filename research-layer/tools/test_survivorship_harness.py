@@ -1,5 +1,6 @@
 import json
 import math
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -167,3 +168,56 @@ def test_cell_error_not_written(tmp_path):
     assert len(r["errors"]) == 1 and r["errors"][0]["key"] == "t3|P|1d"
     keys = [json.loads(l)["key"] for l in out.read_text().splitlines()]
     assert "t3|P|1d" not in keys and len(keys) == 5
+
+
+# ---------------------------------------- the box (final review I7, M-h)
+
+BLAS = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def test_run_arm_runs_the_pool_inside_the_worker_env_and_restores_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    monkeypatch.delenv("MKL_NUM_THREADS", raising=False)
+    seen = []
+
+    def fake_run_all(job, items, workers):
+        seen.append({k: os.environ.get(k) for k in BLAS})
+        return [job(x) for x in items]
+
+    monkeypatch.setattr(h, "run_all", fake_run_all)
+    r = h.run_arm(_rows(4), _job, tmp_path / "o.jsonl", 2, now=lambda: _perth(10), chunk=2)
+    assert r["done"] == 4 and len(seen) == 2
+    assert all(s == {k: "1" for k in BLAS} for s in seen)
+    assert os.environ["OMP_NUM_THREADS"] == "8"
+    assert "OPENBLAS_NUM_THREADS" not in os.environ and "MKL_NUM_THREADS" not in os.environ
+
+
+@pytest.mark.parametrize("n_cpu,want", [(None, 1), (1, 1), (2, 1), (4, 1), (6, 2),
+                                        (8, 3), (10, 4), (16, 4), (64, 4)])
+def test_default_worker_request(monkeypatch, n_cpu, want):
+    monkeypatch.setattr(h.os, "cpu_count", lambda: n_cpu)
+    assert h.default_worker_request() == want
+
+
+def test_run_arm_prints_one_progress_line_per_chunk(tmp_path, capsys):
+    h.run_arm(_rows(5), _job, tmp_path / "o.jsonl", 1, now=lambda: _perth(10),
+              chunk=2, label="run 1d")
+    lines = [x for x in capsys.readouterr().out.splitlines() if x.startswith("run 1d:")]
+    assert len(lines) == 3
+    assert [x.split(":")[1].split()[0] for x in lines] == ["2/5", "4/5", "5/5"]
+    assert all("items/s" in x and "ETA" in x for x in lines)
+
+
+def test_the_study_tool_imports_no_clustering_or_pbo_module():
+    # worker_env comes from gauntlet_core; the study must not pull pipeline.gauntlet,
+    # the clustering or PBO into its import graph (final review I7)
+    import subprocess
+    import sys
+    code = ("import sys, tools.survivorship; print(sorted(m for m in sys.modules if m in "
+            "('pipeline.cluster', 'pipeline.cluster_cells', 'pipeline.pbo', "
+            "'pipeline.gauntlet', 'pipeline.gauntlet_stats')))")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       cwd=Path(h.__file__).resolve().parent.parent)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[]"

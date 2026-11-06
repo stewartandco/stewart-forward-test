@@ -12,7 +12,9 @@ import io
 import json
 import math
 import shutil
+import os
 import sys
+import urllib.error
 import urllib.parse
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -35,6 +37,12 @@ DESIGN = Path(cli.__file__).resolve().parent.parent / cli.DESIGN_REL
 
 
 # ---------------------------------------------------------------- fixtures
+
+@pytest.fixture(autouse=True)
+def _test_clock(monkeypatch):
+    # --now is a test-only clock (final review M-b)
+    monkeypatch.setenv("SURVIVORSHIP_TEST_CLOCK", "1")
+
 
 def _bars(start, stop, seed=0.0, skip=()):
     out, i, d = [], 0, start
@@ -1140,3 +1148,156 @@ def test_freeze_at_the_design_counts_records_accepted_counts_false(env):
     assert _manifest(env)["accepted_counts"] is False
     assert _draft(env) == 0
     assert "differ from the design" not in _note_bytes(env).decode("utf-8")
+
+
+# ---------------------------------------- the box (final review I4, I7, M-b, M-h)
+
+def _ticking(monkeypatch, step_s):
+    """The real clock behind the offset --now clock advances step_s per read."""
+    t = [datetime(2026, 11, 7, 3, 0, tzinfo=timezone.utc)]
+
+    def tick():
+        t[0] += timedelta(seconds=step_s)
+        return t[0]
+
+    monkeypatch.setattr(cli, "_real_now", tick)
+
+
+def _planned(s3env):
+    s, f = s3env.study, s3env.fake
+    assert _run("fetch-cmc", "--study-dir", s, "--now", NOW, fetch=f) == 0
+    assert _run("plan-fetch", "--study-dir", s, "--tf", "1d", fetch=f) == 0
+    return json.loads((s / "plan_1d.json").read_text(encoding="utf-8"))["files"]
+
+
+def _downloads(fake):
+    return [u for u in fake.calls if u.startswith(sa.DL) and not u.endswith(".CHECKSUM")]
+
+
+def test_fetch_stops_at_the_window_with_exit_3_and_resumes(s3env, monkeypatch, capsys):
+    s, f = s3env.study, s3env.fake
+    files = _planned(s3env)
+    _ticking(monkeypatch, 20)
+    # 19:59:00 + 20 s per clock read: two files fit, the third check is 20:00:00
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now",
+                "2026-11-07T19:59:00+08:00", fetch=f) == 3
+    assert len(_downloads(f)) == 2
+    assert "stopped at the run window" in capsys.readouterr().out
+    monkeypatch.setattr(cli, "_real_now", lambda: datetime.now(timezone.utc))
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now", NOW, fetch=f) == 0
+    got = _downloads(f)
+    assert len(got) == len(files) and len(set(got)) == len(files)   # none fetched twice
+
+
+@pytest.mark.parametrize("code", [403, 418, 429])
+def test_fetch_stops_at_once_on_a_ban_status(s3env, capsys, code):
+    s, f = s3env.study, s3env.fake
+    _planned(s3env)
+    n = []
+
+    def banning(url):
+        if url.startswith(sa.DL) and not url.endswith(".CHECKSUM"):
+            n.append(url)
+            if len(n) == 2:
+                raise urllib.error.HTTPError(url, code, "banned", {}, None)
+            if len(n) > 2:
+                raise AssertionError("fetched after a ban status")
+        return f(url)
+
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now", NOW, fetch=banning) == 1
+    assert len(n) == 2
+    out = capsys.readouterr().out
+    assert f"HTTP {code}" in out and "stopped" in out
+
+
+def test_fetch_carries_on_past_an_ordinary_http_error(s3env):
+    s, f = s3env.study, s3env.fake
+    files = _planned(s3env)
+    n = []
+
+    def flaky(url):
+        if url.startswith(sa.DL) and not url.endswith(".CHECKSUM"):
+            n.append(url)
+            if len(n) == 1:
+                raise urllib.error.HTTPError(url, 500, "server", {}, None)
+        return f(url)
+
+    assert _run("fetch", "--study-dir", s, "--tf", "1d", "--now", NOW, fetch=flaky) == 1
+    assert len(n) == len(files)
+
+
+def test_fetch_prints_progress_per_batch(s3env, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "FETCH_BATCH", 10)
+    files = _planned(s3env)
+    capsys.readouterr()
+    assert _run("fetch", "--study-dir", s3env.study, "--tf", "1d", "--now", NOW,
+                fetch=s3env.fake) == 0
+    lines = [x for x in capsys.readouterr().out.splitlines() if "files/s" in x]
+    assert len(lines) == -(-len(files) // 10)
+    assert lines[-1].startswith(f"fetch: {len(files)}/{len(files)} files") and "ETA" in lines[-1]
+
+
+def test_fetch_cmc_network_error_is_a_fail_line_not_a_traceback(s3env, capsys):
+    def down(url):
+        raise urllib.error.URLError("connection refused")
+
+    assert _run("fetch-cmc", "--study-dir", s3env.study, "--now", NOW, fetch=down) == 1
+    assert "fetch-cmc: FAIL" in capsys.readouterr().out
+    assert not (s3env.study / cli.CMC_FILE).exists()
+
+
+def test_preflight_p2_stops_at_the_window_with_exit_3(env, monkeypatch):
+    still = datetime.now(timezone.utc)
+    monkeypatch.setattr(cli, "_real_now", lambda: still)
+    calls = []
+    monkeypatch.setattr(h, "train_job", lambda item: calls.append(1))
+    # 3 train runs x 2 s prior from 19:59:57 would end after 20:00
+    assert _run("preflight", "--study-dir", env.study, "--now", "2026-11-07T19:59:57+08:00",
+                "--registry", env.reg, "--pipeline-data-dir", env.pipe, "--workers", "1") == 3
+    assert calls == []
+    pf = _pf(env)
+    assert pf["passed"] is False and pf["checks"]["P2"]["stopped_at_window"] is True
+
+
+def test_preflight_p2_runs_in_chunks_inside_the_worker_env(env, monkeypatch, capsys):
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "8")
+    seen = []
+    real = h.run_all
+
+    def spy(job, items, workers):
+        seen.append((len(items), os.environ.get("OPENBLAS_NUM_THREADS"),
+                     os.environ.get("OMP_NUM_THREADS"), os.environ.get("MKL_NUM_THREADS")))
+        return real(job, items, workers)
+
+    monkeypatch.setattr(h, "run_all", spy)
+    monkeypatch.setattr(cli, "P2_CHUNK_PER_WORKER", 2)
+    assert _preflight(env) == 0
+    assert seen == [(2, "1", "1", "1"), (1, "1", "1", "1")]
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "8"
+    lines = [x for x in capsys.readouterr().out.splitlines() if x.startswith("preflight P2:")]
+    assert [x.split()[2] for x in lines] == ["2/3", "3/3"]
+
+
+@pytest.mark.parametrize("cmd", ["preflight", "run", "gauntlet"])
+def test_workers_default_fits_the_box(monkeypatch, cmd):
+    monkeypatch.setattr(h.os, "cpu_count", lambda: 16)
+    extra = ["--pipeline-data-dir", "p"] if cmd == "preflight" else []
+    a = cli._parser().parse_args([cmd, "--study-dir", "s", "--registry", "r", *extra])
+    assert a.workers == 4
+    monkeypatch.setattr(h.os, "cpu_count", lambda: 8)
+    a = cli._parser().parse_args([cmd, "--study-dir", "s", "--registry", "r", *extra])
+    assert a.workers == 3
+
+
+def test_now_is_refused_without_the_test_clock_env(env, monkeypatch):
+    monkeypatch.delenv("SURVIVORSHIP_TEST_CLOCK")
+    fetched = []
+    (env.study / cli.CMC_FILE).unlink()
+    assert _run("fetch-cmc", "--study-dir", env.study, "--now", NOW,
+                fetch=lambda u: fetched.append(u) or b"") == 2
+    assert fetched == []
+    calls = _trap_engine(monkeypatch)
+    assert _preflight(env) == 2
+    assert calls == [] and not (env.study / "preflight_1d.json").exists()
+    monkeypatch.setenv("SURVIVORSHIP_TEST_CLOCK", "yes")
+    assert _preflight(env) == 2

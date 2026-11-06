@@ -12,8 +12,9 @@ the frozen registry prefix, carrying every manifest hash, and the manifest
 still matches the inputs on disk.
 
 Exit codes: 0 ok, 1 a check failed, 2 refused, 3 stopped at the run window
-(run/gauntlet only; resume later). Every network call goes through an
-injectable `fetch(url) -> bytes`. The tool never opens a live chain
+(fetch, preflight's P2, run, gauntlet; resume later). Every network call goes
+through an injectable `fetch(url) -> bytes`. `--now` is a test clock: it is
+refused unless the environment sets SURVIVORSHIP_TEST_CLOCK=1. The tool never opens a live chain
 (`--registry` passes refuse_live first) and never writes research-layer/data/.
 """
 from __future__ import annotations
@@ -21,9 +22,13 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import http.client
 import json
+import os
 import subprocess
 import sys
+import time
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -55,6 +60,12 @@ DESIGN_COUNTS = {"templates_1d": 80, "sids_1d": 960,
                  "strata": {"S": 66, "R": 10, "F": 22, "N": 7, "D": 5}}
 
 OK, FAIL, REFUSED, STOPPED = 0, 1, 2, 3
+
+FETCH_EST_S = 2.0          # per archive file: zip + .CHECKSUM, each paced 0.2 s
+FETCH_BATCH = 25           # files per fetch progress line
+BAN_CODES = (403, 418, 429)  # the archive refusing or rate-limiting this client
+P2_CHUNK_PER_WORKER = 8
+TEST_CLOCK_ENV = "SURVIVORSHIP_TEST_CLOCK"
 
 
 class Refused(Exception):
@@ -104,8 +115,20 @@ def _cap(findings: list[str]) -> list[str]:
     return findings[:FINDINGS_CAP] + [f"... {len(findings) - FINDINGS_CAP} more"]
 
 
+def _test_clock(args) -> bool:
+    """--now is for tests only (final review M-b): an operator who passes it
+    without SURVIVORSHIP_TEST_CLOCK=1 is refused, so the 08:40-20:00 window
+    cannot be moved from the command line."""
+    if not getattr(args, "now", None):
+        return False
+    if os.environ.get(TEST_CLOCK_ENV) != "1":
+        raise Refused(f"--now is a test clock; it is refused unless "
+                      f"{TEST_CLOCK_ENV}=1 is set")
+    return True
+
+
 def _now(args) -> datetime:
-    if getattr(args, "now", None):
+    if _test_clock(args):
         t = datetime.fromisoformat(args.now)
         if t.tzinfo is None:
             t = t.replace(tzinfo=h.CLOCK)
@@ -129,7 +152,7 @@ def _now_fn(args):
     """The run clock for run_arm. With --now it is an OFFSET clock: it starts
     at --now and advances with real time, so a long run started with --now
     still stops at 20:00 by its own reckoning."""
-    if getattr(args, "now", None):
+    if _test_clock(args):
         fixed, t0 = _now(args), _real_now()
         return lambda: fixed + (_real_now() - t0)
     return h._now
@@ -489,7 +512,12 @@ def cmd_fetch_cmc(args, fetch) -> int:
     if out.exists():
         raise Refused(f"{out} exists: the CMC snapshot is a frozen input; "
                       f"delete it by hand to re-fetch")
-    data = fetch(su.CMC_URL)
+    try:
+        data = fetch(su.CMC_URL)
+    except (OSError, http.client.HTTPException) as exc:   # URLError/HTTPError are OSError
+        print(f"fetch-cmc: FAIL network error fetching the CMC snapshot: "
+              f"{type(exc).__name__}: {exc}; nothing written")
+        return FAIL
     tmp = out.with_name(out.name + ".part")
     tmp.write_bytes(data)
     try:
@@ -543,27 +571,61 @@ def _have(dest: Path, sym: str, tf: str, month: str) -> bool:
 
 
 def cmd_fetch(args, fetch) -> int:
+    """Downloads every planned file not already on disk (checksum-verified).
+    Before EACH download it checks the run window (h._chunk_ok, one file at
+    FETCH_EST_S) and stops with exit 3 when the next file would not finish
+    before 20:00; a re-run resumes (`_have`). An HTTP 403/418/429 stops it at
+    once, exit 1: the archive is refusing this client and more requests make
+    it worse. Any other per-file failure is reported and fetch goes on."""
     study = _study(args)
     _require_window(args)
     plan = _load_json(study / f"plan_{args.tf}.json", f"run plan-fetch --tf {args.tf} first")
+    now = _now_fn(args)
     dest = study / "archive"
+    files = plan["files"]
     new = have = 0
     errors = []
-    for sym, tf, month in plan["files"]:
+    stopped = banned = None
+    t0 = time.monotonic()
+    for i, (sym, tf, month) in enumerate(files, 1):
         if _have(dest, sym, tf, month):
             have += 1
-            continue
-        try:
-            sa.download_month(sym, tf, month, dest, fetch)
-            new += 1
-        except sa.ChecksumMismatch as exc:
-            errors.append(str(exc))
-        except Exception as exc:      # noqa: BLE001 - network/disk: report, go on
-            errors.append(f"{sym} {tf} {month}: {type(exc).__name__}: {exc}")
+        else:
+            if not h._chunk_ok(now, 1, FETCH_EST_S):
+                stopped = i - 1
+                break
+            try:
+                sa.download_month(sym, tf, month, dest, fetch)
+                new += 1
+            except sa.ChecksumMismatch as exc:
+                errors.append(str(exc))
+            except urllib.error.HTTPError as exc:
+                if exc.code in BAN_CODES:
+                    banned = (sym, tf, month, exc.code)
+                    break
+                errors.append(f"{sym} {tf} {month}: HTTPError {exc.code}: {exc}")
+            except Exception as exc:      # noqa: BLE001 - network/disk: report, go on
+                errors.append(f"{sym} {tf} {month}: {type(exc).__name__}: {exc}")
+        if i % FETCH_BATCH == 0 or i == len(files):
+            print(h.progress("fetch", i, len(files), i - have, t0, unit="files",
+                             extra=f"; {new} downloaded, {have} present, "
+                                   f"{len(errors)} failed"), flush=True)
     print(f"fetch: {new} downloaded, {have} already present, {len(errors)} failed")
     for e in errors[:FINDINGS_CAP]:
         print(f"fetch: FAIL {e}")
-    return FAIL if errors else OK
+    if banned:
+        sym, tf, month, code = banned
+        print(f"fetch: FAIL HTTP {code} on {sym} {tf} {month}: the archive is refusing "
+              f"or rate-limiting this client; stopped at once, nothing more requested. "
+              f"Wait before re-running; fetch resumes from what is on disk")
+        return FAIL
+    if errors:
+        return FAIL
+    if stopped is not None:
+        print(f"fetch: stopped at the run window after {stopped}/{len(files)} files; "
+              f"resume inside 08:40-20:00 Perth (files on disk are kept)")
+        return STOPPED
+    return OK
 
 
 def cmd_universe(args, fetch) -> int:
@@ -648,10 +710,14 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
             "n": len(bars), "sha256": sha}
 
 
-def _p2(copy, tf: str, A: list[str], built: dict, data_dir: Path, workers: int) -> dict:
+def _p2(copy, tf: str, A: list[str], built: dict, data_dir: Path, workers: int,
+        now=h._now) -> dict:
     """P2: the train run of every registered spec of the frozen templates on
     its OWN cell must reproduce its chained screen verdict exactly. Only train
-    runs, only on A cells."""
+    runs, only on A cells. Runs in chunks of workers x P2_CHUNK_PER_WORKER,
+    each inside the worker env and only when it fits the run window (the
+    screen's per-spec prior); a chunk that does not fit stops P2
+    (`stopped_at_window`), and preflight exits 3."""
     tmpl = st.templates(copy, tf)
     sids = sorted(s for v in tmpl.values() for s in v)
     a = set(A)
@@ -669,7 +735,19 @@ def _p2(copy, tf: str, A: list[str], built: dict, data_dir: Path, workers: int) 
         else:
             items.append((spec, str(data_dir), tf))
             sel.append((sid, pair, v))
-    results = parallel.run_all(h.train_job, items, workers) if items else []
+    results: list = []
+    stopped = False
+    chunk = max(1, workers * P2_CHUNK_PER_WORKER)
+    est = screen_prior_s_for(tf)
+    t0 = time.monotonic()
+    for i in range(0, len(items), chunk):
+        batch = items[i:i + chunk]
+        if not h._chunk_ok(now, len(batch), est):
+            stopped = True
+            break
+        results += h.run_pool(h.train_job, batch, workers)
+        print(h.progress("preflight P2", len(results), len(items), len(results), t0,
+                         unit="train runs"), flush=True)
     for (sid, pair, v), r in zip(sel, results):
         if isinstance(r, parallel.CellError):
             misses.append({"sid": sid, "pair": pair, "why": f"train run raised: {r}"})
@@ -687,7 +765,8 @@ def _p2(copy, tf: str, A: list[str], built: dict, data_dir: Path, workers: int) 
                            "(harness, chain)", "diff": diff})
     if not sids:
         misses.append({"sid": None, "pair": None, "why": f"no registered templates at {tf}"})
-    return {"checked": len(sids), "misses": misses}
+    return {"checked": len(sids), "run": len(results), "stopped_at_window": stopped,
+            "misses": misses}
 
 
 def cmd_preflight(args, fetch) -> int:
@@ -739,9 +818,12 @@ def cmd_preflight(args, fetch) -> int:
             b = None
         if b is not None:
             built[p] = b
-    checks["P2"] = _p2(copy, tf, u["A"], built, data_dir, h.default_workers(args.workers))
+    checks["P2"] = _p2(copy, tf, u["A"], built, data_dir, h.default_workers(args.workers),
+                       now=_now_fn(args))
+    stopped = checks["P2"]["stopped_at_window"]
     passed = (not any(checks[k] for k in ("build", "P1", "P3", "P4"))
-              and not checks["P2"]["misses"] and len(built) == len(pairs))
+              and not checks["P2"]["misses"] and len(built) == len(pairs)
+              and not stopped)
     _write_json(study / f"preflight_{tf}.json", {
         "tf": tf, "upto": upto, "passed": passed, "pairs": pairs,
         "first_bars": {p: b["first"] for p, b in built.items()},
@@ -756,6 +838,12 @@ def cmd_preflight(args, fetch) -> int:
     for miss in checks["P2"]["misses"]:
         print(f"preflight P2 MISS {miss['sid']} ({miss['pair']}): {miss['why']}"
               + (f" {miss['diff']}" if "diff" in miss else ""))
+    if stopped:
+        print(f"preflight {tf}: STOPPED at the run window after "
+              f"{checks['P2']['run']}/{checks['P2']['checked']} P2 train runs; "
+              f"preflight_{tf}.json says not passed. Re-run preflight inside "
+              f"08:40-20:00 Perth (it starts over)")
+        return STOPPED
     print(f"preflight {tf}: {'PASS' if passed else 'FAIL'}: {len(built)}/{len(pairs)} "
           f"cells built, P2 {checks['P2']['checked']} registered specs checked, "
           f"{len(checks['P2']['misses'])} miss(es); upto {upto}")
@@ -926,7 +1014,7 @@ def cmd_run(args, fetch) -> int:
     workers = h.default_workers(args.workers)
     s = h.run_arm(rows, h.full_job, study / f"results_{args.tf}.jsonl", workers,
                   now=_now_fn(args), est_s_per_item=screen_prior_s_for(args.tf),
-                  chunk=workers * 8)
+                  chunk=workers * 8, label=f"run {args.tf}")
     return _arm_exit(s, len(rows), f"run {args.tf} (note at entry {note_idx})")
 
 
@@ -939,7 +1027,8 @@ def cmd_gauntlet(args, fetch) -> int:
     workers = h.default_workers(args.workers)
     train_out = study / f"train_{args.tf}.jsonl"
     s1 = h.run_arm(rows, h.train_job, train_out, workers, now=_now_fn(args),
-                   est_s_per_item=screen_prior_s_for(args.tf), chunk=workers * 8)
+                   est_s_per_item=screen_prior_s_for(args.tf), chunk=workers * 8,
+                   label=f"gauntlet {args.tf} train")
     rc = _arm_exit(s1, len(rows), f"gauntlet {args.tf} train")
     if rc != OK:
         return rc
@@ -947,7 +1036,7 @@ def cmd_gauntlet(args, fetch) -> int:
     grows = [r for r in rows if train.get(r["key"], {}).get("screen_pass") is True]
     s2 = h.run_arm(grows, h.gauntlet_job, study / f"gauntlet_{args.tf}.jsonl", workers,
                    now=_now_fn(args), est_s_per_item=prior_s_for(args.tf),
-                   chunk=workers * 8)
+                   chunk=workers * 8, label=f"gauntlet {args.tf} v6.2")
     return _arm_exit(s2, len(grows), f"gauntlet {args.tf} v6.2 on screen passers")
 
 
@@ -1061,7 +1150,9 @@ def _parser() -> argparse.ArgumentParser:
         if registry:
             p.add_argument("--registry", required=True, help="a COPY of the chain")
         if workers:
-            p.add_argument("--workers", type=int, default=6)
+            p.add_argument("--workers", type=int, default=h.default_worker_request(),
+                           help="pool size (default (cores - 2) // 2, at most "
+                                f"{h.MAX_WORKERS}; also bounded by free commit)")
         if layer:
             p.add_argument("--layer-dir", default=None,
                            help="research layer for docs/ (default this layer)")
