@@ -107,7 +107,16 @@ def test_constants_and_declared_shapes():
     assert su.RENAMES["MKRUSDT"][2] == 24000.0
     assert len(su.RENAMES) == 7
     assert set(su.DELISTED) == {"XMRUSDT", "XEMUSDT", "ELFUSDT", "KDAUSDT", "LRCUSDT"}
-    assert all(v[1] is None and v[3] is None for v in su.RENAMES.values())
+    # R4 (2026-11-08): swap date = the successor's first archive bar, each
+    # matching its Binance announcement; every entry carries a binance.com URL
+    assert {p: v[1] for p, v in su.RENAMES.items()} == {
+        "MATICUSDT": "2024-09-13", "RNDRUSDT": "2024-07-26",
+        "FTMUSDT": "2025-01-16", "MKRUSDT": "2025-09-17",
+        "EOSUSDT": "2025-05-28", "KLAYUSDT": "2024-10-31",
+        "FXSUSDT": "2026-01-15"}
+    assert all(v[2] == 1.0 for p, v in su.RENAMES.items() if p != "MKRUSDT")
+    assert all(v[3].startswith("https://www.binance.com/") for v in su.RENAMES.values())
+    assert all(u.startswith("https://www.binance.com/") for u in su.DELISTED.values())
 
 
 def test_load_cmc(tmp_path):

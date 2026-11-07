@@ -6,7 +6,12 @@ from datetime import date as _date
 
 GAP_DAYS = 7
 JUMP_RATIO = 10.0
-SPLICE_TOL = 0.05
+# Coen 2026-11-08 (R4): 0.05 -> 0.25. Every Binance rename halted trading for
+# 1-3 days, and the price moved 4-15% across the halt (MATIC->POL +8.0%,
+# FTM->S +11.1%, KLAY->KAIA +12.8%, FXS->FRAX +14.7%): real returns, not a
+# wrong ratio. The check exists to catch a wrong conversion ratio (a 30%+,
+# usually 2x+, jump); |ln| < 0.25 still stops any ratio error over ~28%.
+SPLICE_TOL = 0.25
 
 _FIELDS = ("open", "high", "low", "close", "volume")
 

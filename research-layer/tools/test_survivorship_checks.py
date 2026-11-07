@@ -14,7 +14,7 @@ def bar(date, close=1.0, volume=10.0):
 
 
 def test_constants():
-    assert (GAP_DAYS, JUMP_RATIO, SPLICE_TOL) == (7, 10.0, 0.05)
+    assert (GAP_DAYS, JUMP_RATIO, SPLICE_TOL) == (7, 10.0, 0.25)
 
 
 def test_parity_pass_and_mismatch():
@@ -57,9 +57,13 @@ def test_splice_ratio_and_continuity():
     assert out[2]["volume"] == 7.0
     assert out[3]["open"] == pytest.approx(0.051 * 24000.0)
     assert out[1]["close"] == 1200.0
-    bad = [bar("2024-09-03", 0.05 * 1.06)]
-    with pytest.raises(SpliceBreak):
-        splice(pred[:2], bad, "2024-09-03", 24000.0)
+    # a halt-gap move like FXS->FRAX (+14.7%) passes; a ratio-sized break fails
+    halt = [bar("2024-09-03", 0.05 * 1.15)]
+    assert len(splice(pred[:2], halt, "2024-09-03", 24000.0)) == 3
+    for factor in (1.30, 1 / 1.30):
+        bad = [bar("2024-09-03", 0.05 * factor)]
+        with pytest.raises(SpliceBreak):
+            splice(pred[:2], bad, "2024-09-03", 24000.0)
 
 
 def test_hidden_splice_gap_and_jump():

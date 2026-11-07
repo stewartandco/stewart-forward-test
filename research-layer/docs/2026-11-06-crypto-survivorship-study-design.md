@@ -121,7 +121,7 @@ Everything in step 1 below reads data or reproduces numbers ALREADY on the chain
 - **P2 The harness is the engine.** For all 960 registered per-cell 1d crypto strategies on their own cells, the harness's train run must reproduce the chained screen verdict (pass/fail, trades, net_pnl). The train window ends 2023-12-31, so the data vintage at verdict time does not matter, and these numbers are already on the chain. Any miss: STOP.
 - **P3 Splices and deaths declared.** For each of the 7 renames: the swap date, the conversion ratio and its Binance announcement URL.
   - Expected ratios are 1:1 except MKR -> SKY at 1:24,000. The builder confirms every ratio from the announcement.
-  - At each boundary, |ln(successor first close x ratio / predecessor last close)| must be below 0.05; otherwise STOP for Coen.
+  - At each boundary, |ln(successor first close x ratio / predecessor last close)| must be below 0.25; otherwise STOP for Coen. (Coen 2026-11-08, R4: raised from 0.05. Every rename halted trading for 1-3 days and the price moved 4-15% across the halt, e.g. FXS->FRAX +14.7%. Those are real returns a holder earned, not a wrong ratio; the check exists to catch a wrong ratio, which shows as a 30%+ jump.)
   - Each D pair is classified as delisted or renamed, with its announcement URL. A reclassified one moves stratum, and the move is recorded here.
   - Only USDT pairs are spliced. The archive also holds old-Skycoin `SKY*`/`SKYCOIN*` symbols, a collision hazard.
 - **P4 No hidden splices.**

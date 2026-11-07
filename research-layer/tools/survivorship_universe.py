@@ -27,23 +27,41 @@ SYMBOL_MAP = {"ETHDYDX": "DYDX"}
 # predecessor pair -> (successor pair, swap date, ratio successor per
 # predecessor unit, announcement URL). Dates/URLs are filled from Binance
 # announcements at G2; `freeze` (Task 7) refuses any None.
+# R4, 2026-11-08: swap date = the successor's first daily bar in the archive;
+# every date and ratio matches the Binance announcement (old pair removed at
+# 03:00 UTC on the old pair's last archive day, new pair opened on the
+# successor's first archive day).
 RENAMES: dict[str, tuple] = {
-    "MATICUSDT": ("POLUSDT", None, 1.0, None),
-    "RNDRUSDT": ("RENDERUSDT", None, 1.0, None),
-    "FTMUSDT": ("SUSDT", None, 1.0, None),
-    "MKRUSDT": ("SKYUSDT", None, 24000.0, None),
-    "EOSUSDT": ("AUSDT", None, 1.0, None),
-    "KLAYUSDT": ("KAIAUSDT", None, 1.0, None),
-    "FXSUSDT": ("FRAXUSDT", None, 1.0, None),
+    "MATICUSDT": ("POLUSDT", "2024-09-13", 1.0,
+                  "https://www.binance.com/en/support/articles/6a6de383727f4659a3050f7982e1620f"),
+    "RNDRUSDT": ("RENDERUSDT", "2024-07-26", 1.0,
+                 "https://www.binance.com/en/support/announcement/d1f2ae8d99b24439a7a900caa9bb6b3b"),
+    "FTMUSDT": ("SUSDT", "2025-01-16", 1.0,
+                "https://www.binance.com/en/support/announcement/aec6fcbc84b749eeab6690e6bcac2f3d"),
+    "MKRUSDT": ("SKYUSDT", "2025-09-17", 24000.0,
+                "https://www.binance.com/en/support/announcement/detail/bf29506a33a94c17a5d5a01e74e646d2"),
+    "EOSUSDT": ("AUSDT", "2025-05-28", 1.0,
+                "https://www.binance.com/en/support/announcement/1e89a9ca957c4b0ca7502e60b993e201"),
+    "KLAYUSDT": ("KAIAUSDT", "2024-10-31", 1.0,
+                 "https://www.binance.com/en/support/articles/f75f933759ee49d0af1dfbce7e32144c"),
+    "FXSUSDT": ("FRAXUSDT", "2026-01-15", 1.0,
+                "https://www.binance.com/en/support/announcement/detail/a17352ba70414c96882cd881591dd36d"),
 }
 
-# pair -> announcement URL (filled at G2)
+# pair -> Binance delisting announcement (R4, 2026-11-08); each a genuine
+# delisting with no successor token; the date matches the archive's last bar.
 DELISTED: dict[str, str | None] = {
-    "XMRUSDT": None, "XEMUSDT": None, "ELFUSDT": None,
-    "KDAUSDT": None, "LRCUSDT": None,
+    "XMRUSDT": "https://www.binance.com/en/support/announcement/f73b083ba6834771b07dbe5319917ae5",
+    "XEMUSDT": "https://www.binance.com/en/support/announcement/binance-will-delist-omg-waves-wnxm-xem-on-2024-06-17-f65faeeefe07417a8b6dd2900ba8da7e",
+    "ELFUSDT": "https://www.binance.com/en/support/articles/fac9c3e401da4cc8b604566fd261d70c",
+    "KDAUSDT": "https://www.binance.com/en/support/announcement/detail/a6c810fc36424548917e146dbe21469a",
+    "LRCUSDT": "https://www.binance.com/en/support/announcement/detail/ddac99c0e5044c13a13c7c113e530e2b",
 }
 
-# pair -> first usable date (confirmed at G2)
+# pair -> first usable date. LUNAUSDT carries Terra Classic until its
+# 2022-05-13 bar, then Terra 2.0 from 2022-05-31 (Binance listing announcement
+# binance-will-list-terra-2-0-luna-in-the-innovation-zone-luna-old-renamed-as-lunc-d044a6742e484b77a170111460b0eed3);
+# confirmed in the archive (18-day gap, then a new price series). R4, 2026-11-08.
 CUTS: dict[str, str] = {"LUNAUSDT": "2022-05-31"}
 
 # pair -> reason: a declared exclusion (design P4; Coen's call, declared BEFORE
