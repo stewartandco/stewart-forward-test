@@ -1,0 +1,86 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "04d60cdc150727f47d51e65296b49403f40a5b1017f94d6ff21b83a2371ab149",
+  "ETHUSD_1d": "11151839ff9c4499fefa4317c6645757c2d1f955a0e38fb5744e5c836fda3ef9"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 105,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-09T12:13:08Z",
+  "family": "tstat_trend_scan_symmetric",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-09-120048-loop-crypto"
+  },
+  "name": "BTC+ETH 1d tstat_trend_scan_symmetric dboth ml105 tm2.0 al14 m2.5 ml90 te0.5 f0.02",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "e0d728e421153bec",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_scan_symmetric-2026-10-09-120048-loop-crypto"
+  },
+  "strategy_id": "54f30dbb81cb8c53",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

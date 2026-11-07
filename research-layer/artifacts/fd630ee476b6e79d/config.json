@@ -1,0 +1,110 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "ADAUSDT_1d": "2023-12-31 00:00:00",
+  "BCHUSDT_1d": "2023-12-31 00:00:00",
+  "BNBUSDT_1d": "2023-12-31 00:00:00",
+  "BTCUSDT_1d": "2023-12-31 00:00:00",
+  "DOGEUSDT_1d": "2023-12-31 00:00:00",
+  "ETHUSDT_1d": "2023-12-31 00:00:00",
+  "LINKUSDT_1d": "2023-12-31 00:00:00",
+  "SOLUSDT_1d": "2023-12-31 00:00:00",
+  "TRXUSDT_1d": "2023-12-31 00:00:00",
+  "XLMUSDT_1d": "2023-12-31 00:00:00",
+  "XRPUSDT_1d": "2023-12-31 00:00:00",
+  "ZECUSDT_1d": "2023-12-31 00:00:00"
+ },
+ "data_sha256": {
+  "ADAUSDT_1d": "a187adf3e49179b95df9629e62013270ba7b02ea9bd75bb90e9f8c87cce02fce",
+  "BCHUSDT_1d": "21de3a863a53063b8bbceb1ed47f66b7675e7375d424e2d7321da90da23ed2cc",
+  "BNBUSDT_1d": "15612e2dfb662841d6783bb56978a88d55c5ded4f7a904e18f4b3b497549eca0",
+  "BTCUSDT_1d": "f5f6bb091279452dc2a9fcf4aebc7724514de6e0d2b3f7560172fec5d320af47",
+  "DOGEUSDT_1d": "31915fa77520e5ebeb1febdabbcc6173dfb7718c14fbbe43e32444e1ee1cb810",
+  "ETHUSDT_1d": "bd67dc945bd6cba47063aaf54f3ca35a00a8e2c00775b746efd22424a01ae3f6",
+  "LINKUSDT_1d": "ecf833995ada50b79f8ae3415002e2c5c729ed22b8b9543692f2ffd950218557",
+  "SOLUSDT_1d": "febb2f56036d73e139171e51e501783e5211db14f511805b740ab93b13275732",
+  "TRXUSDT_1d": "001e7e02a4305091c4975fe22b714c29b17c81947ba3f3e97f5d277313127325",
+  "XLMUSDT_1d": "e94cfa6290fe4f489a68ac3ac485671028e5277ef82a8177d3fb9a5bc88a713f",
+  "XRPUSDT_1d": "6d86f9ddd041ff34f24d8eea481e6f085a2fad58df02980d29164b43deb3828b",
+  "ZECUSDT_1d": "a47d522cc8c1f97c2c81ca1d2dd4ee4c50d2898928a1c08172e708fb5fb6114e"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 8,
+     "slow": 50
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-18T12:17:30Z",
+  "family": "downtrend_regime_short_macross",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-18-120031-loop-crypto"
+  },
+  "name": "XRP 1d downtrend_regime_short_macross dshort f8 s50 ml50 al14 m2.5 ml100 f0.01",
+  "provenance": {
+   "card_ids": [
+    "19533cf882254744",
+    "3605eedc183f09ce",
+    "6078cc70ec7b8303",
+    "831e8c990e96e75e",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "downtrend_regime_short_macross-2026-10-18-120031-loop-crypto:XRPUSDT_1d"
+  },
+  "strategy_id": "fd630ee476b6e79d",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "XRPUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

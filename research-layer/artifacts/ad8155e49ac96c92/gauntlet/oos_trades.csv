@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+DIA,long,2024-08-13 00:00:00,395.07,2025-01-13 00:00:00,418.76,signal:channel_exit,0.059564057002556584,1.0
+DIA,long,2025-06-10 00:00:00,428.265,2026-03-09 00:00:00,470.88,signal:channel_exit,0.09910614689503001,1.0
+DIA,long,2026-04-15 00:00:00,486.51,2026-10-01 00:00:00,509.37,signal:channel_exit,0.046587728926435326,1.0

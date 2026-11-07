@@ -1,0 +1,119 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "ff223aef59342d4815f01155a4621e73c34d2f4a819f80c91c23e84d0744cf84",
+  "EMB_1d": "fe7da7d27bce65b6b03be062f759550a91a69f1ecfa3ec2887661fff490c6e22",
+  "HYG_1d": "ce5596d44be4b226d1e2dee84fa08de0e113c587f51dd22c21f9a442f2733dfd",
+  "IEF_1d": "6daf46992a29d2972010d1f7cd967f6925e42999f17cef7feafee97a1575d820",
+  "LQD_1d": "f58f7604f17300b6a111628a746b74ef25a732f1b97266b0305f121aa8aed49c",
+  "SHY_1d": "a7c4be273d2c0b26731849323f5e164a8afcc6ca506a7f1b971f4a194985b93c",
+  "TIP_1d": "ac709bf9124122c4c2d5af0103ef163cf6985294dbc8331f77dea3fcc25958a0",
+  "TLT_1d": "bab8f346b3709f96023df251893c20ea467b5682db03796327ed28540f239b8f"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 2.25
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 60,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-08T12:16:39Z",
+  "family": "credit_flow_reversion_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-08-120221-loop-bond_etf"
+  },
+  "name": "IEF 1d credit_flow_reversion_long dlong l40 ze2.25 al14 m3.5 l120 mp0.8 l60 ze0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "3142c67d77f9011a",
+    "4cf9bb79602caeb9",
+    "58fc981f679dad73",
+    "6dba955b6b43f40d",
+    "7290a79089f6ba27",
+    "72ea5fdb6f549ffe",
+    "73ba48a43e430161",
+    "89e66b95663d995b",
+    "9a6abe19343ae46f",
+    "9e01e80cae4ced2a",
+    "bec5e126dff7ccb1",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "4cf9bb79602caeb9",
+    "58fc981f679dad73",
+    "7290a79089f6ba27",
+    "72ea5fdb6f549ffe"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_flow_reversion_long-2026-10-08-120221-loop-bond_etf:IEF_1d"
+  },
+  "strategy_id": "097f4fd5eb19da62",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "IEF"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

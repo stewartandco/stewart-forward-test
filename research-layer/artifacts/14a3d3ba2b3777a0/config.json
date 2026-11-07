@@ -1,0 +1,128 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "914d909870b763ca850727899bdfc9d847682dcb97e8ca0ff687f9819d15570f",
+  "EEM_1d": "3d4242e7d24a272ad9ca211105fb2211ccd7bc897974b32ced13c3adb6e58152",
+  "EFA_1d": "7a1d7c7cdb27082056e4210da5bd230ba2b260ca5f9db88ba07c8223a70db0f0",
+  "EWA_1d": "38c2652cfd41d67ac29c25184e2017d222e6d45e02a784ff6964f69b77a70df5",
+  "EWC_1d": "d4d66654013be0def6e4ab2b62aa26329724d9f2051f4d5b8dc02ec2e75a7503",
+  "EWG_1d": "32d809a354639a23fd8e24d7ae9ce6b812516ae624ad5dde56261bca19a4b0f4",
+  "EWH_1d": "5278be548abc46e7642f73de59d0c1ac76777ce05eda03f48dea93fca19279cf",
+  "EWJ_1d": "ec16e71b7078f0be780cb7fd731df79cf497428030b9c0477d45f77250c23713",
+  "EWU_1d": "45b0fc4eae3132e0c5d0f5a80a3cb9824564a2560da7e817a874fff3df7a4ba1",
+  "EWY_1d": "d3fe80b9427116ea3d43634f74740be10c5cbb040dd51a4214384a4b7b6d3070",
+  "EWZ_1d": "83f4b7a9db17e43cc2906c374a095fe685d4618a4d42397984816fe430e3bf7c",
+  "FXI_1d": "1dd7424d977f0725a31899eaee66365a3613e90895e48271516e75c5b5306b27",
+  "IWM_1d": "b01783967fa1cfb3a3bc36b07b6aaec6f980016be43623a0a43b44edb1b268df",
+  "MDY_1d": "ec6697b68fc453253a30086cd866bc068502618125f4876a191011f0be8fed25",
+  "QQQ_1d": "0e2e454585c71529405df8c140f6339d3fefe86eef925e92124d52594d7ba45b",
+  "SPY_1d": "d2669f5a9a1630af403c004e483aa081e9afb63037cf276ae3101d0b1c19c532"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "max_bars": 20
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-01T13:37:47Z",
+  "family": "breakout_triple_barrier_geometry",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-01-133003-loop-equity_etf"
+  },
+  "name": "EWU 1d breakout_triple_barrier_geometry dlong l55 ml200 al14 m3.0 r3.0 mb20 f0.02",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "295c089b48478986",
+    "73ba48a43e430161",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "a59075409e6a124e",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "breakout_triple_barrier_geometry-2026-09-01-133003-loop-equity_etf:EWU_1d"
+  },
+  "strategy_id": "14a3d3ba2b3777a0",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "EWU"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

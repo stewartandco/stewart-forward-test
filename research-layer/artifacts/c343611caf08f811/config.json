@@ -1,0 +1,100 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "4434857629cdbda9d8b0b2d92b8d77b3e51dd5a0a44a39c2c663fd7f5b6c2ed1",
+  "ETHUSD_1d": "6b24123aba5d9e9e9c5f57a8e5f8adde5597fc3d36cd503d52d4e277eacc22e3"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.7
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 80
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 2.0
+    },
+    "role": "target",
+    "type": "r_multiple"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-31T09:31:54Z",
+  "family": "vol_gated_symmetric_ma_cross",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-31-091654-loop-crypto"
+  },
+  "name": "BTC+ETH 1d vol_gated_symmetric_ma_cross l120 mp0.7 dboth f13 s80 al14 m2.5 r2.0 mb40 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "2359bf09659f2885",
+    "35c61158d380a771",
+    "6078cc70ec7b8303",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91",
+    "fe7e4468ebcb3ce6"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "vol_gated_symmetric_ma_cross-2026-08-31-091654-loop-crypto"
+  },
+  "strategy_id": "c343611caf08f811",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

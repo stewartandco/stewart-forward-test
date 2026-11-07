@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+APTUSDT,long,2023-01-21 00:00:00,10.9515,2023-02-26 00:00:00,12.2499,signal:channel_exit,0.11555910149294635
+APTUSDT,short,2023-05-07 00:00:00,9.2096,2023-06-03 00:00:00,9.0415,signal:channel_exit,0.015252692842251617
+APTUSDT,short,2023-06-10 00:00:00,7.4427,2023-10-23 00:00:00,6.1622,signal:channel_exit,0.16904777836000373

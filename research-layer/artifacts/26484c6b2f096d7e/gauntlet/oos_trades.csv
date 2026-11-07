@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWG,short,2026-03-16 00:00:00,40.39,2026-04-14 00:00:00,42.26,signal:regime_flip,-0.04709541415641931,1.0
+EWG,short,2026-06-23 00:00:00,41.0,2026-07-06 00:00:00,42.43,signal:regime_flip,-0.03543677893921799,1.0
+EWG,short,2026-07-09 00:00:00,41.38,2026-07-31 00:00:00,42.65,signal:regime_flip,-0.03140861546487437,1.0
+EWG,short,2026-09-24 00:00:00,41.89,2026-09-28 00:00:00,42.01,signal:regime_flip,-0.0033043280398018736,1.0

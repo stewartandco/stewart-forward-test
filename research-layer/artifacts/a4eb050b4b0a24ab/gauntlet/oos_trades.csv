@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+QQQ,short,2025-03-12 00:00:00,479.16,2025-05-12 00:00:00,506.99,stop,-0.059314141414141285,0.9018257426125179
+QQQ,short,2026-03-23 00:00:00,590.52,2026-04-10 00:00:00,611.84,stop,-0.03676170945381469,1.0

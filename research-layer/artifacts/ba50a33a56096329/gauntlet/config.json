@@ -1,0 +1,213 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "MXN_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "MXN_1d": "935c8f35c9eaf9baf4141bed398607d65dc40c605fe37d5a71b6783db93f1e54"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.03868762914566052,
+   "excess": 0.0837515626445017,
+   "strategy_net": 0.04506393349884119,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.044236638219078195,
+  "edge_decay_pct": 206.04726153977393,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 9,
+    "net_pnl": 0.2986075963103998
+   },
+   "post_2022": {
+    "n_trades": 6,
+    "net_pnl": -0.02187020592119915
+   },
+   "pre_gfc": {
+    "n_trades": 16,
+    "net_pnl": -0.02470501678383097
+   },
+   "tightening": {
+    "n_trades": 10,
+    "net_pnl": -0.18864682693286283
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 33,
+   "stop": 12
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 2,
+   "stop": 2
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.029889039241128797,
+  "is_edge_raw": 0.005154478637210381,
+  "is_vol": 0.17245380808753344,
+  "mc_p05_equity": 0.7185628191287128,
+  "oos_edge_per_trade": 0.09147458609802311,
+  "oos_edge_raw": 0.011899083496390713,
+  "oos_vol": 0.13008075798932603,
+  "open_at_end": false,
+  "p_ruin": 0.001,
+  "perturbation": {
+   "base_score": 0.1430682403296391,
+   "dense_only": true,
+   "mean_ratio": 1.1348705483822257,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "up",
+     "from": 50,
+     "ratio": 1.1348705483822257,
+     "score": 0.1623639323589776,
+     "to": 100
+    }
+   ],
+   "worst_ratio": 1.1348705483822257
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 3,
+     "net": -0.034244823326937436,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 1,
+     "net": 0.08184115731250029,
+     "win_rate": 1.0,
+     "wins": 1
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.1430682403296391,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9730311930756437,
+     "n_trades": 17,
+     "net": 0.2441205480178922
+    },
+    {
+     "min_equity": 0.9605847120661216,
+     "n_trades": 14,
+     "net": 0.1618701713701457
+    },
+    {
+     "min_equity": 0.8302649278356127,
+     "n_trades": 14,
+     "net": -0.17403918071357072
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 20,
+     "slow": 100
+    },
+    "role": "entry",
+    "type": "ma_cross_ds"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-26T15:10:42Z",
+  "family": "fx_short_side_downtrend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-26-143030-loop-fx"
+  },
+  "name": "MXN 1d fx_short_side_downtrend dshort f20 s100 ml50 ml50 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "a4ff31490b3d6b5d",
+    "c7c0e61fc25e8ba1",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_short_side_downtrend-2026-09-26-143030-loop-fx:MXN_1d"
+  },
+  "strategy_id": "ba50a33a56096329",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "MXN"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,222 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "ZAR_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "ZAR_1d": "618f38800d2e5057c6770819d929b0e4e6d210ceb07f2b956c2ca05fd3f71c2e"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.13725896479594654,
+   "excess": -0.27526523273118964,
+   "strategy_net": -0.13800626793524307,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.13854974892691807,
+  "edge_decay_pct": -341.9135591425558,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 6,
+    "net_pnl": 0.19868231730088848
+   },
+   "post_2022": {
+    "n_trades": 6,
+    "net_pnl": -0.16349751063990803
+   },
+   "pre_gfc": {
+    "n_trades": 14,
+    "net_pnl": -0.07939623689826192
+   },
+   "tightening": {
+    "n_trades": 7,
+    "net_pnl": -0.06378384086659705
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 34,
+   "stop": 11
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 2,
+   "stop": 1
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.1428362963894362,
+  "is_edge_raw": 0.026766714232195836,
+  "is_vol": 0.1873943451965297,
+  "mc_p05_equity": 1.0956388419508925,
+  "oos_edge_per_trade": -0.34554036834309504,
+  "oos_edge_raw": -0.04803113666227937,
+  "oos_vol": 0.1390029677070557,
+  "open_at_end": false,
+  "p_ruin": 0.0005,
+  "perturbation": {
+   "base_score": 0.4757717151855151,
+   "dense_only": true,
+   "mean_ratio": 0.9919705442848488,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "down",
+     "from": 150,
+     "ratio": 1.0486147455545678,
+     "score": 0.49890123606131925,
+     "to": 100
+    },
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "up",
+     "from": 150,
+     "ratio": 0.9353263430151296,
+     "score": 0.44500181847450365,
+     "to": 200
+    }
+   ],
+   "worst_ratio": 0.9353263430151296
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 2,
+     "net": -0.06766069440630257,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 1,
+     "net": -0.07643271558053556,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.4757717151855151,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 12,
+     "net": 1.015563133010238
+    },
+    {
+     "min_equity": 0.9846199733501684,
+     "n_trades": 19,
+     "net": 0.20359123097734222
+    },
+    {
+     "min_equity": 0.9318989875776641,
+     "n_trades": 14,
+     "net": -0.014652223538767535
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 20,
+     "slow": 100
+    },
+    "role": "entry",
+    "type": "ma_cross_ds"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-26T15:10:42Z",
+  "family": "fx_short_side_downtrend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-26-143030-loop-fx"
+  },
+  "name": "ZAR 1d fx_short_side_downtrend dshort f20 s100 ml150 ml50 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "a4ff31490b3d6b5d",
+    "c7c0e61fc25e8ba1",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_short_side_downtrend-2026-09-26-143030-loop-fx:ZAR_1d"
+  },
+  "strategy_id": "5683841b98c594a8",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "ZAR"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,286 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CAD_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "CAD_1d": "0834db48d730ca96ec34181946077fd15ffd75dd85d47db5d4d2111b9093bcc3"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.05899872701555867,
+   "excess": 0.006298075749453326,
+   "strategy_net": -0.05270065126610535,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.053657891156935644,
+  "edge_decay_pct": -6485.557548894045,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 12,
+    "net_pnl": 0.037552059862622444
+   },
+   "post_2022": {
+    "n_trades": 11,
+    "net_pnl": -0.11493374279055213
+   },
+   "pre_gfc": {
+    "n_trades": 23,
+    "net_pnl": 0.15703632075070062
+   },
+   "tightening": {
+    "n_trades": 13,
+    "net_pnl": -0.02506287258350015
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 35,
+   "stop": 68
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 1,
+   "stop": 4
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.00280931717426188,
+  "is_edge_raw": 0.00022163121475314918,
+  "is_vol": 0.07889148892964731,
+  "mc_p05_equity": 0.6324490334534367,
+  "oos_edge_per_trade": -0.17939056489345634,
+  "oos_edge_raw": -0.010754620671991899,
+  "oos_vol": 0.05995087132023518,
+  "open_at_end": false,
+  "p_ruin": 0.002,
+  "perturbation": {
+   "base_score": 0.029452266210811553,
+   "dense_only": true,
+   "mean_ratio": 1.0510221490544829,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 0.5642260004936145,
+     "score": 0.016617734369599426,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 1.4999364876067787,
+     "score": 0.04417652873230449,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.029452266210811553,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0922574936051082,
+     "score": 0.03216945847241144,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.0843324072651221,
+     "score": 0.03193604671978251,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.10325322724035287,
+     "score": 0.003041041535808292,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.9,
+     "ratio": 1.4812012339046063,
+     "score": 0.04362473305274102,
+     "to": 0.8
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.9,
+     "ratio": 1.58297034232028,
+     "score": 0.046622063925836385,
+     "to": 1.0
+    }
+   ],
+   "worst_ratio": 0.10325322724035287
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 5,
+     "net": -0.053773103359959495,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.029452266210811553,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9393953084898221,
+     "n_trades": 23,
+     "net": 0.046908549360070266
+    },
+    {
+     "min_equity": 0.7824956875768597,
+     "n_trades": 44,
+     "net": -0.07741601830724795
+    },
+    {
+     "min_equity": 0.9722357956585814,
+     "n_trades": 36,
+     "net": 0.05333548406675233
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-25T04:52:07Z",
+  "family": "fx_vol_filtered_tstat_trend_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-25-043929-loop-fx"
+  },
+  "name": "CAD 1d fx_vol_filtered_tstat_trend_long dlong ml90 tm2.5 ml200 l120 mp0.9 ml50 ml90 te0.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "3d4db3693d78d717",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_vol_filtered_tstat_trend_long-2026-09-25-043929-loop-fx:CAD_1d"
+  },
+  "strategy_id": "68447202c307449d",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "CAD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
