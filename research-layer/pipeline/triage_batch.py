@@ -32,6 +32,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import halt as _halt
 from .registry import Registry
 from .triage import apply_decisions
 
@@ -173,7 +174,7 @@ def review_card(client, model: str, card: dict, meter,
 
 def build_decisions(client, model: str, pending: dict[str, dict],
                     accepted: dict[str, dict], meter,
-                    panel_size: int = PANEL_SIZE) -> dict:
+                    panel_size: int = PANEL_SIZE, halt_dir=None) -> dict:
     """Turn pending cards into a decision list without chaining anything.
 
     Returns {decisions, rejections, counts, stopped}. `decisions` is the shape
@@ -191,6 +192,9 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     for cid, card in pending.items():
         if cid in dupes:
             continue                       # already decided, never pay for it
+        if halt_dir is not None and _halt.halt_reason(halt_dir) is not None:
+            stopped = "halted"             # D35: no more paid panels once Coen halts;
+            break                          # the cards decided so far are still chained
         if not meter.can_spend():
             stopped = "budget"
             break
@@ -309,7 +313,7 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     client, meter = _client_and_meter()
-    out = build_decisions(client, args.model, pending, accepted, meter)
+    out = build_decisions(client, args.model, pending, accepted, meter, halt_dir=logs_dir)
 
     c = out["counts"]
     print(f"{len(pending)} pending -> {c['accepted']} auto-accepted, "

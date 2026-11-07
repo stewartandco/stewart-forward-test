@@ -17,7 +17,9 @@ Spec: docs/2026-08-27-pipeline-loop-design.md. Invoked by
 as `python -m pipeline.loop --once`.
 
 Exit 0: cycle_complete | no_trigger | no_new_accepted_cards | deferred_cycle_budget | deferred_lock |
-        deferred_budget | deferred_instance | dry_run_would_fire
+        deferred_budget | deferred_instance | dry_run_would_fire |
+        halted (D35: logs/pipeline.halted present at run start or before any
+        stage; see pipeline/halt.py. WARN, never retried: Coen's act, not a defect)
         (distinguished in logs/pipeline_status.json items.outcome)
 Exit 1: stage_failed | chain_invalid | gauntlet_orphan | snapshot_failed | stale_data |
         loop_crashed -- a real defect.
@@ -43,6 +45,7 @@ import sys
 import traceback
 
 from . import allowance as _allowance
+from . import halt as _halt
 from . import chain_mirror as _chain_mirror
 from . import commit_list as _commit_list
 from . import deadline as _deadline
@@ -1153,6 +1156,9 @@ def _write_status(logs_dir: str | Path, outcome: str, *, overall: str = "OK",
 
 
 def _stage(runner: Runner, argv: list[str], cwd: str | Path) -> int:
+    # D35: every stage subprocess is started here with cwd = the layer, so this is
+    # "before each stage". A halt raises PipelineHalted; run() reports it.
+    _halt.check(Path(cwd) / "logs")
     print(f"loop: running {' '.join(argv)}", flush=True)
     return runner(argv, cwd=str(cwd)).returncode
 
@@ -1419,6 +1425,10 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     if args.seed_watermarks:
+        reason = _halt.halt_reason(logs_dir)       # D35: seeding writes loop_state
+        if reason is not None:
+            print(f"loop: {_halt.describe(reason)}; watermarks not seeded", flush=True)
+            return 0
         return _seed_watermarks(layer, registry_path, state_path)
 
     # Window check BEFORE the cycle: a killed cycle leaves no evidence, so
@@ -1439,6 +1449,11 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
 
     try:
         return _run_cycle(args, runner, layer, logs_dir, registry_path, state_path)
+    except _halt.PipelineHalted as h:
+        # Between stages: the stages already run left valid chain entries (the
+        # chain is append-only); the cycle is not committed or watermarked, as
+        # on stage_failed. Locks are released by _run_cycle's finally.
+        return _report_halt(logs_dir, h.reason, "before a stage")
     except Exception as exc:                        # unattended -- never silent
         traceback.print_exc()
         print(f"loop_crashed: {exc}", flush=True)
@@ -1452,6 +1467,15 @@ def run(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
             # either way.
             traceback.print_exc()
         return 1
+
+
+def _report_halt(logs_dir: Path, reason: str, where: str) -> int:
+    msg = _halt.describe(reason)
+    print(f"loop: {msg} ({where}); stopping, no further stage runs", flush=True)
+    _write_status(logs_dir, "halted", overall="WARN",
+                  extra={"halted": msg, "halted_at": where},
+                  spent=_spent(logs_dir), escalations=["halted_by_coen"])
+    return 0
 
 
 def _run_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
@@ -1479,6 +1503,11 @@ def _run_cycle(args, runner: Runner, layer: Path, logs_dir: Path,
                       spent=_spent(logs_dir), state=state)
         return 0
     try:
+        # D35 run-start check, once loop.lock is ours: a second instance never
+        # overwrites the holder's pipeline_status.json with `halted`.
+        reason = _halt.halt_reason(logs_dir)
+        if reason is not None:
+            return _report_halt(logs_dir, reason, "run start")
         return _run_locked_cycle(args, runner, layer, logs_dir, registry_path,
                                  state_path, state)
     finally:

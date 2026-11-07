@@ -48,6 +48,13 @@ set LOG=%LAYER%\logs\quarantine-run.log
 cd /d "%LAYER%"
 if not exist "%LAYER%\logs" mkdir "%LAYER%\logs"
 echo ==== %DATE% %TIME% ==== >> "%LOG%"
+rem D35 kill switch (pipeline\halt.py): Coen's logs\pipeline.halted stops the whole run,
+rem fetch, record, mirror sync and commit. Owed dates are recorded by --catch-up later.
+if exist "%LAYER%\logs\pipeline.halted" (
+  echo halted by pipeline.halted, D35: nothing fetched, recorded, synced or committed >> "%LOG%"
+  endlocal
+  exit /b 0
+)
 
 REM 1. Refresh the committed price CSVs. A stale crypto data dir defers every
 REM    crypto spec, which the all-deferred guard turns into exit 1 -- so this

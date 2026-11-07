@@ -388,6 +388,13 @@ def run(argv: list[str] | None = None) -> int:
                     help="directory for <date>-livegate-assessment.md")
     args = ap.parse_args(argv)
 
+    # D35 (pipeline/halt.py): stop on the halt artifact before any chain read or write.
+    from . import halt as _halt
+    reason = _halt.halt_reason(args.registry.parent / "logs")
+    if reason is not None:
+        print(f"livegate: {_halt.describe(reason)}; nothing assessed or written")
+        return 0
+
     registry = Registry(args.registry)
     # ONE chain pass reads both notes. The v1 refusal is exactly as before; a
     # chained quarantine-live-protocol-v2 note (prefix with its colon) arms the

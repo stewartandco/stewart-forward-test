@@ -61,6 +61,11 @@ exit /b %ERRORLEVEL%
 echo ==== %DATE% %TIME% gauntlet stats ==== >> "%LOG%" 2>nul || goto :log_locked
 "%PY%" -m pipeline.gauntlet_stats --chain --report "%LAYER%\logs\gauntlet-stats-report.md" >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
+rem D35 kill switch: while logs\pipeline.halted exists, no chain mirror sync and no commit.
+if exist "%LAYER%\logs\pipeline.halted" (
+  echo halted by pipeline.halted, D35: no chain mirror sync, no commit >> "%LOG%"
+  goto :done
+)
 rem Chain mirror (2026-10-09 segments design, pipeline\chain_mirror.py): git
 rem tracks research-layer\registry_log.d (LF segments of the chain, none over
 rem 40 MiB), never registry_log.jsonl. The mirror is staged ONLY on sync's exit

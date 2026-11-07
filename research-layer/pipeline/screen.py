@@ -22,6 +22,7 @@ import argparse
 from pathlib import Path
 from collections.abc import Iterable
 
+from . import halt as _halt
 from . import commit_list as _commit_list
 from . import deadline as _deadline
 from .cells import CLASSES, cell_id, retired_cell_ids
@@ -612,6 +613,7 @@ def run(argv: list[str] | None = None) -> int:
     n_pass_written = 0
     n_started = 0
     stopped_at_deadline = False
+    halted = None                         # D35: pipeline.halted seen (pipeline/halt.py)
     last_flush: str | None = None
 
     def flush() -> str | None:
@@ -625,6 +627,9 @@ def run(argv: list[str] | None = None) -> int:
         nonlocal snap, n_pass_written, last_flush
         last_flush = None
         while pending:
+            if _halt.halt_reason(logs_dir) is not None:
+                last_flush = "halted"       # D35: no write starts once Coen halts
+                return last_flush
             if budget.active and (budget.remaining_s() or 0) <= 0:
                 last_flush = "deadline"     # never START a write after the deadline
                 return last_flush
@@ -667,7 +672,7 @@ def run(argv: list[str] | None = None) -> int:
             return
         stop_at = time.monotonic() + DRAIN_RESERVE_S
         while pending:
-            if flush() in (None, "deadline"):
+            if flush() in (None, "deadline", "halted"):
                 return
             if time.monotonic() + DRAIN_INTERVAL_S >= stop_at:
                 return
@@ -677,6 +682,9 @@ def run(argv: list[str] | None = None) -> int:
 
     try:
         for tf, chunk in _tf_chunks(_group_by_tf(jobs), chunk_size):
+            halted = _halt.halt_reason(logs_dir)
+            if halted is not None:              # D35: between batches
+                break
             # the drain reserve is held back only while a batch is pending
             # (the gauntlet worker's reserve_s): stop unless this chunk AND
             # the reserve both fit in what is left
@@ -713,7 +721,7 @@ def run(argv: list[str] | None = None) -> int:
                     n_pass_written += 1
             if not args.dry_run:
                 flush()
-        if not args.dry_run:
+        if not args.dry_run and halted is None and last_flush != "halted":
             final_drain()
     except (ChainMoved, UnstableEntry) as exc:
         print(f"REFUSED: chain moved or an entry did not round-trip; nothing "
@@ -730,8 +738,14 @@ def run(argv: list[str] | None = None) -> int:
     # deferred_lock, no stopped_at_deadline) unless the last flush was
     # stopped by the deadline itself (Ruling 6: deferred only, and the
     # deadline stopped the run).
+    stopped_by_halt = halted is not None or last_flush == "halted"
     unwritten_deadline = len(pending) if last_flush == "deadline" else 0
-    unwritten_lock = len(pending) - unwritten_deadline
+    unwritten_halt = len(pending) if stopped_by_halt and not unwritten_deadline else 0
+    unwritten_lock = len(pending) - unwritten_deadline - unwritten_halt
+    if stopped_by_halt:
+        print(f"HALTED by pipeline.halted (D35): {not_started} spec(s) not started and "
+              f"{unwritten_halt} screened spec(s) not written; they stay 'proposed' and "
+              f"the next run after the halt is lifted screens them.", flush=True)
     if unwritten_deadline:
         stopped_at_deadline = True
     if stopped_at_deadline and not_started:
@@ -748,7 +762,8 @@ def run(argv: list[str] | None = None) -> int:
         args.registry, "screen", evaluated=counts["written"],
         deferred=not_started + len(pending), deadline_utc=args.deadline_utc,
         stopped_at_deadline=stopped_at_deadline,
-        extra={"deferred_lock": unwritten_lock, "retried_written": counts["retried_written"],
+        extra={"deferred_lock": unwritten_lock, "halted": stopped_by_halt,
+               "retried_written": counts["retried_written"],
                "dropped_stale": counts["dropped_stale"]})
     print(f"\n{counts['written']} screened: {n_pass_written} -> gauntlet, "
           f"{counts['written'] - n_pass_written} -> graveyard"

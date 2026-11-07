@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import deadline as _deadline
+from . import halt as _halt
 from .chainlock import ChainLock, ChainLockHeld
 from .taskguard import task_started
 from .registry import ChainMoved, ChainSnapshot, Registry, UnstableEntry
@@ -379,6 +380,13 @@ def run(argv: list[str] | None = None) -> int:
         except ChainLockHeld:
             return finish(0, "deferred_instance", write=False)
     try:
+        # D35 (pipeline/halt.py): checked once the instance lock is ours, so the
+        # status file this run owns says `halted`; nothing is read or written.
+        reason = _halt.halt_reason(a.logs_dir)
+        if reason is not None:
+            status["halted"] = _halt.describe(reason)
+            status["queued"] = None          # not read: the chain is untouched on a halt
+            return finish(0, "halted")
         _prune_commit_list(a.logs_dir, a.repo_root)
         registry = Registry(a.registry)
         # The run's ONE full chain read, outside any lock. Everything done
@@ -560,7 +568,14 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{sid}  ERROR: no verdict written; stays queued", flush=True)
             status["errored"] += 1
 
+        halted_mid = None
         for start, tf, chunk in _walk_chunks(todo, chunk_size, max_workers, budget):
+            # D35: between batches. Verdicts already chained stay; kept (unwritten)
+            # verdicts are dropped, as on any run end: the next run re-evaluates.
+            halted_mid = _halt.halt_reason(a.logs_dir)
+            if halted_mid is not None:
+                status["halted"] = _halt.describe(halted_mid)
+                break
             # the rate is measured, and the prior assumed, per timeframe; the
             # first chunk of an unmeasured timeframe is one pool round
             # (_walk_chunks), so its prior-based check can pass
@@ -599,7 +614,13 @@ def run(argv: list[str] | None = None) -> int:
             finally:
                 budget.record(len(chunk), time.time() - t0, key=tf)
 
-        final_drain()
+        if halted_mid is None:
+            final_drain()                 # a halt writes nothing more to the chain
+        if halted_mid is not None:
+            for item in pending:
+                print(f"{item['spec']['strategy_id']}  not written: halted by "
+                      f"pipeline.halted; stays queued", flush=True)
+            pending.clear()               # dropped by the halt, not a lock deferral
         for item in pending:
             print(f"{item['spec']['strategy_id']}  deferred: chain.lock held "
                   f"through the run; not written, stays queued", flush=True)
@@ -623,6 +644,8 @@ def run(argv: list[str] | None = None) -> int:
             if ts:
                 ages.append((now - _deadline._parse_iso(ts)).total_seconds() / 3600)
         status["oldest_queued_age_hours"] = round(max(ages), 2) if ages else 0.0
+        if halted_mid is not None:
+            return finish(0, "halted")
         if status["errored"]:
             return finish(1, "candidate_errors")
         if status["deferred_deadline"]:
