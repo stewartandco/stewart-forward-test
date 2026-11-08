@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 import urllib.error
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -229,9 +229,12 @@ def _pairs(u: dict) -> list[str]:
     return list(u["A"]) + [p for p in u["B"] if p not in seen]
 
 
-def _archive_bars(study: Path, sym: str, tf: str, months=None) -> list[dict]:
+def _archive_bars(study: Path, sym: str, tf: str, months=None,
+                  dropped: list | None = None) -> list[dict]:
     """Every parsed bar of a pair's downloaded monthly zips, sorted by date.
-    With `months`, each listed month's zip must be on disk (Refused if not)."""
+    With `months`, each listed month's zip must be on disk (Refused if not).
+    A bar identical in every field to an already-kept bar of the same date is
+    dropped (Coen 2026-11-08); each drop is appended to `dropped` when given."""
     folder = study / "archive" / sym / tf
     if months is not None:
         paths = []
@@ -246,6 +249,9 @@ def _archive_bars(study: Path, sym: str, tf: str, months=None) -> list[dict]:
     for p in paths:
         bars.extend(sa.parse_zip(p))
     bars.sort(key=lambda b: b["date"])
+    bars, notes = sc.dedup_exact(bars)
+    if dropped is not None:
+        dropped += [f"{sym}: {n}" for n in notes]
     return bars
 
 
@@ -269,6 +275,17 @@ def _refuse_none_declared() -> None:
             bad.append(f"RENAMES[{k}] = {v!r}")
     bad += [f"DELISTED[{k}] = None" for k, v in su.DELISTED.items() if v is None]
     bad += [f"CUTS[{k}] = None" for k, v in su.CUTS.items() if v is None]
+    for k, v in su.HALTS.items():
+        ok = (isinstance(v, (tuple, list)) and len(v) == 2
+              and all(isinstance(x, str) for x in v))
+        if ok:
+            try:
+                ok = date.fromisoformat(v[0]) < date.fromisoformat(v[1])
+            except ValueError:
+                ok = False
+        if not ok:
+            bad.append(f"HALTS[{k}] = {v!r} (want (last bar before, first bar after) "
+                       f"as ISO dates, before < after)")
     bad += [f"EXCLUDED[{k}] = {v!r} (a reason is required)"
             for k, v in su.EXCLUDED.items() if not (isinstance(v, str) and v.strip())]
     if bad:
@@ -279,6 +296,8 @@ def _refuse_none_declared() -> None:
 def _declared() -> dict:
     return {"renames": {k: list(v) for k, v in su.RENAMES.items()},
             "delisted": dict(su.DELISTED), "cuts": dict(su.CUTS),
+            "halts": {k: list(v) if isinstance(v, (tuple, list)) else v
+                      for k, v in su.HALTS.items()},   # malformed: refused later
             "excluded": dict(su.EXCLUDED)}
 
 
@@ -361,6 +380,7 @@ def _input_hashes(study: Path, copy) -> dict:
         "renames": _sha_canon(d["renames"]),
         "delisted": _sha_canon(d["delisted"]),
         "cuts": _sha_canon(d["cuts"]),
+        "halts": _sha_canon(d["halts"]),
         "excluded": _sha_canon(d["excluded"]),
         "first_bars": _sha_canon(pf["first_bars"]),
         "data_1d": _sha_canon(pf["data_sha256"]),
@@ -465,7 +485,7 @@ def _gate(args, study: Path, tf: str):
     _check_pf_pairs(pf, u, tf)
     if tf != "1d" and pf.get("declared") != _declared():
         raise Refused(f"preflight_{tf}.json ran under other RENAMES/DELISTED/CUTS/"
-                      f"EXCLUDED: "
+                      f"HALTS/EXCLUDED: "
                       f"re-run preflight --tf {tf}")
     if pf.get("passed") is not True:
         raise Refused(f"preflight_{tf}.json did not pass: a failed precondition "
@@ -756,18 +776,21 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
     if missing:
         checks["build"][pair] = _cap(missing)
         return None
-    bars = _archive_bars(study, pair, tf, months=months[pair])
+    dedup: list[str] = []
+    bars = _archive_bars(study, pair, tf, months=months[pair], dropped=dedup)
     if not bars:
         checks["build"][pair] = ["no archive bars"]
         return None
     raw = bars
+    if dedup:
+        checks["dedup"][pair] = _cap(dedup)
     if pair in su.CUTS:
         bars = sc.apply_cut(bars, su.CUTS[pair])
     if pair in su.RENAMES:
         succ, swap, ratio, _url = su.RENAMES[pair]
         try:
-            bars = sc.splice(bars, _archive_bars(study, succ, tf, months=months[succ]),
-                             swap, ratio)
+            bars = sc.splice(bars, _archive_bars(study, succ, tf, months=months[succ],
+                                                 dropped=dedup), swap, ratio)
         except sc.SpliceBreak as exc:
             checks["P3"][pair] = [str(exc)]
             return None
@@ -779,6 +802,9 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
         found = sc.parity(raw, pbars)
         if found:
             checks["P1"][pair] = _cap(found)
+        vol = sc.volume_diffs(raw, pbars)          # report-only (Coen 2026-11-08)
+        if vol:
+            checks["P1_volume"][pair] = _cap(vol)
         first = sc.first_bar(bars[0]["date"][:10], pbars[0]["date"][:10])
         bars = sc.apply_cut(bars, first)
     bars = [b for b in bars if b["date"][:10] <= su.END]
@@ -795,7 +821,7 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
     dates = [b["date"] for b in bars]
     if len(dates) != len(set(dates)):
         flags.append(f"{len(dates) - len(set(dates))} duplicate bar date(s)")
-    flags += sc.hidden_splices(bars)
+    flags += sc.hidden_splices(bars, [su.HALTS[pair]] if pair in su.HALTS else ())
     if flags:
         checks["P4"][pair] = _cap(flags)
     sha = sa.write_pipeline_csv(bars, study / f"data_{tf}" / f"{pair}_{tf}.csv")
@@ -900,7 +926,8 @@ def cmd_preflight(args, fetch) -> int:
         for f in data_dir.iterdir():
             if f.is_file():
                 f.unlink()            # a stale CSV from an earlier universe never survives
-    checks = {"build": {}, "P1": {}, "P3": {}, "P4": {}}
+    # P1_volume and dedup are report-only: they never enter `passed`
+    checks = {"build": {}, "P1": {}, "P3": {}, "P4": {}, "P1_volume": {}, "dedup": {}}
     built = {}
     a = set(u["A"])
     for p in pairs:
@@ -961,7 +988,7 @@ def cmd_freeze(args, fetch) -> int:
         raise Refused(f"preflight ran P2 at upto {pf.get('upto')}; re-run preflight "
                       f"with --upto {args.upto}")
     if pf.get("declared") != _declared():
-        raise Refused("RENAMES/DELISTED/CUTS/EXCLUDED changed since preflight: "
+        raise Refused("RENAMES/DELISTED/CUTS/HALTS/EXCLUDED changed since preflight: "
                       "re-run preflight")
     _check_pf_pairs(pf, u, "1d")
     copy = st.read_copy(reg, args.upto)
@@ -1030,7 +1057,7 @@ def cmd_draft_note(args, fetch) -> int:
         "chained before any study outcome number exists (design s4 step 2) and fixes "
         "the decision rule below (design s5, verbatim), the frozen inputs by sha256 "
         "(design P5), the pinned registry entry index for the templates, the splice "
-        "and death list, the P4 cuts and the declared exclusions. It arms nothing "
+        "and death list, the P4 cuts, the declared halts and the declared exclusions. It arms nothing "
         "in the pipeline: only the study tool's gate (tools/survivorship.py) reads "
         "it, refusing every outcome computation until this note is on the chain.",
         "",
@@ -1041,7 +1068,7 @@ def cmd_draft_note(args, fetch) -> int:
         f"Each hash is the sha256 of the UTF-8 canonical JSON {CANON_RULE}, except "
         "cmc, the sha256 of the raw CMC response bytes. templates = per timeframe, "
         "template key -> sorted registered strategy ids; cells_A / cells_B = the "
-        "ordered pair lists; renames / delisted / cuts / excluded = the declared "
+        "ordered pair lists; renames / delisted / cuts / halts / excluded = the declared "
         "lists below; "
         "first_bars = pair -> first bar date of each 1d cell; data_1d = pair -> "
         "sha256 of each 1d study CSV; design_doc_sha256 = the sha256 of the design "
@@ -1086,9 +1113,12 @@ def cmd_draft_note(args, fetch) -> int:
             f"predecessor unit, {v[3]}" for p, v in sorted(ren.items())] or ["- none"]
     out += ["", "## Deaths (delisted pairs, stratum D)", ""]
     out += [f"- {p}: {url}" for p, url in sorted(inp["delisted"].items())] or ["- none"]
-    out += ["", "## P4 cuts and exclusions", ""]
+    out += ["", "## P4 cuts, halts and exclusions", ""]
     out += [f"- {p}: cut to first usable date {d}"
             for p, d in sorted(inp["cuts"].items())] or ["- cuts: none"]
+    out += [f"- declared halt {p}: last bar {a}, next bar {b} (a trading halt the P4 "
+            f"gap check passes only for exactly these two dates)"
+            for p, (a, b) in sorted(inp["halts"].items())] or ["- halts: none"]
     out += [f"- declared exclusion {p}: {why}"
             for p, why in sorted(inp["excluded"].items())] or ["- exclusions: none"]
     if inp["excluded"]:

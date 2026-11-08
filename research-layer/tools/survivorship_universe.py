@@ -64,10 +64,20 @@ DELISTED: dict[str, str | None] = {
 # confirmed in the archive (18-day gap, then a new price series). R4, 2026-11-08.
 CUTS: dict[str, str] = {"LUNAUSDT": "2022-05-31"}
 
+# pair -> (last bar date before the halt, first bar date after it): a declared
+# trading halt that P4's gap check (more than 7 days between daily bars) passes
+# ONLY when both bar dates match exactly. FTTUSDT halted 311 days: last bar
+# 2022-11-15 (close 1.4322), next bar 2023-09-22 (open 0.9752), the FTX collapse
+# (Binance archive, confirmed in the preflight_1d run of 2026-11-08). Coen
+# 2026-11-08: "Keep FTT, declare the halt". The x10 close-jump check still
+# applies across it. Hashed into the manifest like CUTS/EXCLUDED and listed in
+# the note.
+HALTS: dict[str, tuple[str, str]] = {"FTTUSDT": ("2022-11-15", "2023-09-22")}
+
 # pair -> reason: a declared exclusion (design P4; Coen's call, declared BEFORE
 # the pre-registration note). The walk records the pair as excluded and it
 # takes NO slot: the walk continues to TARGET. Hashed into the manifest like
-# RENAMES/DELISTED/CUTS and listed in the note. A change after the note needs
+# RENAMES/DELISTED/CUTS/HALTS and listed in the note. A change after the note needs
 # a superseding chained note AND a code change (design s4 step 3).
 EXCLUDED: dict[str, str] = {}
 

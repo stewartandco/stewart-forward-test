@@ -191,3 +191,8 @@ def test_walk_reads_the_declared_exclusions_by_default(monkeypatch):
 
 def test_no_exclusion_is_declared_yet():
     assert su.EXCLUDED == {}
+
+
+def test_halts_declare_ftt_only():
+    # Coen 2026-11-08: FTT's 311-day halt (FTX collapse) is declared, nothing else
+    assert su.HALTS == {"FTTUSDT": ("2022-11-15", "2023-09-22")}

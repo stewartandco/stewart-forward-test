@@ -4,7 +4,8 @@ import pytest
 
 from tools.survivorship_checks import (
     GAP_DAYS, JUMP_RATIO, SPLICE_TOL, SpliceBreak,
-    apply_cut, first_bar, hidden_splices, parity, splice,
+    apply_cut, dedup_exact, first_bar, hidden_splices, parity, splice,
+    volume_diffs,
 )
 
 
@@ -134,3 +135,65 @@ def test_parity_reports_dates_missing_from_one_side_inside_the_shared_span():
     assert any("2024-01-04" in x and "archive" in x for x in out)
     # outside the shared span (2024-01-01 .. 2024-01-05) is not a finding
     assert not any("2023-12-30" in x or "2024-01-06" in x for x in out)
+
+
+# ---- R4 preflight rules (Coen 2026-11-08)
+
+def test_parity_ignores_volume_and_volume_diffs_reports_it():
+    a = [bar("2021-01-01", 5.0, 10.0), bar("2021-01-02", 6.0, 10.0)]
+    b = [dict(x) for x in a]
+    b[1]["volume"] = 10.5
+    assert parity(a, b) == []
+    out = volume_diffs(a, b)
+    assert len(out) == 1 and "2021-01-02" in out[0] and "volume" in out[0]
+    assert volume_diffs(a, [dict(x) for x in a]) == []
+
+
+def test_parity_still_fails_an_ohlc_difference_even_with_volume_equal():
+    a = [bar("2021-01-01", 5.0)]
+    for f in ("open", "high", "low", "close"):
+        b = [dict(a[0])]
+        b[0][f] += 1e-9
+        out = parity(a, b)
+        assert len(out) == 1 and f in out[0]
+
+
+def test_dedup_exact_drops_identical_and_keeps_differing_duplicates():
+    x = bar("2021-01-01", 5.0)
+    kept, notes = dedup_exact([x, dict(x), bar("2021-01-02")])
+    assert [b["date"] for b in kept] == ["2021-01-01 00:00:00", "2021-01-02 00:00:00"]
+    assert len(notes) == 1 and "2021-01-01" in notes[0]
+    y = dict(x, volume=11.0)
+    kept, notes = dedup_exact([x, y])
+    assert len(kept) == 2 and notes == []
+    y = dict(x, low=4.0)
+    assert len(dedup_exact([x, y])[0]) == 2
+
+
+FTT = ("2022-11-15", "2023-09-22")
+
+
+def _ftt_bars(after="2023-09-22", c_after=0.9752):
+    return [bar("2022-11-14", 2.0), bar("2022-11-15", 1.4322), bar(after, c_after)]
+
+
+def test_declared_halt_gap_passes_and_x10_still_applies_across_it():
+    assert hidden_splices(_ftt_bars(), halts=[FTT]) == []
+    out = hidden_splices(_ftt_bars(c_after=0.05), halts=[FTT])
+    assert len(out) == 1 and "close jump" in out[0]
+
+
+def test_other_gap_for_the_same_pair_still_fails():
+    out = hidden_splices(_ftt_bars(after="2023-09-23"), halts=[FTT])
+    assert any("gap of" in s for s in out)
+    assert any("gap of" in s for s in hidden_splices(_ftt_bars()))
+
+
+def test_declared_halt_that_matches_nothing_fails_not_silent():
+    clean = [bar("2022-11-14"), bar("2022-11-15"), bar("2022-11-16")]
+    out = hidden_splices(clean, halts=[FTT])
+    assert out and "declared halt" in out[0]
+    # a declared halt must not excuse a different gap
+    other = [bar("2021-01-01"), bar("2021-03-01")]
+    out = hidden_splices(other, halts=[FTT])
+    assert any("gap of" in s for s in out)

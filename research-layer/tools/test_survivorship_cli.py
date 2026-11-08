@@ -131,6 +131,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
+    monkeypatch.setattr(su, "HALTS", {})
     monkeypatch.setattr(su, "EXCLUDED", {})
     monkeypatch.setattr(su, "END", STOP.isoformat())    # the fixture's common end
     # the fixture's own counts stand in for the design's 80/960 and strata
@@ -325,6 +326,7 @@ def s3env(tmp_path, monkeypatch):
     monkeypatch.setattr(su, "RENAMES", {})
     monkeypatch.setattr(su, "DELISTED", {})
     monkeypatch.setattr(su, "CUTS", {})
+    monkeypatch.setattr(su, "HALTS", {})
     monkeypatch.setattr(su, "TARGET", 3)
     monkeypatch.setattr(su, "EXCLUDED", {})
     monkeypatch.setattr(su, "declared_assets", lambda: ["AAAUSDT", "BBBUSDT"])
@@ -698,7 +700,8 @@ def test_freeze_writes_canonical_hashes(env):
     assert m["hashes"]["first_bars"] == sha(canon(_pf(env)["first_bars"]))
     assert set(m["hashes"]) == {"templates", "cells_A", "cells_B", "cmc", "renames",
                                 "delisted", "cuts", "first_bars", "data_1d",
-                                "design_doc_sha256", "study_code", "excluded"}
+                                "design_doc_sha256", "study_code", "excluded",
+                                "halts"}
 
 
 # --------------------------------------------------------------- draft-note
@@ -1565,3 +1568,125 @@ def test_analyse_writes_a_nan_secondary_as_null(env, monkeypatch):
     res = json.loads((env.layer / "docs" / "runs" / "2026-11-07-survivorship-1d.json")
                      .read_text(encoding="utf-8"))
     assert res["secondaries"]["m_minus_hold_gap"] is None
+
+
+# ---------------------------------------------- R4 preflight rules (Coen 2026-11-08)
+
+def test_preflight_p1_volume_difference_is_reported_not_failed(env):
+    bars = [dict(b) for b in env.series["AAAUSDT"]]
+    bars[100]["volume"] += 7.0
+    write_pipeline_csv(bars, env.pipe / "AAAUSDT_1d.csv")
+    assert _preflight(env) == 0
+    pf = _pf(env)
+    assert pf["passed"] is True and not pf["checks"]["P1"]
+    vol = pf["checks"]["P1_volume"]
+    assert list(vol) == ["AAAUSDT"] and "volume" in vol["AAAUSDT"][0]
+
+
+def test_preflight_p1_ohlc_difference_still_fails_beside_a_volume_one(env):
+    bars = [dict(b) for b in env.series["AAAUSDT"]]
+    bars[100]["volume"] += 7.0
+    bars[101]["high"] += 0.000001
+    write_pipeline_csv(bars, env.pipe / "AAAUSDT_1d.csv")
+    assert _preflight(env) == 1
+    pf = _pf(env)
+    assert list(pf["checks"]["P1"]) == ["AAAUSDT"]
+    assert all("volume" not in x for x in pf["checks"]["P1"]["AAAUSDT"])
+    assert "AAAUSDT" in pf["checks"]["P1_volume"]
+
+
+def _ccc_with_duplicate(env, differing):
+    bars = _bars(START, STOP, 2.0)
+    i = 200
+    dup = dict(bars[i], volume=bars[i]["volume"] + 1.0) if differing else dict(bars[i])
+    bars.insert(i + 1, dup)
+    shutil.rmtree(env.study / "archive" / "CCCUSDT")
+    _write_archive(env.study, "CCCUSDT", bars)
+    _write_plan(env.study)
+    return bars[i]["date"][:10]
+
+
+def test_preflight_drops_an_exact_duplicate_row_and_reports_it(env):
+    day = _ccc_with_duplicate(env, differing=False)
+    assert _preflight(env) == 0
+    pf = _pf(env)
+    assert pf["passed"] is True and not pf["checks"]["P4"]
+    note = pf["checks"]["dedup"]["CCCUSDT"]
+    assert len(note) == 1 and day in note[0]
+    assert pf["n_bars"]["CCCUSDT"] == len(_bars(START, STOP, 2.0))
+
+
+def test_preflight_still_fails_a_duplicate_date_with_differing_values(env):
+    _ccc_with_duplicate(env, differing=True)
+    assert _preflight(env) == 1
+    pf = _pf(env)
+    assert "duplicate" in pf["checks"]["P4"]["CCCUSDT"][0]
+    assert not pf["checks"].get("dedup")
+
+
+def _ccc_gap(env):
+    skip = {date(2023, 3, 1) + timedelta(days=i) for i in range(10)}
+    shutil.rmtree(env.study / "archive" / "CCCUSDT")
+    _write_archive(env.study, "CCCUSDT", _bars(START, STOP, 2.0, skip=skip))
+    _write_plan(env.study)
+
+
+def test_preflight_passes_a_declared_halt_gap(env, monkeypatch):
+    _ccc_gap(env)
+    monkeypatch.setattr(su, "HALTS", {"CCCUSDT": ("2023-02-28", "2023-03-11")})
+    assert _preflight(env) == 0
+    pf = _pf(env)
+    assert not pf["checks"]["P4"]
+    assert pf["declared"]["halts"] == {"CCCUSDT": ["2023-02-28", "2023-03-11"]}
+
+
+@pytest.mark.parametrize("halt", [("2023-02-28", "2023-03-12"),
+                                  ("2023-02-27", "2023-03-11"),
+                                  ("2023-04-01", "2023-04-20")])
+def test_preflight_fails_a_gap_that_does_not_match_the_declared_halt(env, monkeypatch, halt):
+    _ccc_gap(env)
+    monkeypatch.setattr(su, "HALTS", {"CCCUSDT": halt})
+    assert _preflight(env) == 1
+    assert any("gap of 11 days" in x for x in _pf(env)["checks"]["P4"]["CCCUSDT"])
+
+
+def test_the_manifest_hash_changes_when_halts_change(env, monkeypatch):
+    _chain(env, _frozen(env))
+    copy = st.read_copy(env.reg, 6)
+    before = cli._input_hashes(env.study, copy)
+    monkeypatch.setattr(su, "HALTS", {"ZZZUSDT": ("2022-11-15", "2023-09-22")})
+    after = cli._input_hashes(env.study, copy)
+    assert sorted(k for k in before if before[k] != after[k]) == ["halts"]
+    calls = _trap_engine(monkeypatch)
+    assert _run("run", *_base(env), "--registry", env.reg) == 2
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", [None, ("2022-11-15", None), ("2023-09-22", "2022-11-15"),
+                                 ("2022-11-15",), ("nope", "2023-09-22"),
+                                 ("2022-11-15", "2023-09-22", "x")])
+def test_freeze_refuses_a_malformed_halt(env, monkeypatch, bad):
+    monkeypatch.setattr(su, "HALTS", {"ZZZUSDT": bad})
+    assert _preflight(env) == 0
+    assert _freeze(env) == 2
+    assert not (env.study / "manifest.json").exists()
+
+
+def test_freeze_refuses_halts_changed_since_preflight(env, monkeypatch):
+    assert _preflight(env) == 0
+    monkeypatch.setattr(su, "HALTS", {"ZZZUSDT": ("2022-11-15", "2023-09-22")})
+    assert _freeze(env) == 2
+
+
+def test_draft_note_lists_every_declared_halt(env, monkeypatch):
+    monkeypatch.setattr(su, "HALTS", {"ZZZUSDT": ("2022-11-15", "2023-09-22")})
+    text = _frozen(env)
+    assert "- declared halt ZZZUSDT: last bar 2022-11-15, next bar 2023-09-22" in text
+    m = _manifest(env)
+    assert m["inputs"]["halts"] == {"ZZZUSDT": ["2022-11-15", "2023-09-22"]}
+    assert f"halts: {m['hashes']['halts']}" in text
+
+
+def test_draft_note_says_no_halts_when_none_are_declared(env):
+    assert "- halts: none" in _frozen(env)
+

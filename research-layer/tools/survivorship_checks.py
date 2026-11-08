@@ -13,7 +13,11 @@ JUMP_RATIO = 10.0
 # usually 2x+, jump); |ln| < 0.25 still stops any ratio error over ~28%.
 SPLICE_TOL = 0.25
 
-_FIELDS = ("open", "high", "low", "close", "volume")
+# P1 fails on OHLC only. Volume is report-only (volume_diffs): Binance revised
+# some archive volumes after the fact (~10 dates, e.g. 2021-12-24 in 60 pairs)
+# while open/high/low/close match the pipeline bar for bar, and no strategy
+# block reads volume. Coen 2026-11-08.
+_FIELDS = ("open", "high", "low", "close")
 
 
 class SpliceBreak(ValueError):
@@ -56,6 +60,38 @@ def parity(archive: list[dict], pipeline: list[dict]) -> list[str]:
     return out
 
 
+def volume_diffs(archive: list[dict], pipeline: list[dict]) -> list[str]:
+    """Report-only P1 volume differences on dates both inputs hold (never a
+    failure; see _FIELDS). Duplicate dates keep their first bar here: parity
+    is the check that reports them."""
+    a, p = {}, {}
+    for bars, idx in ((archive, a), (pipeline, p)):
+        for b in bars:
+            idx.setdefault(b["date"], b)
+    return [f"{d} volume: archive={a[d]['volume']!r} pipeline={p[d]['volume']!r}"
+            for d in sorted(set(a) & set(p)) if a[d]["volume"] != p[d]["volume"]]
+
+
+def dedup_exact(bars: list[dict]) -> tuple[list[dict], list[str]]:
+    """Drops a bar identical in EVERY field (date, open, high, low, close,
+    volume) to an already-kept bar of the same date; returns (kept, notes).
+    A same-date bar whose values differ is kept, so it still fails P1/P4.
+    Coen 2026-11-08 (AXSUSDT-1d-2026-02.zip holds 2026-02-10 twice)."""
+    kept: list[dict] = []
+    seen: set = set()
+    notes: list[str] = []
+    for b in bars:
+        key = tuple(b[f] for f in ("date",) + _FIELDS + ("volume",))
+        if key in seen:
+            notes.append(f"dropped exact duplicate {b['date']} (open={b['open']!r} "
+                         f"high={b['high']!r} low={b['low']!r} close={b['close']!r} "
+                         f"volume={b['volume']!r})")
+            continue
+        seen.add(key)
+        kept.append(b)
+    return kept, notes
+
+
 def first_bar(archive_first: str, pipeline_first: str | None) -> str:
     if pipeline_first is None:
         return archive_first
@@ -85,8 +121,15 @@ def splice(pred: list[dict], succ: list[dict], swap_date: str, ratio: float) -> 
     return head + tail
 
 
-def hidden_splices(bars: list[dict]) -> list[str]:
+def hidden_splices(bars: list[dict], halts=()) -> list[str]:
+    """`halts` = declared (last bar date before, first bar date after) pairs
+    (survivorship_universe.HALTS). A gap over GAP_DAYS is skipped ONLY when its
+    two bar dates equal a declared pair exactly; the x10 jump check still runs
+    across it. A declared halt that matches no gap in the data is itself a flag
+    (never a silent skip)."""
     flags: list[str] = []
+    halts = {tuple(h) for h in halts}
+    used: set = set()
     for prev, cur in zip(bars, bars[1:]):
         if _day(cur) < _day(prev):
             raise ValueError(f"bars not sorted: {_day(prev)} then {_day(cur)}")
@@ -95,13 +138,17 @@ def hidden_splices(bars: list[dict]) -> list[str]:
             flags.append(f"invalid close {b['close']} on {_day(b)}")
     for prev, cur in zip(bars, bars[1:]):
         gap = (_date.fromisoformat(_day(cur)) - _date.fromisoformat(_day(prev))).days
-        if gap > GAP_DAYS:
+        if gap > GAP_DAYS and (_day(prev), _day(cur)) in halts:
+            used.add((_day(prev), _day(cur)))
+        elif gap > GAP_DAYS:
             flags.append(f"gap of {gap} days before {_day(cur)} (after {_day(prev)})")
         pc, cc = prev["close"], cur["close"]
         if math.isfinite(pc) and math.isfinite(cc) and pc > 0 and cc > 0:
             r = cc / pc
             if r > JUMP_RATIO or r < 1.0 / JUMP_RATIO:
                 flags.append(f"close jump x{r:.4g} on {_day(cur)} ({pc} -> {cc})")
+    flags += [f"declared halt {a} .. {b} matches no gap in the data"
+              for a, b in sorted(halts - used)]
     return flags
 
 

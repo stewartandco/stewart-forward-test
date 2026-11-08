@@ -91,7 +91,7 @@ What the study speaks to:
 
 **Templates (frozen).**
 - T = the 80 distinct `blocks` lists (canonical JSON, sorted keys) among registered per-cell crypto strategies at 1d: 16 families, registered 2026-10-18 .. 2026-11-04, each on 12 registered cells (960 = 80 x 12). They are taken as of a pinned registry entry index named in the pre-registration note: `upto`, the first entry index excluded from the frozen prefix (the templates are the registrations at entries 0..upto-1), and the note's own entry index must be >= upto.
-- Intraday arms: the 20 distinct templates at each of 4h, 12h and 1h (4 families, registered 2026-11-04). Their data CSVs are pinned by `preflight_<tf>.json` (that arm's preflight runs after the note; the gate checks every CSV's sha256 against it); their sources and declared lists (templates, both cell lists, the CMC snapshot, RENAMES/DELISTED/CUTS/EXCLUDED) are pinned by the manifest.
+- Intraday arms: the 20 distinct templates at each of 4h, 12h and 1h (4 families, registered 2026-11-04). Their data CSVs are pinned by `preflight_<tf>.json` (that arm's preflight runs after the note; the gate checks every CSV's sha256 against it); their sources and declared lists (templates, both cell lists, the CMC snapshot, RENAMES/DELISTED/CUTS/HALTS/EXCLUDED) are pinned by the manifest.
 - A template-cell spec is a registered spec of that template with `universe.assets` replaced by the target cell and every other field unchanged. The harness uses each spec's own `cost_model`, unchanged. Every registered per-cell crypto spec carries the class model, `cells.CLASSES["crypto"]["cost_model"]` (10 bps commission + 5 bps slippage per side; verified 2026-11-06 by the final reviewer), so every cell runs at that cost. Its strategy id is the composer's own content id for that spec (s10.4), so on a template's own 12 cells it IS the registered id.
 
 **Cells and bars.**
@@ -114,7 +114,7 @@ Everything in step 1 below reads data or reproduces numbers ALREADY on the chain
 
 **Step 1: before the pre-registration note.**
 - **P1 One data source, proven equal.** Both universes are built from the archive (`data/spot/monthly/klines/<SYM>/<tf>/`, every zip verified against its `.CHECKSUM`).
-  - For the 76 A cells, every archive 1d bar must equal the pipeline's `data/<SYM>_1d.csv` bar on every shared date (OHLCV, float-exact after parse).
+  - For the 76 A cells, every archive 1d bar must equal the pipeline's `data/<SYM>_1d.csv` bar on every shared date: open, high, low and close float-exact after parse. **Volume differences are reported, not failed** (Coen 2026-11-08: "OHLC must match; volume reported only"). The first real run found open/high/low/close equal bar for bar in all 76 A pairs, but 260 volumes differing slightly on about 10 dates (e.g. 2021-12-24 in 60 pairs): Binance revised archived volumes after the fact. No strategy block reads volume. Preflight records them under `checks.P1_volume` and they never fail it.
   - The archive's spot timestamps switch from milliseconds to **microseconds from 2025-01-01**, and parsing must handle both.
   - Any mismatch: STOP and report. Never pick a source per group.
   - P1 also applies to each intraday arm (4h, 12h, 1h), against the pipeline's intraday files `data/<SYM>_<tf>.csv`; a failure stops that arm only.
@@ -127,13 +127,15 @@ Everything in step 1 below reads data or reproduces numbers ALREADY on the chain
 - **P4 No hidden splices.**
   - **LUNAUSDT's archive runs unbroken from 2020-08: it holds Terra Classic, then Luna 2.0.** It is cut to Luna 2.0's listing date (2022-05-31, confirmed from the announcement), which still passes the history test.
   - Within the used span of every cell, any gap of more than 7 days between consecutive daily bars, or any single-day close ratio beyond x10 or /10, flags a ticker reuse or halt: STOP for that cell.
-  - Every exclusion or cut is Coen's call, declared in code BEFORE the note: `CUTS` and `EXCLUDED` (pair -> reason) in `tools/survivorship_universe.py`. An EXCLUDED pair is an excluded row of the PIT walk and takes no slot (the walk continues until 100 are admitted). Both are hashed into the manifest and listed in the note.
+  - **Exact duplicate rows are dropped and reported** (Coen 2026-11-08: "Drop exact duplicates"). `AXSUSDT-1d-2026-02.zip` holds the 2026-02-10 row twice, identical in every field. A bar identical in date, open, high, low, close and volume to an already-kept bar of the same date is dropped where a pair's archive bars are concatenated, and each drop is recorded under `checks.dedup` in the preflight report. A duplicate date whose values differ is not dropped and still fails.
+  - **Declared halts** (Coen 2026-11-08: "Keep FTT, declare the halt"). `HALTS` (pair -> (last bar date before the halt, first bar date after it)) in `tools/survivorship_universe.py` names a gap that the 7-day gap check passes, and only a gap whose two bar dates equal the declared pair exactly. The x10 close-ratio check still applies across it, and a declared halt that matches no gap in the data is itself a P4 flag. FTTUSDT is the only entry: last bar 2022-11-15 (close 1.4322), next bar 2023-09-22 (open 0.9752), a real 311-day halt after the FTX collapse.
+  - Every exclusion, cut or halt is Coen's call, declared in code BEFORE the note: `CUTS`, `HALTS` and `EXCLUDED` (pair -> reason, or dates for HALTS) in `tools/survivorship_universe.py`. An EXCLUDED pair is an excluded row of the PIT walk and takes no slot (the walk continues until 100 are admitted). All three are hashed into the manifest and listed in the note.
 - **P5 Inputs frozen.** `freeze` writes the manifest and the note carries its hashes. It freezes:
   - the templates (per timeframe, template key -> sorted registered strategy ids);
   - both cell lists (the builder's re-derived exact list; if it differs from s1.2 by more than month-boundary cases, STOP for Coen);
   - the strata check: the strata are a pure function of A, B, RENAMES and DELISTED, re-checked at freeze and at every gate;
   - the CMC snapshot response (raw bytes);
-  - RENAMES, DELISTED, CUTS and EXCLUDED;
+  - RENAMES, DELISTED, CUTS, HALTS and EXCLUDED;
   - each 1d cell's first bar;
   - `data_1d`, the sha256 of every 1d study CSV;
   - `design_doc_sha256`, this doc's LF-normalised bytes;
@@ -218,7 +220,7 @@ In every row: no outcome changes the screen gate, the gauntlet battery or any qu
 
 ## 9. Records on the chain (Coen approves each exact text)
 
-1. **After s4 step 1, before any outcome number:** `survivorship-study-v1: ` + the s5 decision rule verbatim, the P5 hashes, the pinned registry entry index for T, the splice and death list, and any P4 cuts or exclusions. The prefix arms nothing in the pipeline; only the study tool's gate (`tools/survivorship.py`) reads it.
+1. **After s4 step 1, before any outcome number:** `survivorship-study-v1: ` + the s5 decision rule verbatim, the P5 hashes, the pinned registry entry index for T, the splice and death list, and any P4 cuts, halts or exclusions. The prefix arms nothing in the pipeline; only the study tool's gate (`tools/survivorship.py`) reads it.
 2. **After the run:** `survivorship-study-v1-result: ` + the verdict, G [L, U], the strata means and the precondition outcomes. Evidence only; it changes no protocol.
 
 ## 10. Calls made by Claude (not Coen's decisions; check these)
