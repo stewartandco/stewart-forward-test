@@ -44,6 +44,10 @@ REJECTIONS_LOG_NAME = "triage_rejections.jsonl"
 # D33's pipeline cap, shared with the Composer -- see pipeline/budget.py.
 from .budget import PIPELINE_CAP_USD
 PANEL_SIZE = 3
+# The panel model the loop runs (it passes no --model). The triage eval gate
+# (pipeline/test_triage_eval_gate.py) requires a passing eval for THIS model
+# and the current REVIEW_PROMPT_SHA.
+DEFAULT_MODEL = "claude-sonnet-5"
 # A reviewer whose reply cannot be parsed is re-asked in the same run, up to
 # this many calls in total per card. Retrying across cycles would need state
 # and could pay for the same unreadable card forever; retrying here is bounded.
@@ -304,7 +308,7 @@ def run(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--registry", type=Path,
                     default=Path(__file__).resolve().parent.parent / "registry_log.jsonl")
-    ap.add_argument("--model", default="claude-sonnet-5")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--limit", type=int, default=None,
                     help="review at most N pending cards (cost control)")
     ap.add_argument("--apply", action="store_true",
