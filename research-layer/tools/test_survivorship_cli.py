@@ -1690,3 +1690,45 @@ def test_draft_note_lists_every_declared_halt(env, monkeypatch):
 def test_draft_note_says_no_halts_when_none_are_declared(env):
     assert "- halts: none" in _frozen(env)
 
+
+
+def _dup_row(bars, i):
+    out = list(bars)
+    out.insert(i + 1, dict(out[i]))
+    return out, out[i]["date"][:10]
+
+
+def test_dedup_in_a_rename_successors_zip_is_reported_under_the_pair(env, monkeypatch):
+    _rename_env(env, monkeypatch)
+    new = [b for b in _bars(START, STOP, 2.0) if b["date"][:10] >= "2023-08-20"]
+    new, day = _dup_row(new, 40)                      # 2023-09-29, after the swap
+    shutil.rmtree(env.study / "archive" / "NEWUSDT")
+    _write_archive(env.study, "NEWUSDT", new)
+    _write_plan(env.study)
+    assert _preflight(env) == 0
+    note = _pf(env)["checks"]["dedup"]["OLDUSDT"]
+    assert len(note) == 1 and day in note[0] and note[0].startswith("NEWUSDT: ")
+
+
+def test_dedup_names_the_symbol_of_each_drop_for_predecessor_and_successor(env, monkeypatch):
+    _rename_env(env, monkeypatch)
+    old = [b for b in _bars(START, STOP, 2.0) if b["date"][:10] < "2023-09-15"]
+    old, _d = _dup_row(old, 100)
+    new = [b for b in _bars(START, STOP, 2.0) if b["date"][:10] >= "2023-08-20"]
+    new, _d = _dup_row(new, 40)
+    for sym, bars in (("OLDUSDT", old), ("NEWUSDT", new)):
+        shutil.rmtree(env.study / "archive" / sym)
+        _write_archive(env.study, sym, bars)
+    _write_plan(env.study)
+    assert _preflight(env) == 0
+    note = _pf(env)["checks"]["dedup"]["OLDUSDT"]
+    assert sorted(n.split(":")[0] for n in note) == ["NEWUSDT", "OLDUSDT"]
+
+
+def test_universe_prints_the_count_of_dropped_exact_duplicates(env, capsys):
+    bars, _day = _dup_row(env.series["AAAUSDT"], 10)
+    shutil.rmtree(env.study / "archive" / "AAAUSDT")
+    _write_archive(env.study, "AAAUSDT", bars)
+    _write_plan(env.study)
+    _run("universe", "--study-dir", env.study)
+    assert "dropped 1 exact duplicate" in capsys.readouterr().out

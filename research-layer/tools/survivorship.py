@@ -712,12 +712,16 @@ def cmd_universe(args, fetch) -> int:
     for sym, tf, month in plan["files"]:
         months.setdefault(sym, []).append(month)
     spans = {}
+    dropped: list[str] = []
     for sym in plan["symbols"]:
         if not months.get(sym):
             continue                   # no Binance pair in the archive
-        bars = _archive_bars(study, sym, "1d", months=months[sym])
+        bars = _archive_bars(study, sym, "1d", months=months[sym], dropped=dropped)
         if bars:
             spans[sym] = (bars[0]["date"][:10], bars[-1]["date"][:10])
+    if dropped:
+        print(f"universe: dropped {len(dropped)} exact duplicate archive row(s) "
+              f"(spans unchanged; preflight lists them per pair)")
     cmc_bytes = cmc_path.read_bytes()
     cmc = _cmc_rows(cmc_path)
     try:
@@ -782,8 +786,6 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
         checks["build"][pair] = ["no archive bars"]
         return None
     raw = bars
-    if dedup:
-        checks["dedup"][pair] = _cap(dedup)
     if pair in su.CUTS:
         bars = sc.apply_cut(bars, su.CUTS[pair])
     if pair in su.RENAMES:
@@ -793,7 +795,11 @@ def _build_pair(study: Path, pipe_dir: Path, tf: str, pair: str, in_a: bool,
                                                  dropped=dedup), swap, ratio)
         except sc.SpliceBreak as exc:
             checks["P3"][pair] = [str(exc)]
+            if dedup:
+                checks["dedup"][pair] = _cap(dedup)
             return None
+    if dedup:
+        checks["dedup"][pair] = _cap(dedup)      # predecessor + successor drops
     if in_a:
         pbars = _read_pipeline(pipe_dir / f"{pair}_{tf}.csv")
         if not pbars:

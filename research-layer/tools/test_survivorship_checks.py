@@ -197,3 +197,24 @@ def test_declared_halt_that_matches_nothing_fails_not_silent():
     other = [bar("2021-01-01"), bar("2021-03-01")]
     out = hidden_splices(other, halts=[FTT])
     assert any("gap of" in s for s in out)
+
+
+def test_declared_halt_does_not_excuse_a_second_undeclared_gap():
+    bars = [bar("2022-11-14", 2.0), bar("2022-11-15", 1.4322), bar("2023-09-22", 0.9752),
+            bar("2023-09-23", 0.97), bar("2023-10-10", 0.96)]
+    out = hidden_splices(bars, halts=[FTT])
+    assert len(out) == 1 and "gap of 17 days" in out[0] and "2023-10-10" in out[0]
+
+
+def test_ohlc_and_volume_mismatch_on_one_date_split_between_the_two_reports():
+    a = [bar("2021-01-01", 5.0, 10.0)]
+    b = [dict(a[0], close=5.5, volume=11.0)]
+    p, v = parity(a, b), volume_diffs(a, b)
+    assert len(p) == 1 and "close" in p[0] and "volume" not in p[0]
+    assert len(v) == 1 and "volume" in v[0]
+
+
+def test_dedup_exact_triple_keeps_one_and_reports_two():
+    x = bar("2021-01-01", 5.0)
+    kept, notes = dedup_exact([x, dict(x), dict(x), bar("2021-01-02")])
+    assert len(kept) == 2 and len(notes) == 2
