@@ -369,6 +369,7 @@ def test_a_fourth_revised_version_is_refused_before_any_spend(tmp_path, capsys, 
     reg, ids = _labelled_registry(tmp_path, n_accept=5, n_overreach=2)
     _pinned_to(monkeypatch, reg)
     _no_spend(monkeypatch)
+    monkeypatch.setattr(E, "rule_sha", lambda: "d" * 16)      # a 4th revised rule, whatever the tree runs
     out = tmp_path / "out"
     for k in ("a", "b", "c"):
         E.write_result(_doc(rule_sha=k * 16), out)
