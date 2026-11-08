@@ -24,6 +24,7 @@ import itertools
 from pathlib import Path
 from datetime import datetime, timezone
 
+from .prompt_stamp import prompt_sha, served_model as _served_model
 from .common import content_id
 from .registry import Registry
 from .blocks import BLOCK_TYPES, RETIRED_TYPES, validate_block, block_type_payload
@@ -1114,6 +1115,7 @@ def expand_family_for_class(fam: dict, run_id: str, model: str, created_utc: str
                 "model": model,
                 "pipeline_version": PIPELINE_VERSION,
                 "run_id": run_id,
+                **_generator_stamp(fam),
             },
             "cost_model": dict(cls_spec["cost_model"]),
         }
@@ -1855,6 +1857,13 @@ def _client_and_meter():
         agent="pipeline")
 
 
+COMPOSER_USER_TEMPLATE = (
+    "Block grammar:\n{grammar}\n\n"
+    "Accepted research cards:\n{cards}\n\n"
+    "Propose up to {max_families} strategy families per your rules."
+    "{exclusion_note}")
+
+
 def propose_families(model: str, accepted: dict[str, dict],
                      max_families: int, client=None, meter=None,
                      asset_class: str = "crypto") -> list[dict]:
@@ -1886,17 +1895,7 @@ def propose_families(model: str, accepted: dict[str, dict],
     # always naming RANGE_REQUIRING -- equity_etf declares an EMPTY set (real
     # OHLC bars, spec s"Class declaration"), so this note is skipped entirely
     # for it, exactly like crypto. Only fx (today) has anything to name.
-    excluded_types = (cells.CLASSES[asset_class]["excluded_block_types"]
-                      if asset_class != "crypto" else frozenset())
-    exclusion_note = ""
-    if excluded_types:
-        bar_kind = cells.CLASSES[asset_class]["bar_kind"]
-        reason = ("single-fix daily bars (no real intrabar high/low distinct "
-                  "from close)" if bar_kind == "single_fix" else f"bar_kind {bar_kind!r}")
-        exclusion_note = (
-            f"\n\nThis run targets asset_class={asset_class!r} cells with "
-            f"{reason}: do NOT propose these excluded block types: "
-            f"{sorted(excluded_types)}.")
+    exclusion_note = _exclusion_note(asset_class)
     with client.messages.stream(
         model=model,
         max_tokens=32_000,
@@ -1905,12 +1904,9 @@ def propose_families(model: str, accepted: dict[str, dict],
                                   "schema": proposal_schema_for(asset_class)}},
         messages=[{
             "role": "user",
-            "content": (
-                f"Block grammar:\n{grammar_summary()}\n\n"
-                f"Accepted research cards:\n{cards_summary(accepted)}\n\n"
-                f"Propose up to {max_families} strategy families per your rules."
-                f"{exclusion_note}"
-            ),
+            "content": COMPOSER_USER_TEMPLATE.format(
+                grammar=grammar_summary(), cards=cards_summary(accepted),
+                max_families=max_families, exclusion_note=exclusion_note),
         }],
     ) as stream:
         message = stream.get_final_message()
@@ -1924,7 +1920,50 @@ def propose_families(model: str, accepted: dict[str, dict],
     text = next((b.text for b in message.content if b.type == "text"), None)
     if text is None or message.stop_reason == "max_tokens":
         raise RuntimeError(f"composer: no complete answer (stop_reason={message.stop_reason})")
-    return normalize_proposal(json.loads(text)["families"])
+    families = normalize_proposal(json.loads(text)["families"])
+    stamp = {"_prompt_sha": composer_prompt_sha(asset_class),
+             "_served_model": _served_model(message, model)}
+    for fam in families:
+        if isinstance(fam, dict):
+            fam.update(stamp)
+    return families
+
+
+def _exclusion_note(asset_class: str) -> str:
+    # the excluded-types sentence appended to a non-crypto run's user message
+    excluded_types = (cells.CLASSES[asset_class]["excluded_block_types"]
+                      if asset_class != "crypto" else frozenset())
+    if not excluded_types:
+        return ""
+    bar_kind = cells.CLASSES[asset_class]["bar_kind"]
+    reason = ("single-fix daily bars (no real intrabar high/low distinct "
+              "from close)" if bar_kind == "single_fix" else f"bar_kind {bar_kind!r}")
+    return (
+        f"\n\nThis run targets asset_class={asset_class!r} cells with "
+        f"{reason}: do NOT propose these excluded block types: "
+        f"{sorted(excluded_types)}.")
+
+
+def composer_prompt_sha(asset_class: str) -> str:
+    # system prompt + proposal schema for the class + the user message as rendered for
+    # a probe card: the grammar summary, the card line format and the class's exclusion
+    # note all move the sha (harness audit 2026-11-07, Tier 1 #4; pinned per class)
+    probe = {"{card_id}": {"claim": "{claim}", "testability": {"score": 0.5}}}
+    user = COMPOSER_USER_TEMPLATE.format(grammar=grammar_summary(), cards=cards_summary(probe),
+                                         max_families="{n}",
+                                         exclusion_note=_exclusion_note(asset_class))
+    return prompt_sha(system_prompt_for(asset_class), proposal_schema_for(asset_class), user)
+
+
+def _generator_stamp(fam: dict) -> dict:
+    # proposals from propose_families carry the stamp; a family injected through
+    # run(propose_fn=...) (tests) has none and the generator block stays as it was
+    out = {}
+    if fam.get("_prompt_sha"):
+        out["prompt_sha"] = fam["_prompt_sha"]
+    if fam.get("_served_model"):
+        out["served_model"] = fam["_served_model"]
+    return out
 
 
 def normalize_proposal(families: list[dict]) -> list[dict]:

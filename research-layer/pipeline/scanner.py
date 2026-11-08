@@ -38,7 +38,7 @@ from .probation import (prioritise_items, process_admissions, process_reviews,
 from .scanstatus import ActionLog, write_status, write_digest
 from .registry import Registry
 from .common import quote_in_source
-from .reader import ExtractionFailed, build_card, chunk_text, extract_claims_usage
+from .reader import ExtractionFailed, build_card, chunk_text, extract_claims_served
 from .chainlock import ChainLock, ChainLockHeld
 
 LAYER = Path(__file__).resolve().parent.parent
@@ -173,13 +173,13 @@ def _extract_item(client, model, item, source, page_text, html, *,
     all_claims = []
     for label, chunk in chunk_text(page_text):
         try:
-            claims, usage = extract_claims_usage(client, model, label, chunk)
+            claims, usage, served = extract_claims_served(client, model, label, chunk)
         except ExtractionFailed as exc:
             meter.record_call(model, exc.usage, purpose="extract", agent="reader")
             raise
         meter.record_call(model, usage, purpose="extract",
                           agent="reader")
-        all_claims.extend(claims)
+        all_claims.extend((c, served) for c in claims)   # each claim + the model that served it
 
     registered = dropped = 0
     try:
@@ -190,14 +190,14 @@ def _extract_item(client, model, item, source, page_text, html, *,
         # re-feedable via RESUME_STATUSES / refeedable_deferred.
         return 0, 0, True
     try:
-        for raw in all_claims:
+        for raw, served in all_claims:
             if not quote_in_source(raw["quote"], page_text):
                 dropped += 1
                 continue
             if raw["claim"] in known_claims:
                 continue
             known_claims.add(raw["claim"])
-            card = build_card(raw, source_meta, model, run_id)
+            card = build_card(raw, source_meta, model, run_id, served_model=served)
             registry.register_card(card)
             registered += 1
     finally:
@@ -421,13 +421,13 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
         all_claims = []
         for label, chunk in chunk_text(text):
             try:
-                claims, usage = extract_claims_usage(client, model, label, chunk)
+                claims, usage, served = extract_claims_served(client, model, label, chunk)
             except ExtractionFailed as exc:
                 meter.record_call(model, exc.usage, purpose="inbox_extract", agent="reader")
                 raise
             meter.record_call(model, usage, purpose="inbox_extract",
                               agent="reader")
-            all_claims.extend(claims)
+            all_claims.extend((c, served) for c in claims)   # each claim + the model that served it
 
         registered = dropped = 0
         try:
@@ -439,14 +439,14 @@ def process_inbox(*, client, model: str, meter, seen: SeenStore,
             stats["deferred_lock"] += 1
             continue
         try:
-            for raw in all_claims:
+            for raw, served in all_claims:
                 if not quote_in_source(raw["quote"], text):
                     dropped += 1
                     continue
                 if raw["claim"] in known_claims:
                     continue
                 known_claims.add(raw["claim"])
-                registry.register_card(build_card(raw, source_meta, model, run_id))
+                registry.register_card(build_card(raw, source_meta, model, run_id, served_model=served))
                 registered += 1
         finally:
             lock.release()

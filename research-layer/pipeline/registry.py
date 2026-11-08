@@ -455,7 +455,7 @@ class Registry:
         return self.append("card_registered", card)
 
     def review_card(self, card_id: str, status: str, reviewed_by: str,
-                    reject_reason: str | None = None) -> dict:
+                    reject_reason: str | None = None, stamp: dict | None = None) -> dict:
         if status not in ("accepted", "rejected"):
             raise ValueError("status must be accepted|rejected")
         if status == "rejected" and reject_reason not in (
@@ -463,10 +463,14 @@ class Registry:
             raise ValueError("rejected cards need a valid reject_reason")
         if card_id not in self.cards():
             raise ValueError(f"unknown card {card_id!r}")
-        return self.append("card_reviewed", {
+        payload = {
             "card_id": card_id, "status": status,
             "reject_reason": reject_reason, "reviewed_by": reviewed_by,
-        })
+        }
+        if stamp:   # an LLM panel's prompt + served models (harness audit 2026-11-07, #4)
+            payload["review_prompt_sha"] = stamp.get("prompt_sha")
+            payload["review_served_models"] = list(stamp.get("served_models") or [])
+        return self.append("card_reviewed", payload)
 
     def register_block_type(self, payload: dict) -> dict:
         for k in ("role", "type", "params_schema"):

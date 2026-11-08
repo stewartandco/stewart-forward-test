@@ -70,9 +70,11 @@ twelve claims yields twelve cards, each independently groundable.
 
   "extraction": {
     "agent": "reader",
-    "model": "claude-sonnet-5",
+    "model": "claude-sonnet-5",            // the model ASKED for
     "pipeline_version": "r1.0.0",
-    "run_id": "2026-08-05-nightly"
+    "run_id": "2026-08-05-nightly",
+    "prompt_sha": "e7bb3f39c57e18e7",      // optional (2026-11): sha of the exact prompt; pinned in test_prompt_stamps
+    "served_model": "claude-sonnet-5-..."  // optional (2026-11): the model the API SERVED
   },
 
   "review": {
@@ -144,7 +146,9 @@ auditing tractable.
     "agent": "composer",
     "model": "claude-sonnet-5",
     "pipeline_version": "g1.0.0",
-    "run_id": "2026-08-05-nightly"
+    "run_id": "2026-08-05-nightly",
+    "prompt_sha": "...",                   // optional (2026-11), per asset class
+    "served_model": "..."                  // optional (2026-11)
   },
 
   "cost_model": {
@@ -356,7 +360,7 @@ Common envelope:
 | `entry_type` | Payload | Emitted when |
 |---|---|---|
 | `card_registered` | full research card | reader agent commits a card (pre-review) |
-| `card_reviewed` | `{card_id, status, reject_reason?}` | human triage decision |
+| `card_reviewed` | `{card_id, status, reject_reason?, reviewed_by, review_prompt_sha?, review_served_models?}` | triage decision; the two `review_*` fields only from the LLM panel (2026-11) |
 | `strategy_registered` | full strategy spec | composer births a spec — **before any backtest** |
 | `verdict` | `{strategy_id, stage, verdict: "pass"\|"fail", metrics{}, artifacts_hash}` | each gate evaluation |
 | `state_change` | `{strategy_id, from, to, reason?}` | lifecycle transition |

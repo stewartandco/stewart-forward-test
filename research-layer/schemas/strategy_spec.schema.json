@@ -62,7 +62,9 @@
         "agent": {"type": "string"},
         "model": {"type": "string"},
         "pipeline_version": {"type": "string"},
-        "run_id": {"type": "string"}
+        "run_id": {"type": "string"},
+        "prompt_sha": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+        "served_model": {"type": "string", "minLength": 1}
       }
     },
     "cost_model": {

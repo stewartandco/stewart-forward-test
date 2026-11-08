@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from .common import content_id, quote_in_source
 from .registry import Registry
+from .prompt_stamp import prompt_sha, served_model as _served_model
 
 PIPELINE_VERSION = "r1.0.0"
 DEFAULT_MODEL = "claude-opus-5"
@@ -147,8 +148,18 @@ def chunk_text(text: str) -> list[tuple[str, str]]:
     return chunks
 
 
-def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
-    """One structured-output extraction call; returns (claims, usage) so
+# The fixed user framing of every extraction call. Its text, the system prompt and the
+# structured-output schema are what EXTRACTION_PROMPT_SHA covers (harness audit
+# 2026-11-07, Tier 1 #4); test_prompt_stamps pins the value.
+EXTRACTION_USER_TEMPLATE = (
+    "Document section: {label}\n\n"
+    "<document>\n{chunk}\n</document>\n\n"
+    "Extract the testable claims per your instructions.")
+EXTRACTION_PROMPT_SHA = prompt_sha(SYSTEM_PROMPT, EXTRACTION_SCHEMA, EXTRACTION_USER_TEMPLATE)
+
+
+def extract_claims_served(client, model: str, chunk_label: str, chunk: str):
+    """One structured-output extraction call; returns (claims, usage, served_model) so
     callers (the v2 scanner) can meter spend. Streaming so long inputs don't
     hit HTTP timeouts; thinking is on by default on this model."""
     with client.messages.stream(
@@ -158,11 +169,7 @@ def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
         output_config={"format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}},
         messages=[{
             "role": "user",
-            "content": (
-                f"Document section: {chunk_label}\n\n"
-                f"<document>\n{chunk}\n</document>\n\n"
-                "Extract the testable claims per your instructions."
-            ),
+            "content": EXTRACTION_USER_TEMPLATE.format(label=chunk_label, chunk=chunk),
         }],
     ) as stream:
         message = stream.get_final_message()
@@ -171,15 +178,23 @@ def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
               + (f" (category: {message.stop_details.category})"
                  if getattr(message, "stop_details", None) else ""),
               file=sys.stderr)
-        return [], message.usage
+        return [], message.usage, _served_model(message, model)
     text = next((b.text for b in message.content if b.type == "text"), None)
     try:
-        return json.loads(text)["claims"], message.usage
+        claims = json.loads(text)["claims"]
     except (TypeError, ValueError, KeyError) as exc:
         raise ExtractionFailed(
             f"unusable extraction answer on {chunk_label} "
             f"(stop_reason={message.stop_reason}): {type(exc).__name__}",
             message.usage) from exc
+    # (claims, usage, the model that SERVED the call) -- harness audit 2026-11-07, #4
+    return claims, message.usage, _served_model(message, model)
+
+
+def extract_claims_usage(client, model: str, chunk_label: str, chunk: str):
+    """(claims, usage): the pre-stamp contract, claims untouched."""
+    claims, usage, _served = extract_claims_served(client, model, chunk_label, chunk)
+    return claims, usage
 
 
 def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dict]:
@@ -187,7 +202,8 @@ def extract_claims(client, model: str, chunk_label: str, chunk: str) -> list[dic
     return claims
 
 
-def build_card(raw: dict, source_meta: dict, model: str, run_id: str) -> dict:
+def build_card(raw: dict, source_meta: dict, model: str, run_id: str,
+               served_model: str | None = None) -> dict:
     card = {
         "card_id": None,
         "version": 1,
@@ -216,6 +232,11 @@ def build_card(raw: dict, source_meta: dict, model: str, run_id: str) -> dict:
         "review": {"status": "pending", "reviewed_by": None,
                    "reviewed_utc": None, "reject_reason": None},
     }
+    # Stamp only a card a model call actually produced (harness audit 2026-11-07, #4):
+    # fixtures and hand-built cards pass no served_model and stay unstamped.
+    if served_model:
+        card["extraction"]["prompt_sha"] = EXTRACTION_PROMPT_SHA
+        card["extraction"]["served_model"] = served_model
     card["card_id"] = content_id(card, "card_id")
     return card
 
@@ -259,7 +280,8 @@ def run(argv: list[str] | None = None) -> int:
     kept, dropped_quote, dropped_dupe = [], 0, 0
     for label, chunk in chunk_text(text):
         print(f"reading {label} ({len(chunk):,} chars)...")
-        for raw in extract_claims(client, args.model, label, chunk):
+        claims, _usage, served = extract_claims_served(client, args.model, label, chunk)
+        for raw in claims:
             if not quote_in_source(raw["quote"], text):
                 dropped_quote += 1
                 print(f"  DROPPED (quote not found verbatim): {raw['claim'][:80]}")
@@ -268,7 +290,7 @@ def run(argv: list[str] | None = None) -> int:
                 dropped_dupe += 1
                 continue
             known_claims.add(raw["claim"])
-            kept.append(build_card(raw, source_meta, args.model, run_id))
+            kept.append(build_card(raw, source_meta, args.model, run_id, served_model=served))
 
     for card in kept:
         if args.dry_run:

@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
+from .prompt_stamp import prompt_sha, served_model as _served_model
+
 BATCH_SIZE = 20
 SCREEN_MAX_TOKENS = 4000
 
@@ -89,6 +91,13 @@ SCREEN_SCHEMA = {
 }
 
 
+def _screen_prompt_sha() -> str:
+    # The system prompt, the schema, and the fixed framing build_screen_prompt adds
+    # around the items (rendered for a fixed probe item, so a framing edit moves it).
+    probe = [{"item_id": "{id}", "source_id": "{src}", "title": "{t}", "summary": "{s}"}]
+    return prompt_sha(INTAKE_PARAMETERS, SCREEN_SCHEMA, build_screen_prompt(probe))
+
+
 def build_screen_prompt(items: list[dict]) -> str:
     lines = ["Screen these items:\n"]
     for it in items:
@@ -125,14 +134,19 @@ def parse_screen_response(items: list[dict], data: dict) -> dict[str, tuple[str,
     return out
 
 
-def _log_decisions(log_path: Path, model: str, decisions: dict[str, tuple[str, str]]) -> None:
+def _log_decisions(log_path: Path, model: str, decisions: dict[str, tuple[str, str]],
+                   served: str | None = None) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with log_path.open("a", encoding="utf-8") as f:
         for iid, (status, reason) in decisions.items():
-            f.write(json.dumps({"ts_utc": ts, "item_id": iid, "model": model,
-                                "decision": status, "reason": reason},
-                               ensure_ascii=False) + "\n")
+            row = {"ts_utc": ts, "item_id": iid, "model": model,
+                   "decision": status, "reason": reason}
+            if served is not None:      # every row of a batch whose call returned (its
+                                        # deferrals included); budget/API-error rows: none
+                row["prompt_sha"] = SCREEN_PROMPT_SHA
+                row["served_model"] = served
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def screen_items(client, model: str, items: list[dict], meter,
@@ -178,5 +192,8 @@ def screen_items(client, model: str, items: list[dict], meter,
         else:
             decisions = parse_screen_response(batch, json.loads(text))
         out.update(decisions)
-        _log_decisions(log_path, model, decisions)
+        _log_decisions(log_path, model, decisions, served=_served_model(msg, model))
     return out
+
+
+SCREEN_PROMPT_SHA = _screen_prompt_sha()
