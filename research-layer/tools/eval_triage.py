@@ -64,6 +64,12 @@ USD_PER_CARD = 0.017             # measured 2026-11-08: USD 0.0056 per triage ca
 # Coen's labels ended 2026-09-04 (D44 made triage automatic), so the set is fixed. A change
 # here means the chain changed under the eval: re-pin deliberately, never silently.
 LABEL_PIN = {"n_overreach": 104, "n_accepted": 650, "digest": "e5022c5c695534b0"}
+# Coen 2026-11-08: at most 3 REVISED prompt/rule versions are evaluated on these labels; each
+# result records its attempt. The original production rule is the baseline, not an attempt.
+# After 3 failed versions: new labels, more context for the panel, or a structural change,
+# never a 4th prompt tuned on the same 104 cards.
+BASELINE_RULE = "1c1877d42075dc02"
+MAX_REVISED_VERSIONS = 3
 
 
 def rule_sha() -> str:
@@ -226,6 +232,20 @@ def _clean(d: dict, rule: str, model: str) -> bool:
             and float(d.get("incomplete_panel_rate", 1.0)) <= MAX_INCOMPLETE_RATE)
 
 
+def attempt_number(out_dir: Path, rule: str) -> int:
+    """Which revised version `rule` is (1-based), counting distinct rule keys already on file
+    in order of their first result; 0 for the baseline."""
+    if rule == BASELINE_RULE:
+        return 0
+    first: dict[str, str] = {}
+    for f in sorted(Path(out_dir).glob("*__*__*.json")) if Path(out_dir).exists() else []:
+        key, _model, stamp = f.stem.split("__", 2)
+        if key != BASELINE_RULE:
+            first[key] = min(first.get(key, stamp), stamp)
+    order = sorted(first, key=lambda k: first[k])
+    return order.index(rule) + 1 if rule in order else len(order) + 1
+
+
 def gate_status(out_dir: Path, rule: str, model: str) -> tuple[bool, str]:
     """(ok, why): ok only with MIN_RUNS clean runs for this rule + model and NO run on file
     that saw a false accept."""
@@ -279,6 +299,12 @@ def run(argv: list[str] | None = None) -> int:
     if not pinned:
         print("REFUSED: the labelled set differs from LABEL_PIN; re-pin it deliberately first")
         return 2
+    attempt = attempt_number(a.out_dir, rule_sha())
+    if attempt > MAX_REVISED_VERSIONS:
+        print(f"REFUSED: this would be revised version {attempt}; at most {MAX_REVISED_VERSIONS} are "
+              "evaluated on these labels (Coen 2026-11-08). Rethink: new labels, more panel context, "
+              "or a structural change.")
+        return 2
 
     logs = a.layer / "logs"
     ledger = logs / "budget_ledger.jsonl"
@@ -298,7 +324,8 @@ def run(argv: list[str] | None = None) -> int:
     out = evaluate(sample, review_fn, can_spend=meter.can_spend,
                    halted=lambda: _halt.halt_reason(logs))
     import anthropic
-    doc = {"rule_sha": rule_sha(), "prompt_sha": REVIEW_PROMPT_SHA, "model": a.model, "seed": a.seed,
+    doc = {"rule_sha": rule_sha(), "prompt_sha": _tb.REVIEW_PROMPT_SHA, "model": a.model, "seed": a.seed,
+           "attempt": attempt,
            "n_accepts_requested": a.n_accepts, "labelled_total": len(labels), "label_digest": digest,
            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
            "sdk": f"anthropic {anthropic.__version__}", "python": platform.python_version(), **out}

@@ -346,3 +346,34 @@ def test_a_paid_run_takes_no_chain_lock_and_writes_one_result(tmp_path, capsys, 
     doc = json.loads(files[0].read_text(encoding="utf-8"))
     assert doc["rule_sha"] == E.rule_sha() and doc["label_digest"] == E.LABEL_PIN["digest"] and doc["pass"]
     assert not (tmp_path / "logs" / "chain.lock").exists()           # never taken: no chain writes
+
+
+# ---------------------------------------------------------------- the 3-version limit (Coen 2026-11-08)
+
+def test_attempts_count_revised_versions_in_order_and_skip_the_baseline(tmp_path):
+    E.write_result(_doc(rule_sha=E.BASELINE_RULE), tmp_path)
+    assert E.attempt_number(tmp_path, E.BASELINE_RULE) == 0
+    assert E.attempt_number(tmp_path, "a" * 16) == 1                  # first revised version
+    E.write_result(_doc(rule_sha="a" * 16), tmp_path)
+    E.write_result(_doc(rule_sha="b" * 16), tmp_path)
+    assert E.attempt_number(tmp_path, "a" * 16) == 1                  # stable once on file
+    assert E.attempt_number(tmp_path, "b" * 16) == 2
+    assert E.attempt_number(tmp_path, "c" * 16) == 3
+    import time
+    time.sleep(0.01)
+    E.write_result(_doc(rule_sha="a" * 16), tmp_path)                # a's second run, after b's first
+    assert E.attempt_number(tmp_path, "a" * 16) == 1 and E.attempt_number(tmp_path, "b" * 16) == 2
+
+
+def test_a_fourth_revised_version_is_refused_before_any_spend(tmp_path, capsys, monkeypatch):
+    reg, ids = _labelled_registry(tmp_path, n_accept=5, n_overreach=2)
+    _pinned_to(monkeypatch, reg)
+    _no_spend(monkeypatch)
+    out = tmp_path / "out"
+    for k in ("a", "b", "c"):
+        E.write_result(_doc(rule_sha=k * 16), out)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    assert E.run(["--layer", str(tmp_path), "--out-dir", str(out)]) == 2
+    assert "revised version 4" in capsys.readouterr().out
+
