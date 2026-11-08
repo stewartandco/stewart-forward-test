@@ -29,8 +29,8 @@ turn it green. The live model snapshot is watched separately by the Sentinel.
     python -m tools.eval_triage --layer <live research-layer>              # paid (~USD 4.32)
 
 --layer must be the LIVE research layer even when run from a worktree. The run refuses
-without its budget ledger, while a loop cycle runs, or while the chain lock is held
-(reextract_shadow's guards).
+without its budget ledger or while a loop cycle runs. It takes no chain lock: it never writes
+the chain, and an hours-long hold would stall the worker's and scanner's chain writes.
 """
 from __future__ import annotations
 
@@ -286,25 +286,17 @@ def run(argv: list[str] | None = None) -> int:
         print(f"REFUSED: no ledger at {ledger} - is --layer the live research-layer? "
               "An absent ledger is never 'zero spend this month'.")
         return 2
-    from pipeline.chainlock import ChainLock, ChainLockHeld
+    # No chain.lock: the eval never writes the chain, and holding the lock for an hours-long
+    # run would defer the gauntlet worker's and the scanner's chain writes all that time.
     from tools.reextract_shadow import ensure_no_cycle_running
     try:
         ensure_no_cycle_running(logs)
     except RuntimeError as exc:
         print(f"REFUSED: {exc}")
         return 2
-    lock = ChainLock(logs, holder="triage-eval", purpose=f"triage eval, seed {a.seed}")
-    try:
-        lock.acquire()
-    except ChainLockHeld as exc:
-        print(f"REFUSED: {exc}")
-        return 2
-    try:
-        review_fn, meter = _live_review(a.model, a.layer)
-        out = evaluate(sample, review_fn, can_spend=meter.can_spend,
-                       halted=lambda: _halt.halt_reason(logs))
-    finally:
-        lock.release()
+    review_fn, meter = _live_review(a.model, a.layer)
+    out = evaluate(sample, review_fn, can_spend=meter.can_spend,
+                   halted=lambda: _halt.halt_reason(logs))
     import anthropic
     doc = {"rule_sha": rule_sha(), "prompt_sha": REVIEW_PROMPT_SHA, "model": a.model, "seed": a.seed,
            "n_accepts_requested": a.n_accepts, "labelled_total": len(labels), "label_digest": digest,

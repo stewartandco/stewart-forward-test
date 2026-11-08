@@ -313,7 +313,7 @@ def test_a_paid_run_without_the_live_ledger_is_refused(tmp_path, capsys, monkeyp
     assert not (tmp_path / "logs").exists()                       # refusing created nothing
 
 
-def test_a_paid_run_during_a_cycle_or_under_a_held_chain_lock_is_refused(tmp_path, capsys, monkeypatch):
+def test_a_paid_run_during_a_cycle_is_refused(tmp_path, capsys, monkeypatch):
     reg, ids = _labelled_registry(tmp_path, n_accept=5, n_overreach=2)
     _pinned_to(monkeypatch, reg)
     _no_spend(monkeypatch)
@@ -324,21 +324,9 @@ def test_a_paid_run_during_a_cycle_or_under_a_held_chain_lock_is_refused(tmp_pat
                         lambda logs: (_ for _ in ()).throw(RuntimeError("loop cycle running")))
     assert E.run(["--layer", str(tmp_path), "--out-dir", str(tmp_path / "out")]) == 2
     assert "loop cycle running" in capsys.readouterr().out
-    monkeypatch.undo()
-    _pinned_to(monkeypatch, reg)
-    _no_spend(monkeypatch)
-    monkeypatch.setattr(RS, "ensure_no_cycle_running", lambda logs: None)
-    from pipeline.chainlock import ChainLock
-    held = ChainLock(tmp_path / "logs", holder="someone", purpose="t")
-    held.acquire()
-    try:
-        assert E.run(["--layer", str(tmp_path), "--out-dir", str(tmp_path / "out")]) == 2
-    finally:
-        held.release()
-    assert "REFUSED" in capsys.readouterr().out
 
 
-def test_a_paid_run_releases_the_lock_and_writes_one_result(tmp_path, capsys, monkeypatch):
+def test_a_paid_run_takes_no_chain_lock_and_writes_one_result(tmp_path, capsys, monkeypatch):
     reg, ids = _labelled_registry(tmp_path, n_accept=4, n_overreach=2)
     _pinned_to(monkeypatch, reg)
     (tmp_path / "logs").mkdir()
@@ -357,4 +345,4 @@ def test_a_paid_run_releases_the_lock_and_writes_one_result(tmp_path, capsys, mo
     assert rc == 0 and len(files) == 1
     doc = json.loads(files[0].read_text(encoding="utf-8"))
     assert doc["rule_sha"] == E.rule_sha() and doc["label_digest"] == E.LABEL_PIN["digest"] and doc["pass"]
-    assert not (tmp_path / "logs" / "chain.lock").exists()           # released
+    assert not (tmp_path / "logs" / "chain.lock").exists()           # never taken: no chain writes
