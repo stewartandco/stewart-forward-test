@@ -35,6 +35,7 @@ from pathlib import Path
 from . import halt as _halt
 from .registry import Registry
 from .triage import apply_decisions
+from .prompt_stamp import prompt_sha, served_model as _served_model
 
 REVIEWER = "auto-d44"
 REJECTIONS_LOG_NAME = "triage_rejections.jsonl"
@@ -131,6 +132,9 @@ Answer with accept and a one-sentence reason. If you reject, name the specific
 words in the claim that the quote does not support."""
 
 
+REVIEW_PROMPT_SHA = prompt_sha(REVIEW_PROMPT, VOTE_SCHEMA)   # pinned in test_prompt_stamps
+
+
 def review_card(client, model: str, card: dict, meter,
                 panel_size: int = PANEL_SIZE) -> list[dict]:
     """Ask `panel_size` independent reviewers whether this card overreaches.
@@ -168,7 +172,8 @@ def review_card(client, model: str, card: dict, meter,
         if not isinstance(vote, dict):
             continue          # valid JSON but not an object: also a lost vote
         votes.append({"accept": bool(vote.get("accept")),
-                      "reason": str(vote.get("reason", ""))})
+                      "reason": str(vote.get("reason", "")),
+                      "served_model": _served_model(msg, model)})
     return votes
 
 
@@ -187,6 +192,7 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     decisions: dict[str, tuple[str, str | None]] = {
         cid: ("rejected", "duplicate") for cid in dupes}
     rejections: dict[str, dict] = {}
+    stamps: dict[str, dict] = {}
     stopped = None
 
     for cid, card in pending.items():
@@ -200,6 +206,10 @@ def build_decisions(client, model: str, pending: dict[str, dict],
             break
         votes = review_card(client, model, card, meter, panel_size)
         decision, basis = panel_verdict(votes)
+        # served_models: models behind the votes that parsed; [] when the whole panel
+        # was lost (incomplete_panel), though those calls were still paid for
+        stamps[cid] = {"prompt_sha": REVIEW_PROMPT_SHA,
+                       "served_models": sorted({v.get("served_model") for v in votes} - {None})}
         if decision == "accepted":
             decisions[cid] = ("accepted", None)
         else:
@@ -213,6 +223,7 @@ def build_decisions(client, model: str, pending: dict[str, dict],
     return {
         "decisions": decisions,
         "rejections": rejections,
+        "stamps": stamps,
         "counts": {
             "accepted": sum(1 for v in decisions.values() if v[0] == "accepted"),
             "rejected": len(rejections),
@@ -223,7 +234,8 @@ def build_decisions(client, model: str, pending: dict[str, dict],
 
 
 def append_rejections(path: Path, rejections: dict[str, dict],
-                      reviewer: str = REVIEWER) -> None:
+                      reviewer: str = REVIEWER,
+                      stamps: dict[str, dict] | None = None) -> None:
     """Audit trail for panel rejections: the chain records only
     `claim_not_supported`, so the reviewers' own words live here."""
     if not rejections:
@@ -231,10 +243,13 @@ def append_rejections(path: Path, rejections: dict[str, dict],
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     with path.open("a", encoding="utf-8") as f:
+        stamps = stamps or {}
         for cid, r in rejections.items():
             f.write(json.dumps({"ts_utc": now, "card_id": cid, "reviewed_by": reviewer,
                                 "basis": r["basis"],
-                                "dissent_reasons": r["dissent_reasons"]},
+                                "dissent_reasons": r["dissent_reasons"],
+                                "prompt_sha": (stamps.get(cid) or {}).get("prompt_sha"),
+                                "served_models": (stamps.get(cid) or {}).get("served_models")},
                                ensure_ascii=False) + "\n")
 
 
@@ -331,11 +346,11 @@ def run(argv: list[str] | None = None) -> int:
     # leaves the rest pending, and banking them would strand them behind the
     # loop's watermark.
     save_result(result_path, sum(1 for cid in pending if cid in out["decisions"]))
-    apply_decisions(registry, out["decisions"], REVIEWER)
+    apply_decisions(registry, out["decisions"], REVIEWER, stamps=out.get("stamps"))
     print(f"{len(out['decisions'])} card_reviewed entries chained as {REVIEWER}.")
     # After the chain write, so the audit log never describes a rejection
     # that apply_decisions failed to record.
-    append_rejections(logs_dir / REJECTIONS_LOG_NAME, out["rejections"])
+    append_rejections(logs_dir / REJECTIONS_LOG_NAME, out["rejections"], stamps=out.get("stamps"))
     return 0
 
 

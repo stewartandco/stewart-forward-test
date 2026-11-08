@@ -100,9 +100,13 @@ def confirm_write(decisions: dict[str, tuple[str, str | None]], n_pending: int,
 
 
 def apply_decisions(registry: Registry, decisions: dict[str, tuple[str, str | None]],
-                    reviewer: str) -> None:
+                    reviewer: str, stamps: dict[str, dict] | None = None) -> None:
+    # stamps: {card_id: {prompt_sha, served_models}} from an LLM panel (triage_batch);
+    # a human review or a duplicate decision has none.
+    stamps = stamps or {}
     for cid, (status, reason) in decisions.items():
-        registry.review_card(cid, status, reviewer, reject_reason=reason)
+        registry.review_card(cid, status, reviewer, reject_reason=reason,
+                             stamp=stamps.get(cid))
 
 
 def run(argv: list[str] | None = None) -> int:
