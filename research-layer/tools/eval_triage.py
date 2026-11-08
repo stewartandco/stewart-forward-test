@@ -70,6 +70,16 @@ LABEL_PIN = {"n_overreach": 104, "n_accepted": 650, "digest": "e5022c5c695534b0"
 # never a 4th prompt tuned on the same 104 cards.
 BASELINE_RULE = "1c1877d42075dc02"
 MAX_REVISED_VERSIONS = 3
+# THE RATCHET (Coen 2026-11-08, after v1-v3 all failed an absolute zero-false-accept bar: two
+# overreach cards are accepted by every prompt, so zero is unreachable for this panel).
+# A candidate lands only if EACH of MIN_RUNS runs is no worse than the production prompt's
+# measured run: false accepts <= PRODUCTION['false_accepts'] (strict; precision is what D34
+# governs) and false rejects <= PRODUCTION['false_rejects'] + FR_TOLERANCE (they swing about
+# 8 points between runs). When a candidate lands, PRODUCTION moves to the WORSE of its runs,
+# in the same commit, so the bar only ever tightens. PRODUCTION's own rule passes the gate.
+PRODUCTION = {"rule": "1c1877d42075dc02", "model": "claude-sonnet-5",
+              "false_accepts": 6, "false_rejects": 96, "measured": "run 1, 2026-11-08"}
+FR_TOLERANCE = 8
 
 
 def rule_sha() -> str:
@@ -223,13 +233,19 @@ def write_result(doc: dict, out_dir: Path) -> Path:
     return path
 
 
-def _clean(d: dict, rule: str, model: str) -> bool:
-    return (d.get("rule_sha") == rule and d.get("model") == model and d.get("complete") is True
-            and d.get("pass") is True and d.get("false_accepts") == []
+def qualifies(d: dict) -> bool:
+    """One run meets the ratchet: a complete run on the pinned labels, no worse than PRODUCTION."""
+    return (d.get("complete") is True
             and d.get("label_digest") == LABEL_PIN["digest"]
             and d.get("n_overreach") == LABEL_PIN["n_overreach"]
             and int(d.get("n_accept") or 0) >= N_ACCEPTS
-            and float(d.get("incomplete_panel_rate", 1.0)) <= MAX_INCOMPLETE_RATE)
+            and float(d.get("incomplete_panel_rate", 1.0)) <= MAX_INCOMPLETE_RATE
+            and len(d.get("false_accepts") or []) <= PRODUCTION["false_accepts"]
+            and len(d.get("false_rejects") or []) <= PRODUCTION["false_rejects"] + FR_TOLERANCE)
+
+
+def _clean(d: dict, rule: str, model: str) -> bool:
+    return d.get("rule_sha") == rule and d.get("model") == model and qualifies(d)
 
 
 def attempt_number(out_dir: Path, rule: str) -> int:
@@ -247,10 +263,12 @@ def attempt_number(out_dir: Path, rule: str) -> int:
 
 
 def gate_status(out_dir: Path, rule: str, model: str) -> tuple[bool, str]:
-    """(ok, why): ok only with MIN_RUNS clean runs for this rule + model and NO run on file
-    that saw a false accept."""
+    """(ok, why): ok for the PRODUCTION rule itself; otherwise only with MIN_RUNS runs for this rule +
+    model that meet the ratchet, and NO run on file for it that does not (no cherry-picking)."""
     hint = ("run twice: python -m tools.eval_triage --layer <live research-layer>, then commit "
             "the results under docs/evals/triage/")
+    if rule == PRODUCTION["rule"] and model == PRODUCTION["model"]:
+        return True, f"production baseline ({PRODUCTION['measured']})"
     out_dir = Path(out_dir)
     files = sorted(out_dir.glob(f"{rule}__{_safe(model)}__*.json")) if out_dir.exists() else []
     docs = []
@@ -259,10 +277,10 @@ def gate_status(out_dir: Path, rule: str, model: str) -> tuple[bool, str]:
             docs.append((f.name, json.loads(f.read_text(encoding="utf-8"))))
         except (OSError, ValueError):
             return False, f"{f.name}: unreadable result; {hint}"
-    bad = [name for name, d in docs if d.get("false_accepts")]
+    bad = [name for name, d in docs if d.get("complete") is True and not qualifies(d)]
     if bad:
-        return False, (f"a run for rule {rule} on {model} saw false accepts ({', '.join(bad)}): this "
-                       "prompt/rule is blocked for good; change it and evaluate the new one")
+        return False, (f"a run for rule {rule} on {model} is worse than production ({', '.join(bad)}): "
+                       "this prompt/rule is blocked for good; change it and evaluate the new one")
     clean = [name for name, d in docs if _clean(d, rule, model)]
     if len(clean) < MIN_RUNS:
         return False, (f"{len(clean)} of {MIN_RUNS} required clean runs for rule {rule} on {model} "
@@ -328,17 +346,21 @@ def run(argv: list[str] | None = None) -> int:
            "attempt": attempt,
            "n_accepts_requested": a.n_accepts, "labelled_total": len(labels), "label_digest": digest,
            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "sdk": f"anthropic {anthropic.__version__}", "python": platform.python_version(), **out}
+           "sdk": f"anthropic {anthropic.__version__}", "python": platform.python_version(),
+           "production": dict(PRODUCTION), "fr_tolerance": FR_TOLERANCE, **out}
+    doc["qualifies"] = qualifies(doc)
     path = write_result(doc, a.out_dir)
     fa = out["false_accepts_by_origin"]
-    print(f"{'PASS' if out['pass'] else 'FAIL'}: false accepts {len(out['false_accepts'])} of "
+    print(f"{'QUALIFIES' if doc['qualifies'] else 'WORSE THAN PRODUCTION'} (production "
+          f"{PRODUCTION['false_accepts']} FA / {PRODUCTION['false_rejects']} FR, +{FR_TOLERANCE} FR tolerance); "
+          f"absolute bar {'PASS' if out['pass'] else 'FAIL'}: false accepts {len(out['false_accepts'])} of "
           f"{out['n_overreach']} overreach (independent {len(fa['independent'])} of "
           f"{out['n_overreach_by_origin']['independent']}, panel-flagged {len(fa['panel_flagged'])} of "
           f"{out['n_overreach_by_origin']['panel_flagged']}); false rejects {len(out['false_rejects'])} "
           f"of {out['n_accept']} ({out['false_reject_rate']:.1%}, 95% CI "
           f"{out['false_reject_rate_ci95'][0]:.1%}-{out['false_reject_rate_ci95'][1]:.1%}); incomplete "
           f"panels {out['incomplete_panel_rate']:.1%}; stopped={out['stopped']}; -> {path}")
-    return 0 if out["pass"] else 1
+    return 0 if doc["qualifies"] else 1
 
 
 if __name__ == "__main__":
