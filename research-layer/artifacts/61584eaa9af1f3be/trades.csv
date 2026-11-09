@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+JASMYUSDT,short,2023-05-23 00:00:00,0.004873,2023-10-29 00:00:00,0.003739,signal:regime_flip,0.2297108557356864

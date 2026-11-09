@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+LUNCUSDT,long,2023-10-23 04:00:00,5.929e-05,2023-10-23 08:00:00,5.831e-05,signal:regime_flip,-0.019528925619834766
+LUNCUSDT,short,2023-11-23 00:00:00,7.445e-05,2023-11-23 04:00:00,7.448e-05,signal:regime_flip,-0.0034029550033581853
+LUNCUSDT,long,2023-11-26 04:00:00,7.791e-05,2023-12-18 04:00:00,0.00015348,signal:regime_flip,0.9669653446284173

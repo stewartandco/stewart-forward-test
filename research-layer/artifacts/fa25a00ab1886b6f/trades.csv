@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+JASMYUSDT,short,2022-04-15 00:00:00,0.0188,2022-08-16 00:00:00,0.010723,signal:regime_flip,0.42662765957446813
+JASMYUSDT,short,2022-08-25 00:00:00,0.009104,2023-01-13 00:00:00,0.004328,signal:regime_flip,0.5216045694200351
+JASMYUSDT,short,2023-05-15 00:00:00,0.00478,2023-10-27 00:00:00,0.003582,signal:regime_flip,0.24762761506276154
