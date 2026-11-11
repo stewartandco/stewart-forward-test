@@ -77,8 +77,10 @@ MAX_REVISED_VERSIONS = 3
 # governs) and false rejects <= PRODUCTION['false_rejects'] + FR_TOLERANCE (they swing about
 # 8 points between runs). When a candidate lands, PRODUCTION moves to the WORSE of its runs,
 # in the same commit, so the bar only ever tightens. PRODUCTION's own rule passes the gate.
-PRODUCTION = {"rule": "1c1877d42075dc02", "model": "claude-sonnet-5",
-              "false_accepts": 6, "false_rejects": 96, "measured": "run 1, 2026-11-08"}
+# History: v1 1c1877d42075dc02 (6 FA / 96 FR, 2026-11-08) -> v3 cb97f031c3248192, landed with
+# the worse of its two qualifying runs (3/97 and 2/96).
+PRODUCTION = {"rule": "cb97f031c3248192", "model": "claude-sonnet-5",
+              "false_accepts": 3, "false_rejects": 97, "measured": "worse of 2 runs, 2026-11-08"}
 FR_TOLERANCE = 8
 
 

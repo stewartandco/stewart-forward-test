@@ -244,8 +244,8 @@ def test_the_production_rule_itself_passes_the_gate(tmp_path):
 @pytest.mark.parametrize("bad", [
     {"complete": False}, {"label_digest": "0" * 16}, {"n_overreach": 1},
     {"n_accept": 10}, {"incomplete_panel_rate": 0.5}, {"model": "claude-other"},
-    {"false_accepts": [f"c{i}" for i in range(7)]},
-    {"false_rejects": [f"r{i}" for i in range(105)]},
+    {"false_accepts": [f"c{i}" for i in range(E.PRODUCTION["false_accepts"] + 1)]},          # one past the bar
+    {"false_rejects": [f"r{i}" for i in range(E.PRODUCTION["false_rejects"] + E.FR_TOLERANCE + 1)]},
 ])
 def test_runs_on_the_wrong_labels_or_unclean_runs_do_not_count(tmp_path, bad):
     E.write_result(_doc(), tmp_path)
