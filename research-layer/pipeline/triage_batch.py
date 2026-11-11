@@ -109,20 +109,45 @@ VOTE_SCHEMA = {
     "additionalProperties": False,
 }
 
-REVIEW_PROMPT = """You are checking ONE research card for OVERREACH.
+# v3 (2026-11-08, harness audit Tier 2 #9; revised version 2 of the 3 Coen allows).
+# v1 (1c1877d42075dc02) failed: 6/104 overreach accepted, 64% of good cards rejected -- most
+# live dissents were "adds specifics", i.e. the subject the extractor took from the document.
+# v2 (329ac4c3c159ecf9, allowed all identifiers) failed: 6/104 again, false rejects 47%; its
+# new misses were thin quotes whose claims ADD CONDITIONS. Coen: names yes, conditions no.
+# Examples stay generic on purpose: none is taken from an eval card.
+REVIEW_PROMPT = """You are checking ONE research card for OVERREACH: a claim that asserts more than
+its verbatim quote supports. This is the only thing you are judging. You are NOT judging
+whether the claim is true, useful, novel, well-written or tradeable - later stages test that.
 
-The card's claim must not assert more than its verbatim quote supports. This is
-the only thing you are judging. You are NOT judging whether the claim is true,
-useful, novel, well-written, or tradeable - later stages test all of that.
+The quote is a short excerpt from a longer document, and the claim was written from that
+document. The claim may therefore NAME what the excerpt refers to - the instrument, index,
+universe, strategy, signal or metric behind words like "this strategy" or "the index". A NAME
+is fine even when it is not in the quote. A CONDITION is not: the claim must not add a sample
+period, horizon, holding period, test setup (a backtest split, a walk-forward scheme), threshold,
+figure, position count or combination of rules that the quote does not show. A short quote
+that states only a conclusion cannot support a claim that spells out when that conclusion holds.
 
-Reject (accept=false) when the claim:
-- asserts a stronger, broader or more general relationship than the quote states
-- turns a suggestion, proposal or planned test into a result
-- reverses, inverts or changes the direction the quote describes
-- adds an asset class, horizon or condition the quote does not mention
+Reject (accept=false) when the claim goes beyond the quote in any of these ways:
+1. STRONGER - it raises the strength, reliability, size or frequency of the effect
+   ("tends to" becomes "reliably" or "always"; a rough figure becomes a precise one).
+2. WIDER - it generalises past the subject the quote is about (one market becomes all
+   markets, one period becomes a standing rule, a sample result becomes a law).
+3. REVERSED - it changes the direction, or turns a co-occurrence around: "returns are weak
+   while volatility is high" does NOT support "when returns are weak, volatility is high".
+4. DE-HEDGED - it drops a hedge or qualifier the quote keeps ("appears", "may", "seems",
+   "suggests", "in this sample", "so far").
+5. HYPOTHETICAL AS FACT - the quote gives an example, a hypothetical, a proposal or a planned
+   test ("imagine a rule that...", "we plan to test...") and the claim states it as a finding.
+6. ADDED INFERENCE - the claim adds a conclusion, prediction, cause or implication the quote
+   does not state ("which means it will continue", "therefore", "because", "making it a
+   good signal").
+7. ADDED CONDITION - the claim specifies a period, horizon, test setup, threshold, figure,
+   count or combination the quote does not show ("over ten years", "with a 20-day lookback",
+   "in out-of-sample tests", "using 12 positions").
 
-Accept (accept=true) when the claim is a faithful, possibly narrower,
-restatement of what the quote actually says.
+Accept (accept=true) when the claim asserts the same relationship as the quote - the same
+strength, scope, direction, hedging and conditions, or less - possibly naming the subject
+the excerpt refers to.
 
 CLAIM:
 {claim}
@@ -132,8 +157,8 @@ VERBATIM QUOTE FROM THE SOURCE:
 
 SOURCE: {title}
 
-Answer with accept and a one-sentence reason. If you reject, name the specific
-words in the claim that the quote does not support."""
+Answer with accept and a one-sentence reason. If you reject, give the number of the way the
+claim overreaches (1-7) and the specific words that do it."""
 
 
 REVIEW_PROMPT_SHA = prompt_sha(REVIEW_PROMPT, VOTE_SCHEMA)   # pinned in test_prompt_stamps

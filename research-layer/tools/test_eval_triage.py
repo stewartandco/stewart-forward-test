@@ -216,17 +216,36 @@ def test_two_clean_runs_open_the_gate_and_one_does_not(tmp_path):
     assert ok, why
 
 
-def test_any_run_with_a_false_accept_blocks_the_key_for_good(tmp_path):
+def test_any_run_worse_than_production_blocks_the_key_for_good(tmp_path):
     for _ in range(3):
         E.write_result(_doc(), tmp_path)
-    E.write_result(_doc(**{"pass": False, "false_accepts": ["c1"]}), tmp_path)
+    worse = [f"c{i}" for i in range(E.PRODUCTION["false_accepts"] + 1)]
+    E.write_result(_doc(false_accepts=worse), tmp_path)
     ok, why = E.gate_status(tmp_path, RULE, MODEL)
     assert not ok and "blocked for good" in why
 
 
+def test_the_ratchet_edges():
+    fa_ok = [f"c{i}" for i in range(E.PRODUCTION["false_accepts"])]
+    fr_edge = [f"r{i}" for i in range(E.PRODUCTION["false_rejects"] + E.FR_TOLERANCE)]
+    assert E.qualifies(_doc(false_accepts=fa_ok, false_rejects=fr_edge))           # at both edges
+    assert not E.qualifies(_doc(false_accepts=fa_ok + ["x"]))                       # FA strict
+    assert not E.qualifies(_doc(false_rejects=fr_edge + ["x"]))                     # FR past tolerance
+    assert not E.qualifies(_doc(complete=False))
+
+
+def test_the_production_rule_itself_passes_the_gate(tmp_path):
+    ok, why = E.gate_status(tmp_path / "empty", E.PRODUCTION["rule"], E.PRODUCTION["model"])
+    assert ok and "production" in why
+    ok, why = E.gate_status(tmp_path / "empty", E.PRODUCTION["rule"], "claude-other")
+    assert not ok                                                                  # same rule, other model
+
+
 @pytest.mark.parametrize("bad", [
-    {"pass": False}, {"complete": False}, {"label_digest": "0" * 16}, {"n_overreach": 1},
+    {"complete": False}, {"label_digest": "0" * 16}, {"n_overreach": 1},
     {"n_accept": 10}, {"incomplete_panel_rate": 0.5}, {"model": "claude-other"},
+    {"false_accepts": [f"c{i}" for i in range(E.PRODUCTION["false_accepts"] + 1)]},          # one past the bar
+    {"false_rejects": [f"r{i}" for i in range(E.PRODUCTION["false_rejects"] + E.FR_TOLERANCE + 1)]},
 ])
 def test_runs_on_the_wrong_labels_or_unclean_runs_do_not_count(tmp_path, bad):
     E.write_result(_doc(), tmp_path)
@@ -340,11 +359,14 @@ def test_a_paid_run_takes_no_chain_lock_and_writes_one_result(tmp_path, capsys, 
         def can_spend(self):
             return True
     monkeypatch.setattr(E, "_live_review", lambda model, layer: (_panel(verdicts), M()))
+    monkeypatch.setitem(E.LABEL_PIN, "n_overreach", 2)          # this fixture's labelled set
+    monkeypatch.setattr(E, "N_ACCEPTS", 4)
     rc = E.run(["--layer", str(tmp_path), "--n-accepts", "4", "--out-dir", str(tmp_path / "out")])
     files = list((tmp_path / "out").glob("*.json"))
     assert rc == 0 and len(files) == 1
     doc = json.loads(files[0].read_text(encoding="utf-8"))
     assert doc["rule_sha"] == E.rule_sha() and doc["label_digest"] == E.LABEL_PIN["digest"] and doc["pass"]
+    assert doc["qualifies"] and doc["production"] == E.PRODUCTION
     assert not (tmp_path / "logs" / "chain.lock").exists()           # never taken: no chain writes
 
 
@@ -377,4 +399,24 @@ def test_a_fourth_revised_version_is_refused_before_any_spend(tmp_path, capsys, 
     (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
     assert E.run(["--layer", str(tmp_path), "--out-dir", str(out)]) == 2
     assert "revised version 4" in capsys.readouterr().out
+
+
+def test_a_paid_run_worse_than_production_exits_1(tmp_path, monkeypatch):
+    reg, ids = _labelled_registry(tmp_path, n_accept=4, n_overreach=2)
+    _pinned_to(monkeypatch, reg)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "budget_ledger.jsonl").write_text("", encoding="utf-8")
+    import tools.reextract_shadow as RS
+    monkeypatch.setattr(RS, "ensure_no_cycle_running", lambda logs: None)
+    monkeypatch.setitem(E.LABEL_PIN, "n_overreach", 2)
+    monkeypatch.setattr(E, "N_ACCEPTS", 4)
+    monkeypatch.setitem(E.PRODUCTION, "false_accepts", 0)          # production made no false accept
+    labels = E.load_labels(reg)
+    accept_all = {v[0]["claim"]: True for v in labels.values()}   # this panel accepts the overreach cards
+
+    class M:
+        def can_spend(self):
+            return True
+    monkeypatch.setattr(E, "_live_review", lambda model, layer: (_panel(accept_all), M()))
+    assert E.run(["--layer", str(tmp_path), "--n-accepts", "4", "--out-dir", str(tmp_path / "out")]) == 1
 

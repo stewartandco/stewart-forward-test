@@ -29,7 +29,9 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 PINNED = {
     "reader extraction": ("16e8be0983f7fe4a", lambda: reader.EXTRACTION_PROMPT_SHA),
     "relevance screen": ("4f5abaecc4bda3bc", lambda: relevance.SCREEN_PROMPT_SHA),
-    "triage review": ("d2301c54f6ae81ef", lambda: triage_batch.REVIEW_PROMPT_SHA),
+    # bumped 2026-11-08: review prompt v3 (Coen: names yes, conditions no); v1 d2301c54f6ae81ef
+    # and v2 4b3a8b9f7c5ec393 both failed the triage eval (6/104 false accepts each)
+    "triage review": ("2b4f6e44a71c1a2e", lambda: triage_batch.REVIEW_PROMPT_SHA),
 }
 PINNED_COMPOSER = {
     "bond_etf": "631f239d38eaa78f", "crypto": "c8e7c223c7f520ab", "equity_etf": "33800e51c56dab96",
