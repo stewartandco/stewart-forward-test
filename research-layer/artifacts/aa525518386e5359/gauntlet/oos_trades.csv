@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+SLV,long,2025-04-07 00:00:00,27.3,2025-04-14 00:00:00,29.1,signal:zscore_revert,0.06553406593406592,0.10353552670875192
+SLV,long,2026-10-01 00:00:00,55.11,2026-10-23 00:00:00,48.595,stop,-0.11861810923607334,0.08937894808364971
