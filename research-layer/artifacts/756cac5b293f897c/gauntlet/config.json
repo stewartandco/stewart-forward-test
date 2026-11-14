@@ -1,0 +1,282 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "SHY_1d": "2026-11-10 00:00:00"
+ },
+ "data_sha256": {
+  "SHY_1d": "0221969ca2a4b9c8a6ae925b9227b3f7b1a940cf92edf180298dc7ea5613ccca"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": -0.1663593796458983,
+   "n_days": 718,
+   "strategy_sharpe": -0.2788286360591288,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.007966512082011311,
+   "excess": 0.0037026079956339764,
+   "strategy_net": -0.004263904086377335,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.0058568293780374425,
+  "edge_decay_pct": -1463.8816768522433,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 13,
+    "net_pnl": 0.027770266993662363
+   },
+   "post_2022": {
+    "n_trades": 10,
+    "net_pnl": -0.00902686430910593
+   },
+   "pre_gfc": {
+    "n_trades": 12,
+    "net_pnl": 0.012967385952393329
+   },
+   "zirp": {
+    "n_trades": 33,
+    "net_pnl": -0.03416028213484601
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 36,
+   "stop": 24
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 5,
+   "stop": 3
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0016877799227749928,
+  "is_edge_raw": 3.282967646047959e-05,
+  "is_vol": 0.019451396486872594,
+  "mc_p05_equity": 0.9211549780293659,
+  "oos_edge_per_trade": -0.02301932111231907,
+  "oos_edge_raw": -0.0005262196682810246,
+  "oos_vol": 0.022859912580106966,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.035413031072719287,
+   "dense_only": true,
+   "mean_ratio": -0.16922360512592602,
+   "n_perturbations": 6,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": -0.06135033312928658,
+     "score": -0.002172601253429105,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": -0.5567414265439712,
+     "score": -0.019715901437671712,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.088386380358317,
+     "score": 0.03854306070675355,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 2.259537409336675,
+     "score": 0.08001706848681131,
+     "to": 3.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": -4.372641648255154,
+     "score": -0.15484849455952626,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 0.6274679874778639,
+     "score": 0.022220543337690232,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": -4.372641648255154
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 8,
+     "net": -0.0042097573462481965,
+     "win_rate": 0.25,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.035413031072719287,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9686037975842343,
+     "n_trades": 12,
+     "net": 0.013596960704683995
+    },
+    {
+     "min_equity": 0.9620083912210764,
+     "n_trades": 38,
+     "net": -0.038662961019767184
+    },
+    {
+     "min_equity": 0.9972037370967651,
+     "n_trades": 10,
+     "net": 0.027035780902711973
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-11T12:17:31Z",
+  "family": "duration_tstat_trend_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-11-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "SHY 1d duration_tstat_trend_long dlong ml90 tm2.5 ml200 al14 m2.5 ml90 te0.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "295c089b48478986",
+    "303001052725c19f",
+    "3d4db3693d78d717",
+    "78ab4454813ac1ec",
+    "8ce8c138cdd38d16",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "c7c0e61fc25e8ba1",
+    "d0fc8344bd267d47",
+    "dad2ffd5702377ba",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "78ab4454813ac1ec",
+    "8ce8c138cdd38d16",
+    "dad2ffd5702377ba"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "duration_tstat_trend_long-2026-11-11-120012-loop-bond_etf:SHY_1d"
+  },
+  "strategy_id": "756cac5b293f897c",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "SHY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

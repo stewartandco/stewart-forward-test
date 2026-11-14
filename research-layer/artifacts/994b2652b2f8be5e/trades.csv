@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+CFXUSDT,long,2022-08-07 12:00:00,0.0601,2022-08-08 00:00:00,0.0593,signal:regime_flip,-0.01631114808652245
+CFXUSDT,short,2022-08-29 00:00:00,0.0505,2022-09-09 12:00:00,0.0539,signal:regime_flip,-0.07032673267326739
+CFXUSDT,long,2023-01-19 12:00:00,0.026,2023-01-20 00:00:00,0.0263,signal:regime_flip,0.008538461538461498
+CFXUSDT,short,2023-04-28 00:00:00,0.3322,2023-04-28 12:00:00,0.3256,signal:regime_flip,0.016867549668874163

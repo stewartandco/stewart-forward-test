@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+DIA,long,1999-09-24 00:00:00,102.4,1999-10-29 00:00:00,107.59363457202814,target,0.050319087617462135
+DIA,long,2012-05-21 00:00:00,123.69,2012-06-18 00:00:00,126.8,signal:zscore_revert,0.02474350392109299

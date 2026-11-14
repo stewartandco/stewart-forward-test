@@ -1,0 +1,110 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "e989f515edf86e45fe6da28c03342366ec37a2376e6f80f445c36fabea0ab117",
+  "EMB_1d": "303f97cfaeb7b4014afd886ed124ef6845410bdefa99178f5a6dfe8792b0002a",
+  "HYG_1d": "aee231bd68e1f925ad5d6dd5796f2d1481e7d155636b450734b0c933616efa0c",
+  "IEF_1d": "2e2365da5835a32ffe80b6862831de70801dfe52a93969dce79c9eb6d75975f6",
+  "LQD_1d": "9adc14972a9b5d7423795417c11291e9e988c9c1b2cb521b10d58a292803a6eb",
+  "SHY_1d": "172c81409d0352906d7e4e43a109358b2884fcaf7bd8726e555e4eaca9499102",
+  "TIP_1d": "3dc5b9fe57f698d8beb1ef1c5dc0d0eef93f6e449681a019f671f16fefe728b9",
+  "TLT_1d": "cd9bf9fd71d99d217405f578a846560dd77a402b43a94a8eea41def9b92eb76d"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "channel_stop"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-27T12:08:49Z",
+  "family": "credit_range_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-27-120012-loop-bond_etf"
+  },
+  "name": "TLT 1d credit_range_breakout dlong l100 l120 mp0.9 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3142c67d77f9011a",
+    "6dba955b6b43f40d",
+    "7290a79089f6ba27",
+    "80a41669681d747b",
+    "842c23a34c889515",
+    "9a6abe19343ae46f",
+    "e519d19950313468"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "7290a79089f6ba27",
+    "842c23a34c889515"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_range_breakout-2026-10-27-120012-loop-bond_etf:TLT_1d"
+  },
+  "strategy_id": "5616efd2065d9426",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "TLT"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

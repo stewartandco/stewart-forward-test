@@ -1,0 +1,284 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "ZAR_1d": "2026-10-30 00:00:00"
+ },
+ "data_sha256": {
+  "ZAR_1d": "abda3f4db3c4e2485997483291276e14a274ae6f355ab7a4e23fcf84ede558c4"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, carry excluded on both sides",
+   "hold_sharpe": 0.4565590199015463,
+   "n_days": 710,
+   "strategy_sharpe": -0.011447103395934166,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": 0.10978949148484027,
+   "excess": -0.11668744068537171,
+   "strategy_net": -0.006897949200531439,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.008090821060018571,
+  "edge_decay_pct": -108.8661675508416,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 11,
+    "net_pnl": 0.5602376766193844
+   },
+   "post_2022": {
+    "n_trades": 11,
+    "net_pnl": -0.17344328398978293
+   },
+   "pre_gfc": {
+    "n_trades": 23,
+    "net_pnl": 0.6546304642722243
+   },
+   "tightening": {
+    "n_trades": 12,
+    "net_pnl": -0.1838558558111052
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 54,
+   "stop": 21
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 4,
+   "stop": 2
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.06811352287828658,
+  "is_edge_raw": 0.012764089018805358,
+  "is_vol": 0.1873943451965297,
+  "mc_p05_equity": 0.8510930259570599,
+  "oos_edge_per_trade": -0.006039059063169718,
+  "oos_edge_raw": -0.0008352444239448038,
+  "oos_vol": 0.13830704671174543,
+  "open_at_end": false,
+  "p_ruin": 0.0085,
+  "perturbation": {
+   "base_score": 0.2740779351376071,
+   "dense_only": true,
+   "mean_ratio": 0.8129341357884753,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 20,
+     "ratio": 0.5638917610480548,
+     "score": 0.1545502895091598,
+     "to": 13
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "up",
+     "from": 20,
+     "ratio": 0.4012451799488124,
+     "score": 0.1099724504042881,
+     "to": 34
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 130,
+     "ratio": 0.8784179301028454,
+     "score": 0.24075497247043873,
+     "to": 80
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 130,
+     "ratio": 0.6404895020333642,
+     "score": 0.17554404019461867,
+     "to": 200
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.9768090428831053,
+     "score": 0.2677218054971438,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.0392887120115524,
+     "score": 0.2848461041999495,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 1.011743004008089,
+     "score": 0.2772964334284568,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 0.9915879542719789,
+     "score": 0.27177237901418794,
+     "to": 0.9
+    }
+   ],
+   "worst_ratio": 0.4012451799488124
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 6,
+     "net": -0.005011466543668824,
+     "win_rate": 0.16666666666666666,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.2740779351376071,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9166327670504566,
+     "n_trades": 18,
+     "net": 0.17099292219476941
+    },
+    {
+     "min_equity": 0.9704329432823369,
+     "n_trades": 31,
+     "net": 0.7848071997131035
+    },
+    {
+     "min_equity": 0.9539217516450369,
+     "n_trades": 26,
+     "net": 0.0015065545025291158
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 20,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.4,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-07T12:10:49Z",
+  "family": "fx_trend_vol_state_filter",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-07-120026-loop-fx"
+  },
+  "name": "ZAR 1d fx_trend_vol_state_filter dboth f20 s130 l120 mp0.8 ml200 ml100 av0.4 l30",
+  "provenance": {
+   "card_ids": [
+    "1c11d61fbf10b3a0",
+    "2243c5930df5c5be",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_trend_vol_state_filter-2026-11-07-120026-loop-fx:ZAR_1d"
+  },
+  "strategy_id": "43d59b223ae171b4",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "ZAR"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

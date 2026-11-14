@@ -1,0 +1,194 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CAKEUSDT_4h": "2026-11-03 20:00:00"
+ },
+ "data_sha256": {
+  "CAKEUSDT_4h": "bb12719949490d17d0cf05c745577ebc596a7d128cb8274a0df1d47aad9299a3"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.45778110599078337,
+   "excess": 0.5666263402747685,
+   "strategy_net": 0.10884523428398518,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.0999817378183896,
+  "edge_decay_pct": 45.13075386652372,
+  "exit_reasons_is": {
+   "signal:channel_exit": 58,
+   "stop": 19
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 70,
+   "stop": 8
+  },
+  "fail_reason": "mc_p05",
+  "is_edge_per_trade": 0.0010524957739124795,
+  "is_edge_raw": 0.0011673821531801476,
+  "is_vol": 1.1091561430604104,
+  "mc_p05_equity": 0.916677271931108,
+  "oos_edge_per_trade": 0.0015274950510924847,
+  "oos_edge_raw": 0.001397702715582693,
+  "oos_vol": 0.9150292922933122,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.43626712610892515,
+   "dense_only": true,
+   "mean_ratio": 1.6387674118677027,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 1.388673779230727,
+     "score": 0.6058327187678093,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 1.888861044504678,
+     "score": 0.8240479795051585,
+     "to": 75
+    }
+   ],
+   "worst_ratio": 1.388673779230727
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 10,
+     "net": 0.000711444769107691,
+     "win_rate": 0.5,
+     "wins": 5
+    },
+    "trend_down": {
+     "n": 39,
+     "net": 0.011193433418510212,
+     "win_rate": 0.358974358974359,
+     "wins": 14
+    },
+    "trend_up": {
+     "n": 29,
+     "net": 0.09711593362783215,
+     "win_rate": 0.4827586206896552,
+     "wins": 14
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.43626712610892515,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.976667269062471,
+     "n_trades": 26,
+     "net": 0.0018541040624244307
+    },
+    {
+     "min_equity": 0.9582396161698984,
+     "n_trades": 27,
+     "net": 0.02335085346354302
+    },
+    {
+     "min_equity": 0.9678399593466709,
+     "n_trades": 24,
+     "net": 0.06468346826890392
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "CAKE 4h range_breakout_both_sides dboth l55 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:CAKEUSDT_4h"
+  },
+  "strategy_id": "e24218cd36003a2b",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "CAKEUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

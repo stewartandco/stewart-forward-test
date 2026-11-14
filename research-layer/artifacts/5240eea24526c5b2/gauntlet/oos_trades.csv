@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+GBP,short,2026-03-23 00:00:00,1.3385,2026-04-09 00:00:00,1.3443,signal:regime_flip,-0.00538033525262015,1.0

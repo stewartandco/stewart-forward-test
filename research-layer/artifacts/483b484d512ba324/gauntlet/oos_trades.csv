@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+GLD,long,2026-06-08 00:00:00,397.52,2026-06-24 00:00:00,364.81,stop,-0.08268516804185948,0.14325804664258954
+GLD,long,2026-06-25 00:00:00,368.99,2026-08-06 00:00:00,389.5,signal:zscore_revert,0.055184162172416465,0.11772310473900205

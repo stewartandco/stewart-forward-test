@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+AAVEUSDT,long,2021-01-24 00:00:00,213.373,2021-03-23 00:00:00,336.195,signal:channel_exit,0.5726210954525642

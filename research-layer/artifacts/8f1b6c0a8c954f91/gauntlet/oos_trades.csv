@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWU,short,2024-11-07 00:00:00,35.85,2024-11-08 00:00:00,35.44,signal:regime_flip,0.011016699873812952,1.0
+EWU,short,2026-06-25 00:00:00,45.96,2026-06-26 00:00:00,45.6,signal:regime_flip,0.007413056902482529,1.0
+EWU,short,2026-10-05 00:00:00,46.03,2026-10-13 00:00:00,47.17,stop,-0.02528550427774854,1.0

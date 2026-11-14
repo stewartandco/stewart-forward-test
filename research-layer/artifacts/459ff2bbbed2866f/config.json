@@ -1,0 +1,115 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "ddc798b59cb1398534709083d2e65569e8fba41384fb1e40a41641f99523443e",
+  "EMB_1d": "922ed75506e830ac3d280c6f4a85799de59f26a30eca248704b3f2e751a4cc1f",
+  "HYG_1d": "69458a5c349523a3dd9bb694f1b30c30d427bc6f8291941fce7b4fad9e55e5d1",
+  "IEF_1d": "ffa709e406a02624de4213b92f93516c0781eba6f8e61e2a65fa4e4b2ac6e75c",
+  "LQD_1d": "6aba5ac2f044f4385d65ddf26ac5ab848b35aef24337619810e7a5a34d84e206",
+  "SHY_1d": "b381a6dd0be888d373129553149e6b2a1df575da28057139194f395e4b25f0bb",
+  "TIP_1d": "0a7113f5123be0252cb31c8c468d22b4dcb90a598c799817589e573ea39177ed",
+  "TLT_1d": "fcbb191eba301a69f93a33df8b6850b8a04f876a70a61e8c6b45962ca89446ec"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-08-27T04:29:22Z",
+  "family": "slow_trend_short_duration_below_ma",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-27-bond-gen1"
+  },
+  "name": "SHY 1d slow_trend_short_duration_below_ma dshort ml90 tm2.5 ml100 al14 m2.5 mb40 f0.01",
+  "provenance": {
+   "card_ids": [
+    "1e1964ade70f388d",
+    "3605eedc183f09ce",
+    "3d4db3693d78d717",
+    "5e05bd28ab90f9ed",
+    "6dba955b6b43f40d",
+    "7f3fcc21056d791d",
+    "c7c0e61fc25e8ba1",
+    "cb6bfaec7e8c9131",
+    "dad2ffd5702377ba",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "1e1964ade70f388d",
+    "7f3fcc21056d791d",
+    "cb6bfaec7e8c9131",
+    "dad2ffd5702377ba"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "slow_trend_short_duration_below_ma-2026-08-27-bond-gen1:SHY_1d"
+  },
+  "strategy_id": "459ff2bbbed2866f",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "SHY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

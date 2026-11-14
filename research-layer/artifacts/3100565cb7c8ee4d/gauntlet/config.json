@@ -1,0 +1,278 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "NZD_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "NZD_1d": "0df85d967178f5399e842fbc59e8fe9fb60a591be6b2d878108075e801e5594a"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.09546206290914896,
+   "excess": -0.03977932812626381,
+   "strategy_net": -0.13524139103541277,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.13613134544522376,
+  "edge_decay_pct": -480.9569849831183,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 5,
+    "net_pnl": -0.13333213880789985
+   },
+   "post_2022": {
+    "n_trades": 8,
+    "net_pnl": -0.18498746784192988
+   },
+   "pre_gfc": {
+    "n_trades": 6,
+    "net_pnl": 0.48401364024857707
+   },
+   "tightening": {
+    "n_trades": 6,
+    "net_pnl": -0.14028179019415632
+   }
+  },
+  "exit_reasons_is": {
+   "signal:ma_crossunder": 15,
+   "stop": 28
+  },
+  "exit_reasons_oos": {
+   "stop": 5
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.06706240148285808,
+  "is_edge_raw": 0.009520366546179406,
+  "is_vol": 0.14196280383148702,
+  "mc_p05_equity": 0.5309754867172762,
+  "oos_edge_per_trade": -0.25547890274637014,
+  "oos_edge_raw": -0.02857426855401274,
+  "oos_vol": 0.11184590291739353,
+  "open_at_end": false,
+  "p_ruin": 0.046,
+  "perturbation": {
+   "base_score": 0.17076356615630678,
+   "dense_only": true,
+   "mean_ratio": 0.8094599808286475,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 20,
+     "ratio": 0.7572013260314976,
+     "score": 0.12930239873142285,
+     "to": 13
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "up",
+     "from": 20,
+     "ratio": 0.08321707201645831,
+     "score": 0.014210443982616623,
+     "to": 34
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 130,
+     "ratio": 1.2610462647499252,
+     "score": 0.21534075725678742,
+     "to": 80
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 130,
+     "ratio": 0.5572603827728836,
+     "score": 0.09515977023992614,
+     "to": 200
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 150,
+     "ratio": 0.723851932811128,
+     "score": 0.12360753741596359,
+     "to": 120
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 150,
+     "ratio": 1.100412943900783,
+     "score": 0.18791043854505768,
+     "to": 180
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 0.6706689012121666,
+     "score": 0.11452581328112138,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 1.3220210231343372,
+     "score": 0.22575302444402878,
+     "to": 0.9
+    }
+   ],
+   "worst_ratio": 0.08321707201645831
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 5,
+     "net": -0.1428713427700637,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.17076356615630678,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9517745650340896,
+     "n_trades": 13,
+     "net": 0.25757362118035154
+    },
+    {
+     "min_equity": 0.9304232816168269,
+     "n_trades": 15,
+     "net": 0.37534644912505344
+    },
+    {
+     "min_equity": 0.7901535610826311,
+     "n_trades": 15,
+     "net": -0.22354430881969048
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 20,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 150,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "fast": 20,
+     "slow": 130
+    },
+    "role": "exit",
+    "type": "ma_crossunder"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-25T14:35:58Z",
+  "family": "fx_vol_filtered_trend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-25-143032-loop-fx"
+  },
+  "name": "NZD 1d fx_vol_filtered_trend dlong f20 s130 l150 mp0.8 f20 s130 ml100 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "5d46eb5e6f34392f",
+    "6dba955b6b43f40d",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_vol_filtered_trend-2026-09-25-143032-loop-fx:NZD_1d"
+  },
+  "strategy_id": "3100565cb7c8ee4d",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "NZD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

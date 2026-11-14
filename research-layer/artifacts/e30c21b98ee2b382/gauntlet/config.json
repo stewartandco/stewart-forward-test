@@ -1,0 +1,283 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "JASMYUSDT_1h": "2026-11-08 23:00:00"
+ },
+ "data_sha256": {
+  "JASMYUSDT_1h": "1f8137a79730ad5dfcb0ae3c83a6e77f2aad6f44a8d8d9d246401ccd6d6eb328"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": 0.3784484753827732,
+   "n_days": 1043,
+   "strategy_sharpe": 0.9262242296606527,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.46390409285277945,
+   "excess": 2.0065116340774276,
+   "strategy_net": 1.542607541224648,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 1.2075457213721843,
+  "edge_decay_pct": 881.9086879101038,
+  "exit_reasons_is": {
+   "signal:regime_flip": 81,
+   "stop": 25
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 212,
+   "stop": 62
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0004030794470069257,
+  "is_edge_raw": 0.0005381423468547054,
+  "is_vol": 1.335077615221247,
+  "mc_p05_equity": 0.7366097766205776,
+  "oos_edge_per_trade": 0.003957872109341006,
+  "oos_edge_raw": 0.004520053551667829,
+  "oos_vol": 1.1420413360502513,
+  "open_at_end": true,
+  "p_ruin": 0.0415,
+  "perturbation": {
+   "base_score": 0.13278957478987302,
+   "dense_only": true,
+   "mean_ratio": 0.30529960123602984,
+   "n_perturbations": 9,
+   "reason": null,
+   "results": [
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 13,
+     "ratio": -3.7330261155642477,
+     "score": -0.4957069505652678,
+     "to": 8
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "up",
+     "from": 13,
+     "ratio": 3.3012473863071996,
+     "score": 0.4383712367039127,
+     "to": 20
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 130,
+     "ratio": -0.6547494589587842,
+     "score": -0.08694390224903638,
+     "to": 80
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 130,
+     "ratio": -2.78740814593523,
+     "score": -0.3701387424645675,
+     "to": 200
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 180,
+     "ratio": 1.1147929348547543,
+     "score": 0.14803287979811744,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.9,
+     "ratio": 2.1752610133920167,
+     "score": 0.2888519850253142,
+     "to": 0.8
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.9,
+     "ratio": 0.9726622924720488,
+     "score": 0.12915941223150648,
+     "to": 1.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.4676169015182892,
+     "score": 0.19488422430704458,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 0.8912996030382216,
+     "score": 0.11835529529782807,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": -3.7330261155642477
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 22,
+     "net": 0.13377324051616746,
+     "win_rate": 0.3181818181818182,
+     "wins": 7
+    },
+    "trend_down": {
+     "n": 194,
+     "net": 0.1754755149350861,
+     "win_rate": 0.23711340206185566,
+     "wins": 46
+    },
+    "trend_up": {
+     "n": 58,
+     "net": 0.9292459177057321,
+     "win_rate": 0.3103448275862069,
+     "wins": 18
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.13278957478987302,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 0,
+     "net": 0.0
+    },
+    {
+     "min_equity": 0.9866822600855667,
+     "n_trades": 32,
+     "net": 0.3260843994991161
+    },
+    {
+     "min_equity": 0.7435933646202305,
+     "n_trades": 74,
+     "net": -0.2690413107325171
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 180,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.4,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-09T12:16:54Z",
+  "family": "symmetric_ma_cross_speed_scan",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-09-120010-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "JASMY 1h symmetric_ma_cross_speed_scan dboth f13 s130 l180 mp0.9 ml150 al14 m2.5 av0.4 l30",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "1be665e133422ed2",
+    "2243c5930df5c5be",
+    "4e907fc4974a48f9",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "bdd6f691940fb0de",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e0d728e421153bec",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_ma_cross_speed_scan-2026-11-09-120010-loop-crypto:JASMYUSDT_1h"
+  },
+  "strategy_id": "e30c21b98ee2b382",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "JASMYUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

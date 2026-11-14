@@ -1,0 +1,133 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "c73308227bb2a7149fcc630050f7d47b63cc0ae1efd53317906468470b91273d",
+  "EEM_1d": "260739ccb642dbc56732cfc21ec3878aac75bc5480063c591dd2e3c4ce1e27bd",
+  "EFA_1d": "fed83c9cee6adb295ff160bb818f18ae9da044bd1e9251d52cc017d8faeea036",
+  "EWA_1d": "7276492cf43450309ad5a6a970e777d600958e32b3a26d9dfa5e88c3a674e3b1",
+  "EWC_1d": "785fc072bf4e4dddc4993625190aa74ac367bfc3c1b3a489c0b2f2b8d0cc3c2c",
+  "EWG_1d": "a80890c85e5e514ed6f662dbbab5a920feff1d14f8aec7667cc9af1f380c8110",
+  "EWH_1d": "4461b75968f3d285304b5a75a9c7bd881f954e624caaab87f843bd2a02757b87",
+  "EWJ_1d": "cc9d93e3e6edd43eca6021689a4f95a5c0c9b8da473737020709c21c10618083",
+  "EWU_1d": "15e9eaeec6d427b62fc9dff788ce0fb66f0cbe3b1ef238f6630e440851a74076",
+  "EWY_1d": "7580519de6560d86a2c7aeaa621f7aacafcd764a09a79f9e82fbc3fdac930b48",
+  "EWZ_1d": "c3aff83bdfd2d9f7a425cfd6e4473e9b245fa8ea64f03a35983f1ef34fc4941e",
+  "FXI_1d": "1c2bd45a53819f04830143abd55175ecc06f6e4fd79ca21cadcb58f317cd82ef",
+  "IWM_1d": "7713ac2f403550f2d3a7a25c6fc54e719a75ee015468eb3b42a8fcf6b62c9904",
+  "MDY_1d": "e3ed387b3880c02d2350bb4c3a272741ea951a36d7a139d3327ed914877222e8",
+  "QQQ_1d": "423ad2567d005253145a50131213825f80c6ea84b4ba1f4e07e00824fe7e803d",
+  "SPY_1d": "0b3bfec72d254de797d58899a1fa91a8cefb79d1863e8912c93ef1c7b9d0d0f5"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 120,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 1.0
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-18T14:47:06Z",
+  "family": "tstat_significant_trend_with_decay_exit",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-18-143037-loop-equity_etf"
+  },
+  "name": "MDY 1d tstat_significant_trend_with_decay_exit dlong ml120 tm2.5 ml200 l120 mp1.0 ml90 te0.5 al14 m3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3d4db3693d78d717",
+    "4cf9bb79602caeb9",
+    "538cb5fd38ba4ef3",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "be7a97c49de94b92",
+    "c7c0e61fc25e8ba1",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_significant_trend_with_decay_exit-2026-09-18-143037-loop-equity_etf:MDY_1d"
+  },
+  "strategy_id": "c6c60b3b8f363d68",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "MDY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

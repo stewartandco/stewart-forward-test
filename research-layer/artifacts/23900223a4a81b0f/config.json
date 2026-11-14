@@ -1,0 +1,86 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "04d60cdc150727f47d51e65296b49403f40a5b1017f94d6ff21b83a2371ab149",
+  "ETHUSD_1d": "11151839ff9c4499fefa4317c6645757c2d1f955a0e38fb5744e5c836fda3ef9"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-09T12:13:08Z",
+  "family": "symmetric_channel_breakout_stop_target_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-09-120048-loop-crypto"
+  },
+  "name": "BTC+ETH 1d symmetric_channel_breakout_stop_target_mesh dboth l55 al14 m3.5 r3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "6078cc70ec7b8303",
+    "73ba48a43e430161",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "a000848247f01f95",
+    "e0d728e421153bec",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_channel_breakout_stop_target_mesh-2026-10-09-120048-loop-crypto"
+  },
+  "strategy_id": "23900223a4a81b0f",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

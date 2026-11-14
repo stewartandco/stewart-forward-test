@@ -1,0 +1,247 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2026-10-12",
+  "ETHUSD_1d": "2026-10-12"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "db48ffd3079adc478c5052f542e2a9e0d0eb874b37976f26888c146fdb7bd6e6",
+  "ETHUSD_1d": "dfd22afaba9e3996d9dcac289c1c0c1280a84405fb472c976b67556f10f16a73"
+ },
+ "group_context": {},
+ "metrics": {
+  "cost_stress_net_pnl": -0.02584216454584587,
+  "edge_decay_pct": -85.52688569139248,
+  "exit_reasons_is": {
+   "signal:channel_exit": 8,
+   "stop": 35,
+   "target": 23
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 1,
+   "stop": 20,
+   "target": 11
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.004760287024791166,
+  "is_edge_raw": 0.004026237802309981,
+  "is_vol": 0.8457972767905969,
+  "mc_p05_equity": 0.6783659150115557,
+  "oos_edge_per_trade": 0.0006889617825158379,
+  "oos_edge_raw": 0.0003931219955085995,
+  "oos_vol": 0.570600584074578,
+  "open_at_end": false,
+  "p_ruin": 0.01,
+  "perturbation": {
+   "base_score": 0.3165447647057811,
+   "dense_only": true,
+   "mean_ratio": 1.2237484613956842,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "down",
+     "from": 13,
+     "ratio": 0.5701257745339865,
+     "score": 0.18047032915256195,
+     "to": 8
+    },
+    {
+     "axis": "ma_cross_dense.fast",
+     "dense": true,
+     "direction": "up",
+     "from": 13,
+     "ratio": 0.8961502144436188,
+     "score": 0.28367165877209055,
+     "to": 20
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "down",
+     "from": 80,
+     "ratio": 1.887410856499285,
+     "score": 0.597450025473703,
+     "to": 50
+    },
+    {
+     "axis": "ma_cross_dense.slow",
+     "dense": true,
+     "direction": "up",
+     "from": 80,
+     "ratio": 0.9823166561773397,
+     "score": 0.3109471947962256,
+     "to": 130
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 1.5,
+     "ratio": 1.445702409738992,
+     "score": 0.4576295291254099,
+     "to": 2.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "down",
+     "from": 2.0,
+     "ratio": 1.190949979284627,
+     "score": 0.3769889809690071,
+     "to": 1.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": 1.5935833390919394,
+     "score": 0.5044404631119109,
+     "to": 2.5
+    }
+   ],
+   "worst_ratio": 0.5701257745339865
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 6,
+     "net": 0.10284628027889232,
+     "win_rate": 0.5,
+     "wins": 3
+    },
+    "trend_down": {
+     "n": 10,
+     "net": 0.1075767472915646,
+     "win_rate": 0.5,
+     "wins": 5
+    },
+    "trend_up": {
+     "n": 16,
+     "net": -0.19784312371418178,
+     "win_rate": 0.1875,
+     "wins": 3
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.3165447647057811,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9503245443303174,
+     "n_trades": 18,
+     "net": 0.17021579062432696
+    },
+    {
+     "min_equity": 0.9566652202610603,
+     "n_trades": 22,
+     "net": 0.14682655198944627
+    },
+    {
+     "min_equity": 0.8429545391861178,
+     "n_trades": 26,
+     "net": -0.051310647661314525
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 13,
+     "slow": 80
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 1.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 2.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-13T12:09:43Z",
+  "family": "symmetric_trend_stop_geometry_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-13-120031-loop-crypto"
+  },
+  "name": "BTC+ETH 1d symmetric_trend_stop_geometry_mesh dboth f13 s80 al14 m1.5 r2.0 l20 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "6078cc70ec7b8303",
+    "73ba48a43e430161",
+    "a000848247f01f95",
+    "a59075409e6a124e",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_trend_stop_geometry_mesh-2026-10-13-120031-loop-crypto"
+  },
+  "strategy_id": "9387b6101e1f42ff",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+AUD,short,1972-08-28 00:00:00,1.191,1972-12-26 00:00:00,1.2726,stop,-0.07341155505370728
+AUD,short,1974-06-04 00:00:00,1.4825,1974-06-06 00:00:00,1.485,stop,-0.0021012831695452682

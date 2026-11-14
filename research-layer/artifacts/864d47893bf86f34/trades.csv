@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GNOUSDT,short,2023-06-14 00:00:00,109.1,2023-06-22 00:00:00,114.3,signal:regime_flip,-0.0506626947754355
+GNOUSDT,long,2023-06-24 00:00:00,116.6,2023-08-03 00:00:00,111.5,signal:regime_flip,-0.046739279588336125
+GNOUSDT,short,2023-08-04 00:00:00,111.6,2023-10-31 00:00:00,109.7,signal:regime_flip,0.014025089605734679
