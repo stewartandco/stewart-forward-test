@@ -1,0 +1,270 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "NEOUSDT_4h": "2026-11-13 20:00:00"
+ },
+ "data_sha256": {
+  "NEOUSDT_4h": "46b97bbae8ceff28c89382215f155fcdcc649829fb6c43cf3fcc366a2db4dc7a"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.39751088310246957,
+   "n_days": 1048,
+   "strategy_sharpe": -0.9968224020800868,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8802922636103152,
+   "excess": 0.5298789244833524,
+   "strategy_net": -0.3504133391269628,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.3872361588111358,
+  "edge_decay_pct": -313.76804454906943,
+  "exit_reasons_is": {
+   "signal:tstat_decay": 113,
+   "stop": 174,
+   "target": 96
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 71,
+   "stop": 92,
+   "target": 35
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.0010845794603720471,
+  "is_edge_raw": 0.0012388474236300657,
+  "is_vol": 1.142237585068317,
+  "mc_p05_equity": 0.4467918823316847,
+  "oos_edge_per_trade": -0.0023184843040181748,
+  "oos_edge_raw": -0.002015964098621135,
+  "oos_vol": 0.8695181136776554,
+  "open_at_end": false,
+  "p_ruin": 0.149,
+  "perturbation": {
+   "base_score": 0.48462867665475723,
+   "dense_only": true,
+   "mean_ratio": 0.9231463620802853,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 0.3331006275968554,
+     "score": 0.16143011634513313,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 0.7984908042294598,
+     "score": 0.38697154177471593,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.9814466836482331,
+     "score": 0.47563720750364336,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0148147947378028,
+     "score": 0.49180835102345044,
+     "to": 3.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.0,
+     "ratio": 0.5713455993908051,
+     "score": 0.2768904617452849,
+     "to": 1.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": 1.4341402272947485,
+     "score": 0.6950254804912067,
+     "to": 2.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.7640073899813885,
+     "score": 0.3702598903611353,
+     "to": 2.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.4878247697629896,
+     "score": 0.7210425492644065,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.3331006275968554
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 13,
+     "net": 0.05614490124912745,
+     "win_rate": 0.46153846153846156,
+     "wins": 6
+    },
+    "trend_down": {
+     "n": 129,
+     "net": -0.4621244598138521,
+     "win_rate": 0.23255813953488372,
+     "wins": 30
+    },
+    "trend_up": {
+     "n": 56,
+     "net": 0.006818667037739775,
+     "win_rate": 0.32142857142857145,
+     "wins": 18
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.48462867665475723,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9218760676271178,
+     "n_trades": 117,
+     "net": 0.01453935722808769
+    },
+    {
+     "min_equity": 0.9649088521334099,
+     "n_trades": 136,
+     "net": 0.4094214214949018
+    },
+    {
+     "min_equity": 0.7944610751552931,
+     "n_trades": 130,
+     "net": 0.05051778452732556
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 2.5
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "tstat_trend_long_profit_target_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "NEO 4h tstat_trend_long_profit_target_mesh dlong ml90 tm2.5 ml90 te0.5 al14 m2.0 r2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "73ba48a43e430161",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_long_profit_target_mesh-2026-11-14-120014-loop-crypto:NEOUSDT_4h"
+  },
+  "strategy_id": "a7a720be98258af6",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "NEOUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

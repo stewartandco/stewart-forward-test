@@ -1,0 +1,267 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "RUNEUSDT_1h": "2026-11-13 23:00:00"
+ },
+ "data_sha256": {
+  "RUNEUSDT_1h": "2eab3db57913684722d5b4c4800da59ff8196936565a2a96ea52d06695952a48"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.22673092116187538,
+   "n_days": 1048,
+   "strategy_sharpe": 0.019524948999679298,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8974207671445177,
+   "excess": 0.8332890853633049,
+   "strategy_net": -0.06413168178121276,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.15132084150137637,
+  "edge_decay_pct": -102.40065347585498,
+  "exit_reasons_is": {
+   "signal:channel_exit": 146,
+   "stop": 124
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 161,
+   "stop": 179
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.0014656934738348293,
+  "is_edge_raw": 0.0021456437864469007,
+  "is_vol": 1.4639103091815333,
+  "mc_p05_equity": 0.6496723722002906,
+  "oos_edge_per_trade": -3.518622132499559e-05,
+  "oos_edge_raw": -3.7330702337085134e-05,
+  "oos_vol": 1.0609466129449414,
+  "open_at_end": true,
+  "p_ruin": 0.0375,
+  "perturbation": {
+   "base_score": 0.908906519151061,
+   "dense_only": true,
+   "mean_ratio": 1.0122879386570898,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 1.016093738210023,
+     "score": 0.9235342227276614,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 1.0445876219097872,
+     "score": 0.9494324993783092,
+     "to": 75
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.9832275758917254,
+     "score": 0.8936619535370838,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.0524229459631298,
+     "score": 0.9565540764900535,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.9,
+     "ratio": 0.9566163502475522,
+     "score": 0.8694748370664949,
+     "to": 0.8
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.9,
+     "ratio": 0.918075643312387,
+     "score": 0.8344449372804328,
+     "to": 1.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.059716564387677,
+     "score": 0.9631832938243247,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0675630693344362,
+     "score": 0.9703150333229852,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.918075643312387
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 33,
+     "net": -0.10870770313440056,
+     "win_rate": 0.36363636363636365,
+     "wins": 12
+    },
+    "trend_down": {
+     "n": 216,
+     "net": 0.14667090177933081,
+     "win_rate": 0.3148148148148148,
+     "wins": 68
+    },
+    "trend_up": {
+     "n": 91,
+     "net": -0.050655637439539214,
+     "win_rate": 0.2857142857142857,
+     "wins": 26
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.908906519151061,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9872146227714529,
+     "n_trades": 10,
+     "net": 0.02519672583810044
+    },
+    {
+     "min_equity": 0.9810918031755923,
+     "n_trades": 140,
+     "net": 0.14651505626433817
+    },
+    {
+     "min_equity": 0.8084152547438977,
+     "n_trades": 120,
+     "net": 0.4076120402382246
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "vol_percentile_gated_symmetric_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "RUNE 1h vol_percentile_gated_symmetric_breakout dboth l55 l120 mp0.9 l20 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0634177be8e6f12b",
+    "2243c5930df5c5be",
+    "6078cc70ec7b8303",
+    "6dba955b6b43f40d",
+    "80a41669681d747b",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "vol_percentile_gated_symmetric_breakout-2026-11-14-120014-loop-crypto:RUNEUSDT_1h"
+  },
+  "strategy_id": "6eec239765468721",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "RUNEUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}
