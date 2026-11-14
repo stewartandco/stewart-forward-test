@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+COMPUSDT,long,2023-06-30 00:00:00,50.16,2023-08-05 00:00:00,58.04,signal:channel_exit,0.15409728867623607

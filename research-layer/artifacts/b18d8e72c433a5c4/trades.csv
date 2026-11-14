@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GRTUSDT,short,2021-10-01 00:00:00,0.6461,2021-10-16 00:00:00,0.8587511016340488,stop,-0.3321303229129372
+GRTUSDT,short,2021-12-10 00:00:00,0.6845,2023-01-24 00:00:00,0.0899,signal:regime_flip,0.865663257852447
+GRTUSDT,short,2023-08-03 00:00:00,0.1095,2023-10-31 00:00:00,0.1096,signal:regime_flip,-0.003913242009132453

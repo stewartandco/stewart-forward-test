@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+OPUSDT,short,2022-11-11 00:00:00,1.041,2022-12-01 00:00:00,1.002,signal:regime_flip,0.034463976945244834
+OPUSDT,short,2022-12-18 12:00:00,0.941,2022-12-20 12:00:00,0.964,signal:regime_flip,-0.02744208289054206
+OPUSDT,short,2023-04-22 12:00:00,2.266,2023-07-30 12:00:00,1.585,signal:regime_flip,0.2975295675198588
+OPUSDT,short,2023-10-05 00:00:00,1.33,2023-10-24 12:00:00,1.415,signal:regime_flip,-0.06690977443609014

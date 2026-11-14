@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+AXSUSDT,long,2021-09-21 00:00:00,55.11,2021-10-01 00:00:00,80.733059967331,target,0.4619439297283797
+AXSUSDT,long,2021-12-06 00:00:00,107.47,2022-01-21 00:00:00,63.25721106365208,stop,-0.4143965658913922

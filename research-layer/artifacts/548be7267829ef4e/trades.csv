@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GRTUSDT,long,2023-01-24 00:00:00,0.0899,2023-03-09 00:00:00,0.1248,signal:channel_exit,0.38520912124582873

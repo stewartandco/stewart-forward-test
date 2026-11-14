@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+TWTUSDT,long,2021-12-05 00:00:00,0.8268,2022-01-16 00:00:00,0.7341,signal:zscore_revert,-0.11511901306240935
+TWTUSDT,long,2022-05-01 00:00:00,0.9026,2022-05-12 00:00:00,0.5127173461902449,stop,-0.4349550784508698
+TWTUSDT,long,2022-12-23 00:00:00,1.4952,2023-01-23 00:00:00,1.5146,signal:zscore_revert,0.009974852862493114

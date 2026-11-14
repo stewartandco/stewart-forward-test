@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+APEUSDT,short,2023-03-09 00:00:00,4.356,2023-04-15 00:00:00,4.564,signal:regime_flip,-0.050750229568411354

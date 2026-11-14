@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+MANAUSDT,long,2021-05-20 00:00:00,0.7711,2021-07-08 00:00:00,0.7223,signal:zscore_revert,-0.06628621449876793
+MANAUSDT,long,2022-01-11 00:00:00,2.812,2022-02-06 00:00:00,3.0116,signal:zscore_revert,0.06798150782361312
+MANAUSDT,long,2023-03-01 00:00:00,0.6272,2023-04-05 00:00:00,0.5969,signal:zscore_revert,-0.051309948979591846

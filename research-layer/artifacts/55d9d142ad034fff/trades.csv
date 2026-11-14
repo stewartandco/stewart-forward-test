@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+OPUSDT,long,2023-03-08 12:00:00,2.282,2023-03-14 00:00:00,2.615,signal:zscore_revert,0.14292462751971968
+OPUSDT,long,2023-08-16 00:00:00,1.471,2023-08-17 12:00:00,1.2480322261692993,stop,-0.15457564502426968

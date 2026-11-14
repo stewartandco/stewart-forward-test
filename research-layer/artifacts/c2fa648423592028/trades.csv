@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+RUNEUSDT,short,2021-05-24 00:00:00,7.776,2021-05-25 00:00:00,10.18,signal:regime_flip,-0.3121563786008231
+RUNEUSDT,short,2022-08-21 12:00:00,2.158,2023-01-09 00:00:00,1.419,signal:regime_flip,0.33944670991658943
+RUNEUSDT,short,2023-04-26 12:00:00,1.415,2023-08-11 00:00:00,1.051,signal:regime_flip,0.25424381625441705

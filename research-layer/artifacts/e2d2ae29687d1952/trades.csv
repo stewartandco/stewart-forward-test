@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+TWTUSDT,long,2022-05-01 00:00:00,0.9026,2022-05-11 12:00:00,0.6496489028040366,stop,-0.28324717172165226
+TWTUSDT,long,2022-12-17 00:00:00,1.7276,2023-01-09 00:00:00,1.4231,signal:zscore_revert,-0.179256077795786

@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+COMPUSDT,short,2021-09-18 00:00:00,400.7,2023-01-15 00:00:00,52.41,signal:regime_flip,0.8662038931869229
+COMPUSDT,short,2023-03-12 00:00:00,37.94,2023-03-14 00:00:00,47.54150219298698,stop,-0.25607069565068497
+COMPUSDT,short,2023-08-21 00:00:00,42.32,2023-09-29 00:00:00,49.47,signal:regime_flip,-0.17195085066162574

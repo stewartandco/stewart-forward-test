@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+COMPUSDT,long,2021-03-23 00:00:00,378.67,2021-04-02 00:00:00,449.99,signal:zscore_revert,0.18534341246996056
+COMPUSDT,long,2021-05-22 00:00:00,448.77,2021-07-03 00:00:00,368.17,signal:zscore_revert,-0.18260202330815334
+COMPUSDT,long,2023-03-04 00:00:00,47.73,2023-04-11 00:00:00,43.81,signal:zscore_revert,-0.08512864026817502
+COMPUSDT,long,2023-08-16 00:00:00,50.8,2023-09-28 00:00:00,41.32,signal:zscore_revert,-0.1896141732283464
