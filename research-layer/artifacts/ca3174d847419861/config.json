@@ -1,0 +1,114 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "4a8747d982fb6bc92c343ea7d9c2f3089e7f371f3f09401c4bb688aff29561f1",
+  "EMB_1d": "f54bf15559d22adb89121d3ecc2ca219cab6cb0167d1a5b684cac006464e020e",
+  "HYG_1d": "c7e049940be82d2bea091781f701cb097f13cb33ce507e5ce0acc85de7839302",
+  "IEF_1d": "e747487658f6f3457be03b07c5a55f225dcb93a521e5f7bfe81a2d46bd639a78",
+  "LQD_1d": "ba99648593526eaa74866fcfff245ab48118bcaf6a709dee2e446a8c1a9cc784",
+  "SHY_1d": "4f539036a4db5797d49b6bc7b32f5b00e002aab878c9879ccdd37a71847fa73f",
+  "TIP_1d": "87a27398b218de8bb2141b9551b044a67fb52512142595869165a11fa90f4caf",
+  "TLT_1d": "0ecda19ce91c468145d6466c02d94195b5db4ee2ef833936d93975e7a83b63f2"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 75
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-17T12:13:55Z",
+  "family": "credit_breakout_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-17-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "HYG 1d credit_breakout_long dlong l75 ml200 al14 m3.5 av0.2 l30 l20",
+  "provenance": {
+   "card_ids": [
+    "06289c4fdff02767",
+    "2243c5930df5c5be",
+    "3142c67d77f9011a",
+    "7660d2b7a0a4100b",
+    "80a41669681d747b",
+    "842c23a34c889515",
+    "9a6abe19343ae46f",
+    "b4c34cf2e261b7a9",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "7660d2b7a0a4100b",
+    "842c23a34c889515"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_breakout_long-2026-11-17-120012-loop-bond_etf:HYG_1d"
+  },
+  "strategy_id": "ca3174d847419861",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "HYG"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
