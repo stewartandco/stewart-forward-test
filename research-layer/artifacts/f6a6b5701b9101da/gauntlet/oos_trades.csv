@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+HYG,short,2024-12-20 00:00:00,78.0,2024-12-27 00:00:00,78.74,signal:regime_flip,-0.009966544566544444,1.0
+HYG,short,2025-03-17 00:00:00,78.89,2025-03-20 00:00:00,79.39,signal:regime_flip,-0.00679746271179289,1.0
+HYG,short,2025-03-28 00:00:00,78.99,2025-05-13 00:00:00,79.38,signal:regime_flip,-0.005952413204805864,1.0
+HYG,short,2026-03-05 00:00:00,80.27,2026-04-20 00:00:00,80.63,signal:regime_flip,-0.005499942950478711,1.0

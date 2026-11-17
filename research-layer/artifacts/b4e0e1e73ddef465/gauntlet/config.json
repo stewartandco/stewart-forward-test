@@ -1,0 +1,274 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "TLT_1d": "2026-11-16 00:00:00"
+ },
+ "data_sha256": {
+  "TLT_1d": "0ecda19ce91c468145d6466c02d94195b5db4ee2ef833936d93975e7a83b63f2"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": -0.6565256015808718,
+   "n_days": 722,
+   "strategy_sharpe": -1.0952059770190166,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.19229081058299308,
+   "excess": 0.07477068856820474,
+   "strategy_net": -0.11752012201478834,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.11983452782294235,
+  "edge_decay_pct": -1895.9097445135797,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 18,
+    "net_pnl": 0.08196069907267223
+   },
+   "post_2022": {
+    "n_trades": 23,
+    "net_pnl": -0.21385683638108266
+   },
+   "pre_gfc": {
+    "n_trades": 7,
+    "net_pnl": -0.06596001337337931
+   },
+   "zirp": {
+    "n_trades": 24,
+    "net_pnl": 0.13864966603568574
+   }
+  },
+  "exit_reasons_is": {
+   "signal:zscore_revert": 6,
+   "stop": 24,
+   "target": 29
+  },
+  "exit_reasons_oos": {
+   "stop": 9,
+   "target": 4
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.003508145438245455,
+  "is_edge_raw": 0.0006131015152215919,
+  "is_vol": 0.17476513617070139,
+  "mc_p05_equity": 0.6758159816878513,
+  "oos_edge_per_trade": -0.06300312577715875,
+  "oos_edge_raw": -0.009318225495371125,
+  "oos_vol": 0.14790100301260561,
+  "open_at_end": false,
+  "p_ruin": 0.0005,
+  "perturbation": {
+   "base_score": 0.061401393821159,
+   "dense_only": true,
+   "mean_ratio": 0.20502983129568125,
+   "n_perturbations": 5,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 40,
+     "ratio": 3.695398585275923,
+     "score": 0.22690262386068075,
+     "to": 20
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 40,
+     "ratio": -3.830282624062437,
+     "score": -0.23518469184639998,
+     "to": 60
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "down",
+     "from": 2.25,
+     "ratio": -1.0743333114682698,
+     "score": -0.06596556275265311,
+     "to": 2.0
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "up",
+     "from": 2.25,
+     "ratio": 0.6094524688072216,
+     "score": 0.037421231052509836,
+     "to": 2.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 1.6249140379259686,
+     "score": 0.09977198676822209,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": -3.830282624062437
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 6,
+     "net": -0.06776506254071937,
+     "win_rate": 0.3333333333333333,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 7,
+     "net": -0.053371868899105245,
+     "win_rate": 0.2857142857142857,
+     "wins": 2
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.061401393821159,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9031471106587113,
+     "n_trades": 11,
+     "net": -0.06213292618368696
+    },
+    {
+     "min_equity": 0.9991398626600233,
+     "n_trades": 21,
+     "net": 0.15199392964739175
+    },
+    {
+     "min_equity": 0.9414734188467095,
+     "n_trades": 27,
+     "net": -0.05368801406563084
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 2.25
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "lookback": 60,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "band_stop"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   },
+   {
+    "params": {
+     "lookback": 60,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-17T12:13:55Z",
+  "family": "flow_reversion_short_duration",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-17-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "TLT 1d flow_reversion_short_duration dlong l40 ze2.25 l60 m3.0 r1.0 av0.2 l30 l60 ze0.5",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "5240bc1e9b2b4840",
+    "658c272c7c5620ea",
+    "72ea5fdb6f549ffe",
+    "73ba48a43e430161",
+    "75327098e20ee89c",
+    "7d67838f9104f2c1",
+    "89e66b95663d995b",
+    "9e01e80cae4ced2a",
+    "a4ff31490b3d6b5d",
+    "bec5e126dff7ccb1",
+    "eaf4074190391254",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "5240bc1e9b2b4840",
+    "72ea5fdb6f549ffe",
+    "75327098e20ee89c",
+    "eaf4074190391254"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "flow_reversion_short_duration-2026-11-17-120012-loop-bond_etf:TLT_1d"
+  },
+  "strategy_id": "b4e0e1e73ddef465",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "TLT"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

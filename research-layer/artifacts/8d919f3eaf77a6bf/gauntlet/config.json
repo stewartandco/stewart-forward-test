@@ -1,0 +1,248 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "TLT_1d": "2026-11-16 00:00:00"
+ },
+ "data_sha256": {
+  "TLT_1d": "0ecda19ce91c468145d6466c02d94195b5db4ee2ef833936d93975e7a83b63f2"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": -0.6565256015808718,
+   "n_days": 722,
+   "strategy_sharpe": -1.4104314698701865,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.19229081058299308,
+   "excess": 0.046403413907285695,
+   "strategy_net": -0.14588739667570738,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.14710982624863855,
+  "edge_decay_pct": -405.8439665480655,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 15,
+    "net_pnl": 0.017992926427172318
+   },
+   "post_2022": {
+    "n_trades": 8,
+    "net_pnl": -0.1837808472258715
+   },
+   "pre_gfc": {
+    "n_trades": 16,
+    "net_pnl": 0.0736103131691801
+   },
+   "zirp": {
+    "n_trades": 13,
+    "net_pnl": 0.34953380883387686
+   }
+  },
+  "exit_reasons_is": {
+   "signal:channel_exit": 35,
+   "stop": 10
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 2,
+   "stop": 5
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.04892525687368958,
+  "is_edge_raw": 0.008550429179716903,
+  "is_vol": 0.17476513617070139,
+  "mc_p05_equity": 0.7385054235845382,
+  "oos_edge_per_trade": -0.14963494626632232,
+  "oos_edge_raw": -0.022131158638526417,
+  "oos_vol": 0.14790100301260561,
+  "open_at_end": false,
+  "p_ruin": 0.001,
+  "perturbation": {
+   "base_score": 0.3053843315229342,
+   "dense_only": true,
+   "mean_ratio": 0.641748664977164,
+   "n_perturbations": 3,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 20,
+     "ratio": 0.3959364654367182,
+     "score": 0.12091279282294552,
+     "to": 35
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.0,
+     "ratio": 0.5875416819679635,
+     "score": 0.17942602378964695,
+     "to": 2.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 3.0,
+     "ratio": 0.9417678475268103,
+     "score": 0.2876011445667676,
+     "to": 3.5
+    }
+   ],
+   "worst_ratio": 0.3959364654367182
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 7,
+     "net": -0.15491811046968496,
+     "win_rate": 0.2857142857142857,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.3053843315229342,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9830253751968511,
+     "n_trades": 16,
+     "net": 0.07778939766027135
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 15,
+     "net": 0.33025598607239254
+    },
+    {
+     "min_equity": 0.9247018349560989,
+     "n_trades": 14,
+     "net": -0.023276070645403386
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 20
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-17T12:13:55Z",
+  "family": "credit_breakout_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-17-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "TLT 1d credit_breakout_long dlong l20 ml200 al14 m3.0 av0.2 l30 l20",
+  "provenance": {
+   "card_ids": [
+    "06289c4fdff02767",
+    "2243c5930df5c5be",
+    "3142c67d77f9011a",
+    "7660d2b7a0a4100b",
+    "80a41669681d747b",
+    "842c23a34c889515",
+    "9a6abe19343ae46f",
+    "b4c34cf2e261b7a9",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "7660d2b7a0a4100b",
+    "842c23a34c889515"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_breakout_long-2026-11-17-120012-loop-bond_etf:TLT_1d"
+  },
+  "strategy_id": "8d919f3eaf77a6bf",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "TLT"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}
