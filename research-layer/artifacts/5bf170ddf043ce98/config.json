@@ -1,0 +1,178 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "1INCHUSDT_12h": "2023-12-31 12:00:00",
+  "1INCHUSDT_1d": "2023-12-31 00:00:00",
+  "1INCHUSDT_1h": "2023-12-31 23:00:00",
+  "1INCHUSDT_4h": "2023-12-31 20:00:00",
+  "ARUSDT_12h": "2023-12-31 12:00:00",
+  "ARUSDT_1d": "2023-12-31 00:00:00",
+  "ARUSDT_1h": "2023-12-31 23:00:00",
+  "ARUSDT_4h": "2023-12-31 20:00:00",
+  "BATUSDT_12h": "2023-12-31 12:00:00",
+  "BATUSDT_1d": "2023-12-31 00:00:00",
+  "BATUSDT_1h": "2023-12-31 23:00:00",
+  "BATUSDT_4h": "2023-12-31 20:00:00",
+  "DYDXUSDT_12h": "2023-12-31 12:00:00",
+  "DYDXUSDT_1d": "2023-12-31 00:00:00",
+  "DYDXUSDT_1h": "2023-12-31 23:00:00",
+  "DYDXUSDT_4h": "2023-12-31 20:00:00",
+  "EGLDUSDT_12h": "2023-12-31 12:00:00",
+  "EGLDUSDT_1d": "2023-12-31 00:00:00",
+  "EGLDUSDT_1h": "2023-12-31 23:00:00",
+  "EGLDUSDT_4h": "2023-12-31 20:00:00",
+  "IMXUSDT_12h": "2023-12-31 12:00:00",
+  "IMXUSDT_1d": "2023-12-31 00:00:00",
+  "IMXUSDT_1h": "2023-12-31 23:00:00",
+  "IMXUSDT_4h": "2023-12-31 20:00:00",
+  "RSRUSDT_12h": "2023-12-31 12:00:00",
+  "RSRUSDT_1d": "2023-12-31 00:00:00",
+  "RSRUSDT_1h": "2023-12-31 23:00:00",
+  "RSRUSDT_4h": "2023-12-31 20:00:00",
+  "SANDUSDT_12h": "2023-12-31 12:00:00",
+  "SANDUSDT_1d": "2023-12-31 00:00:00",
+  "SANDUSDT_1h": "2023-12-31 23:00:00",
+  "SANDUSDT_4h": "2023-12-31 20:00:00",
+  "SFPUSDT_12h": "2023-12-31 12:00:00",
+  "SFPUSDT_1d": "2023-12-31 00:00:00",
+  "SFPUSDT_1h": "2023-12-31 23:00:00",
+  "SFPUSDT_4h": "2023-12-31 20:00:00",
+  "SNXUSDT_12h": "2023-12-31 12:00:00",
+  "SNXUSDT_1d": "2023-12-31 00:00:00",
+  "SNXUSDT_1h": "2023-12-31 23:00:00",
+  "SNXUSDT_4h": "2023-12-31 20:00:00",
+  "XECUSDT_12h": "2023-12-31 12:00:00",
+  "XECUSDT_1d": "2023-12-31 00:00:00",
+  "XECUSDT_1h": "2023-12-31 23:00:00",
+  "XECUSDT_4h": "2023-12-31 20:00:00",
+  "ZENUSDT_12h": "2023-12-31 12:00:00",
+  "ZENUSDT_1d": "2023-12-31 00:00:00",
+  "ZENUSDT_1h": "2023-12-31 23:00:00",
+  "ZENUSDT_4h": "2023-12-31 20:00:00"
+ },
+ "data_sha256": {
+  "1INCHUSDT_12h": "ee7ae423ac18b84b3cf45200f4cb5eb3d411313fb571a30d660cbe7742f9a7ad",
+  "1INCHUSDT_1d": "6bdb2a90d4a429e35228e479e5356434f35b351f83ac6b7fca79c20adddcd2ac",
+  "1INCHUSDT_1h": "9351b4f3bb6eff40e2df25975978034dc70f2fedfba2ccb37d675721a24c5d16",
+  "1INCHUSDT_4h": "c1405c71c194af16151b9aaa0ff66d4cd0d85d45fed0f2e5e198d2e3a91596d5",
+  "ARUSDT_12h": "4e14af824d1f5e224c5a9bb495a019fdf35122fde0eef8ec2e59e2b69b57d42b",
+  "ARUSDT_1d": "07d59f2559e10863d6282f8250780a69fdf627f87c8d09e65b5881fa4bc3facc",
+  "ARUSDT_1h": "f5ac982078c1e8065bd62e1d18f4a7d91e2f59a5395b7723237feba89b60cb94",
+  "ARUSDT_4h": "befc1c2557cec7ceb5c3b0ead2fec7bbb36ace1068cb3fec67d8f7d16ca05527",
+  "BATUSDT_12h": "295d41b80907529392785bc35890a08a7fbde05faaab7a6947f2390d3746c9bd",
+  "BATUSDT_1d": "caadefc07da5a2c7007959deef921526f0c0340b8663984be0c5d6934f91f20d",
+  "BATUSDT_1h": "0443e19bf0d5b46caf20f885b6945b271f01c68c69338110e69814a95adfa6f4",
+  "BATUSDT_4h": "e43dea8567546de8f985c9bd54e3bf66535669347adacc8aed880aa5965a7cec",
+  "DYDXUSDT_12h": "e03fecc0297672063b782da83657fdad961e4a9fdf00961e72211f40d287a362",
+  "DYDXUSDT_1d": "ff9823a06e83509ab3e8bc55398ff1dd2b213f3a6b098eff7b2b2bd9347ca5a0",
+  "DYDXUSDT_1h": "28a92e7236c7c3fb6cbdcc88e28a42422cc853942530deb94c17ec556802da46",
+  "DYDXUSDT_4h": "cefc5689f1ae3e710f1a126c429c6dd59f56b37cc4592c555f0c50a81b1f1cd6",
+  "EGLDUSDT_12h": "97d06381aa91fbf0d2ccbe108b20d40bc161576843a35afad0cf212a95d422c5",
+  "EGLDUSDT_1d": "ef47f16c7e766f6fc26196507478383221185e20901e3fb506048f0426d7a509",
+  "EGLDUSDT_1h": "cf4ea8623b5bf7ccdf3004e9d337f6f786e027a3ab6e4661e3db330184add70e",
+  "EGLDUSDT_4h": "0909bfe51585ccfce0a53ab676db66b7253ea52dfdb62c165b4f1336d08a8dad",
+  "IMXUSDT_12h": "2f751da408cf467f4f39936a5af3afa9cd4cc8258fd9ec6b1f99acd58b56353e",
+  "IMXUSDT_1d": "bad77ad77e926d95371f0d7a2e40741c45389b674c5e5c0d85e01b492efce2ff",
+  "IMXUSDT_1h": "c8334b5e81df23ebd3884aba7ad1829b8d850b95ee93a38ed7ec87ba663a1971",
+  "IMXUSDT_4h": "396b40ba68e7694f76bfc65e190ec3bcadc48d9a04ae90d7013d5cf5c333bc36",
+  "RSRUSDT_12h": "f2ac6322216823d92b0f907968717db500ba348bacf9418a4e39155d145aabe7",
+  "RSRUSDT_1d": "80e6b52f5bb66169c95237aa9db52eea69cdf35d3f5a5a35d3b5c230165e444e",
+  "RSRUSDT_1h": "0d9311b43a4a9b8b46eb76a7ec48252974309629555d70ceabb49d20c802f12d",
+  "RSRUSDT_4h": "f903ddf378f10101c0a6493bd8f6f958e2be5d16bfcf6d16f8d350d369b1772e",
+  "SANDUSDT_12h": "2cd1edc6dc46de041d7763a23c0f39293e02995f8d1532dccf1e8cde0c3080b1",
+  "SANDUSDT_1d": "6831631c9b5538e7789f836c2c90998cce0d85188c3e853fc1777cd5e4f826ba",
+  "SANDUSDT_1h": "f4fc4d19246d81837b13a519bf4254c347410617dc5fab397ce6061dfbe5ca0d",
+  "SANDUSDT_4h": "e532420caeaea5fd8605415570131a0340798a56ba8a6390df9b28a998db6034",
+  "SFPUSDT_12h": "0720d989f26fb95022971cad7697a52945c5a154e3f5610904026a0a2831590a",
+  "SFPUSDT_1d": "fb684c9e454a3d8e69f859088d43b9098dd99857a3fb242024a89c1201f51d74",
+  "SFPUSDT_1h": "0c4f301a9c471b5ff58dee2e3dd7fd10ddceebe44c4b9474b0a3c65c5f80d83a",
+  "SFPUSDT_4h": "6ebaf5a34cfa1417f16e3f4a6a0b86a62c5ee86560246642de2cace592c5e20a",
+  "SNXUSDT_12h": "2e198b1bb03ba876a3061ed2c7b166d79f792d3fe5d5a7466a15fdd0bdb1f514",
+  "SNXUSDT_1d": "39aa62aec124657c5b4891051fa0a1e022c9eb46f5bc37b0a6c508ccb7cbd372",
+  "SNXUSDT_1h": "42fbc6e4ecef6a557a3d9cc29d8da5538032d79ce924f5b9c1347fb19c74f435",
+  "SNXUSDT_4h": "c88f8202fe995cab85d4bcd3d541ec6fbedfffd0c5b5129900b7b852f7edddc0",
+  "XECUSDT_12h": "a331b24ebae77c89cc71cdccfe76558f848ad008c38530a2c6074240b4c562a6",
+  "XECUSDT_1d": "015bd8bf1af47001ea7ab4fe189edebf7dc2ca2bfc84a3640886dd76559c0724",
+  "XECUSDT_1h": "6e5eee3a43a17c644cb58941bdaada2431460bc8909b26d2419160ce3b043346",
+  "XECUSDT_4h": "da61afe8bb62f5ad9f6a26acb77ed46e6075710869d2cf0d63fb6b2de335243f",
+  "ZENUSDT_12h": "54d00d97d49e4cf7ad7432e09e34e870a327a4e074cb7177761f536cf67c585c",
+  "ZENUSDT_1d": "2f8ba3afffefc52a0f00e7cb7e3562d3123e87f46f097f1e63397f189a3650eb",
+  "ZENUSDT_1h": "995f181c681a9436fe60da4828d1f07bed0ca1e2d4533d9da6c4a8b47713e99a",
+  "ZENUSDT_4h": "a2db6326c2f9543ce28bb0dfc2fda740b3558856e4697b48e913e63e00eebc76"
+ },
+ "equity_bars_sha256": "4bcc0cf9bff0a9aa03ed62154d71f845eeab14cd935b092a8c66852eb68a1bd2",
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-19T12:11:39Z",
+  "family": "tstat_trend_stopgeometry",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-19-120016-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "1INCH 1h tstat_trend_stopgeometry dboth ml90 tm2.5 al14 m3.0 ml90 te0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_stopgeometry-2026-11-19-120016-loop-crypto:1INCHUSDT_1h"
+  },
+  "strategy_id": "5bf170ddf043ce98",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "1INCHUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+IMXUSDT,short,2023-05-12 00:00:00,0.733,2023-06-03 00:00:00,0.804,signal:channel_exit,-0.09986221009549812
+IMXUSDT,short,2023-06-08 00:00:00,0.681,2023-09-22 00:00:00,0.6813,signal:channel_exit,-0.0034405286343611704

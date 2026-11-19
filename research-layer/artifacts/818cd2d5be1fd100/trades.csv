@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+1INCHUSDT,long,2022-11-13 00:00:00,0.508,2023-01-09 00:00:00,0.41,signal:zscore_revert,-0.19591338582677176
+1INCHUSDT,long,2023-03-10 00:00:00,0.439,2023-03-15 00:00:00,0.527,signal:zscore_revert,0.19745558086560366
+1INCHUSDT,long,2023-06-11 00:00:00,0.272,2023-06-24 00:00:00,0.3183,signal:zscore_revert,0.16722058823529407
+1INCHUSDT,long,2023-08-18 00:00:00,0.2353,2023-09-16 00:00:00,0.2552,signal:zscore_revert,0.08157288567785803
