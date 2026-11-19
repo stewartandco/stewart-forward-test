@@ -1,0 +1,293 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "IMXUSDT_1h": "2026-11-18 23:00:00"
+ },
+ "data_sha256": {
+  "IMXUSDT_1h": "c8334b5e81df23ebd3884aba7ad1829b8d850b95ee93a38ed7ec87ba663a1971"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.5828341356418512,
+   "n_days": 1053,
+   "strategy_sharpe": -1.27853403492084,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.9578674642270701,
+   "excess": 0.6982299346246653,
+   "strategy_net": -0.2596375296024048,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.29992224981448623,
+  "edge_decay_pct": -658.5533380438675,
+  "exit_reasons_is": {
+   "signal:zscore_revert": 53,
+   "stop": 19,
+   "target": 7
+  },
+  "exit_reasons_oos": {
+   "signal:zscore_revert": 150,
+   "stop": 98,
+   "target": 35
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.00018538927349051203,
+  "is_edge_raw": 0.00022325517093415453,
+  "is_vol": 1.204250746176965,
+  "mc_p05_equity": 0.5889712092187404,
+  "oos_edge_per_trade": -0.0010354979754565296,
+  "oos_edge_raw": -0.0010312965765042548,
+  "oos_vol": 0.995942629486627,
+  "open_at_end": false,
+  "p_ruin": 0.005,
+  "perturbation": {
+   "base_score": 0.1482346187165322,
+   "dense_only": true,
+   "mean_ratio": 0.32033845977673897,
+   "n_perturbations": 10,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 40,
+     "ratio": -2.3787310797650125,
+     "score": -0.3526102946381316,
+     "to": 20
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 40,
+     "ratio": 0.0686005834857566,
+     "score": 0.010168981336742764,
+     "to": 60
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "down",
+     "from": 2.25,
+     "ratio": 0.13952438495935382,
+     "score": 0.020682344006108473,
+     "to": 2.0
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "up",
+     "from": 2.25,
+     "ratio": -0.09531568633533405,
+     "score": -0.014129084421622822,
+     "to": 2.5
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.7686619993743314,
+     "score": 0.11394231839914135,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.7604027052339397,
+     "score": 0.2609526237979049,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": -0.23043488474857968,
+     "score": -0.03415842727969375,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 2.975661831974478,
+     "score": 0.4410960970920745,
+     "to": 0.9
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.5,
+     "ratio": -0.13713002199059562,
+     "score": -0.02032741652436562,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 0.33214476557905215,
+     "score": 0.04923535268430276,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": -2.3787310797650125
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 17,
+     "net": -0.008178235377636432,
+     "win_rate": 0.5294117647058824,
+     "wins": 9
+    },
+    "trend_down": {
+     "n": 228,
+     "net": -0.2205036851943269,
+     "win_rate": 0.5833333333333334,
+     "wins": 133
+    },
+    "trend_up": {
+     "n": 38,
+     "net": -0.06317501057874074,
+     "win_rate": 0.5263157894736842,
+     "wins": 20
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.1482346187165322,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 0,
+     "net": 0.0
+    },
+    {
+     "min_equity": 0.9963664259222974,
+     "n_trades": 19,
+     "net": -0.0002194420838226613
+    },
+    {
+     "min_equity": 0.9695493273338261,
+     "n_trades": 60,
+     "net": 0.017856600587620876
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 2.25
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-19T12:11:39Z",
+  "family": "asymmetric_pullback_reversion",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-19-120016-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "IMX 1h asymmetric_pullback_reversion dlong l40 ze2.25 l120 mp0.8 al14 m3.5 r1.0 l40 ze0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "16278b7e95681e44",
+    "4c787022d5d94488",
+    "73ba48a43e430161",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "asymmetric_pullback_reversion-2026-11-19-120016-loop-crypto:IMXUSDT_1h"
+  },
+  "strategy_id": "140bea1f25cc6d22",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "IMXUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

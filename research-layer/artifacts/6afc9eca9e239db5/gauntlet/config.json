@@ -1,0 +1,284 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DYDXUSDT_4h": "2026-11-18 20:00:00"
+ },
+ "data_sha256": {
+  "DYDXUSDT_4h": "cefc5689f1ae3e710f1a126c429c6dd59f56b37cc4592c555f0c50a81b1f1cd6"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.6929028579955372,
+   "n_days": 1053,
+   "strategy_sharpe": -1.3249654711825578,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.9756508474576271,
+   "excess": 0.8173144304140765,
+   "strategy_net": -0.15833641704355061,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.16764051731445428,
+  "edge_decay_pct": -1013.3032387978677,
+  "exit_reasons_is": {
+   "signal:zscore_revert": 33,
+   "stop": 8,
+   "target": 2
+  },
+  "exit_reasons_oos": {
+   "signal:zscore_revert": 77,
+   "stop": 40,
+   "target": 5
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.00014583975730826992,
+  "is_edge_raw": 0.00018613931962611023,
+  "is_vol": 1.276327683627838,
+  "mc_p05_equity": 0.7313483675444905,
+  "oos_edge_per_trade": -0.001331959226951379,
+  "oos_edge_raw": -0.0013865740797313968,
+  "oos_vol": 1.0410033968569905,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.12400434485948952,
+   "dense_only": true,
+   "mean_ratio": 0.9007608008814132,
+   "n_perturbations": 9,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 40,
+     "ratio": -2.00342592556753,
+     "score": -0.248433519374518,
+     "to": 20
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 40,
+     "ratio": -1.0125850461690478,
+     "score": -0.1255649452647087,
+     "to": 60
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "up",
+     "from": 1.5,
+     "ratio": 2.5781196981238743,
+     "score": 0.3196980441351959,
+     "to": 1.75
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 2.1118916427310075,
+     "score": 0.2618837395710897,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.5024685527055265,
+     "score": 0.06230828369074469,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 1.3278136538037406,
+     "score": 0.1646546622354179,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 1.526218854248123,
+     "score": 0.18925776913323922,
+     "to": 0.9
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.5,
+     "ratio": 2.203722260318015,
+     "score": 0.2732711351430089,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 0.8726235177390095,
+     "score": 0.108209107626209,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": -2.00342592556753
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 8,
+     "net": 0.006711697565244413,
+     "win_rate": 0.75,
+     "wins": 6
+    },
+    "trend_down": {
+     "n": 102,
+     "net": -0.1750807475506085,
+     "win_rate": 0.5294117647058824,
+     "wins": 54
+    },
+    "trend_up": {
+     "n": 12,
+     "net": -0.0007929877418663025,
+     "win_rate": 0.5,
+     "wins": 6
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.12400434485948952,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 0,
+     "net": 0.0
+    },
+    {
+     "min_equity": 0.9926285725030971,
+     "n_trades": 12,
+     "net": -0.0016859879132366962
+    },
+    {
+     "min_equity": 0.9903885645517779,
+     "n_trades": 31,
+     "net": 0.009689978657159433
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 1.5
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-19T12:11:39Z",
+  "family": "asymmetric_pullback_reversion",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-19-120016-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "DYDX 4h asymmetric_pullback_reversion dlong l40 ze1.5 l120 mp0.8 al14 m3.5 r1.0 l40 ze0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "16278b7e95681e44",
+    "4c787022d5d94488",
+    "73ba48a43e430161",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "asymmetric_pullback_reversion-2026-11-19-120016-loop-crypto:DYDXUSDT_4h"
+  },
+  "strategy_id": "6afc9eca9e239db5",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "DYDXUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}
