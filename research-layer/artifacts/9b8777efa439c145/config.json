@@ -1,0 +1,114 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "e989f515edf86e45fe6da28c03342366ec37a2376e6f80f445c36fabea0ab117",
+  "EMB_1d": "303f97cfaeb7b4014afd886ed124ef6845410bdefa99178f5a6dfe8792b0002a",
+  "HYG_1d": "aee231bd68e1f925ad5d6dd5796f2d1481e7d155636b450734b0c933616efa0c",
+  "IEF_1d": "2e2365da5835a32ffe80b6862831de70801dfe52a93969dce79c9eb6d75975f6",
+  "LQD_1d": "9adc14972a9b5d7423795417c11291e9e988c9c1b2cb521b10d58a292803a6eb",
+  "SHY_1d": "172c81409d0352906d7e4e43a109358b2884fcaf7bd8726e555e4eaca9499102",
+  "TIP_1d": "3dc5b9fe57f698d8beb1ef1c5dc0d0eef93f6e449681a019f671f16fefe728b9",
+  "TLT_1d": "cd9bf9fd71d99d217405f578a846560dd77a402b43a94a8eea41def9b92eb76d"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 13,
+     "slow": 200
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-27T12:08:49Z",
+  "family": "duration_trend_ma_slow",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-27-120012-loop-bond_etf"
+  },
+  "name": "BND 1d duration_trend_ma_slow dlong f13 s200 ml200 al14 m3.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "3605eedc183f09ce",
+    "6dba955b6b43f40d",
+    "78ab4454813ac1ec",
+    "8ce8c138cdd38d16",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "b75771d2de3b3e53",
+    "bdd6f691940fb0de",
+    "c7c0e61fc25e8ba1",
+    "cb6cc4541084448c",
+    "dad2ffd5702377ba",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "78ab4454813ac1ec",
+    "8ce8c138cdd38d16",
+    "b75771d2de3b3e53",
+    "dad2ffd5702377ba"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "duration_trend_ma_slow-2026-10-27-120012-loop-bond_etf:BND_1d"
+  },
+  "strategy_id": "9b8777efa439c145",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "BND"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

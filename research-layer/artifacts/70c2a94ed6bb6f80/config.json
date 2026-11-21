@@ -1,0 +1,106 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "e57a21ce0a37ce6a6892fe4df0651fe16e42d08de9b5f996657db43a0833baa3",
+  "CAD_1d": "c0e2451d4509768802e950ec9252fba57e5baf6fa30e0b36aa40362233a59761",
+  "CHF_1d": "075262dde902ec4cea6012cb8801f79a5a9327af053fa839f6e6ed1b55b18e08",
+  "EUR_1d": "e0b0294a043ef0db45006a7a4efc239819cf447ba8f9d44cdb8c25bc431edee0",
+  "GBP_1d": "478665113358838585283a7c629acd0e5e2726022709f43356433070a7670a5e",
+  "JPY_1d": "8caabc8063d71d345c73a2b73f8762b5bee16ece329908ce89241f032da411d2",
+  "MXN_1d": "9c52d8c21541a8f09e5b6a9524c0ff963552d24ea04d7126e32422fa92ac7f67",
+  "NOK_1d": "d77470f3e71732ac05495da380a96604999650485c11c2119ec9aeed937df2ec",
+  "NZD_1d": "063950a8287f0a6130daa9628aad8a0925b585c431e027aa9f97bef963c316c9",
+  "SEK_1d": "4619d8caad98351f01922ee277cd5b8e70192df57182fc0b44a78d4a5b58d121",
+  "SGD_1d": "86c7d885dc80a7a144a5d64f5054213cb5f7bb283ee26f9d9c0e563df13b1f24",
+  "ZAR_1d": "9ab70f0fae9ad026273ae845fbfa13352c51fcefc6b7cbce3eea2189d13ad830"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 20
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-21T14:51:18Z",
+  "family": "fx_trend_payoff_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-21-124801-loop-fx"
+  },
+  "name": "MXN 1d fx_trend_payoff_mesh dboth ml90 tm2.5 ml20 r3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "3d4db3693d78d717",
+    "5d46eb5e6f34392f",
+    "73ba48a43e430161",
+    "a59075409e6a124e",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9",
+    "f6bcefd96029682d"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_trend_payoff_mesh-2026-10-21-124801-loop-fx:MXN_1d"
+  },
+  "strategy_id": "70c2a94ed6bb6f80",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "MXN"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

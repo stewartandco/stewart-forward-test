@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+AXSUSDT,short,2022-04-15 00:00:00,46.78,2023-01-23 00:00:00,12.55,signal:regime_flip,0.728722958529286
+AXSUSDT,short,2023-03-10 00:00:00,7.36,2023-03-18 00:00:00,9.207965179251811,stop,-0.25408222544182213
+AXSUSDT,short,2023-08-03 00:00:00,5.91,2023-11-06 00:00:00,5.72,signal:regime_flip,0.029148900169204798

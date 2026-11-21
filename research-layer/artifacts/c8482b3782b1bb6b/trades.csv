@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+THETAUSDT,long,2020-11-03 00:00:00,0.58802,2020-11-18 00:00:00,0.65409,signal:zscore_revert,0.10936012380531268
+THETAUSDT,long,2021-04-25 00:00:00,8.66099,2021-05-09 00:00:00,12.298,signal:zscore_revert,0.41693005418549156
+THETAUSDT,long,2021-05-13 00:00:00,9.16,2021-06-04 00:00:00,9.573,signal:zscore_revert,0.04208733624454142

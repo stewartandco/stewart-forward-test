@@ -1,0 +1,281 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "TIP_1d": "2026-11-10 00:00:00"
+ },
+ "data_sha256": {
+  "TIP_1d": "06155d836e56e4cf50261fe81587624e044a40a0f6eabe1cdad001580346ce25"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": -0.14226298450640396,
+   "n_days": 718,
+   "strategy_sharpe": -0.3661690532299359,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.01785054124673373,
+   "excess": 0.005770804324015156,
+   "strategy_net": -0.012079736922718576,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.013312195308575747,
+  "edge_decay_pct": -1560.0046776122913,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 17,
+    "net_pnl": 0.0071096464905400225
+   },
+   "post_2022": {
+    "n_trades": 21,
+    "net_pnl": -0.03621433001205332
+   },
+   "pre_gfc": {
+    "n_trades": 17,
+    "net_pnl": -0.01350098606523309
+   },
+   "zirp": {
+    "n_trades": 19,
+    "net_pnl": 0.03991037855779456
+   }
+  },
+  "exit_reasons_is": {
+   "signal:zscore_revert": 39,
+   "stop": 21,
+   "target": 6
+  },
+  "exit_reasons_oos": {
+   "signal:zscore_revert": 6,
+   "stop": 2
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0019039344291137208,
+  "is_edge_raw": 0.00014795202289001366,
+  "is_vol": 0.0777085705408905,
+  "mc_p05_equity": 0.8919640018988213,
+  "oos_edge_per_trade": -0.0277975317237312,
+  "oos_edge_raw": -0.0015036910128451205,
+  "oos_vol": 0.05409440765423771,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.041063156704710765,
+   "dense_only": true,
+   "mean_ratio": -0.633409102301013,
+   "n_perturbations": 6,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 60,
+     "ratio": -4.002582261284961,
+     "score": -0.16435866261863993,
+     "to": 40
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 60,
+     "ratio": 1.7667330259894658,
+     "score": 0.07254763510159327,
+     "to": 75
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "down",
+     "from": 2.0,
+     "ratio": -0.7690395901724849,
+     "score": -0.03157919320337929,
+     "to": 1.75
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": -0.9830694218589148,
+     "score": -0.04036793372140203,
+     "to": 2.25
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.5,
+     "ratio": 0.2486087829125113,
+     "score": 0.01020866141090387,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": -0.0611051493916941,
+     "score": -0.0025091703249358966,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": -4.002582261284961
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 8,
+     "net": -0.012029528102760964,
+     "win_rate": 0.5,
+     "wins": 4
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.041063156704710765,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9862087130257083,
+     "n_trades": 18,
+     "net": -0.007770910531169357
+    },
+    {
+     "min_equity": 0.9908972854153744,
+     "n_trades": 22,
+     "net": 0.028074321194804193
+    },
+    {
+     "min_equity": 0.9819074824391107,
+     "n_trades": 26,
+     "net": -0.010538577152893944
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 60,
+     "z_entry": 2.0
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-11T12:17:31Z",
+  "family": "flow_shock_reversion_wide_stop",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-11-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "TIP 1d flow_shock_reversion_wide_stop dlong l60 ze2.0 al14 m3.5 r1.0 l40 ze0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "5240bc1e9b2b4840",
+    "72ea5fdb6f549ffe",
+    "73ba48a43e430161",
+    "75327098e20ee89c",
+    "7d67838f9104f2c1",
+    "89e66b95663d995b",
+    "9a6abe19343ae46f",
+    "bec5e126dff7ccb1",
+    "cf8f063058f35c92",
+    "eaf4074190391254",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "5240bc1e9b2b4840",
+    "72ea5fdb6f549ffe",
+    "75327098e20ee89c",
+    "eaf4074190391254"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "flow_shock_reversion_wide_stop-2026-11-11-120012-loop-bond_etf:TIP_1d"
+  },
+  "strategy_id": "37f214ae5a8d57c5",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "TIP"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

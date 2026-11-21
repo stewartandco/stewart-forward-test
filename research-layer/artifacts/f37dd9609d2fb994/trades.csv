@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+ARUSDT,long,2022-12-20 00:00:00,7.3,2023-01-09 00:00:00,7.29,signal:zscore_revert,-0.004369863013698569
+ARUSDT,long,2023-05-09 00:00:00,6.59,2023-05-29 00:00:00,7.01,signal:zscore_revert,0.06073292867981783
+ARUSDT,long,2023-06-11 00:00:00,4.92,2023-07-01 00:00:00,5.5,signal:zscore_revert,0.11488617886178865
+ARUSDT,long,2023-08-19 00:00:00,4.32,2023-09-16 00:00:00,4.51,signal:zscore_revert,0.0409814814814814

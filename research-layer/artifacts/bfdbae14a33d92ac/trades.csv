@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+NEOUSDT,long,2019-07-14 12:00:00,13.06,2019-08-03 12:00:00,11.864,signal:zscore_revert,-0.09457733537519142
+NEOUSDT,long,2020-02-27 00:00:00,10.983,2020-03-12 00:00:00,7.792534966838466,stop,-0.29349121671324174
+NEOUSDT,long,2021-05-19 12:00:00,68.659,2021-06-07 12:00:00,57.321,signal:zscore_revert,-0.16813494225083392

@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+AUD,short,2024-04-15 00:00:00,0.6469,2024-04-29 00:00:00,0.6565,stop,-0.015714718827013967,1.0
+AUD,short,2024-08-06 00:00:00,0.6519,2024-08-16 00:00:00,0.6649,stop,-0.020701478965993263,1.0
+AUD,short,2024-10-30 00:00:00,0.6584,2025-04-29 00:00:00,0.6385,signal:ma_crossunder,0.022855821846063648,1.0

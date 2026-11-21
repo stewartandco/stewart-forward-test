@@ -1,0 +1,17 @@
+{
+ "spec": {"strategy_id": "aaaaaaaaaaaaaaaa",
+          "universe": {"assets": ["BTCUSD"], "asset_class": "crypto", "timeframe": "1d", "session": "24x7"},
+          "blocks": [{"role": "entry", "type": "channel_breakout", "params": {"lookback": 20, "direction": "long"}}],
+          "cost_model": {"fee_bps": 10, "slippage_bps": 5}},
+ "result": {
+  "trades": [
+   {"asset": "BTCUSD", "side": "long", "entry_date": "2023-01-21", "entry_px": 111.0, "exit_date": "2023-01-23", "exit_px": 119.99999999999999, "exit_reason": "target", "return_net": 0.07477477477477478},
+   {"asset": "BTCUSD", "side": "long", "entry_date": "2023-02-02", "entry_px": 100.1, "exit_date": "2023-02-09", "exit_px": 95.05, "exit_reason": "stop", "return_net": -0.0530469530469530},
+   {"asset": "BTCUSD", "side": "long", "entry_date": "2023-03-01", "entry_px": 3, "exit_date": "2023-03-04", "exit_px": 3.5, "exit_reason": "time", "return_net": 0.1}
+  ],
+  "equity": [["2023-01-01", 1.0], ["2023-01-02", 1.0000000000000002], ["2023-01-03", 0.9987654321], ["2023-01-04", 1.1], ["2023-01-05", 1.0499999999999998]]
+ },
+ "cutoff": "2023-12-31",
+ "data_hashes": {"BTCUSD_1d": "deadbeef"},
+ "data_end": {"BTCUSD_1d": "2023-12-31"}
+}

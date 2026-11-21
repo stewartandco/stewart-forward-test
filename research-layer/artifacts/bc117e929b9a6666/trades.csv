@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWC,long,2004-04-29 00:00:00,13.59,2004-05-28 00:00:00,13.66,signal:zscore_revert,0.0047508462104488116
+EWC,long,2014-09-26 00:00:00,30.7,2014-10-08 00:00:00,29.712851712122873,stop,-0.032554667357561115

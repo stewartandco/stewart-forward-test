@@ -1,0 +1,289 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "SPY_1d": "2026-11-13 00:00:00"
+ },
+ "data_sha256": {
+  "SPY_1d": "8ffee023137a7c247ce70f76377d627266091639e7e98c565648abe225c2ffdb"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": 1.3501470308195083,
+   "n_days": 721,
+   "strategy_sharpe": 0.30912199891676057,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": 0.5972999322263639,
+   "excess": -0.5898472740649412,
+   "strategy_net": 0.007452658161422709,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.0066142457251368025,
+  "edge_decay_pct": -75.7793628156839,
+  "era_summary": {
+   "covid_cycle": {
+    "n_trades": 4,
+    "net_pnl": -0.0327649442184077
+   },
+   "dotcom_gfc": {
+    "n_trades": 26,
+    "net_pnl": 0.2233201083381391
+   },
+   "post_2022": {
+    "n_trades": 10,
+    "net_pnl": -0.011022525586490417
+   },
+   "qe_bull": {
+    "n_trades": 26,
+    "net_pnl": 0.16601732146303183
+   }
+  },
+  "exit_reasons_is": {
+   "signal:zscore_revert": 45,
+   "stop": 9,
+   "target": 4
+  },
+  "exit_reasons_oos": {
+   "signal:zscore_revert": 4,
+   "stop": 3,
+   "target": 1
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.02352507743939148,
+  "is_edge_raw": 0.005329570257464898,
+  "is_vol": 0.22654846816958055,
+  "mc_p05_equity": 1.1354866413309999,
+  "oos_edge_per_trade": 0.005697923653924412,
+  "oos_edge_raw": 0.001071244561942384,
+  "oos_vol": 0.18800612767153707,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.5173836686604781,
+   "dense_only": true,
+   "mean_ratio": 0.8227507601563104,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 40,
+     "ratio": 0.7506070252269029,
+     "score": 0.3883518164342231,
+     "to": 20
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 40,
+     "ratio": 0.6028867475173332,
+     "score": 0.31192375721730126,
+     "to": 60
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "down",
+     "from": 1.75,
+     "ratio": 0.8846807272962645,
+     "score": 0.4577193602817613,
+     "to": 1.5
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "up",
+     "from": 1.75,
+     "ratio": 0.8071538535670385,
+     "score": 0.41760822193195674,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.0,
+     "ratio": 0.7430822468042056,
+     "score": 0.3844586189680308,
+     "to": 2.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 3.0,
+     "ratio": 0.9543126425852663,
+     "score": 0.4937457760698407,
+     "to": 3.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 1.016532078097162,
+     "score": 0.5259370958769694,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": 0.6028867475173332
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 5,
+     "net": -0.024783060486954504,
+     "win_rate": 0.4,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 3,
+     "net": 0.03335301698249357,
+     "win_rate": 1.0,
+     "wins": 3
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5173836686604781,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.992869992486383,
+     "n_trades": 15,
+     "net": 0.14393754079437754
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 20,
+     "net": 0.061195740958483597
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 23,
+     "net": 0.10398179318010288
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 1.75
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 20,
+     "z_exit": 0.0
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-16T12:11:16Z",
+  "family": "uptrend_pullback_reversion",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "33800e51c56dab96",
+   "run_id": "2026-11-16-120012-loop-equity_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "SPY 1d uptrend_pullback_reversion dlong l40 ze1.75 ml200 l20 ze0.0 al14 m3.0 r1.0 f0.02",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "01dffd821dd1e18c",
+    "0a231fd242d65c8e",
+    "49852629642221f7",
+    "4c787022d5d94488",
+    "82decf1171906939",
+    "88e46925892c1ede",
+    "bec5e126dff7ccb1",
+    "bf962c5e7d1c9858",
+    "c7c8508a460f1cea"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "uptrend_pullback_reversion-2026-11-16-120012-loop-equity_etf:SPY_1d"
+  },
+  "strategy_id": "6533379ff672f602",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "SPY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

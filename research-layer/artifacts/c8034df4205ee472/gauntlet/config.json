@@ -1,0 +1,194 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DASHUSDT_1h": "2026-11-03 23:00:00"
+ },
+ "data_sha256": {
+  "DASHUSDT_1h": "393348d5da7b8d913d3b426005fe4976564a70e83933981c170708f1d2af2e96"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": 0.452233291298865,
+   "excess": -0.30975476266484103,
+   "strategy_net": 0.142478528634024,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.08752453801330762,
+  "edge_decay_pct": 160.6591291843239,
+  "exit_reasons_is": {
+   "signal:channel_exit": 365,
+   "stop": 70
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 240,
+   "stop": 32
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.00022274015358284357,
+  "is_edge_raw": 0.00023586904262490774,
+  "is_vol": 1.0589426236396176,
+  "mc_p05_equity": 0.6568966366414599,
+  "oos_edge_per_trade": 0.0005805925446728656,
+  "oos_edge_raw": 0.0006200215409524056,
+  "oos_vol": 1.067911647576798,
+  "open_at_end": true,
+  "p_ruin": 0.0075,
+  "perturbation": {
+   "base_score": 0.17736259757518427,
+   "dense_only": true,
+   "mean_ratio": 0.5284309815213726,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 75,
+     "ratio": 0.4425630153979523,
+     "score": 0.07849412600168709,
+     "to": 55
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 75,
+     "ratio": 0.6142989476447928,
+     "score": 0.10895365704198258,
+     "to": 100
+    }
+   ],
+   "worst_ratio": 0.4425630153979523
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 23,
+     "net": 0.11677621534997105,
+     "win_rate": 0.2608695652173913,
+     "wins": 6
+    },
+    "trend_down": {
+     "n": 166,
+     "net": -0.15501455635215883,
+     "win_rate": 0.3072289156626506,
+     "wins": 51
+    },
+    "trend_up": {
+     "n": 83,
+     "net": 0.20688420014124217,
+     "win_rate": 0.42168674698795183,
+     "wins": 35
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.17736259757518427,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9547158949926265,
+     "n_trades": 141,
+     "net": 0.016836738798692744
+    },
+    {
+     "min_equity": 0.9606907197643452,
+     "n_trades": 141,
+     "net": 0.21803739024691793
+    },
+    {
+     "min_equity": 0.8640634424007726,
+     "n_trades": 153,
+     "net": -0.13227109550377583
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 75
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "DASH 1h range_breakout_both_sides dboth l75 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:DASHUSDT_1h"
+  },
+  "strategy_id": "c8034df4205ee472",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "DASHUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,267 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "RUNEUSDT_4h": "2026-11-13 20:00:00"
+ },
+ "data_sha256": {
+  "RUNEUSDT_4h": "68de5f69f548d55a40670dbec99d63a355302e47bfb7094d71b06fa21fdfeafb"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.22673092116187538,
+   "n_days": 1048,
+   "strategy_sharpe": 0.4398764067630752,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8974207671445177,
+   "excess": 1.1085434016391362,
+   "strategy_net": 0.21112263449461843,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.18452015677233335,
+  "edge_decay_pct": -72.21554269540856,
+  "exit_reasons_is": {
+   "signal:channel_exit": 39,
+   "stop": 27
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 42,
+   "stop": 41
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.009735192316834278,
+  "is_edge_raw": 0.014251448394478556,
+  "is_vol": 1.4639103091815333,
+  "mc_p05_equity": 1.00291402555823,
+  "oos_edge_per_trade": 0.0027048703527906876,
+  "oos_edge_raw": 0.002869723039248469,
+  "oos_vol": 1.0609466129449414,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 1.3161980753455886,
+   "dense_only": true,
+   "mean_ratio": 0.9594357937741255,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 0.7275645048448464,
+     "score": 0.957619000966553,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 0.9758283095828225,
+     "score": 1.2843833429406502,
+     "to": 75
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 0.9666910144674197,
+     "score": 1.2723568526958924,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.022275685504055,
+     "score": 1.3455172897330292,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.9,
+     "ratio": 0.8876611981345218,
+     "score": 1.1683379605436168,
+     "to": 0.8
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.9,
+     "ratio": 0.9864770882866369,
+     "score": 1.2983992449753918,
+     "to": 1.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0426890291568511,
+     "score": 1.3723852933602079,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0662995202158507,
+     "score": 1.4034613762500274,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.7275645048448464
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 7,
+     "net": -0.08247106297732555,
+     "win_rate": 0.14285714285714285,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 52,
+     "net": 0.3449405774029318,
+     "win_rate": 0.40384615384615385,
+     "wins": 21
+    },
+    "trend_up": {
+     "n": 24,
+     "net": -0.0242825021679833,
+     "win_rate": 0.20833333333333334,
+     "wins": 5
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 1.3161980753455886,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9545116169675777,
+     "n_trades": 3,
+     "net": -0.04618377231655438
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 32,
+     "net": 0.17933507551916023
+    },
+    {
+     "min_equity": 0.9756640620220532,
+     "n_trades": 31,
+     "net": 0.807444290832979
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "vol_percentile_gated_symmetric_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "RUNE 4h vol_percentile_gated_symmetric_breakout dboth l55 l120 mp0.9 l20 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0634177be8e6f12b",
+    "2243c5930df5c5be",
+    "6078cc70ec7b8303",
+    "6dba955b6b43f40d",
+    "80a41669681d747b",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "vol_percentile_gated_symmetric_breakout-2026-11-14-120014-loop-crypto:RUNEUSDT_4h"
+  },
+  "strategy_id": "1e042ab135c5de60",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "RUNEUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

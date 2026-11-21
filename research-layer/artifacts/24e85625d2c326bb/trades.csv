@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWG,long,1999-07-14 00:00:00,21.94,1999-07-23 00:00:00,21.1992,stop,-0.0341648131267092
+EWG,long,1999-11-05 00:00:00,22.38,2000-08-24 00:00:00,20.94,stop,-0.06474316353887392

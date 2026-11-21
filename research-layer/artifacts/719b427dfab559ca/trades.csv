@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+RUNEUSDT,long,2021-05-24 00:00:00,7.776,2021-07-30 00:00:00,5.461,signal:zscore_revert,-0.30071090534979417

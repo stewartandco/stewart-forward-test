@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWA,long,2024-08-15 00:00:00,24.62,2024-12-18 00:00:00,24.76,signal:regime_flip,0.005286433793663736,0.9476618669131388
+EWA,long,2026-01-22 00:00:00,27.07,2026-07-02 00:00:00,28.14,signal:regime_flip,0.03912715182859246,1.0
+EWA,long,2026-07-20 00:00:00,28.7,2026-09-17 00:00:00,29.02,signal:regime_flip,0.010749825783972168,1.0

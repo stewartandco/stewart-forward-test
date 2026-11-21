@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+ICPUSDT,long,2023-01-23 00:00:00,5.54,2023-03-09 00:00:00,5.047,signal:tstat_decay,-0.0919891696750903
+ICPUSDT,long,2023-04-19 00:00:00,6.82,2023-04-21 00:00:00,5.662011929557447,stop,-0.17279297220565304
+ICPUSDT,long,2023-04-22 00:00:00,5.533,2023-05-16 00:00:00,5.233,signal:tstat_decay,-0.057220133742996726

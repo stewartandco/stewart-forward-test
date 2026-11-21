@@ -1,0 +1,512 @@
+"""The quarantine -> live gate, per quarantine-live-protocol-v1 (entry 2515).
+
+Judgment lives here; OBSERVATION lives in quarantine.py. That separation is
+deliberate and mirrors screen/gauntlet: the daily runner records what the book
+did without deciding anything, and this module decides without recording
+anything new.
+
+THE FOUNDING ASYMMETRY. Sixty days can disprove but cannot confirm. Clearing
+PSR 0.95 on a 60-day record needs an annualized Sharpe near 4.14 even against a
+zero benchmark, while the strategies here carry train Sharpes near 1.0 to 1.3.
+So the gate has two arms with different horizons:
+
+  KILL      from MIN_TRADING_DAYS onward, bury a book behaving nothing like the
+            one that was modelled: forward terminal equity below the FIRST
+            percentile of a cone REBUILT at the matched forward trade count.
+            One percent, not five, because burial is terminal on this chain.
+  GRADUATE  plain PSR of the forward daily returns against a benchmark of ZERO
+            -- no deflation by search burden, which was already paid at the
+            gauntlet -- with the threshold set by Benjamini-Hochberg over the
+            cohort under simultaneous assessment.
+
+quarantine-live-protocol-v2 (design 2026-11-05 section 4) adds a second test to
+GRADUATE, armed by its chained note: the record must also beat its own asset's
+buy-and-hold (a paired Sharpe test), and its p is the larger of the two.
+
+This module WRITES NOTHING. It returns a report; chaining any state change from
+it is a separate, Coen-gated step.
+"""
+from __future__ import annotations
+
+import math
+import random
+from collections import defaultdict
+
+from .beats_hold import HOLD_TEST_PATHS, forward_hold_series, hold_pvalue
+from .protocols import LIVE_V2, NOTE_LIVE_V2
+from .stats import moments, sharpe, percentile, psr
+
+KILL_PCTILE = 0.01       # burial line on the rebuilt cone; 1 percent, not 5
+BH_Q = 0.05              # Benjamini-Hochberg false discovery rate
+CONE_PATHS = 2000        # bootstrap paths for the rebuilt cone
+TRADING_DAYS = 365       # 24x7 crypto
+
+# Below this many CLOSED forward trades the cone is not built and no burial
+# occurs. protocol-v4 held that a gate passing on absence of evidence is not a
+# gate; this gate BURIES, so the same reasoning runs the other way and silence
+# must not condemn.
+#
+# MEASURED CONSEQUENCE, recorded rather than discovered later: the three
+# strategies in quarantine close roughly 2 to 3.6 trades per 60 days at their
+# train-window rates, so this floor means the kill arm typically cannot fire on
+# them until around 150 days. That is the honest cost of a conservative burial
+# rule meeting a low trade frequency, and it is the direction to err in.
+MIN_FORWARD_TRADES = 5
+
+
+def forward_series(rows: list[dict]) -> list[tuple[str, float]]:
+    """The strategy's forward equity curve: the equal-weight mean across assets
+    of the rebased per-asset equity quarantine.observe_day already records.
+
+    That is engine.run_spec's own combination rule. A date missing any asset is
+    DROPPED rather than averaged over whichever assets reported, which would
+    silently reweight the book toward one leg.
+    """
+    by_date: dict[str, dict[str, float]] = defaultdict(dict)
+    assets = set()
+    for r in rows:
+        by_date[r["date"]][r["asset"]] = r["equity"]
+        assets.add(r["asset"])
+    out = []
+    for date in sorted(by_date):
+        got = by_date[date]
+        if set(got) != assets:
+            continue
+        out.append((date, sum(got.values()) / len(got)))
+    return out
+
+
+def daily_returns(series: list[tuple[str, float]]) -> list[float]:
+    return [series[i][1] / series[i - 1][1] - 1
+            for i in range(1, len(series)) if series[i - 1][1] > 0]
+
+
+def closed_forward_trades(rows: list[dict]) -> int:
+    """Closed trades across every asset. A daily row records at most one
+    event, so observe_day's action='exit' counts one (it never enters on the
+    bar it exits). An intraday row (2b-2) is a whole UTC day of an hourly
+    book and carries the day's closed-trade count in `exits`."""
+    return sum(r["exits"] if "exits" in r else (1 if r.get("action") == "exit" else 0)
+               for r in rows)
+
+
+def rebuilt_cone(train_contributions: list[float], n_trades: int,
+                 seed: int = 0, paths: int = CONE_PATHS) -> dict | None:
+    """Terminal-equity distribution over exactly `n_trades` draws.
+
+    Rebuilt at the MATCHED forward trade count rather than reusing the cone in
+    the gauntlet verdict, which spans the strategy's full train trade count and
+    is not on the same footing as a short forward record -- quarantine.py's
+    CONE_CAVEAT says exactly this. Returns None below MIN_FORWARD_TRADES, which
+    the kill arm treats as "cannot judge", never as "fails".
+    """
+    if n_trades < MIN_FORWARD_TRADES or not train_contributions:
+        return None
+    rng = random.Random(seed)
+    terminals = []
+    for _ in range(paths):
+        eq = 1.0
+        for _ in range(n_trades):
+            eq *= 1 + rng.choice(train_contributions)
+        terminals.append(eq)
+    terminals.sort()
+    return {"n_trades": n_trades, "paths": paths, "terminals": terminals,
+            "p01": percentile(terminals, KILL_PCTILE),
+            "p50": percentile(terminals, 0.50)}
+
+
+def kill_verdict(forward_terminal: float, cone: dict | None) -> bool:
+    """True when the forward record is grossly outside what was modelled."""
+    if cone is None:
+        return False
+    return forward_terminal < cone["p01"]
+
+
+def forward_psr(returns: list[float], sr_star: float = 0.0) -> float:
+    """PSR of the forward record against `sr_star`, default ZERO.
+
+    The deflation protocol-v3 placed here is removed by
+    quarantine-live-protocol-v1: the search burden was paid at the gauntlet,
+    and a quarantine record is a single pre-registered hypothesis rather than a
+    selected maximum, so deflating it again counts the same search twice.
+    """
+    if len(returns) < 2:
+        return 0.0
+    _, _, skew, kurt = moments(returns)
+    return psr(sharpe(returns), sr_star, len(returns), skew, kurt)
+
+
+def benjamini_hochberg(pvalues: list[float], q: float = BH_Q) -> set[int]:
+    """Indices rejected by Benjamini-Hochberg at false discovery rate `q`.
+
+    Chosen over Bonferroni because this is a discovery pipeline expecting
+    several genuine survivors, which cares about the PROPORTION of false
+    graduates among graduates rather than about avoiding any single false
+    positive. It adapts: the weakest member of a uniformly strong cohort still
+    clears at q, while a lone strong strategy among m faces q/m, Bonferroni's
+    bar.
+    """
+    m = len(pvalues)
+    if m == 0:
+        return set()
+    order = sorted(range(m), key=lambda i: pvalues[i])
+    largest_k = 0
+    for k, i in enumerate(order, start=1):
+        if pvalues[i] <= k * q / m:
+            largest_k = k
+    return set(order[:largest_k])
+
+
+def assess(cases: list[dict], min_days: int, q: float = BH_Q,
+           hold_arm: bool = False) -> dict:
+    """Judge every quarantined strategy. Returns a report; writes nothing.
+
+    `cases` are {sid, rows, train_contributions}. A strategy is eligible once
+    its forward record reaches `min_days` observations. The kill arm runs per
+    strategy; graduation runs over the ELIGIBLE COHORT, because the
+    concurrent-confirmation burden is a property of the cohort rather than of
+    any strategy in it.
+
+    `hold_arm` (quarantine-live-protocol-v2): each surviving eligible strategy
+    must ALSO beat its own asset's hold. Its row gains p_zero (1 - PSR, the v1
+    test), p_hold (paired Sharpe test against the forward hold), p = the larger
+    of the two, which is what Benjamini-Hochberg sees, p_hold_paths (the
+    resamples p_hold was drawn from: HOLD_TEST_PATHS, or more when a p on the
+    2000-path floor is refined for m = the number of survivors at rate q), and
+    the two annualized Sharpes, which are recorded only and decide nothing.
+    """
+    report: dict[str, dict] = {}
+    cones: dict[str, dict | None] = {}
+    rets_by_sid: dict[str, list[float]] = {}
+    rows_by_sid: dict[str, list[dict]] = {}
+    for case in cases:
+        sid = case["sid"]
+        series = forward_series(case["rows"])
+        rets = daily_returns(series)
+        n_trades = closed_forward_trades(case["rows"])
+        # computed ONCE and reused by the kill arm below: rebuilding it there
+        # would give two cones that agree only as long as the two seed
+        # expressions stay in sync, which is a silent-divergence waiting to
+        # happen on a gate that buries strategies.
+        cone = rebuilt_cone(case["train_contributions"], n_trades,
+                            seed=_seed(sid))
+        cones[sid] = cone
+        rets_by_sid[sid] = rets
+        rows_by_sid[sid] = case["rows"]
+        terminal = series[-1][1] if series else 1.0
+        report[sid] = {
+            "eligible": len(series) >= min_days,
+            "forward_days": len(series),
+            "forward_trades": n_trades,
+            "terminal": terminal,
+            "cone_p01": None if cone is None else cone["p01"],
+            "psr": forward_psr(rets),
+            "verdict": "hold",
+        }
+
+    eligible = [s for s, r in report.items() if r["eligible"]]
+
+    # Kill first: a strategy the record has already disproved must not also be
+    # counted in the cohort that sets everyone else's graduation bar.
+    for sid in eligible:
+        r = report[sid]
+        if kill_verdict(r["terminal"], cones[sid]):
+            r["verdict"] = "graveyard"
+
+    survivors = [s for s in eligible if report[s]["verdict"] == "hold"]
+    if survivors:
+        if hold_arm:
+            for s in survivors:
+                report[s].update(_hold_test(s, rets_by_sid[s], rows_by_sid[s],
+                                            report[s]["psr"], len(survivors), q))
+            pvals = [report[s]["p"] for s in survivors]
+        else:
+            pvals = [1.0 - report[s]["psr"] for s in survivors]
+        for idx in benjamini_hochberg(pvals, q):
+            report[survivors[idx]]["verdict"] = "live"
+        for s in survivors:
+            report[s]["cohort_size"] = len(survivors)
+    return report
+
+
+def _hold_test(sid: str, rets: list[float], rows: list[dict],
+               psr_value: float, m: int, q: float) -> dict:
+    """The v2 arm's fields for one of `m` survivors judged at BH rate `q`.
+    Cannot be tested, so p_hold = 1.0 (never an error): a strategy whose
+    equity touched 0 has a step dropped by daily_returns, so its record no
+    longer pairs with the hold's; an asset whose first price is not positive
+    leaves no hold curve (forward_hold_series returns [])."""
+    hold = daily_returns(forward_hold_series(rows))
+    p_zero = 1.0 - psr_value
+    if hold and len(rets) == len(hold):
+        p_hold, paths = hold_pvalue(rets, hold, _seed(sid), m, q)
+    else:
+        p_hold, paths = 1.0, HOLD_TEST_PATHS
+    return {"p_zero": p_zero, "p_hold": p_hold, "p": max(p_zero, p_hold),
+            "p_hold_paths": paths,
+            "strategy_sr": sharpe(rets) * math.sqrt(TRADING_DAYS) if rets else 0.0,
+            "hold_sr": sharpe(hold) * math.sqrt(TRADING_DAYS) if hold else 0.0}
+
+
+def _seed(sid: str) -> int:
+    """The per-strategy seed shared by the rebuilt cone and the paired test."""
+    return int(sid, 16) % (2 ** 31) if _is_hex(sid) else 0
+
+
+def _is_hex(s: str) -> bool:
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# The runner. Everything above is pure; everything below touches the chain, and
+# only ever behind the same refusal guard and --dry-run discipline the screen
+# and the gauntlet use.
+# ---------------------------------------------------------------------------
+
+PROTOCOL = "quarantine-live-protocol-v1"
+
+
+def quarantined_specs(registry) -> dict[str, dict]:
+    """{sid: spec} for every strategy currently in the quarantine state."""
+    specs, state = {}, {}
+    for e in registry.entries():
+        p = e.get("payload", {})
+        if not isinstance(p, dict):
+            continue
+        if e["entry_type"] == "strategy_registered":
+            specs[p["strategy_id"]] = p
+        elif e["entry_type"] == "state_change" and p.get("strategy_id"):
+            state[p["strategy_id"]] = p.get("to")
+    return {s: specs[s] for s, st in state.items()
+            if st == "quarantine" and s in specs}
+
+
+def quarantine_rows(registry) -> dict[str, list[dict]]:
+    rows: dict[str, list[dict]] = defaultdict(list)
+    for e in registry.entries():
+        if e["entry_type"] == "quarantine_decision":
+            rows[e["payload"]["strategy_id"]].append(e["payload"])
+    return rows
+
+
+def train_contributions(spec: dict, data_dir, cutoff: str) -> list[float]:
+    """Per-trade portfolio contributions over the TRAIN window.
+
+    Recomputed by re-running the spec rather than read from the screen's
+    trades.csv, which deliberately omits notional_frac -- its byte format is
+    pinned by a regression test -- so the contributions the cone needs are not
+    recoverable from the artifact. The spec is content-addressed and the bars
+    are hashed on the chain, so the re-run is reproducible.
+    """
+    from .screen import load_bars
+    from .engine import run_spec
+    from .gauntlet import contributions
+    universe = spec["universe"]
+    tf = universe.get("timeframe", "1d")
+    bars = {a: load_bars(data_dir, a, cutoff, timeframe=tf)
+            for a in universe["assets"]}
+    res = run_spec(spec, bars)
+    # Compare UTC DATES (2b-3 C5): an intraday entry_date carries a time
+    # ("2023-12-31 05:00:00"), which a plain string compare puts after the
+    # bare cutoff date, dropping every trade entered on the cutoff day.
+    return contributions([t for t in res["trades"]
+                          if t["entry_date"][:10] <= cutoff[:10]])
+
+
+def write_report(out_dir, report: dict, min_days: int, q: float,
+                 hold_arm: bool = False):
+    """<out_dir>/<UTC date>-livegate-assessment.md: one row per quarantined
+    strategy, the cohort size the graduation arm judged against, and the
+    protocol name. Markdown, read-only with respect to the chain. Under
+    `hold_arm` (v2) the header names v2 and its rule and the table gains the
+    hold test's columns; without it the file is exactly the v1 report."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = out_dir / f"{today}-livegate-assessment.md"
+    n_elig = sum(1 for r in report.values() if r["eligible"])
+    cohort = max((r.get("cohort_size") or 0 for r in report.values()), default=0)
+    if hold_arm:
+        head = [f"Protocol: `{LIVE_V2}`. Kill arm from {min_days} trading days; "
+                f"graduation = beats zero AND own-asset hold: p = max(1 - PSR vs 0, "
+                f"paired Sharpe test vs the hold) with Benjamini-Hochberg at q={q}.",
+                "",
+                f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
+                "| strategy | days | trades | terminal | cone p01 | PSR | p_hold | paths | p "
+                "| SR | hold SR | verdict |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    else:
+        head = [f"Protocol: `{PROTOCOL}`. Kill arm from {min_days} trading days; "
+                f"graduation = PSR vs 0 with Benjamini-Hochberg at q={q}.", "",
+                f"{len(report)} in quarantine, {n_elig} eligible, cohort size {cohort}.", "",
+                "| strategy | days | trades | terminal | cone p01 | PSR | verdict |",
+                "|---|---:|---:|---:|---:|---:|---|"]
+    lines = [f"# Live-gate assessment {today}", ""] + head
+    for sid in sorted(report):
+        r = report[sid]
+        cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
+        extra = ""
+        if hold_arm:
+            # p fields in %g: a refined p (below 1/2001) reads 0.0000 in %.4f
+            extra = "".join("n/a | " if r.get(k) is None else f"{r[k]:{fmt}} | "
+                            for k, fmt in (("p_hold", ".4g"), ("p_hold_paths", "d"),
+                                           ("p", ".4g"), ("strategy_sr", ".4f"),
+                                           ("hold_sr", ".4f")))
+        lines.append(f"| `{sid}` | {r['forward_days']} | {r['forward_trades']} | "
+                     f"{r['terminal']:.4f} | {cone} | {r['psr']:.4f} | {extra}"
+                     f"**{r['verdict'].upper()}**{'' if r['eligible'] else ' (not yet eligible)'} |")
+    lines += ["", "HOLD moves nothing. LIVE is a lifecycle state, not capital: "
+                  "money at risk is Coen's separate decision (the note's own words)."]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def run(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+    from pathlib import Path
+    from .registry import Registry
+    from .quarantine import MIN_TRADING_DAYS
+
+    here = Path(__file__).resolve().parent.parent
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--registry", type=Path, default=here / "registry_log.jsonl")
+    ap.add_argument("--data-dir", type=Path, default=here / "data")
+    ap.add_argument("--cutoff", default="2023-12-31")
+    ap.add_argument("--min-days", type=int, default=MIN_TRADING_DAYS)
+    ap.add_argument("--q", type=float, default=BH_Q)
+    ap.add_argument("--dry-run", action="store_true")
+    # Dated assessment report for Coen's quarterly read. Written whether or
+    # not anything moves, and on a dry run too: it is not a chain write.
+    ap.add_argument("--report", type=Path, default=None,
+                    help="directory for <date>-livegate-assessment.md")
+    args = ap.parse_args(argv)
+
+    # D35 (pipeline/halt.py): stop on the halt artifact before any chain read or write.
+    from . import halt as _halt
+    reason = _halt.halt_reason(args.registry.parent / "logs")
+    if reason is not None:
+        print(f"livegate: {_halt.describe(reason)}; nothing assessed or written")
+        return 0
+
+    registry = Registry(args.registry)
+    # ONE chain pass reads both notes. The v1 refusal is exactly as before; a
+    # chained quarantine-live-protocol-v2 note (prefix with its colon) arms the
+    # hold test by itself, and without one every output is the v1 output.
+    has_v1 = v2 = False
+    for e in registry.entries():
+        if e["entry_type"] != "note":
+            continue
+        text = str(e["payload"].get("text", ""))
+        has_v1 = has_v1 or text.startswith(PROTOCOL)
+        v2 = v2 or text.startswith(NOTE_LIVE_V2)
+    if not args.dry_run and not has_v1:
+        print(f"REFUSED: no '{PROTOCOL}' note on the chain. Chain the gate "
+              f"before it may move a single strategy.")
+        return 1
+    protocol = LIVE_V2 if v2 else PROTOCOL
+
+    specs = quarantined_specs(registry)
+    rows = quarantine_rows(registry)
+    if not specs:
+        print("no strategies in quarantine; nothing to assess")
+        return 0
+
+    cases = [{"sid": sid,
+              "rows": rows.get(sid, []),
+              "train_contributions": train_contributions(spec, args.data_dir,
+                                                         args.cutoff)}
+             for sid, spec in sorted(specs.items())]
+    report = assess(cases, min_days=args.min_days, q=args.q, hold_arm=v2)
+
+    for sid in sorted(report):
+        r = report[sid]
+        cone = "n/a" if r["cone_p01"] is None else f"{r['cone_p01']:.4f}"
+        print(f"{sid}  days={r['forward_days']:>4} trades={r['forward_trades']:>3} "
+              f"terminal={r['terminal']:.4f} cone_p01={cone:>7} "
+              f"psr={r['psr']:.4f}"
+              + (f" p_hold={r['p_hold']:.4g} p_hold_paths={r['p_hold_paths']}"
+                 f" p={r['p']:.4g}" if "p_hold" in r else "")
+              + f"  -> {r['verdict'].upper()}"
+              + ("" if r["eligible"] else "  (not yet eligible)"))
+
+    n_live = sum(1 for r in report.values() if r["verdict"] == "live")
+    n_dead = sum(1 for r in report.values() if r["verdict"] == "graveyard")
+    if args.report is not None:
+        out = write_report(args.report, report, args.min_days, args.q,
+                           hold_arm=v2)
+        print(f"report: {out}")
+    if args.dry_run:
+        print(f"\nDRY RUN - {len(report)} assessed, {n_live} would go live, "
+              f"{n_dead} would be buried; nothing written.")
+        return 0
+
+    # Unattended since 2026-09-03 (26_LiveGateWeekly). The write phase below is
+    # the only chain write, so the lock is taken as late as correctness
+    # allows and only when there is a verdict to chain -- the same discipline
+    # as the quarantine daily. Held lock = defer politely, exit 0, write
+    # nothing; next week's run judges the same record plus a week.
+    if n_live + n_dead == 0:
+        print(f"\n{len(report)} assessed: nothing to move.")
+        return 0
+    from .chainlock import ChainLock, ChainLockHeld
+    lock = ChainLock(args.registry.resolve().parent / "logs", holder="livegate",
+                     purpose=f"{protocol} assessment")
+    try:
+        lock.acquire()
+    except ChainLockHeld:
+        if lock.is_stale():
+            print("WARN: chain.lock is stale (>3h); if no writer is alive, remove "
+                  "logs/chain.lock or let the loop's two-strike rule break it",
+                  file=sys.stderr)
+        print(f"deferred_lock: chain.lock held; {n_live + n_dead} verdict(s) not "
+              f"chained this run, the next assessment will re-judge the same record")
+        return 0
+
+    written = 0
+    try:
+        for sid in sorted(report):
+            r = report[sid]
+            if r["verdict"] == "hold":
+                continue
+            metrics = ({k: r[k] for k in ("forward_days", "forward_trades",
+                                          "terminal", "cone_p01", "psr",
+                                          "eligible")}
+                       | {"protocol": protocol, "cohort_size": r.get("cohort_size")})
+            if v2:
+                # a buried strategy was never hold-tested: its p fields are None
+                metrics |= {k: r.get(k) for k in ("p_zero", "p_hold", "p",
+                                                  "p_hold_paths")}
+            registry.record_verdict(
+                sid, "live_gate", "pass" if r["verdict"] == "live" else "fail",
+                metrics, "0" * 64)
+            written += 1
+        for sid in sorted(report):
+            r = report[sid]
+            if r["verdict"] == "live":
+                registry.record_state_change(sid, "live", f"{protocol} pass")
+                written += 1
+            elif r["verdict"] == "graveyard":
+                registry.record_state_change(
+                    sid, "graveyard", "forward record below the rebuilt cone")
+                written += 1
+    except BaseException:
+        print(f"\nPARTIAL WRITE: {written} entries chained before failure.",
+              file=sys.stderr)
+        raise
+    finally:
+        lock.release()
+
+    print(f"\n{len(report)} assessed: {n_live} -> live, {n_dead} -> graveyard.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(run())

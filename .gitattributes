@@ -1,0 +1,4 @@
+# Chain mirror segments (research-layer/docs/2026-10-09-registry-segments-design.md):
+# stored and checked out byte for byte. Their sha256 in MANIFEST.json is over
+# these exact LF bytes; core.autocrlf must never convert them.
+research-layer/registry_log.d/** -text

@@ -1,0 +1,291 @@
+"""gauntlet_core: the standalone six-gate battery (Build 2a, 2026-09-30)."""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+from . import gauntlet, gauntlet_core
+from .engine import run_spec
+from .test_gauntlet import GOOD_IS, GOOD_OOS, STEADY_RETURNS
+from .test_screen import screening_registry, dated_target_hit_bars
+
+LAYER = Path(__file__).resolve().parent.parent
+
+
+def test_the_core_imports_no_clustering_or_pbo():
+    """The worker's verdict path must not be able to compute group
+    statistics: protocol-v6 retired every group gate, and the family kill
+    survived in code (5 burials) precisely because it was reachable."""
+    code = ("import sys; import pipeline.gauntlet_core; "
+            "bad = [m for m in ('pipeline.cluster', 'pipeline.pbo') if m in sys.modules]; "
+            "print(bad); sys.exit(1 if bad else 0)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=LAYER,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_gates_match_evaluate_spec_on_every_gate_field():
+    kw = dict(is_vol=0.02, oos_vol=0.02, seed=7, train_sharpe=1.1)
+    p1, r1, m1, mc1 = gauntlet_core.evaluate_gates(GOOD_IS, GOOD_OOS, GOOD_OOS, **kw)
+    p2, r2, m2, mc2 = gauntlet.evaluate_spec(
+        GOOD_IS, GOOD_OOS, GOOD_OOS, STEADY_RETURNS, 0.02, 0.02,
+        trials_n=10, trials_sr_var=0.5, seed=7, train_sharpe=1.1)
+    assert (p1, r1, mc1) == (p2, r2, mc2)
+    for k, v in m1.items():
+        if k == "protocol":
+            continue
+        assert m2[k] == v, k
+
+
+def test_gates_carry_no_group_statistic():
+    _, _, m, _ = gauntlet_core.evaluate_gates(
+        GOOD_IS, GOOD_OOS, GOOD_OOS, 0.02, 0.02, 7, 1.1)
+    for k in ("deflated_sharpe", "trials_n", "registered_n", "trials_sr_var",
+              "expected_max_sharpe", "sibling_group_n", "pbo", "pbo_percentile",
+              "pbo_family_kill", "plateau_ok", "haircut"):
+        assert k not in m, k
+    assert m["protocol"] == gauntlet_core.PROTOCOL_V61
+
+
+def test_gauntlet_reexports_the_moved_names():
+    for name in ("FAIL_ORDER", "split_trades", "contributions", "compound",
+                 "window_vol", "stressed", "write_gauntlet_artifacts",
+                 "DEFAULT_CUTOFF", "_spec_bars"):
+        assert getattr(gauntlet, name) is getattr(gauntlet_core, name), name
+
+
+# ---- evaluate_standalone, end to end on a one-trade fixture ----------------
+
+FIXTURE_CUTOFF = "2023-01-21"   # the fixture's single trade enters after it (OOS)
+GROUP_KEYS = ("haircut", "plateau_ok", "trials_n", "registered_n",
+              "deflated_sharpe", "sibling_group_n", "sim_cache",
+              "trials_alignment", "pbo", "pbo_family_kill")
+
+
+def _fixture(tmp_path):
+    _, spec = screening_registry(tmp_path)
+    bars = {"BTCUSD": dated_target_hit_bars()}
+    return spec, gauntlet_core._spec_bars({("BTCUSD", "1d"): bars["BTCUSD"]}, spec)
+
+
+def test_standalone_result_shape_and_no_group_keys(tmp_path):
+    spec, sb = _fixture(tmp_path)
+    out = gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False)
+    assert set(out) == {"sid", "passed", "reason", "metrics", "mc_summary",
+                        "oos_trades"}
+    assert out["sid"] == spec["strategy_id"]
+    for k in GROUP_KEYS:
+        assert k not in out["metrics"], k
+    assert out["metrics"]["protocol"] == gauntlet_core.PROTOCOL_V61
+    assert out["metrics"]["perturbation"] is None
+    assert out["metrics"]["walkforward"]["window"] == "train"
+    assert out["metrics"]["regime"]["window"] == "oos"
+    assert out["metrics"]["open_at_end"] is False
+    assert len(out["oos_trades"]) == 1
+
+
+def test_standalone_verdict_equals_gates_over_its_own_trades(tmp_path):
+    spec, sb = _fixture(tmp_path)
+    out = gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False)
+    res = run_spec(spec, sb)
+    stress = run_spec(gauntlet_core.stressed(spec), sb)
+    is_t, oos_t = gauntlet_core.split_trades(res["trades"], FIXTURE_CUTOFF)
+    _, stress_oos = gauntlet_core.split_trades(stress["trades"], FIXTURE_CUTOFF)
+    assets = spec["universe"]["assets"]
+    dated = gauntlet_core.daily_returns_with_dates(res["equity"])
+    train_sharpe = gauntlet_core._annualized_sharpe_from_returns(
+        [r for d, r in dated if gauntlet_core._date_le(d, FIXTURE_CUTOFF)])
+    passed, reason, metrics, mc = gauntlet_core.evaluate_gates(
+        is_t, oos_t, stress_oos,
+        gauntlet_core.window_vol(sb, assets, "", FIXTURE_CUTOFF),
+        gauntlet_core.window_vol(sb, assets, FIXTURE_CUTOFF, "9999-12-31"),
+        seed=int(spec["strategy_id"], 16) % (2 ** 31), train_sharpe=train_sharpe)
+    assert (out["passed"], out["reason"]) == (passed, reason)
+    assert out["mc_summary"] == mc
+    assert out["oos_trades"] == oos_t
+    for k, v in metrics.items():
+        assert out["metrics"][k] == v, k
+
+
+def test_standalone_seed_is_the_strategy_id_mod_2_31(tmp_path):
+    spec, sb = _fixture(tmp_path)
+    out = gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False)
+    assert out["mc_summary"]["seed"] == int(spec["strategy_id"], 16) % (2 ** 31)
+    # a hand-made id with bit 30 set and bits above 31 set, so a wrong modulus
+    # (2**30, 2**32) cannot coincide with the right one by luck of the hash
+    forced = dict(spec, strategy_id="1" + "f" * 15 + "c0ffee11")
+    out = gauntlet_core.evaluate_standalone(forced, sb, FIXTURE_CUTOFF,
+                                            perturb=False)
+    assert out["mc_summary"]["seed"] == int(forced["strategy_id"], 16) % (2 ** 31)
+    assert out["mc_summary"]["seed"] == 0x40ffee11
+
+
+# ---- Switch 1: the benchmark control on a legacy pooled crypto spec --------
+
+def _pooled_fixture(tmp_path):
+    """The pre-switch shape: one 2-asset BTCUSD+ETHUSD crypto spec (every
+    pre-switch crypto strategy, 533 at 2026-10-17, looks like this)."""
+    import json
+    _, spec = screening_registry(tmp_path)
+    spec = json.loads(json.dumps(spec))
+    spec["universe"]["assets"] = ["BTCUSD", "ETHUSD"]
+    bars = {("BTCUSD", "1d"): dated_target_hit_bars(),
+            ("ETHUSD", "1d"): dated_target_hit_bars()}
+    return spec, gauntlet_core._spec_bars(bars, spec)
+
+
+def test_the_default_still_raises_on_a_multi_asset_crypto_spec(tmp_path):
+    """The gauntlet worker calls evaluate_standalone with the default, and a
+    multi-asset spec of a benchmark:"self" class must keep failing LOUDLY
+    there (crypto is "self" since Switch 1)."""
+    import pytest
+    spec, sb = _pooled_fixture(tmp_path)
+    with pytest.raises(ValueError, match="exactly one asset per cell"):
+        gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False)
+
+
+def test_record_benchmark_false_skips_only_the_control(tmp_path):
+    """The parity tools' keyword: the pooled spec completes with no control
+    key, and on a single-asset spec the result differs from the default by
+    exactly the benchmark_relative key."""
+    spec, sb = _pooled_fixture(tmp_path)
+    out = gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False,
+                                            record_benchmark=False)
+    assert "benchmark_relative" not in out["metrics"]
+    one, sb1 = _fixture(tmp_path / "one")
+    with_b = gauntlet_core.evaluate_standalone(one, sb1, FIXTURE_CUTOFF, perturb=False)
+    without = gauntlet_core.evaluate_standalone(one, sb1, FIXTURE_CUTOFF, perturb=False,
+                                                record_benchmark=False)
+    assert "benchmark_relative" in with_b["metrics"]
+    with_b["metrics"].pop("benchmark_relative")
+    assert with_b == without
+
+
+# ---- beats-hold T3: the opt-in v6.2 battery --------------------------------
+
+def _long_fixture(tmp_path, bars, slippage=None):
+    """The screening spec (single-asset crypto, benchmark "self") on a
+    1000-day calendar whose OOS window (after V4_CUTOFF) is 270 days, enough
+    for both Sharpes in the beats_hold comparison."""
+    import json
+    _, spec = screening_registry(tmp_path)
+    if slippage is not None:
+        spec = json.loads(json.dumps(spec))
+        spec["cost_model"]["slippage_ticks"] = slippage
+    return spec, gauntlet_core._spec_bars({("BTCUSD", "1d"): bars}, spec)
+
+
+def _zigzag_bars(n=1000):
+    """A noisy uptrend: closes alternate +2% / -0.5%. Every breakout trade of
+    the screening spec wins (six gates pass), but holding the asset has the
+    higher Sharpe (beats_hold fails)."""
+    from datetime import datetime, timedelta
+    bars, px = [], 100.0
+    for i in range(n):
+        o = px
+        px *= 1.02 if i % 2 == 0 else 0.995
+        bars.append({"date": (datetime(2022, 1, 1) + timedelta(days=i)).strftime("%Y-%m-%d"),
+                     "open": o, "high": max(o, px), "low": min(o, px),
+                     "close": px, "volume": 1.0})
+    return bars
+
+
+def test_default_battery_is_byte_identical(tmp_path):
+    import json
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, v4_bars())
+    default = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.1")
+    assert json.dumps(default, sort_keys=True) == json.dumps(v61, sort_keys=True)
+    assert "beats_hold" not in default["metrics"]
+    assert default["metrics"]["protocol"] == "gauntlet-protocol-v6.1"
+
+
+def test_v62_six_gate_fields_equal_v61(tmp_path):
+    from .test_gauntlet import v4_bars, V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, v4_bars())
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    for k, v in v61["metrics"].items():
+        if k != "protocol":
+            assert v62["metrics"][k] == v, k
+    assert set(v62["metrics"]) - set(v61["metrics"]) == {"beats_hold"}
+    assert v62["metrics"]["protocol"] == "gauntlet-protocol-v6.2"
+    # this fixture beats its hold, so the verdict is the six gates' own
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] > bh["hold_sharpe"] and bh["window"] == "oos"
+    assert (v62["passed"], v62["reason"]) == (v61["passed"], v61["reason"]) == (True, None)
+    assert v62["mc_summary"] == v61["mc_summary"]
+    assert v62["oos_trades"] == v61["oos_trades"]
+    assert gauntlet_core.FAIL_ORDER == ("sharpe_floor", "oos_negative", "edge_decay",
+                                        "mc_p05", "p_ruin", "cost_stress")
+    assert gauntlet_core.FAIL_ORDER_V62 == gauntlet_core.FAIL_ORDER + ("beats_hold",)
+
+
+def test_v62_fails_beats_hold_only_when_six_gates_pass(tmp_path):
+    from .test_gauntlet import V4_CUTOFF
+    spec, sb = _long_fixture(tmp_path, _zigzag_bars())
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert (v61["passed"], v61["reason"]) == (True, None)
+    assert (v62["passed"], v62["reason"]) == (False, "beats_hold")
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] < bh["hold_sharpe"]
+
+    # doubled slippage loses money here: cost_stress fails first and keeps
+    # the reason, though the hold still wins (and is still recorded)
+    spec, sb = _long_fixture(tmp_path / "cs", _zigzag_bars(), slippage=0.015)
+    v61 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False)
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert (v61["passed"], v61["reason"]) == (False, "cost_stress")
+    assert (v62["passed"], v62["reason"]) == (False, "cost_stress")
+    bh = v62["metrics"]["beats_hold"]
+    assert bh["strategy_sharpe"] < bh["hold_sharpe"]
+
+
+def test_v62_on_a_class_without_a_self_benchmark_records_nothing(tmp_path, monkeypatch):
+    """Not applicable (benchmark is not "self"): no beats_hold key, the
+    six gates decide, and the protocol is still v6.2."""
+    from . import cells
+    from .test_gauntlet import V4_CUTOFF
+    monkeypatch.setitem(cells.CLASSES, "crypto",
+                        dict(cells.CLASSES["crypto"], benchmark=None))
+    spec, sb = _long_fixture(tmp_path, _zigzag_bars())
+    v62 = gauntlet_core.evaluate_standalone(spec, sb, V4_CUTOFF, perturb=False,
+                                            battery="v6.2")
+    assert "beats_hold" not in v62["metrics"]
+    assert (v62["passed"], v62["reason"]) == (True, None)
+    assert v62["metrics"]["protocol"] == "gauntlet-protocol-v6.2"
+
+
+def test_an_unknown_battery_is_refused(tmp_path):
+    import pytest
+    spec, sb = _fixture(tmp_path)
+    with pytest.raises(ValueError, match="battery"):
+        gauntlet_core.evaluate_standalone(spec, sb, FIXTURE_CUTOFF, perturb=False,
+                                          battery="v6.3")
+
+
+def test_process_memory_mb_shape():
+    """Memory spec s3.2 item 3: (PrivateUsage, PeakPagefileUsage) in MiB from
+    GetProcessMemoryInfo (PROCESS_MEMORY_COUNTERS_EX). On Windows two
+    positive ints, the peak at or above the current private commit; touching
+    a fresh 64 MiB buffer raises the private commit by at least 60 MiB, and
+    the peak stays at or above it. None off Windows."""
+    import os
+    got = gauntlet_core.process_memory_mb()
+    if os.name != "nt":
+        assert got is None
+        return
+    private, peak = got
+    assert type(private) is int and type(peak) is int
+    assert private > 0 and peak >= private
+    blob = bytearray(64 * 2**20)                # committed and touched
+    private2, peak2 = gauntlet_core.process_memory_mb()
+    assert private2 >= private + 60 and peak2 >= private2
+    del blob

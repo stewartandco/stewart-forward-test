@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GRTUSDT,long,2021-02-23 04:00:00,1.87018,2021-03-01 16:00:00,1.75907,signal:zscore_revert,-0.06241139355570058
+GRTUSDT,long,2021-08-26 08:00:00,0.8758,2021-09-01 12:00:00,0.8944,signal:zscore_revert,0.018237725508106876
+GRTUSDT,long,2023-02-22 16:00:00,0.1553,2023-02-27 16:00:00,0.16,signal:zscore_revert,0.027264005151320107
+GRTUSDT,long,2023-11-14 00:00:00,0.1241,2023-11-15 16:00:00,0.1326,signal:zscore_revert,0.06549315068493156

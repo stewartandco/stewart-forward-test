@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWA,long,2024-08-19 00:00:00,25.2,2024-08-20 00:00:00,25.37,signal:ma_crossunder,0.006346031746031722,0.9557006125077817
+EWA,long,2026-01-23 00:00:00,27.17,2026-01-26 00:00:00,27.7,signal:ma_crossunder,0.01910680898049306,1.0
+EWA,long,2026-07-29 00:00:00,29.3,2026-07-30 00:00:00,29.5,signal:ma_crossunder,0.00642593856655278,1.0
+EWA,long,2026-10-28 00:00:00,29.49,2026-10-29 00:00:00,29.63,signal:ma_crossunder,0.0043473719905053445,1.0

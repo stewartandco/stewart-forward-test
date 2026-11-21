@@ -1,0 +1,270 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "IOTAUSDT_4h": "2026-11-13 20:00:00"
+ },
+ "data_sha256": {
+  "IOTAUSDT_4h": "57f6aa047e5a13cbddf21f8806f92b3b3289cc3877a09b48e3367975e240a197"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.4016971116645969,
+   "n_days": 1048,
+   "strategy_sharpe": -0.9483110880706581,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8902422680412371,
+   "excess": 0.5752151775063002,
+   "strategy_net": -0.3150270905349368,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.35694180182430835,
+  "edge_decay_pct": -1412.5127153318513,
+  "exit_reasons_is": {
+   "signal:tstat_decay": 126,
+   "stop": 193,
+   "target": 162
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 62,
+   "stop": 103,
+   "target": 73
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0001256349073302791,
+  "is_edge_raw": 0.0001353661332196894,
+  "is_vol": 1.077456386096804,
+  "mc_p05_equity": 0.3449360564085523,
+  "oos_edge_per_trade": -0.001648974133605301,
+  "oos_edge_raw": -0.0014721607692023421,
+  "oos_vol": 0.8927737186414345,
+  "open_at_end": false,
+  "p_ruin": 0.3065,
+  "perturbation": {
+   "base_score": 0.09234057431275886,
+   "dense_only": true,
+   "mean_ratio": -0.029431549418942146,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": -3.768463900453657,
+     "score": -0.34798212084479,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 1.7230847884131484,
+     "score": 0.1591106389516487,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.7435925357027029,
+     "score": 0.06866376180146823,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0062010321065382,
+     "score": 0.09291318117880845,
+     "to": 3.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.0,
+     "ratio": -4.576110947727233,
+     "score": -0.42256071303203585,
+     "to": 1.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": 2.238205441892513,
+     "score": 0.20667717593429688,
+     "to": 2.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "down",
+     "from": 1.5,
+     "ratio": -0.6611170991697003,
+     "score": -0.06104793262531528,
+     "to": 1.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.5,
+     "ratio": 3.0591557538841503,
+     "score": 0.2824841992258432,
+     "to": 2.0
+    }
+   ],
+   "worst_ratio": -4.576110947727233
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 32,
+     "net": -0.0484428070259719,
+     "win_rate": 0.375,
+     "wins": 12
+    },
+    "trend_down": {
+     "n": 147,
+     "net": -0.3340130462982793,
+     "win_rate": 0.30612244897959184,
+     "wins": 45
+    },
+    "trend_up": {
+     "n": 59,
+     "net": 0.0320815902540937,
+     "win_rate": 0.4406779661016949,
+     "wins": 26
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.09234057431275886,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.8379726485177738,
+     "n_trades": 132,
+     "net": -0.04789047651436943
+    },
+    {
+     "min_equity": 0.9744286120005432,
+     "n_trades": 190,
+     "net": 0.16016757701462542
+    },
+    {
+     "min_equity": 0.8841213686316316,
+     "n_trades": 159,
+     "net": -0.04716599042158538
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.5
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "tstat_trend_long_profit_target_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "IOTA 4h tstat_trend_long_profit_target_mesh dlong ml90 tm2.5 ml90 te0.5 al14 m2.0 r1.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "73ba48a43e430161",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_long_profit_target_mesh-2026-11-14-120014-loop-crypto:IOTAUSDT_4h"
+  },
+  "strategy_id": "86f96dab5973b11c",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "IOTAUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

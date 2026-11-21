@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+MANAUSDT,short,2021-09-23 00:00:00,0.7328,2021-10-28 00:00:00,0.9456892455471118,stop,-0.2935148001461677
+MANAUSDT,short,2022-04-07 00:00:00,2.3289,2023-01-16 00:00:00,0.6982,signal:regime_flip,0.6972018120142557
+MANAUSDT,short,2023-03-11 00:00:00,0.5267,2023-03-14 00:00:00,0.5951,signal:regime_flip,-0.1328651984051642

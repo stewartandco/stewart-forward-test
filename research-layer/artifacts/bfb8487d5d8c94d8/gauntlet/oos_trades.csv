@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+AUD,short,2024-04-15 00:00:00,0.6469,2024-04-29 00:00:00,0.6565,stop,-0.015714718827013967,1.0
+AUD,short,2024-08-06 00:00:00,0.6519,2024-08-14 00:00:00,0.6617,signal:regime_flip,-0.015677808104691236,1.0
+AUD,short,2024-10-30 00:00:00,0.6584,2025-03-18 00:00:00,0.6356,signal:regime_flip,0.028984577031046937,1.0

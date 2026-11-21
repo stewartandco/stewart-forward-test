@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+EWC,long,2024-08-16 00:00:00,39.13,2025-03-05 00:00:00,40.04,signal:regime_flip,0.02285581395348819,1.0

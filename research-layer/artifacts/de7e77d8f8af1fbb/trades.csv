@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+OPUSDT,long,2023-07-31 12:00:00,1.684,2023-08-15 12:00:00,1.4860841665214082,stop,-0.12052721703004265
+OPUSDT,long,2023-11-05 00:00:00,1.499,2023-11-22 00:00:00,1.59,signal:channel_exit,0.057707138092061405

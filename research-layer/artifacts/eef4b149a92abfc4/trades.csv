@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+CVXUSDT,short,2022-08-20 00:00:00,5.21,2022-10-13 00:00:00,5.914,signal:regime_flip,-0.13812476007677532
+CVXUSDT,short,2022-11-09 00:00:00,4.39,2022-11-13 00:00:00,5.340255046728386,stop,-0.21945900836637489
+CVXUSDT,short,2023-07-25 00:00:00,3.377,2023-10-30 00:00:00,2.939,signal:regime_flip,0.12670091797453353

@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWZ,long,2010-02-05 00:00:00,63.44,2010-02-17 00:00:00,69.07,signal:zscore_revert,0.08834527112232023
+EWZ,long,2011-02-07 00:00:00,71.41,2011-02-10 00:00:00,75.90258970404439,target,0.06251261313603691

@@ -1,0 +1,120 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "cadd086a842a8838568e437c22d181eea083474f508b2ec1e1c34b476317cfee",
+  "EEM_1d": "5b3cd44d8d056d3ac87debdb4c1f34dac7cbdd69268dafc226677433ce8e7d23",
+  "EFA_1d": "da67f4ab3c36b0e00f301a7379b7ca70a39343e7ecfc710c95f7aa728987016c",
+  "EWA_1d": "89558c46f91dd8d6009f631db505527cd50818b6f416a073ef724f43f7bb3bff",
+  "EWC_1d": "300efa216207555dd5e57a16aa21a049663e52a9c47f4c06b2a871773257a935",
+  "EWG_1d": "8318597587d936dee183bb3756e7a19e33848ed8ef2fe7175c58ef36f3672182",
+  "EWH_1d": "303e05dd7ec1de46d98b325912c556b3a0aaa0eb1848a582cd249a965de13e3c",
+  "EWJ_1d": "4ed016fdb60823096339a853942dc36dbcb95eac0344bc78b1aae9b231e97f3f",
+  "EWU_1d": "11f06ecc5bef39b1133ec046d18eefa7e5c08a4a9dcf0ef1a5e23739a65f30f0",
+  "EWY_1d": "cf3a0bad9db67d45f4b0a3bd0119e380beb178aeb4669c2f808d05d421dc128a",
+  "EWZ_1d": "3a7beafca347c457adfbfc9590bf8586d3cffdcf1c4b1883508a2db535c94683",
+  "FXI_1d": "98535ba5c855530291d4ce702e319e0154856c0d753e3b5611794bbbced58941",
+  "IWM_1d": "e8a275da476a870331b7d609de7ec4b60f195cd3c8dcb2668b215e4e64f0a0eb",
+  "MDY_1d": "b1b8d4ab71843e15e59924f08496cbb6587aea624fff72099e30424d863533cf",
+  "QQQ_1d": "6730a3815283c29952335a95eb0bcad094eb96ca4397fad412834251a334acf8",
+  "SPY_1d": "63e5efc9e162264ae7761a51279315686ab458ff8b860a03137f2e173932c24e"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 20,
+     "slow": 100
+    },
+    "role": "entry",
+    "type": "ma_cross_ds"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-10T12:10:24Z",
+  "family": "bear_regime_short_macross",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-10-120054-loop-equity_etf"
+  },
+  "name": "IWM 1d bear_regime_short_macross dshort f20 s100 ml200 ml200 al14 m3.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "10ee57da792af045",
+    "3042ee8aec83f2f2",
+    "3e9b146f141385b6",
+    "799502905879efbd",
+    "df3f0c850d2c121e",
+    "e6cc6c4188b35751",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "bear_regime_short_macross-2026-10-10-120054-loop-equity_etf:IWM_1d"
+  },
+  "strategy_id": "450d7c264c88dbe5",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "IWM"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

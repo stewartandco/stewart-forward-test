@@ -1,0 +1,268 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "THETAUSDT_4h": "2026-11-13 20:00:00"
+ },
+ "data_sha256": {
+  "THETAUSDT_4h": "9ffff9a228627a82e0070f06564756c3334c8d53ee53bb968f47bce406f08cfe"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.2750513614803288,
+   "n_days": 1048,
+   "strategy_sharpe": 1.1306408551048766,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.88996,
+   "excess": 1.7753200223429895,
+   "strategy_net": 0.8853600223429896,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.8629361663092039,
+  "edge_decay_pct": 202.68062170463114,
+  "exit_reasons_is": {
+   "signal:channel_exit": 21,
+   "stop": 39
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 18,
+   "stop": 19
+  },
+  "fail_reason": "mc_p05",
+  "is_edge_per_trade": 0.008833881471865646,
+  "is_edge_raw": 0.010619262978294405,
+  "is_vol": 1.2021061197294625,
+  "mc_p05_equity": 0.8579820541111203,
+  "oos_edge_per_trade": 0.026738447359693156,
+  "oos_edge_raw": 0.026453659481108786,
+  "oos_vol": 0.9893491243244859,
+  "open_at_end": false,
+  "p_ruin": 0.013,
+  "perturbation": {
+   "base_score": 0.5954438352650531,
+   "dense_only": true,
+   "mean_ratio": 0.9952211004263962,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 55,
+     "ratio": 1.0080495389407602,
+     "score": 0.6002368836040547,
+     "to": 35
+    },
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 55,
+     "ratio": 1.0299426713191249,
+     "score": 0.6132730143133936,
+     "to": 75
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.0001460537855078,
+     "score": 0.5955308020912509,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.018969590016616,
+     "score": 0.6067391606979525,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.9,
+     "ratio": 0.8685582781251769,
+     "score": 0.517177672278066,
+     "to": 0.8
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.9,
+     "ratio": 0.9283138952328104,
+     "score": 0.5527587861072653,
+     "to": 1.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0591326042377796,
+     "score": 0.6306539799216071,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0486561717533944,
+     "score": 0.6244158527832093,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.8685582781251769
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 2,
+     "net": -0.02680323073818229,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 25,
+     "net": -0.024670225619356473,
+     "win_rate": 0.24,
+     "wins": 6
+    },
+    "trend_up": {
+     "n": 10,
+     "net": 1.030258857158564,
+     "win_rate": 0.2,
+     "wins": 2
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5954438352650531,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9792852244313358,
+     "n_trades": 10,
+     "net": 0.09401742419847459
+    },
+    {
+     "min_equity": 0.9198092660454545,
+     "n_trades": 26,
+     "net": 0.5050492845405028
+    },
+    {
+     "min_equity": 0.8282321084101437,
+     "n_trades": 24,
+     "net": 0.03808906995868684
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "donchian_breakout_long_fixedfraction",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "THETA 4h donchian_breakout_long_fixedfraction dlong l55 l120 mp0.9 l20 al14 m2.5 f0.02",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "3605eedc183f09ce",
+    "4e907fc4974a48f9",
+    "6078cc70ec7b8303",
+    "6dba955b6b43f40d",
+    "80a41669681d747b",
+    "9a6abe19343ae46f",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "donchian_breakout_long_fixedfraction-2026-11-14-120014-loop-crypto:THETAUSDT_4h"
+  },
+  "strategy_id": "d6f4ff6b4c02d454",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "THETAUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,185 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "STXUSDT_12h": "2026-11-03 12:00:00"
+ },
+ "data_sha256": {
+  "STXUSDT_12h": "3fa55140fbb335bac0eb4442a5f7d724fe9202fd69713ff0b8addb0d6858ce82"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.7847174145299145,
+   "excess": 0.8568691972080973,
+   "strategy_net": 0.07215178267818279,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.07027504631977144,
+  "edge_decay_pct": -53.711904698827986,
+  "exit_reasons_is": {
+   "signal:channel_exit": 33,
+   "stop": 12
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 32,
+   "stop": 5
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.00436563500488554,
+  "is_edge_raw": 0.006063485972504291,
+  "is_vol": 1.3889127161841752,
+  "mc_p05_equity": 1.0257973661787037,
+  "oos_edge_per_trade": 0.0020207692915627444,
+  "oos_edge_raw": 0.0019807590401235507,
+  "oos_vol": 0.9802004852279538,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.6488340531569483,
+   "dense_only": true,
+   "mean_ratio": 0.8830888653008535,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 20,
+     "ratio": 0.8830888653008535,
+     "score": 0.5729781277709232,
+     "to": 35
+    }
+   ],
+   "worst_ratio": 0.8830888653008535
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 2,
+     "net": -0.012081362870030643,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 28,
+     "net": 0.03071326872326694,
+     "win_rate": 0.35714285714285715,
+     "wins": 10
+    },
+    "trend_up": {
+     "n": 7,
+     "net": 0.05465617863133508,
+     "win_rate": 0.42857142857142855,
+     "wins": 3
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.6488340531569483,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.991393564684832,
+     "n_trades": 14,
+     "net": 0.10488897396126418
+    },
+    {
+     "min_equity": 0.9499066954742695,
+     "n_trades": 18,
+     "net": -0.040810715371860894
+    },
+    {
+     "min_equity": 0.9936009754949756,
+     "n_trades": 13,
+     "net": 0.2087786101732898
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 20
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "STX 12h range_breakout_both_sides dboth l20 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:STXUSDT_12h"
+  },
+  "strategy_id": "6617f7e3fa53a0ba",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "STXUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

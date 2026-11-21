@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+NEXOUSDT,short,2023-03-10 00:00:00,0.598,2023-10-24 00:00:00,0.604,signal:channel_exit,-0.013033444816053504

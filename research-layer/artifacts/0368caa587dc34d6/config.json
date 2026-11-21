@@ -1,0 +1,130 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "16faff050c0c2e2c60278ca0dbb911237097d4554fdd929b0efd1c59d527c817",
+  "EEM_1d": "e1645e4ae85ca9484c1437c7fec654a8c4c5d3739e883985b380b7813b3c223d",
+  "EFA_1d": "919f570c139335be4623d1130e0e2527338011afb9d8f1044bb5fce8d01536fc",
+  "EWA_1d": "60716f8abc57d292a30fc650b44ad2f554c9444e85f4b657044f18e4581149af",
+  "EWC_1d": "55dd01e8373ce2264526306c7dc2a60422c4cb56ec1cfc058287dc43c10545de",
+  "EWG_1d": "f516cd4698c906055d16769a3592ca2a7e194440863e08199b8ed6bcc348a63a",
+  "EWH_1d": "f88d88ee22080468856fc6aab9109b275f20965ba3d3540e05c3bae884835176",
+  "EWJ_1d": "bb10909fa2bacd3b29090d3e0daa0dd8ad44460653b287e977f863f82adb0498",
+  "EWU_1d": "6ddaf68489df88b0eb73f2524d022d67c0884edaa23f1887d7d970429ecceb60",
+  "EWY_1d": "ad361e68c91c1de1620aea8b19ad461379e3484c161497eaafd58ceaa4b27464",
+  "EWZ_1d": "9f8312832b3aaee04181ac034e6834f50dc8358dede93469a044678e55a8bb7c",
+  "FXI_1d": "e3d1575f04ece86ab34d35ff61df121e0017dc923afbc514b2d3e8fde58295d5",
+  "IWM_1d": "69653ccf9372e891fdb57165bd2cd8f374895207050fbe5c5506fdbe57cdffe8",
+  "MDY_1d": "a2cc9d2483ebeeadc9948163f590c60270fb500a04f5196387264ade0baedb95",
+  "QQQ_1d": "42d802e253b1900566acb56dc763cc5f6732cef67c0aa995f887f08e2ac49010",
+  "SPY_1d": "566e393a111b20fe24b39dc5e5a56d758ca8341f2cb30dd3a988f5365dba4afb"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 35
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-25T12:27:08Z",
+  "family": "regime_gated_channel_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-25-120009-loop-equity_etf"
+  },
+  "name": "EWH 1d regime_gated_channel_breakout dlong l35 ml200 l120 mp0.9 l20 al14 m3.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0083aff5f697cff4",
+    "2243c5930df5c5be",
+    "538cb5fd38ba4ef3",
+    "5bccc3b77e310e91",
+    "6c11ed7c0ba9f7eb",
+    "80a41669681d747b",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91",
+    "ed9ad3790c1bed9a"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "regime_gated_channel_breakout-2026-10-25-120009-loop-equity_etf:EWH_1d"
+  },
+  "strategy_id": "0368caa587dc34d6",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "EWH"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

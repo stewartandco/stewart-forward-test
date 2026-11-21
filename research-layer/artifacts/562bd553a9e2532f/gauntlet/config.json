@@ -1,0 +1,272 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "EFA_1d": "2026-11-02 00:00:00"
+ },
+ "data_sha256": {
+  "EFA_1d": "65f2a9a1afedda7005f3c5b57f2d24926a8df3b57ba3041fb220cb29c78b4b35"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": 0.3907993560504425,
+   "excess": -0.4440238697762217,
+   "strategy_net": -0.05322451372577919,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.05539518205381666,
+  "edge_decay_pct": -165.94912923626842,
+  "era_summary": {
+   "covid_cycle": {
+    "n_trades": 8,
+    "net_pnl": 0.012144741597446718
+   },
+   "dotcom_gfc": {
+    "n_trades": 19,
+    "net_pnl": 0.563496968844881
+   },
+   "post_2022": {
+    "n_trades": 19,
+    "net_pnl": 0.00281150870474578
+   },
+   "qe_bull": {
+    "n_trades": 53,
+    "net_pnl": 0.14983454968594612
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 46,
+   "stop": 41
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 6,
+   "stop": 6
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.03440791427320387,
+  "is_edge_raw": 0.00886520365664453,
+  "is_vol": 0.2576501320671029,
+  "mc_p05_equity": 0.8845996872662759,
+  "oos_edge_per_trade": -0.022691719851539668,
+  "oos_edge_raw": -0.004227407835940638,
+  "oos_vol": 0.18629737470753244,
+  "open_at_end": false,
+  "p_ruin": 0.0025,
+  "perturbation": {
+   "base_score": 0.42215671938234817,
+   "dense_only": true,
+   "mean_ratio": 1.0283714333124334,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 60,
+     "ratio": 0.9828631383468217,
+     "score": 0.41492227808633325,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.9289104565451367,
+     "score": 0.3921457909350542,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 0.990559941312911,
+     "score": 0.41817153517622985,
+     "to": 3.0
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.1185721116187695,
+     "score": 0.4722127330335655,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 0.9801705499741843,
+     "score": 0.4137855838122936,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 1.1587606089760134,
+     "score": 0.4891785772348058,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 1.038763226413197,
+     "score": 0.43852087587761857,
+     "to": 0.9
+    }
+   ],
+   "worst_ratio": 0.9289104565451367
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 4,
+     "net": -0.04230957692349941,
+     "win_rate": 0.5,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 8,
+     "net": -0.008419317107788253,
+     "win_rate": 0.25,
+     "wins": 2
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.42215671938234817,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.96757056476638,
+     "n_trades": 19,
+     "net": 0.5031702101690747
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 35,
+     "net": 0.17129267548652688
+    },
+    {
+     "min_equity": 0.95058613456009,
+     "n_trades": 33,
+     "net": 0.09680983247247235
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 60,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.0
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-03T12:17:57Z",
+  "family": "tstat_trend_long_volstate",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-03-120010-loop-equity_etf"
+  },
+  "name": "EFA 1d tstat_trend_long_volstate dlong ml60 tm2.5 l120 mp0.8 ml90 te0.0 ml50 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0634177be8e6f12b",
+    "2243c5930df5c5be",
+    "2ad3f28760f67217",
+    "303001052725c19f",
+    "3d4db3693d78d717",
+    "538cb5fd38ba4ef3",
+    "9a6abe19343ae46f",
+    "dcbe4d37af0f4eaa",
+    "e7371faa2a9e8b31",
+    "ed9ad3790c1bed9a"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_long_volstate-2026-11-03-120010-loop-equity_etf:EFA_1d"
+  },
+  "strategy_id": "562bd553a9e2532f",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "EFA"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

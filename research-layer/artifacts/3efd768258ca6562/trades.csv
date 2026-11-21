@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+MANAUSDT,long,2023-01-14 00:00:00,0.5311,2023-03-04 00:00:00,0.602,signal:channel_exit,0.13049651666352846

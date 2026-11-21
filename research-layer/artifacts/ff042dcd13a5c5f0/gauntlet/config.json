@@ -1,0 +1,226 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "JPY_1d": "2026-09-25 00:00:00"
+ },
+ "data_sha256": {
+  "JPY_1d": "e1f2d3b1f481cfefb36702a1b41c45abf62cc84eaa725da59d666ffd1401bc73"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.09757700725283139,
+   "excess": 0.19443827648002912,
+   "strategy_net": 0.09686126922719773,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.09468940641001944,
+  "edge_decay_pct": 20.75684701091978,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 48,
+    "net_pnl": 0.2059624239446458
+   },
+   "post_2022": {
+    "n_trades": 15,
+    "net_pnl": 0.10043589891381965
+   },
+   "pre_gfc": {
+    "n_trades": 78,
+    "net_pnl": -0.2622538988878328
+   },
+   "tightening": {
+    "n_trades": 34,
+    "net_pnl": 0.02059809773096477
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 261,
+   "stop": 11
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 10
+  },
+  "fail_reason": null,
+  "is_edge_per_trade": 0.06619786961746509,
+  "is_edge_raw": 0.008054998157197247,
+  "is_vol": 0.1216806251280341,
+  "mc_p05_equity": 1.8561487997124246,
+  "oos_edge_per_trade": 0.07993846013845046,
+  "oos_edge_raw": 0.009412739176846254,
+  "oos_vol": 0.11774981855471994,
+  "open_at_end": true,
+  "p_ruin": 0.003,
+  "perturbation": {
+   "base_score": 0.5025077678935802,
+   "dense_only": true,
+   "mean_ratio": 0.9973320237171812,
+   "n_perturbations": 3,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 60,
+     "ratio": 0.9846835702002004,
+     "score": 0.49481114294278417,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.995950239014926,
+     "score": 0.5004727315404681,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.011362261936417,
+     "score": 0.5082173927774714,
+     "to": 3.0
+    }
+   ],
+   "worst_ratio": 0.9846835702002004
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 10,
+     "net": 0.09412739176846256,
+     "win_rate": 0.6,
+     "wins": 6
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5025077678935802,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 64,
+     "net": 1.4994291249860514
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 113,
+     "net": 0.4547741206647091
+    },
+    {
+     "min_equity": 0.9288152819351028,
+     "n_trades": 95,
+     "net": 0.23675625310689183
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 60,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "band_stop"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-09-25T04:52:07Z",
+  "family": "fx_tstat_trend_two_sided",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-25-043929-loop-fx"
+  },
+  "name": "JPY 1d fx_tstat_trend_two_sided dboth ml60 tm2.5 l40 m2.5 ml90 te0.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "3d4db3693d78d717",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "a81e453c981f0c9d",
+    "c7c0e61fc25e8ba1",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_tstat_trend_two_sided-2026-09-25-043929-loop-fx:JPY_1d"
+  },
+  "strategy_id": "ff042dcd13a5c5f0",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "JPY"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

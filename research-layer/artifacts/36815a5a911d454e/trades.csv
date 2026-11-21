@@ -1,0 +1,6 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+DYDXUSDT,long,2022-12-17 00:00:00,1.401,2023-01-02 12:00:00,1.178,signal:zscore_revert,-0.1621720199857245
+DYDXUSDT,long,2023-05-09 00:00:00,2.129,2023-05-23 12:00:00,2.183,signal:zscore_revert,0.022364020666979626
+DYDXUSDT,long,2023-06-10 12:00:00,1.599,2023-06-21 00:00:00,1.793,signal:zscore_revert,0.11832582864290175
+DYDXUSDT,long,2023-08-04 00:00:00,1.912,2023-08-05 12:00:00,2.038,signal:zscore_revert,0.06289958158995812
+DYDXUSDT,long,2023-09-12 00:00:00,1.864,2023-09-16 12:00:00,1.995,signal:zscore_revert,0.0672789699570816

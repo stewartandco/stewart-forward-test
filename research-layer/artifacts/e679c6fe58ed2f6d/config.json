@@ -1,0 +1,114 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "751eeef36ea58c0d0a787a798ae599058f419e2f1f551b7e7fad0cc386e31585",
+  "CAD_1d": "6180171bc7b0a1da9a80d8ee66a41fcb25dbbe61167c9363ff90e4affdc24495",
+  "CHF_1d": "729af559edb23478167896040d9c93efeca8e34ecaaeeeef3a2ad976f44365d7",
+  "EUR_1d": "547879d46179192cbc4275d04208b73fb5668befb039db6d0fb8bd26891e3a0e",
+  "GBP_1d": "b6d4d9f669531e651a163e5d72916554ab1849a8b1ee1fd93717969dccd5fd64",
+  "JPY_1d": "a0d5f0c4cfa70663f0df6383735fd9400053c8c11992c0d69e2e8056e471424a",
+  "MXN_1d": "03a3232ad8275f27b8c3a9dbab4e6d93b44f00d478567797fcc280040ce17ca8",
+  "NOK_1d": "3ef22759ed5a0cae323273a89ec045bda185aa9a053b3553208a22a334a87b99",
+  "NZD_1d": "bf5f3ecfa98bd574937ad9e0db4a83006fef293b8df19d41cbd3b71f7767f08c",
+  "SEK_1d": "c260e7882ea8bb1cbce5ee6658fe12d8521d71ae79725fde6143f0da2c318efa",
+  "SGD_1d": "bfb042a64b552f9654efd08ac9be0e333e0a019fe88fb583b67d9e1c842691ff",
+  "ZAR_1d": "461796a994069a0c0e743e06227666e279d657ce282f75de1df270c5c3ac2238"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 20,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.7
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-02T12:18:56Z",
+  "family": "fx_trend_long_vol_filtered",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-02-120009-loop-fx"
+  },
+  "name": "CHF 1d fx_trend_long_vol_filtered dlong f20 s130 ml200 l120 mp0.7 ml50 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "2243c5930df5c5be",
+    "5d46eb5e6f34392f",
+    "9a6abe19343ae46f",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_trend_long_vol_filtered-2026-11-02-120009-loop-fx:CHF_1d"
+  },
+  "strategy_id": "e679c6fe58ed2f6d",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "CHF"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

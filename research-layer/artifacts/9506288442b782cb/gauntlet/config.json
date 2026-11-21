@@ -1,0 +1,230 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "NZD_1d": "2026-11-06 00:00:00"
+ },
+ "data_sha256": {
+  "NZD_1d": "7b1a210ca03efb592ac2f51fc6132bccfa215bde140516a2c7ac9150de8f3803"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, carry excluded on both sides",
+   "hold_sharpe": -0.5016197333594689,
+   "n_days": 715,
+   "strategy_sharpe": -0.3289212033203932,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, carry excluded on both sides",
+   "buy_hold_net": -0.11430287402203423,
+   "excess": 0.03666165523084122,
+   "strategy_net": -0.07764121879119301,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.07931545145017982,
+  "edge_decay_pct": -289.88670907154454,
+  "era_summary": {
+   "gfc_zirp": {
+    "n_trades": 16,
+    "net_pnl": 0.15177070377757684
+   },
+   "post_2022": {
+    "n_trades": 17,
+    "net_pnl": -0.13061953149221817
+   },
+   "pre_gfc": {
+    "n_trades": 21,
+    "net_pnl": -0.20974883948046175
+   },
+   "tightening": {
+    "n_trades": 13,
+    "net_pnl": -0.07130372431259835
+   }
+  },
+  "exit_reasons_is": {
+   "signal:tstat_decay": 56,
+   "stop": 61
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 6,
+   "stop": 3
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.041310987269076595,
+  "is_edge_raw": 0.0058646235817649784,
+  "is_vol": 0.14196280383148702,
+  "mc_p05_equity": 0.6600628422420735,
+  "oos_edge_per_trade": -0.07844407421021429,
+  "oos_edge_raw": -0.008722627886380703,
+  "oos_vol": 0.11119549786521567,
+  "open_at_end": true,
+  "p_ruin": 0.0325,
+  "perturbation": {
+   "base_score": 0.20923456509392546,
+   "dense_only": true,
+   "mean_ratio": 0.9792123811314493,
+   "n_perturbations": 2,
+   "reason": null,
+   "results": [
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "down",
+     "from": 150,
+     "ratio": 0.7976894900681304,
+     "score": 0.16690421353440044,
+     "to": 100
+    },
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "up",
+     "from": 150,
+     "ratio": 1.1607352721947681,
+     "score": 0.24286593986685148,
+     "to": 200
+    }
+   ],
+   "worst_ratio": 0.7976894900681304
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 9,
+     "net": -0.07850365097742633,
+     "win_rate": 0.1111111111111111,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.20923456509392546,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9256127276990684,
+     "n_trades": 34,
+     "net": 0.728915046696491
+    },
+    {
+     "min_equity": 0.9146692095072608,
+     "n_trades": 43,
+     "net": 0.05534673364417257
+    },
+    {
+     "min_equity": 0.8533222575730798,
+     "n_trades": 40,
+     "net": -0.09810082127416103
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "direction": "short",
+     "max_lookback": 90,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan_ds"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-13T12:17:44Z",
+  "family": "fx_short_side_downtrend",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "2a93663d364e38d3",
+   "run_id": "2026-11-13-120011-loop-fx",
+   "served_model": "claude-opus-5"
+  },
+  "name": "NZD 1d fx_short_side_downtrend ml150 dshort ml90 tm2.0 ml90 te0.5 ml50 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "3d4db3693d78d717",
+    "5d46eb5e6f34392f",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "f47c71d30d35547f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_short_side_downtrend-2026-11-13-120011-loop-fx:NZD_1d"
+  },
+  "strategy_id": "9506288442b782cb",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "NZD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

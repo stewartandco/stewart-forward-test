@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+NEARUSDT,long,2021-01-09 00:00:00,1.7375,2021-04-19 00:00:00,5.1563,signal:channel_exit,1.964654676258993
+NEARUSDT,long,2021-08-18 00:00:00,3.7312,2021-11-19 00:00:00,8.799,signal:channel_exit,1.3552225557461408
+NEARUSDT,long,2022-01-12 00:00:00,18.04,2022-01-21 00:00:00,13.206478653258202,stop,-0.27093355580608636

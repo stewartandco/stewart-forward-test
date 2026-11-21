@@ -1,0 +1,185 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "ALGOUSDT_12h": "2023-12-31 12:00:00",
+  "ALGOUSDT_1d": "2023-12-31 00:00:00",
+  "ALGOUSDT_1h": "2023-12-31 23:00:00",
+  "ALGOUSDT_4h": "2023-12-31 20:00:00",
+  "APTUSDT_12h": "2023-12-31 12:00:00",
+  "APTUSDT_1d": "2023-12-31 00:00:00",
+  "APTUSDT_1h": "2023-12-31 23:00:00",
+  "APTUSDT_4h": "2023-12-31 20:00:00",
+  "ATOMUSDT_12h": "2023-12-31 12:00:00",
+  "ATOMUSDT_1d": "2023-12-31 00:00:00",
+  "ATOMUSDT_1h": "2023-12-31 23:00:00",
+  "ATOMUSDT_4h": "2023-12-31 20:00:00",
+  "CAKEUSDT_12h": "2023-12-31 12:00:00",
+  "CAKEUSDT_1d": "2023-12-31 00:00:00",
+  "CAKEUSDT_1h": "2023-12-31 23:00:00",
+  "CAKEUSDT_4h": "2023-12-31 20:00:00",
+  "CRVUSDT_12h": "2023-12-31 12:00:00",
+  "CRVUSDT_1d": "2023-12-31 00:00:00",
+  "CRVUSDT_1h": "2023-12-31 23:00:00",
+  "CRVUSDT_4h": "2023-12-31 20:00:00",
+  "DASHUSDT_12h": "2023-12-31 12:00:00",
+  "DASHUSDT_1d": "2023-12-31 00:00:00",
+  "DASHUSDT_1h": "2023-12-31 23:00:00",
+  "DASHUSDT_4h": "2023-12-31 20:00:00",
+  "FILUSDT_12h": "2023-12-31 12:00:00",
+  "FILUSDT_1d": "2023-12-31 00:00:00",
+  "FILUSDT_1h": "2023-12-31 23:00:00",
+  "FILUSDT_4h": "2023-12-31 20:00:00",
+  "INJUSDT_12h": "2023-12-31 12:00:00",
+  "INJUSDT_1d": "2023-12-31 00:00:00",
+  "INJUSDT_1h": "2023-12-31 23:00:00",
+  "INJUSDT_4h": "2023-12-31 20:00:00",
+  "JSTUSDT_12h": "2023-12-31 12:00:00",
+  "JSTUSDT_1d": "2023-12-31 00:00:00",
+  "JSTUSDT_1h": "2023-12-31 23:00:00",
+  "JSTUSDT_4h": "2023-12-31 20:00:00",
+  "NEXOUSDT_12h": "2023-12-31 12:00:00",
+  "NEXOUSDT_1d": "2023-12-31 00:00:00",
+  "NEXOUSDT_1h": "2023-12-31 23:00:00",
+  "NEXOUSDT_4h": "2023-12-31 20:00:00",
+  "STXUSDT_12h": "2023-12-31 12:00:00",
+  "STXUSDT_1d": "2023-12-31 00:00:00",
+  "STXUSDT_1h": "2023-12-31 23:00:00",
+  "STXUSDT_4h": "2023-12-31 20:00:00",
+  "VETUSDT_12h": "2023-12-31 12:00:00",
+  "VETUSDT_1d": "2023-12-31 00:00:00",
+  "VETUSDT_1h": "2023-12-31 23:00:00",
+  "VETUSDT_4h": "2023-12-31 20:00:00"
+ },
+ "data_sha256": {
+  "ALGOUSDT_12h": "c5e9bed5db77e04a1e203b51f396b6987911039f81e079a281cf5d68b6842fae",
+  "ALGOUSDT_1d": "aba5673bf812808ce20f4831619512246c17ecf523d266961a581aec2de980a4",
+  "ALGOUSDT_1h": "6149bfac845ca05c93809d9e3dd16a8d47b7056cff9f2fa439125c7ca4134e5c",
+  "ALGOUSDT_4h": "0564ab303c176d4cf15da38f6dd8f5e2972960d43e36f1739e9d30da0e149d0c",
+  "APTUSDT_12h": "dff46436f8331b621991b556cc0557fea3fec11c0b61dbb0fecbc236630d594a",
+  "APTUSDT_1d": "ca60fc5f0b6a2974f7acde4968dd4c821ba7497f19bb3efc264eda57a0724628",
+  "APTUSDT_1h": "dede0f2e7998cc3694b63bf3a4e02805db81ffdbefa21390cc3ec501c50a9188",
+  "APTUSDT_4h": "f3b9278282ee1f58912fb31b194d8b14b1eb348cd1ef32ec5570d84c5294567d",
+  "ATOMUSDT_12h": "db6af0d8a0e06228fb75d1541a14f4f14baf6de8a597faee53f5b45487d66666",
+  "ATOMUSDT_1d": "c95521acbe4c952ff797134b2568013cdb060f30bd5cbc4c691b141f17b9ccb0",
+  "ATOMUSDT_1h": "d3987c958f1aec2a417ab6faae39e97e4a71ec731b5f530f879332e901926012",
+  "ATOMUSDT_4h": "3179134da7a9945ce00ba1c955e8f5ac618b291e711d709d9ac1ce0074b4a1bc",
+  "CAKEUSDT_12h": "8402926e99cb57491973534782c6a40bb06d875103589b32905fb1c4ca356155",
+  "CAKEUSDT_1d": "8c6a82718c7e2da6809a5ca9f067b546f9a20a526ca2c7023e46d921277b1b62",
+  "CAKEUSDT_1h": "f35ede7063e77994448b6258a73288e83971afea6963a766cae02ff82681bcc0",
+  "CAKEUSDT_4h": "bb12719949490d17d0cf05c745577ebc596a7d128cb8274a0df1d47aad9299a3",
+  "CRVUSDT_12h": "cbdaed6addfb18ac14a56ec91b9b43d1e99ae33d80948fd4094971fe0e7efe11",
+  "CRVUSDT_1d": "074eabfb2f56b922f4872eaa591b1923c5264cde93b8ef0bbb45034631163507",
+  "CRVUSDT_1h": "a1e46d9f3f9c060f4a2fffec21c70374f47a567cbe6ae80c181b509265e31bba",
+  "CRVUSDT_4h": "8444e404eb64b9f3315449fe80e05f9292d5b06c734118168b4c42a81d6551a9",
+  "DASHUSDT_12h": "d7e33e2f0ee5e2be8dbbba02cae7e5c29e5ccb3d3a4c915cc2da8c1ba87ce91e",
+  "DASHUSDT_1d": "bd5338ef956650677ec83a63c1c8679a00647b9d9eafe78ce7b51af412e15bf1",
+  "DASHUSDT_1h": "393348d5da7b8d913d3b426005fe4976564a70e83933981c170708f1d2af2e96",
+  "DASHUSDT_4h": "f5bb233a35ae9ffeefdbcb927415808b74992c8d36b4bc9bf73ece17e0723d0b",
+  "FILUSDT_12h": "2e02cb4b560672b5b948f116718802c5676777360921422dcd9111575d687fda",
+  "FILUSDT_1d": "55ef1316cc099390e7f124f72da2327955661062c30096b817f16699206b87c6",
+  "FILUSDT_1h": "a1ab21f52fd626006487fbdb67d04a969cc37a9afcad40ba63e1fce539375bf2",
+  "FILUSDT_4h": "1fdc4c6ca4f05109c312b8088d5c3dd40704f60f8620d47f81515bae270c6bc9",
+  "INJUSDT_12h": "993b9d3caa8b150f0b4ebb12cb46afc48f0d0f64b505c64f8499dc8207ce3b9d",
+  "INJUSDT_1d": "6275ad12f46010adb10ca874749763d362fb31c13d17634846ff1ca36dea1663",
+  "INJUSDT_1h": "7b9147bac53bbaced8971fd8ea9aad6be06f5d275426a18988dc290ee24603aa",
+  "INJUSDT_4h": "d676542bddedacd35a78e4568c3910d79fb31a8a173e355c2938c17c8e9a1df9",
+  "JSTUSDT_12h": "b6930b1daf4916fa10f8dff726abc902046252c76029fab87befb6fa27f438bb",
+  "JSTUSDT_1d": "434d848ee51ffc33b8fddbab3e3ad42646e0b2ef01e0681a3a8751b6763da810",
+  "JSTUSDT_1h": "dd7830a39a68b616897f9b9cbfbb6f7a1df54661c41efb0d318a8491914f058b",
+  "JSTUSDT_4h": "a06c46496b7b1d6378d2e7102ea49be93c6c4340ce2f2679f12118ecb9793b37",
+  "NEXOUSDT_12h": "69a0b9c359b8c0798bd6cb007ff41c043ad79b4b8fa92901af2c42d27fe39522",
+  "NEXOUSDT_1d": "57a4372e6db4a4f44e0471c91509c5f3df628573dc1eaac896eaa0a792702d33",
+  "NEXOUSDT_1h": "2d1816d3c3db696c2d62199e42bf887236a56a1d60be49e755c68d5203c8c165",
+  "NEXOUSDT_4h": "08fc97b1ca06d8722bb9cc75b9fe8ca0a2b808050023895ebe3129eaefbfc822",
+  "STXUSDT_12h": "3fa55140fbb335bac0eb4442a5f7d724fe9202fd69713ff0b8addb0d6858ce82",
+  "STXUSDT_1d": "a91102818f92c62ed7ec9576639ae9a1c4012ac771d098ec309a85ba38b32229",
+  "STXUSDT_1h": "5d78794dd376dd1877a45414a0aabe63342e6eeb71dcc57df5414ce5384a7e60",
+  "STXUSDT_4h": "ab2e724777b2612ed6a9bcce69a421cbeb1d8ea787f903f8bb9f5081062a9bc1",
+  "VETUSDT_12h": "dbfd69ee3e62e3a29d672cbf50b0d307087c57e2adafdbeb2c8b1ec08e17d811",
+  "VETUSDT_1d": "b3f312385da96f19ba8986b7108ad1d2a4cdd8a727c6b1a341e4399686c1b37c",
+  "VETUSDT_1h": "91e883a4d1f418b16dda45bff47379a809c12fcdccd2e30eb291512a16a82589",
+  "VETUSDT_4h": "0871b6f4ae2724980977f1bcead4fbe8ff79a2ea3e556216c3d1f2c518b49a3b"
+ },
+ "equity_bars_sha256": "759aaf0e6137afa8bb2779ff035a516e66a083611a6453108a656ada5555e324",
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 8,
+     "slow": 80
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "downtrend_short_regime_scan",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "ATOM 12h downtrend_short_regime_scan dshort f8 s80 ml200 al14 m2.0 ml100 f0.02",
+  "provenance": {
+   "card_ids": [
+    "2907405cb6b8e0a9",
+    "6078cc70ec7b8303",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "a000848247f01f95",
+    "a59075409e6a124e",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "downtrend_short_regime_scan-2026-11-04-120010-loop-crypto:ATOMUSDT_12h"
+  },
+  "strategy_id": "f671d219aa37b01e",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "ATOMUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

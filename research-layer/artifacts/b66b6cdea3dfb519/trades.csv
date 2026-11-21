@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+TWTUSDT,long,2022-06-21 00:00:00,0.8413,2022-12-17 00:00:00,1.7276,signal:channel_exit,1.0504886485201472
+TWTUSDT,long,2023-10-05 00:00:00,0.8718,2023-11-22 00:00:00,1.0421,signal:channel_exit,0.19234296857077304

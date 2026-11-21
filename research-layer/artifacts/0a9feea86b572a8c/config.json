@@ -1,0 +1,106 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AAVEUSDT_1d": "2023-12-31 00:00:00",
+  "AVAXUSDT_1d": "2023-12-31 00:00:00",
+  "DOTUSDT_1d": "2023-12-31 00:00:00",
+  "ETCUSDT_1d": "2023-12-31 00:00:00",
+  "HBARUSDT_1d": "2023-12-31 00:00:00",
+  "ICPUSDT_1d": "2023-12-31 00:00:00",
+  "LTCUSDT_1d": "2023-12-31 00:00:00",
+  "NEARUSDT_1d": "2023-12-31 00:00:00",
+  "PAXGUSDT_1d": "2023-12-31 00:00:00",
+  "QNTUSDT_1d": "2023-12-31 00:00:00",
+  "SHIBUSDT_1d": "2023-12-31 00:00:00",
+  "UNIUSDT_1d": "2023-12-31 00:00:00"
+ },
+ "data_sha256": {
+  "AAVEUSDT_1d": "bbf5b2edb07e78e263f3c9d19b533604a235a78a084d540d9daf13f676c21354",
+  "AVAXUSDT_1d": "3ab8453400b8cbeb1a43d72bfd91db4e1f3812f6bc04aaa23f9c7a0d615392b7",
+  "DOTUSDT_1d": "d43d2966d7a0ca8cc0161b7861b42e22cbc52d03128ac0b0e7284445f7b6fc8f",
+  "ETCUSDT_1d": "e90d35106763e66434fdf6317bd3345cb954a88af36ec90f7dfa90c25a0970af",
+  "HBARUSDT_1d": "c0e0ca8c8d77a1ae8e9394fd25b98d8baf5a982a0dc3d6e04bf2f0504f89b999",
+  "ICPUSDT_1d": "8a290044059a13cac62db809c1b5344d3cda08dc0ebafb5dad9cbc534cbd05c5",
+  "LTCUSDT_1d": "95b8c326eb0bbd7d450113cb34ca4f5d41843ff064c7c26d22aa9a6d22d6ae6a",
+  "NEARUSDT_1d": "322e2b23ae6c7b3d42edcb0c028b25e602b6d1201ed673dbf6ff25cabe1d8096",
+  "PAXGUSDT_1d": "ce4ca420448159b597cf76914b69279dbd2a860474cd7cb59138dffd0d3d535b",
+  "QNTUSDT_1d": "b7f3a4833982c80140029cd7b0d452a82a66a70d00c67600fec18aa7821e3772",
+  "SHIBUSDT_1d": "c96e851c594bfff193473ad7a48368987f492bf8a27138f12be0de2bff0e8c30",
+  "UNIUSDT_1d": "cccddcb3d8236014184167e68d9baf75152411aaf9b36b5d70a9f02c6a12860c"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 35
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-10-26T12:09:38Z",
+  "family": "crypto_donchian_long_breakout_dense",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-26-120012-loop-crypto"
+  },
+  "name": "NEAR 1d crypto_donchian_long_breakout_dense dlong l35 al14 m2.5 l20 f0.02",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "1be665e133422ed2",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "80a41669681d747b",
+    "8280428f7da950cb",
+    "9a6abe19343ae46f",
+    "a4ff31490b3d6b5d",
+    "be7a97c49de94b92",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "crypto_donchian_long_breakout_dense-2026-10-26-120012-loop-crypto:NEARUSDT_1d"
+  },
+  "strategy_id": "0a9feea86b572a8c",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "NEARUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

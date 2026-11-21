@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+DYDXUSDT,long,2023-06-11 00:00:00,1.586,2023-06-22 00:00:00,1.869,signal:zscore_revert,0.1754363177805801

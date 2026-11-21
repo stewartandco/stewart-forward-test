@@ -1,0 +1,284 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "SFPUSDT_1h": "2026-11-18 23:00:00"
+ },
+ "data_sha256": {
+  "SFPUSDT_1h": "0c4f301a9c471b5ff58dee2e3dd7fd10ddceebe44c4b9474b0a3c65c5f80d83a"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.43918733879576843,
+   "n_days": 1053,
+   "strategy_sharpe": -1.0807940317609313,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.7785075649812492,
+   "excess": 0.5827237101659916,
+   "strategy_net": -0.19578385481525762,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.2478307575614821,
+  "edge_decay_pct": -273.0089790297338,
+  "exit_reasons_is": {
+   "signal:zscore_revert": 108,
+   "stop": 35,
+   "target": 26
+  },
+  "exit_reasons_oos": {
+   "signal:zscore_revert": 122,
+   "stop": 72,
+   "target": 23
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.0008367816830630122,
+  "is_edge_raw": 0.0012997662958815403,
+  "is_vol": 1.553292002190808,
+  "mc_p05_equity": 0.7792778689737782,
+  "oos_edge_per_trade": -0.00144770744657514,
+  "oos_edge_raw": -0.0009741155248298929,
+  "oos_vol": 0.6728676619950877,
+  "open_at_end": false,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 1.51951930104461,
+   "dense_only": true,
+   "mean_ratio": 0.8360356837027586,
+   "n_perturbations": 9,
+   "reason": null,
+   "results": [
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 40,
+     "ratio": -0.012245749406538848,
+     "score": -0.018607652578991357,
+     "to": 20
+    },
+    {
+     "axis": "zscore_reversion_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 40,
+     "ratio": 0.5484684222593119,
+     "score": 0.8334083536365097,
+     "to": 60
+    },
+    {
+     "axis": "zscore_reversion_dense.z_entry",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.7967617032211028,
+     "score": 1.2106947863776432,
+     "to": 2.25
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 120,
+     "ratio": 1.0805296461215197,
+     "score": 1.6418856526325514,
+     "to": 90
+    },
+    {
+     "axis": "vol_percentile_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 120,
+     "ratio": 1.0640751247248752,
+     "score": 1.6168826897808986,
+     "to": 150
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "down",
+     "from": 0.8,
+     "ratio": 1.0720832579331434,
+     "score": 1.6290512027561985,
+     "to": 0.7
+    },
+    {
+     "axis": "vol_percentile_dense.max_pctile",
+     "dense": true,
+     "direction": "up",
+     "from": 0.8,
+     "ratio": 1.1921859425214518,
+     "score": 1.8115495500954062,
+     "to": 0.9
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.5,
+     "ratio": 0.8717228719192679,
+     "score": 1.324599729043366,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.0,
+     "ratio": 0.9107399340306932,
+     "score": 1.383886907991733,
+     "to": 1.5
+    }
+   ],
+   "worst_ratio": -0.012245749406538848
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 35,
+     "net": -0.029407762546148214,
+     "win_rate": 0.6285714285714286,
+     "wins": 22
+    },
+    "trend_down": {
+     "n": 146,
+     "net": -0.10076643526019945,
+     "win_rate": 0.5958904109589042,
+     "wins": 87
+    },
+    "trend_up": {
+     "n": 36,
+     "net": -0.08120887108173913,
+     "win_rate": 0.5555555555555556,
+     "wins": 20
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 1.51951930104461,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 0,
+     "net": 0.0
+    },
+    {
+     "min_equity": 0.9487300406573494,
+     "n_trades": 80,
+     "net": -0.007928990291370027
+    },
+    {
+     "min_equity": 0.9747060279148809,
+     "n_trades": 89,
+     "net": 0.2275894942953504
+    }
+   ],
+   "folds_positive": 1,
+   "majority_pass": false,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 40,
+     "z_entry": 2.5
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "z_exit": 0.5
+    },
+    "role": "exit",
+    "type": "zscore_revert"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-19T12:11:39Z",
+  "family": "asymmetric_pullback_reversion",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-19-120016-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "SFP 1h asymmetric_pullback_reversion dlong l40 ze2.5 l120 mp0.8 al14 m3.5 r1.0 l40 ze0.5 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "16278b7e95681e44",
+    "4c787022d5d94488",
+    "73ba48a43e430161",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "asymmetric_pullback_reversion-2026-11-19-120016-loop-crypto:SFPUSDT_1h"
+  },
+  "strategy_id": "7737012f2a8dd59f",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "SFPUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

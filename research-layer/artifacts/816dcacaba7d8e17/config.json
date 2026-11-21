@@ -1,0 +1,101 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "GLD_1d": "2023-12-29 00:00:00",
+  "SLV_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "GLD_1d": "4eea38231bead30d5b9e538804b01d49bc4801d3a6882d2c6ca297d8551f78bc",
+  "SLV_1d": "b1a0d144720139a47bc0c2422ee6f52e2eaf09bc76b20e70a721dd7595f43e20"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.8
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.0075,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-20T12:27:57Z",
+  "family": "metals_channel_breakout_vol_filtered",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-20-120048-loop-metal_etf"
+  },
+  "name": "SLV 1d metals_channel_breakout_vol_filtered dlong l100 ml200 l120 mp0.8 al14 m3.0 l20 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "181cf0b84de7cae4",
+    "1c11d61fbf10b3a0",
+    "2243c5930df5c5be",
+    "2601126e30a794b3",
+    "303001052725c19f",
+    "80a41669681d747b",
+    "c7c0e61fc25e8ba1"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "metals_channel_breakout_vol_filtered-2026-10-20-120048-loop-metal_etf:SLV_1d"
+  },
+  "strategy_id": "816dcacaba7d8e17",
+  "universe": {
+   "asset_class": "metal_etf",
+   "assets": [
+    "SLV"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

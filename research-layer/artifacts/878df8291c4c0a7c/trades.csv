@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWU,long,1998-06-15 00:00:00,39.38,1998-06-18 00:00:00,41.76,signal:zscore_revert,0.06003676993397651
+EWU,long,2007-03-05 00:00:00,44.08,2007-03-12 00:00:00,46.42,signal:zscore_revert,0.05268529945553553
+EWU,long,2010-02-01 00:00:00,31.06,2010-03-04 00:00:00,31.32,signal:zscore_revert,0.007970895041854621
+EWU,long,2021-07-20 00:00:00,31.19,2021-07-30 00:00:00,32.93,signal:zscore_revert,0.055387111253606805

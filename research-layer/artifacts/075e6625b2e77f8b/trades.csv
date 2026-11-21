@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+LDOUSDT,long,2023-10-16 12:00:00,1.62,2023-10-17 00:00:00,1.599,signal:regime_flip,-0.015962962962963064
+LDOUSDT,short,2023-10-18 00:00:00,1.545,2023-10-22 00:00:00,1.6670380814102486,stop,-0.08198904945647156
+LDOUSDT,long,2023-10-23 12:00:00,1.776,2023-12-18 12:00:00,2.029,signal:regime_flip,0.13945495495495497

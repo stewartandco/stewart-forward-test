@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+TWTUSDT,short,2022-05-09 00:00:00,0.8403,2022-06-21 00:00:00,0.8413,signal:regime_flip,-0.0041900511722005014
+TWTUSDT,short,2022-06-30 00:00:00,0.6978,2022-07-01 00:00:00,0.8013,signal:regime_flip,-0.1513233018056751
+TWTUSDT,short,2022-09-22 00:00:00,0.8936,2022-09-23 00:00:00,0.933,signal:regime_flip,-0.04709131602506733
+TWTUSDT,short,2023-08-10 00:00:00,0.9164,2023-10-06 00:00:00,0.975,signal:regime_flip,-0.06694587516368389

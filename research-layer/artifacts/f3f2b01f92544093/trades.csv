@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+SHIBUSDT,long,2021-11-26 00:00:00,4.27e-05,2021-12-06 00:00:00,3.623e-05,signal:tstat_decay,-0.15452224824355987
+SHIBUSDT,long,2023-01-19 00:00:00,1.116e-05,2023-03-09 00:00:00,1.094e-05,signal:tstat_decay,-0.022713261648745427
+SHIBUSDT,long,2023-08-06 00:00:00,9.97e-06,2023-08-17 00:00:00,8.413202993873254e-06,stop,-0.15914814504781805

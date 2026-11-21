@@ -1,0 +1,35 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "deadbeef"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 20
+    },
+    "role": "entry",
+    "type": "channel_breakout"
+   }
+  ],
+  "cost_model": {
+   "fee_bps": 10,
+   "slippage_bps": 5
+  },
+  "strategy_id": "aaaaaaaaaaaaaaaa",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  }
+ }
+}

@@ -1,0 +1,217 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "FETUSDT_12h": "2026-11-08 12:00:00"
+ },
+ "data_sha256": {
+  "FETUSDT_12h": "d4dcec95f02978a750b93f638e504a494bd59ee6fb3a34df4f7d3fe8b0e7e813"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": 0.0987278071854791,
+   "n_days": 1043,
+   "strategy_sharpe": 0.36827159643814994,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.7970826642878382,
+   "excess": 0.8642142061975456,
+   "strategy_net": 0.06713154190970738,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.06237290796872297,
+  "edge_decay_pct": -49.09389938159606,
+  "exit_reasons_is": {
+   "stop": 24,
+   "target": 16
+  },
+  "exit_reasons_oos": {
+   "stop": 15,
+   "target": 7
+  },
+  "fail_reason": "edge_decay",
+  "is_edge_per_trade": 0.007787367490132167,
+  "is_edge_raw": 0.011430577361245527,
+  "is_vol": 1.467835873384669,
+  "mc_p05_equity": 0.7620970841340732,
+  "oos_edge_per_trade": 0.003964245130051559,
+  "oos_edge_raw": 0.0045562044494205515,
+  "oos_vol": 1.1493246002578286,
+  "open_at_end": true,
+  "p_ruin": 0.0115,
+  "perturbation": {
+   "base_score": 0.5967246587538108,
+   "dense_only": true,
+   "mean_ratio": 0.8620132619674075,
+   "n_perturbations": 3,
+   "reason": null,
+   "results": [
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 0.6805419607908941,
+     "score": 0.40609616932059556,
+     "to": 2.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0502599105598345,
+     "score": 0.626715986731625,
+     "to": 3.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "down",
+     "from": 3.0,
+     "ratio": 0.8552379145514938,
+     "score": 0.5103415527140609,
+     "to": 2.5
+    }
+   ],
+   "worst_ratio": 0.6805419607908941
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 2,
+     "net": -0.07665642916153763,
+     "win_rate": 0.0,
+     "wins": 0
+    },
+    "trend_down": {
+     "n": 13,
+     "net": -0.09251949225296718,
+     "win_rate": 0.23076923076923078,
+     "wins": 3
+    },
+    "trend_up": {
+     "n": 7,
+     "net": 0.26941241930175697,
+     "win_rate": 0.5714285714285714,
+     "wins": 4
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5967246587538108,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.8442092554782992,
+     "n_trades": 14,
+     "net": 0.12030409002294258
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 11,
+     "net": 0.17861239755937292
+    },
+    {
+     "min_equity": 0.8839330876075383,
+     "n_trades": 15,
+     "net": 0.15830660686750547
+    }
+   ],
+   "folds_positive": 3,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-09T12:16:54Z",
+  "family": "bracket_width_scan_on_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-09-120010-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "FET 12h bracket_width_scan_on_breakout dboth l55 al14 m2.5 r3.0 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "6078cc70ec7b8303",
+    "73ba48a43e430161",
+    "80a41669681d747b",
+    "a000848247f01f95",
+    "a59075409e6a124e",
+    "dc1cf81e13929936",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9",
+    "f6bcefd96029682d"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "bracket_width_scan_on_breakout-2026-11-09-120010-loop-crypto:FETUSDT_12h"
+  },
+  "strategy_id": "d7fb09f94a387eda",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "FETUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

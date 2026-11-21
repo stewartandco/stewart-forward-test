@@ -1,0 +1,185 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CAKEUSDT_1h": "2026-11-03 23:00:00"
+ },
+ "data_sha256": {
+  "CAKEUSDT_1h": "f35ede7063e77994448b6258a73288e83971afea6963a766cae02ff82681bcc0"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.45778110599078337,
+   "excess": 0.8167133189205352,
+   "strategy_net": 0.35893221292975186,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.21823658814157643,
+  "edge_decay_pct": 540.6601081169218,
+  "exit_reasons_is": {
+   "signal:channel_exit": 352,
+   "stop": 105
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 377,
+   "stop": 90
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.00012679368695830964,
+  "is_edge_raw": 0.0001406339967910878,
+  "is_vol": 1.1091561430604104,
+  "mc_p05_equity": 0.6687731545254537,
+  "oos_edge_per_trade": 0.000812316571952538,
+  "oos_edge_raw": 0.0007432934579518603,
+  "oos_vol": 0.9150292922933122,
+  "open_at_end": true,
+  "p_ruin": 0.0235,
+  "perturbation": {
+   "base_score": 0.1112754632710031,
+   "dense_only": true,
+   "mean_ratio": -0.40078364692387836,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 20,
+     "ratio": -0.40078364692387836,
+     "score": -0.0445973859828967,
+     "to": 35
+    }
+   ],
+   "worst_ratio": -0.40078364692387836
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 49,
+     "net": -0.025673921969177803,
+     "win_rate": 0.4489795918367347,
+     "wins": 22
+    },
+    "trend_down": {
+     "n": 226,
+     "net": 0.11800201320586114,
+     "win_rate": 0.35398230088495575,
+     "wins": 80
+    },
+    "trend_up": {
+     "n": 192,
+     "net": 0.2547899536268355,
+     "win_rate": 0.3645833333333333,
+     "wins": 70
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.1112754632710031,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.7980577775321317,
+     "n_trades": 165,
+     "net": -0.18573011734078598
+    },
+    {
+     "min_equity": 0.9492206171104058,
+     "n_trades": 150,
+     "net": 0.045939799426653743
+    },
+    {
+     "min_equity": 0.7885541278491209,
+     "n_trades": 142,
+     "net": 0.20406005444765926
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 20
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "CAKE 1h range_breakout_both_sides dboth l20 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:CAKEUSDT_1h"
+  },
+  "strategy_id": "278a4d1d2c03c9c6",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "CAKEUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "1h"
+  },
+  "version": 2
+ }
+}

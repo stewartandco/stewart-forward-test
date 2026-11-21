@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+RAYUSDT,short,2023-03-20 00:00:00,0.2625,2023-03-20 12:00:00,0.263,signal:regime_flip,-0.004904761904761854
+RAYUSDT,long,2023-07-07 00:00:00,0.1989,2023-07-07 12:00:00,0.2005,signal:regime_flip,0.005044243338361179
+RAYUSDT,short,2023-08-19 12:00:00,0.1897,2023-09-02 00:00:00,0.20891658606934613,stop,-0.10429987385000594

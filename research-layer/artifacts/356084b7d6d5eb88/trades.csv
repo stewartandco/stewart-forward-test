@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWY,long,2002-07-29 00:00:00,20.35,2002-08-22 00:00:00,21.85,signal:zscore_revert,0.07331007371007377
+EWY,long,2014-01-24 00:00:00,58.78,2014-02-14 00:00:00,61.12698192217725,target,0.039528239574298143

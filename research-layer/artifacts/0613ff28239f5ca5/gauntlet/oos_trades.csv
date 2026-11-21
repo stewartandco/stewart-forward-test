@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+SPY,long,2025-05-27 00:00:00,586.07,2025-11-21 00:00:00,655.05,signal:channel_exit,0.11729925094271994,1.0

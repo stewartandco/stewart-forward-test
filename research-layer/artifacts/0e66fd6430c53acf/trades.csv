@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+QNTUSDT,long,2022-07-20 00:00:00,106.9,2022-09-05 00:00:00,95.2,signal:tstat_decay,-0.1124480823199252
+QNTUSDT,long,2022-09-08 00:00:00,95.7,2022-11-14 00:00:00,101.9,signal:tstat_decay,0.06178578892372
+QNTUSDT,long,2023-01-18 00:00:00,142.0,2023-03-03 00:00:00,120.04694463991416,stop,-0.15759898140905526

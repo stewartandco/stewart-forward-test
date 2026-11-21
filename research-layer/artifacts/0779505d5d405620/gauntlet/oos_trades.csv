@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+DIA,long,2024-08-13 00:00:00,395.07,2025-03-31 00:00:00,412.2,signal:ma_crossunder,0.0429594046624648,1.0
+DIA,long,2025-06-10 00:00:00,428.265,2025-06-11 00:00:00,429.86,signal:ma_crossunder,0.0033243295623037296,1.0
+DIA,long,2025-06-24 00:00:00,428.53,2025-06-25 00:00:00,430.75,signal:ma_crossunder,0.004780500781742259,1.0
+DIA,long,2026-04-15 00:00:00,486.51,2026-04-16 00:00:00,485.82,signal:ma_crossunder,-0.00181826478386875,1.0

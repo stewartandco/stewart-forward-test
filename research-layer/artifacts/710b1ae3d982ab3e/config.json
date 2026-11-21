@@ -1,0 +1,94 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "7a4c320af1931fa7c31f1056b6c407351116cea8c620a508d64908c232e4e12c",
+  "ETHUSD_1d": "a4abd3c7f7d1bc53a78af590f325560edf0b100397c1815983e7fb40d4620b80"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 8,
+     "slow": 50
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "ma_len": 100
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-09-30T12:07:00Z",
+  "family": "downtrend_short_dense",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-30-120029-loop-crypto"
+  },
+  "name": "BTC+ETH 1d downtrend_short_dense dshort f8 s50 ml150 ml100 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "07d743fb1d32ea2f",
+    "10f17cd64def74fe",
+    "35c61158d380a771",
+    "6078cc70ec7b8303",
+    "900adebb2ddd89bb",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91",
+    "f4b7eac70dce1a59"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "downtrend_short_dense-2026-09-30-120029-loop-crypto"
+  },
+  "strategy_id": "710b1ae3d982ab3e",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

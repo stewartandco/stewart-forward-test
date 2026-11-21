@@ -1,0 +1,2 @@
+# golden bytes: stored and checked out byte for byte (core.autocrlf must never convert them)
+* -text

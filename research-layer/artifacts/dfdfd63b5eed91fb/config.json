@@ -1,0 +1,92 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BTCUSD_1d": "2023-12-31",
+  "ETHUSD_1d": "2023-12-31"
+ },
+ "data_sha256": {
+  "BTCUSD_1d": "b749c5ad588856e2d029624c7d2d2b3a104bf2afaa85b74c89080223328235fe",
+  "ETHUSD_1d": "8e85a68ee8f2ab659a1fe08732a1aee78685068950fdb14d2c2c5c711eba4b32"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 0.6
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "f": 0.02
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-09-03T02:38:41Z",
+  "family": "vol_state_conditioned_breakout",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-09-03-023004-loop-crypto"
+  },
+  "name": "BTC+ETH 1d vol_state_conditioned_breakout dboth l55 l120 mp0.6 al14 m2.5 mb40 f0.02",
+  "provenance": {
+   "card_ids": [
+    "10f17cd64def74fe",
+    "16278b7e95681e44",
+    "2359bf09659f2885",
+    "35c61158d380a771",
+    "80a41669681d747b",
+    "dcbe4d37af0f4eaa",
+    "fe7e4468ebcb3ce6"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "vol_state_conditioned_breakout-2026-09-03-023004-loop-crypto"
+  },
+  "strategy_id": "dfdfd63b5eed91fb",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

@@ -1,0 +1,215 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "TWTUSDT_12h": "2026-11-13 12:00:00"
+ },
+ "data_sha256": {
+  "TWTUSDT_12h": "2af3ee1d3ddd4900576d3ba875774ae1c28c9c737ead40447e5dbf8644d1a448"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.17182147852543667,
+   "n_days": 1048,
+   "strategy_sharpe": 0.6371909956388592,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.6900647988858851,
+   "excess": 1.2027146785458416,
+   "strategy_net": 0.5126498796599563,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": 0.43603442962204486,
+  "edge_decay_pct": 23.600231706164443,
+  "exit_reasons_is": {
+   "signal:tstat_decay": 11,
+   "stop": 55
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 25,
+   "stop": 47
+  },
+  "fail_reason": "mc_p05",
+  "is_edge_per_trade": 0.009756473949508076,
+  "is_edge_raw": 0.011618000895789649,
+  "is_vol": 1.1907991509960862,
+  "mc_p05_equity": 0.43170015252965616,
+  "oos_edge_per_trade": 0.012059024407943555,
+  "oos_edge_raw": 0.008995658879679501,
+  "oos_vol": 0.7459690415547924,
+  "open_at_end": true,
+  "p_ruin": 0.189,
+  "perturbation": {
+   "base_score": 0.522440393623139,
+   "dense_only": true,
+   "mean_ratio": 1.0768565655991431,
+   "n_perturbations": 3,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 105,
+     "ratio": 1.1265007032741339,
+     "score": 0.5885294708352814,
+     "to": 90
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 105,
+     "ratio": 1.1040689935232957,
+     "score": 0.5768102395634135,
+     "to": 120
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": 1.0,
+     "score": 0.522440393623139,
+     "to": 2.5
+    }
+   ],
+   "worst_ratio": 1.0
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 12,
+     "net": 0.26631193181184626,
+     "win_rate": 0.16666666666666666,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 50,
+     "net": 0.018054995744971547,
+     "win_rate": 0.22,
+     "wins": 11
+    },
+    "trend_up": {
+     "n": 10,
+     "net": 0.36332051178010627,
+     "win_rate": 0.5,
+     "wins": 5
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.522440393623139,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.6983552058913143,
+     "n_trades": 29,
+     "net": 0.30442972278946245
+    },
+    {
+     "min_equity": 0.8856126724488939,
+     "n_trades": 16,
+     "net": 0.5173635937192419
+    },
+    {
+     "min_equity": 0.9073453536090045,
+     "n_trades": 21,
+     "net": -0.05500525738658754
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 105,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.0
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "ma_len": 50
+    },
+    "role": "stop",
+    "type": "ma_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.4,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "symmetric_tstat_trend_ma_trailing_stop",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "TWT 12h symmetric_tstat_trend_ma_trailing_stop dboth ml105 tm2.0 ml90 te0.0 ml50 av0.4 l30",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "9a6abe19343ae46f",
+    "ae123692354ab519",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_tstat_trend_ma_trailing_stop-2026-11-14-120014-loop-crypto:TWTUSDT_12h"
+  },
+  "strategy_id": "528560291a6a18f1",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "TWTUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

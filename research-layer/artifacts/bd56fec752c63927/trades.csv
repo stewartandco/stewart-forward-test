@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+ENSUSDT,long,2023-11-09 00:00:00,8.51,2023-11-22 00:00:00,7.77,signal:regime_flip,-0.08995652173913049

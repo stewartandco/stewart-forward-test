@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+IMXUSDT,short,2022-05-20 00:00:00,0.896,2023-01-18 00:00:00,0.62,signal:regime_flip,0.3050357142857143
+IMXUSDT,long,2023-01-25 00:00:00,0.645,2023-05-09 00:00:00,0.786,signal:regime_flip,0.21560465116279082
+IMXUSDT,short,2023-05-12 00:00:00,0.733,2023-10-27 00:00:00,0.6528,signal:regime_flip,0.10641336971350601

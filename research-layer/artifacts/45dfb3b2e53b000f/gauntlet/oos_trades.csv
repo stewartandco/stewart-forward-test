@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+SPY,long,2025-09-19 00:00:00,662.33,2026-03-12 00:00:00,671.16,signal:tstat_decay,0.012931722857185869,1.0

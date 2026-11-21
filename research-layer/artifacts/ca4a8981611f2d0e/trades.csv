@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EWU,long,2007-03-05 00:00:00,44.08,2007-03-19 00:00:00,46.34,time,0.050870417422867534
+EWU,long,2010-02-05 00:00:00,29.86,2010-02-22 00:00:00,31.18,time,0.043806296048225016

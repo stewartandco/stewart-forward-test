@@ -1,0 +1,6 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+LQD,long,2024-06-13 00:00:00,108.35,2024-06-14 00:00:00,108.43,signal:ma_crossunder,0.000338347946469986,1.0
+LQD,long,2025-02-28 00:00:00,109.51,2025-03-03 00:00:00,108.94,signal:ma_crossunder,-0.005605004109213873,1.0
+LQD,long,2025-06-18 00:00:00,108.22,2025-12-29 00:00:00,110.69,signal:ma_crossunder,0.022423877287007964,1.0
+LQD,long,2026-02-20 00:00:00,111.62,2026-02-23 00:00:00,111.62,signal:ma_crossunder,-0.0004,1.0
+LQD,long,2026-06-29 00:00:00,109.62,2026-06-30 00:00:00,109.5,signal:ma_crossunder,-0.0014946907498632363,1.0

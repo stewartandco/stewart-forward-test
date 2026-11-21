@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+MDY,long,2024-08-16 00:00:00,548.48,2025-03-12 00:00:00,537.74,signal:ma_crossunder,-0.019981388564760772,0.8701250980894265
+MDY,long,2025-06-12 00:00:00,555.17,2025-06-13 00:00:00,552.77,signal:ma_crossunder,-0.0047230001621125116,1.0
+MDY,long,2025-06-24 00:00:00,560.4,2025-06-25 00:00:00,562.28,signal:ma_crossunder,0.002954746609564696,1.0

@@ -1,0 +1,92 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "GLD_1d": "2023-12-29 00:00:00",
+  "SLV_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "GLD_1d": "4eea38231bead30d5b9e538804b01d49bc4801d3a6882d2c6ca297d8551f78bc",
+  "SLV_1d": "b1a0d144720139a47bc0c2422ee6f52e2eaf09bc76b20e70a721dd7595f43e20"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.0075,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-20T12:27:57Z",
+  "family": "metals_downtrend_short_opposite_rule",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-20-120048-loop-metal_etf"
+  },
+  "name": "SLV 1d metals_downtrend_short_opposite_rule dshort f13 s130 ml150 al14 m3.0 ml150 f0.01",
+  "provenance": {
+   "card_ids": [
+    "6dba955b6b43f40d",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e0d728e421153bec",
+    "e6cc6c4188b35751",
+    "eb1daec3ca717b19",
+    "ff167e660fe6da0c"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "metals_downtrend_short_opposite_rule-2026-10-20-120048-loop-metal_etf:SLV_1d"
+  },
+  "strategy_id": "d65647a96072d4d5",
+  "universe": {
+   "asset_class": "metal_etf",
+   "assets": [
+    "SLV"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

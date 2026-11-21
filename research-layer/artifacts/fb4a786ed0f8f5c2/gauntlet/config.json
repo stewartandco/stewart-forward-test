@@ -1,0 +1,284 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2026-11-16 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "4a8747d982fb6bc92c343ea7d9c2f3089e7f371f3f09401c4bb688aff29561f1"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, dividends excluded on both sides",
+   "hold_sharpe": -0.294488280936494,
+   "n_days": 722,
+   "strategy_sharpe": -0.3059672980605841,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, dividends excluded on both sides",
+   "buy_hold_net": -0.036436036036036,
+   "excess": -0.023300051085260523,
+   "strategy_net": -0.05973608712129652,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.06275201713554324,
+  "edge_decay_pct": -1222.4333003985273,
+  "era_summary": {
+   "hike_cut_cycle": {
+    "n_trades": 17,
+    "net_pnl": 0.09542850897368527
+   },
+   "post_2022": {
+    "n_trades": 19,
+    "net_pnl": -0.061036314550788395
+   },
+   "pre_gfc": {
+    "n_trades": 8,
+    "net_pnl": -0.02112230180070951
+   },
+   "zirp": {
+    "n_trades": 20,
+    "net_pnl": -0.05919279740735417
+   }
+  },
+  "exit_reasons_is": {
+   "signal:regime_flip": 45,
+   "stop": 3
+  },
+  "exit_reasons_oos": {
+   "signal:regime_flip": 16
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.005888041243249613,
+  "is_edge_raw": 0.0003785815712426549,
+  "is_vol": 0.06429669148066557,
+  "mc_p05_equity": 0.758420192885278,
+  "oos_edge_per_trade": -0.06608933565543312,
+  "oos_edge_raw": -0.003834297859079278,
+  "oos_vol": 0.058016892151405146,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.03613093660004784,
+   "dense_only": true,
+   "mean_ratio": 0.33847767343981283,
+   "n_perturbations": 7,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 60,
+     "ratio": 0.20880034000885062,
+     "score": 0.007544151846928214,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.131931230878029,
+     "score": 0.04089773553846818,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0898051183981503,
+     "score": 0.0393756796392512,
+     "to": 3.0
+    },
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "down",
+     "from": 150,
+     "ratio": -3.1236586562427378,
+     "score": -0.11286071286889698,
+     "to": 100
+    },
+    {
+     "axis": "regime_ma_short_dense.ma_len",
+     "dense": true,
+     "direction": "up",
+     "from": 150,
+     "ratio": 1.6897693924574904,
+     "score": 0.061052950787582945,
+     "to": 200
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 3.0,
+     "ratio": 0.28194910505528115,
+     "score": 0.010187085239192591,
+     "to": 2.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 3.0,
+     "ratio": 1.0907471835236262,
+     "score": 0.03940971733457289,
+     "to": 3.5
+    }
+   ],
+   "worst_ratio": -3.1236586562427378
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 16,
+     "net": -0.06134876574526845,
+     "win_rate": 0.125,
+     "wins": 2
+    },
+    "trend_down": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "trend_up": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.03613093660004784,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9086978457104605,
+     "n_trades": 19,
+     "net": -0.09528585006237376
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 17,
+     "net": 0.048514323421531676
+    },
+    {
+     "min_equity": 0.9306241472226792,
+     "n_trades": 12,
+     "net": 0.06494344206048952
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "short",
+     "max_lookback": 60,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "regime",
+    "type": "regime_ma_short_dense"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-17T12:13:55Z",
+  "family": "duration_trend_short_tstat",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "631f239d38eaa78f",
+   "run_id": "2026-11-17-120012-loop-bond_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "BND 1d duration_trend_short_tstat dshort ml60 tm2.5 ml150 al14 m3.0 av0.2 l30 ml150",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3d4db3693d78d717",
+    "528f5ea004be3189",
+    "9a6abe19343ae46f",
+    "b75771d2de3b3e53",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "528f5ea004be3189",
+    "b75771d2de3b3e53",
+    "dad2ffd5702377ba"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "duration_trend_short_tstat-2026-11-17-120012-loop-bond_etf:BND_1d"
+  },
+  "strategy_id": "fb4a786ed0f8f5c2",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "BND"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

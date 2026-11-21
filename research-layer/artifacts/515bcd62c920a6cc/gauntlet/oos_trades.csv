@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+SEK,short,2025-11-14 00:00:00,0.10583690532888819,2025-12-23 00:00:00,0.1089134791321774,stop,-0.030863260453941336,0.8391464954048339

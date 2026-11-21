@@ -1,0 +1,112 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "14f534cb827159889bb4bddb805d540209e3faf70c5a3be908fdd6b927969c97",
+  "EMB_1d": "33aff6021998d71393c95a0deaafb35d0c9624434641db0dea285f2d9e3e8ad6",
+  "HYG_1d": "d68dc13e71de51699de62711cc4a539bdfc3479116a141f1f9346db16ce074e9",
+  "IEF_1d": "271ff4e09088418995e97f7fbe58d88e24c6fcc643387d9b11175751622cbb90",
+  "LQD_1d": "3b43aabecc55cefaa9d7d7c5f785215a919cfb0b53a3b3ff99cd6d5be2a38a54",
+  "SHY_1d": "0fe995527d1f38337d5525a54500f9914419c126b48b0dac0e80889621aa1a8c",
+  "TIP_1d": "9617a428ee80834f9ce903faf8da0e9d9f9a370c2cdc6902f6ce7cb0832dd33d",
+  "TLT_1d": "56c904134cb3903cfd250e00cb6b10770b77b78a85fbd5dfc5685d7f1a3d1c41"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "lookback": 55
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 120,
+     "max_pctile": 1.0
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-10-04T12:13:52Z",
+  "family": "credit_breakout_calmvol",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-10-04-120029-loop-bond_etf"
+  },
+  "name": "SHY 1d credit_breakout_calmvol dlong l55 l120 mp1.0 l20 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "303001052725c19f",
+    "3142c67d77f9011a",
+    "58fc981f679dad73",
+    "6dba955b6b43f40d",
+    "7660d2b7a0a4100b",
+    "80a41669681d747b",
+    "9a6abe19343ae46f"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "58fc981f679dad73",
+    "7660d2b7a0a4100b"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "credit_breakout_calmvol-2026-10-04-120029-loop-bond_etf:SHY_1d"
+  },
+  "strategy_id": "c962e9518a12fc6d",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "SHY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,185 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "ATOMUSDT_4h": "2026-11-03 20:00:00"
+ },
+ "data_sha256": {
+  "ATOMUSDT_4h": "3179134da7a9945ce00ba1c955e8f5ac618b291e711d709d9ac1ce0074b4a1bc"
+ },
+ "group_context": {},
+ "metrics": {
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.8704528301886792,
+   "excess": 0.8482035735455234,
+   "strategy_net": -0.0222492566431558,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.027126768421817826,
+  "edge_decay_pct": -186.29567277202452,
+  "exit_reasons_is": {
+   "signal:channel_exit": 81,
+   "stop": 12
+  },
+  "exit_reasons_oos": {
+   "signal:channel_exit": 50,
+   "stop": 7
+  },
+  "fail_reason": "sharpe_floor",
+  "is_edge_per_trade": 0.0004776881228440039,
+  "is_edge_raw": 0.00057173392898542,
+  "is_vol": 1.1968770033081357,
+  "mc_p05_equity": 0.8077166533865002,
+  "oos_edge_per_trade": -0.0004122241793602881,
+  "oos_edge_raw": -0.0003204240862382871,
+  "oos_vol": 0.7773054136114447,
+  "open_at_end": true,
+  "p_ruin": 0.0,
+  "perturbation": {
+   "base_score": 0.19853546656514037,
+   "dense_only": true,
+   "mean_ratio": -0.10049512624382897,
+   "n_perturbations": 1,
+   "reason": null,
+   "results": [
+    {
+     "axis": "channel_breakout_dense.lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 100,
+     "ratio": -0.10049512624382897,
+     "score": -0.019951846776341268,
+     "to": 75
+    }
+   ],
+   "worst_ratio": -0.10049512624382897
+  },
+  "protocol": "gauntlet-protocol-v6.1",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 4,
+     "net": -0.01623618588133438,
+     "win_rate": 0.25,
+     "wins": 1
+    },
+    "trend_down": {
+     "n": 38,
+     "net": 0.07567078114113224,
+     "win_rate": 0.5,
+     "wins": 19
+    },
+    "trend_up": {
+     "n": 15,
+     "net": -0.07769876817538025,
+     "win_rate": 0.13333333333333333,
+     "wins": 2
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.19853546656514037,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 0.9797334757761597,
+     "n_trades": 29,
+     "net": 0.028173976835109804
+    },
+    {
+     "min_equity": 0.9785541018303924,
+     "n_trades": 33,
+     "net": 0.028419274332104963
+    },
+    {
+     "min_equity": 0.9520309124607325,
+     "n_trades": 31,
+     "net": -0.0034219957715707176
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 100
+    },
+    "role": "entry",
+    "type": "channel_breakout_dense"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "stop",
+    "type": "swing_stop"
+   },
+   {
+    "params": {
+     "lookback": 20
+    },
+    "role": "exit",
+    "type": "channel_exit"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-04T12:21:25Z",
+  "family": "range_breakout_both_sides",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-04-120010-loop-crypto"
+  },
+  "name": "ATOM 4h range_breakout_both_sides dboth l100 l20 l20 f0.01",
+  "provenance": {
+   "card_ids": [
+    "16278b7e95681e44",
+    "19533cf882254744",
+    "6078cc70ec7b8303",
+    "80a41669681d747b",
+    "831e8c990e96e75e",
+    "9a6abe19343ae46f",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "range_breakout_both_sides-2026-11-04-120010-loop-crypto:ATOMUSDT_4h"
+  },
+  "strategy_id": "564da79b6744e597",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "ATOMUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

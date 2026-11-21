@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GBP,short,1975-04-28 00:00:00,2.346,1980-09-02 00:00:00,2.418,stop,-0.10805950260164043
+GBP,short,1980-12-03 00:00:00,2.346,1981-01-05 00:00:00,2.4155,stop,-0.031131789987359264

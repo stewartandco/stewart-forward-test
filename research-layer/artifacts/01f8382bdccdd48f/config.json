@@ -1,0 +1,129 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "DIA_1d": "2023-12-29 00:00:00",
+  "EEM_1d": "2023-12-29 00:00:00",
+  "EFA_1d": "2023-12-29 00:00:00",
+  "EWA_1d": "2023-12-29 00:00:00",
+  "EWC_1d": "2023-12-29 00:00:00",
+  "EWG_1d": "2023-12-29 00:00:00",
+  "EWH_1d": "2023-12-29 00:00:00",
+  "EWJ_1d": "2023-12-29 00:00:00",
+  "EWU_1d": "2023-12-29 00:00:00",
+  "EWY_1d": "2023-12-29 00:00:00",
+  "EWZ_1d": "2023-12-29 00:00:00",
+  "FXI_1d": "2023-12-29 00:00:00",
+  "IWM_1d": "2023-12-29 00:00:00",
+  "MDY_1d": "2023-12-29 00:00:00",
+  "QQQ_1d": "2023-12-29 00:00:00",
+  "SPY_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "DIA_1d": "d28e7de4b9793d1f550ea9ae601bacbd518d3a108ecef6d691505d1648074f0a",
+  "EEM_1d": "3bd464b1cdf8a1cc24541ff9b49d9a81abfc50ba2c6b3434b059392ed065fa0a",
+  "EFA_1d": "e846480ccd34be2a108abfdf36bb521376691d4b355a0827b733e7f46bf96264",
+  "EWA_1d": "1fc736f18bcec99be0507ec07017c99f021d250012c9bfa499c6d039d836f113",
+  "EWC_1d": "53a340adb67505bfa2890ee803f6b81ad5cf3a3dda455cdc54c4beac90d29116",
+  "EWG_1d": "d8e3b6e66006e40e7b66eb8de29aa6834b85c9cbdeec41ea8b1ca32e6ffde187",
+  "EWH_1d": "02be3398f9c79409fb2523462b0a18e562d67b2b66f0782bd80a4687df008f0e",
+  "EWJ_1d": "a7fc9b81fa7d8499caa1226c23bc198252aa37bc69a990848980e47ca4376966",
+  "EWU_1d": "4865fe7ca79fb302738ea5e631c5e8df35a8b7cafc7376c92071448ca66d4d7d",
+  "EWY_1d": "18a95d2fe4c2f4f0a8a31527379b78207ceae36f53bfbd647e23f484d665c3d3",
+  "EWZ_1d": "6ac29fb119fc92a4a2fefa0781de648d1544c92bf37f0f13e9a9b0edfb277f1d",
+  "FXI_1d": "12273dea02ef71e83b934bcb40155d8532d626430c6bebfab2214b7ddb08ac30",
+  "IWM_1d": "e92d56bd7b371ff6f681779077e9245c5edb41dc6882db662819e54e3551dad1",
+  "MDY_1d": "73f2c207d33e0c6d81fa28f8e3d4c2278610aff3e413f083b35f43f691c6ae74",
+  "QQQ_1d": "66b23ffed7e05ac23bea118a05301ddd0658c56792fde01c15a855c8b16be092",
+  "SPY_1d": "b4558ff3de691eaa7a6605d9209dc2de7dcd58d8d246005d61daa9f8d01afa3a"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 8,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "regime",
+    "type": "regime_ma"
+   },
+   {
+    "params": {
+     "ma_len": 200
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-10T12:25:43Z",
+  "family": "ma_trend_long_above_regime",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "33800e51c56dab96",
+   "run_id": "2026-11-10-120010-loop-equity_etf",
+   "served_model": "claude-opus-5"
+  },
+  "name": "MDY 1d ma_trend_long_above_regime dlong f8 s130 ml200 ml200 al14 m3.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "0083aff5f697cff4",
+    "10f17cd64def74fe",
+    "2243c5930df5c5be",
+    "2f5512634bbf2655",
+    "3605eedc183f09ce",
+    "538cb5fd38ba4ef3",
+    "5bccc3b77e310e91",
+    "6c11ed7c0ba9f7eb",
+    "be7a97c49de94b92",
+    "e519d19950313468",
+    "e774e6dd0f261cfc",
+    "e818d7f15744fa91",
+    "ed9ad3790c1bed9a"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "ma_trend_long_above_regime-2026-11-10-120010-loop-equity_etf:MDY_1d"
+  },
+  "strategy_id": "01f8382bdccdd48f",
+  "universe": {
+   "asset_class": "equity_etf",
+   "assets": [
+    "MDY"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

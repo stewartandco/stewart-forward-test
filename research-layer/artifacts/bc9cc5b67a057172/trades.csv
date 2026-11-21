@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+DYDXUSDT,long,2023-01-27 00:00:00,2.306,2023-03-08 00:00:00,2.252,signal:channel_exit,-0.02641717259323517
+DYDXUSDT,short,2023-05-09 00:00:00,2.129,2023-07-01 00:00:00,2.068,signal:channel_exit,0.02565194927195869

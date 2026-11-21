@@ -1,0 +1,3 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+AXSUSDT,long,2022-03-25 00:00:00,70.31,2022-04-06 00:00:00,57.965086870268685,stop,-0.17857834063051226
+AXSUSDT,long,2023-01-14 00:00:00,9.08,2023-02-14 00:00:00,9.59,signal:channel_exit,0.053167400881057314

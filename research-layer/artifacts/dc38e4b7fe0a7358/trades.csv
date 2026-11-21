@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+GRTUSDT,long,2022-03-28 12:00:00,0.4721,2022-04-07 00:00:00,0.4069673475821085,stop,-0.14096367807221244
+GRTUSDT,long,2022-07-29 12:00:00,0.1271,2022-08-18 00:00:00,0.1226,signal:channel_exit,-0.03840519276160492
+GRTUSDT,long,2023-01-14 00:00:00,0.0767,2023-02-25 12:00:00,0.1487,signal:channel_exit,0.935722294654498

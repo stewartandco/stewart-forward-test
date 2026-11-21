@@ -1,0 +1,108 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "AUD_1d": "2023-12-29 00:00:00",
+  "CAD_1d": "2023-12-29 00:00:00",
+  "CHF_1d": "2023-12-29 00:00:00",
+  "EUR_1d": "2023-12-29 00:00:00",
+  "GBP_1d": "2023-12-29 00:00:00",
+  "JPY_1d": "2023-12-29 00:00:00",
+  "MXN_1d": "2023-12-29 00:00:00",
+  "NOK_1d": "2023-12-29 00:00:00",
+  "NZD_1d": "2023-12-29 00:00:00",
+  "SEK_1d": "2023-12-29 00:00:00",
+  "SGD_1d": "2023-12-29 00:00:00",
+  "ZAR_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "AUD_1d": "751eeef36ea58c0d0a787a798ae599058f419e2f1f551b7e7fad0cc386e31585",
+  "CAD_1d": "6180171bc7b0a1da9a80d8ee66a41fcb25dbbe61167c9363ff90e4affdc24495",
+  "CHF_1d": "729af559edb23478167896040d9c93efeca8e34ecaaeeeef3a2ad976f44365d7",
+  "EUR_1d": "547879d46179192cbc4275d04208b73fb5668befb039db6d0fb8bd26891e3a0e",
+  "GBP_1d": "b6d4d9f669531e651a163e5d72916554ab1849a8b1ee1fd93717969dccd5fd64",
+  "JPY_1d": "a0d5f0c4cfa70663f0df6383735fd9400053c8c11992c0d69e2e8056e471424a",
+  "MXN_1d": "03a3232ad8275f27b8c3a9dbab4e6d93b44f00d478567797fcc280040ce17ca8",
+  "NOK_1d": "3ef22759ed5a0cae323273a89ec045bda185aa9a053b3553208a22a334a87b99",
+  "NZD_1d": "bf5f3ecfa98bd574937ad9e0db4a83006fef293b8df19d41cbd3b71f7767f08c",
+  "SEK_1d": "c260e7882ea8bb1cbce5ee6658fe12d8521d71ae79725fde6143f0da2c318efa",
+  "SGD_1d": "bfb042a64b552f9654efd08ac9be0e333e0a019fe88fb583b67d9e1c842691ff",
+  "ZAR_1d": "461796a994069a0c0e743e06227666e279d657ce282f75de1df270c5c3ac2238"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "lookback": 40,
+     "z_entry": 2.0
+    },
+    "role": "entry",
+    "type": "zscore_reversion_dense"
+   },
+   {
+    "params": {
+     "r": 3.0
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "lookback": 40,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "band_stop"
+   },
+   {
+    "params": {
+     "f": 0.01
+    },
+    "role": "risk",
+    "type": "fixed_fraction"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 5e-05,
+   "short_financing_per_year": -0.015,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-02T12:18:56Z",
+  "family": "fx_reversion_profit_target_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-02-120009-loop-fx"
+  },
+  "name": "NZD 1d fx_reversion_profit_target_mesh dboth l40 ze2.0 r3.0 l40 m3.0 f0.01",
+  "provenance": {
+   "card_ids": [
+    "010bcfbdbae4e5fa",
+    "6dba955b6b43f40d",
+    "73ba48a43e430161",
+    "7d67838f9104f2c1",
+    "a59075409e6a124e",
+    "bec5e126dff7ccb1",
+    "cb6cc4541084448c",
+    "dc1cf81e13929936",
+    "ec52fcd4a87988e9",
+    "f6bcefd96029682d"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "fx_reversion_profit_target_mesh-2026-11-02-120009-loop-fx:NZD_1d"
+  },
+  "strategy_id": "4082d4c28d2905a8",
+  "universe": {
+   "asset_class": "fx",
+   "assets": [
+    "NZD"
+   ],
+   "session": "fx_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

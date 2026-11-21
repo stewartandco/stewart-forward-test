@@ -1,0 +1,270 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "GRTUSDT_12h": "2026-11-13 12:00:00"
+ },
+ "data_sha256": {
+  "GRTUSDT_12h": "5753e2ba95e4fb4298702302a6eabd03881151d77d9a856370977f60cde42fd8"
+ },
+ "group_context": {},
+ "metrics": {
+  "beats_hold": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "hold_sharpe": -0.40698640529645835,
+   "n_days": 1048,
+   "strategy_sharpe": 0.11588683469280689,
+   "window": "oos"
+  },
+  "benchmark_relative": {
+   "basis": "price returns, staking/funding yield excluded on both sides",
+   "buy_hold_net": -0.9087065217391305,
+   "excess": 0.8919087458099253,
+   "strategy_net": -0.016797775929205172,
+   "window": "oos"
+  },
+  "cost_stress_net_pnl": -0.032741651266485206,
+  "edge_decay_pct": -94.80542301726194,
+  "exit_reasons_is": {
+   "signal:tstat_decay": 17,
+   "stop": 25,
+   "target": 29
+  },
+  "exit_reasons_oos": {
+   "signal:tstat_decay": 14,
+   "stop": 31,
+   "target": 24
+  },
+  "fail_reason": "oos_negative",
+  "is_edge_per_trade": 0.0021653719953375356,
+  "is_edge_raw": 0.0032370854128023823,
+  "is_vol": 1.494932704298593,
+  "mc_p05_equity": 0.724917936122879,
+  "oos_edge_per_trade": 0.00011248191526045938,
+  "oos_edge_raw": 0.00010461585545821541,
+  "oos_vol": 0.9300682266653304,
+  "open_at_end": false,
+  "p_ruin": 0.003,
+  "perturbation": {
+   "base_score": 0.5268563677973066,
+   "dense_only": true,
+   "mean_ratio": 0.8314338624014461,
+   "n_perturbations": 8,
+   "reason": null,
+   "results": [
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "down",
+     "from": 90,
+     "ratio": 0.20784928309184175,
+     "score": 0.10950671833904188,
+     "to": 75
+    },
+    {
+     "axis": "trend_scan_dense.max_lookback",
+     "dense": true,
+     "direction": "up",
+     "from": 90,
+     "ratio": 1.204596677206989,
+     "score": 0.6346494300139788,
+     "to": 105
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "down",
+     "from": 2.5,
+     "ratio": 1.0,
+     "score": 0.5268563677973066,
+     "to": 2.0
+    },
+    {
+     "axis": "trend_scan_dense.t_min",
+     "dense": true,
+     "direction": "up",
+     "from": 2.5,
+     "ratio": 1.0402106809990737,
+     "score": 0.5480416211351348,
+     "to": 3.0
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "down",
+     "from": 2.0,
+     "ratio": 0.00019204373417613086,
+     "score": 0.00010117946424626779,
+     "to": 1.5
+    },
+    {
+     "axis": "atr_stop_dense.mult",
+     "dense": true,
+     "direction": "up",
+     "from": 2.0,
+     "ratio": 0.6181327051953829,
+     "score": 0.32566715187596273,
+     "to": 2.5
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "down",
+     "from": 1.5,
+     "ratio": 1.1868298523560812,
+     "score": 0.6252888652057386,
+     "to": 1.0
+    },
+    {
+     "axis": "r_multiple_dense.r",
+     "dense": true,
+     "direction": "up",
+     "from": 1.5,
+     "ratio": 1.3936596566280242,
+     "score": 0.7342584646366823,
+     "to": 2.0
+    }
+   ],
+   "worst_ratio": 0.00019204373417613086
+  },
+  "protocol": "gauntlet-protocol-v6.2",
+  "regime": {
+   "buckets": {
+    "chop": {
+     "n": 5,
+     "net": 0.05037983738998365,
+     "win_rate": 0.6,
+     "wins": 3
+    },
+    "trend_down": {
+     "n": 37,
+     "net": -0.11089083274445233,
+     "win_rate": 0.35135135135135137,
+     "wins": 13
+    },
+    "trend_up": {
+     "n": 27,
+     "net": 0.06772948938108553,
+     "win_rate": 0.4074074074074074,
+     "wins": 11
+    },
+    "unlabelled": {
+     "n": 0,
+     "net": 0.0,
+     "win_rate": null,
+     "wins": 0
+    }
+   },
+   "window": "oos"
+  },
+  "train_sharpe": 0.5268563677973066,
+  "walkforward": {
+   "catastrophic": false,
+   "folds": [
+    {
+     "min_equity": 1.0,
+     "n_trades": 23,
+     "net": 0.1262164696761688
+    },
+    {
+     "min_equity": 0.9283766962462211,
+     "n_trades": 15,
+     "net": -0.07079750921279149
+    },
+    {
+     "min_equity": 1.0,
+     "n_trades": 33,
+     "net": 0.17441410384559186
+    }
+   ],
+   "folds_positive": 2,
+   "majority_pass": true,
+   "n_folds": 3,
+   "purge_bars": 200,
+   "window": "train"
+  }
+ },
+ "protocol": "gauntlet-protocol-v6.2",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "max_lookback": 90,
+     "t_min": 2.5
+    },
+    "role": "entry",
+    "type": "trend_scan_dense"
+   },
+   {
+    "params": {
+     "max_lookback": 90,
+     "t_exit": 0.5
+    },
+    "role": "exit",
+    "type": "tstat_decay"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.0
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "r": 1.5
+    },
+    "role": "target",
+    "type": "r_multiple_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-14T12:12:04Z",
+  "family": "tstat_trend_long_profit_target_mesh",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-14-120014-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "GRT 12h tstat_trend_long_profit_target_mesh dlong ml90 tm2.5 ml90 te0.5 al14 m2.0 r1.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "3d4db3693d78d717",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "73ba48a43e430161",
+    "e818d7f15744fa91",
+    "ec52fcd4a87988e9"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "tstat_trend_long_profit_target_mesh-2026-11-14-120014-loop-crypto:GRTUSDT_12h"
+  },
+  "strategy_id": "5e2d47c829f4c140",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "GRTUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "12h"
+  },
+  "version": 2
+ }
+}

@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+ICPUSDT,short,2021-09-18 00:00:00,56.47,2021-11-08 00:00:00,53.53,signal:regime_flip,0.04906304232335745
+ICPUSDT,long,2023-01-30 00:00:00,6.239,2023-02-09 00:00:00,5.021319865541825,stop,-0.19817232480496472
+ICPUSDT,short,2023-05-23 00:00:00,5.075,2023-10-29 00:00:00,3.709,signal:regime_flip,0.26616256157635465

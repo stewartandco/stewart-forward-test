@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+LDOUSDT,long,2023-10-23 00:00:00,1.717,2023-12-18 12:00:00,2.029,signal:regime_flip,0.17871228887594637

@@ -1,0 +1,4 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+SOLUSDT,long,2021-04-04 00:00:00,22.4672,2021-05-20 00:00:00,34.987,signal:channel_exit,0.5542478991596641
+SOLUSDT,long,2021-08-14 00:00:00,44.859,2021-12-11 00:00:00,167.39,signal:channel_exit,2.728469716221939
+SOLUSDT,long,2023-07-14 00:00:00,26.01,2023-08-04 00:00:00,22.65,signal:channel_exit,-0.13218108419838537

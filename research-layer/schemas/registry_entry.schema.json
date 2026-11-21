@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stewartandco.org/schemas/registry_entry.schema.json",
+  "title": "Registry Log Entry v1",
+  "type": "object",
+  "required": ["version", "ts_utc", "entry_type", "prev_entry_hash", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "ts_utc": {"type": "string", "format": "date-time"},
+    "entry_type": {"enum": ["card_registered", "card_reviewed", "strategy_registered", "verdict", "state_change", "block_type_registered", "note"]},
+    "prev_entry_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"entry_type": {"const": "card_registered"}}},
+      "then": {"properties": {"payload": {"$ref": "research_card.schema.json"}}}
+    },
+    {
+      "if": {"properties": {"entry_type": {"const": "card_reviewed"}}},
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["card_id", "status"],
+            "properties": {
+              "card_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+              "status": {"enum": ["accepted", "rejected"]},
+              "reject_reason": {"enum": ["off_topic", "quote_not_found", "claim_not_supported", "duplicate", null]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"entry_type": {"const": "strategy_registered"}}},
+      "then": {"properties": {"payload": {"$ref": "strategy_spec.schema.json"}}}
+    },
+    {
+      "if": {"properties": {"entry_type": {"const": "verdict"}}},
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["strategy_id", "stage", "verdict", "metrics", "artifacts_hash"],
+            "properties": {
+              "strategy_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+              "stage": {"enum": ["screened", "gauntlet", "quarantine", "live_review"]},
+              "verdict": {"enum": ["pass", "fail"]},
+              "metrics": {"type": "object", "minProperties": 1},
+              "artifacts_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"entry_type": {"const": "state_change"}}},
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["strategy_id", "from", "to"],
+            "properties": {
+              "strategy_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+              "from": {"enum": ["proposed", "screened", "gauntlet", "quarantine", "live"]},
+              "to": {"enum": ["screened", "gauntlet", "quarantine", "live", "retired", "graveyard"]},
+              "reason": {"type": ["string", "null"]},
+              "buried_at": {"enum": ["screened", "gauntlet", "quarantine", "live", null]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"entry_type": {"const": "block_type_registered"}}},
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["role", "type", "params_schema"],
+            "properties": {
+              "role": {"enum": ["entry", "filter", "exit", "stop", "target", "risk", "regime"]},
+              "type": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+              "params_schema": {"type": "object"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

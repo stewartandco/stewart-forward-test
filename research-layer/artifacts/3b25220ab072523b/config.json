@@ -1,0 +1,90 @@
+{
+ "cutoff": "2023-12-31",
+ "data_sha256": {
+  "BTCUSD": "815ad51a3f33b950f67df75612b75adb2f14c53943a03a3b1f16faa5266b9636",
+  "ETHUSD": "ef5a4eb98df4e7adba57969ea17ee392d1159cece5cfa5f2d0f5e9086d7ad4db"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "max_lookback": 120,
+     "t_min": 2.0
+    },
+    "role": "entry",
+    "type": "trend_scan_ds"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 3.0
+    },
+    "role": "stop",
+    "type": "atr_stop"
+   },
+   {
+    "params": {
+     "max_bars": 40
+    },
+    "role": "exit",
+    "type": "time_stop"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-08-15T09:12:02Z",
+  "family": "symmetric_slow_trend_dual_side",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-08-15-gen2"
+  },
+  "name": "BTC+ETH 1d symmetric_slow_trend_dual_side dboth ml120 tm2.0 al14 m3.0 mb40 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "1be665e133422ed2",
+    "295c089b48478986",
+    "303001052725c19f",
+    "3d4db3693d78d717",
+    "4e907fc4974a48f9",
+    "6078cc70ec7b8303",
+    "9a6abe19343ae46f",
+    "9aeedfe2b4f5e2cc",
+    "a2e3769454c39476",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e0d728e421153bec",
+    "e519d19950313468",
+    "e6cc6c4188b35751",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_slow_trend_dual_side-2026-08-15-gen2"
+  },
+  "strategy_id": "3b25220ab072523b",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "BTCUSD",
+    "ETHUSD"
+   ],
+   "session": "24x7",
+   "timeframe": "1d"
+  },
+  "version": 1
+ }
+}

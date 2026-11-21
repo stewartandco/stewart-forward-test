@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+NEXOUSDT,short,2022-06-14 00:00:00,0.777,2022-08-14 00:00:00,1.038,signal:channel_exit,-0.3389073359073359
+NEXOUSDT,long,2022-10-27 00:00:00,0.995,2022-11-09 00:00:00,0.784,stop,-0.21506030150753763
+NEXOUSDT,short,2022-11-10 00:00:00,0.724,2023-01-21 00:00:00,0.82,signal:channel_exit,-0.13559668508287281
+NEXOUSDT,short,2023-03-03 00:00:00,0.683,2023-10-24 00:00:00,0.604,signal:channel_exit,0.11266617862371897

@@ -1,0 +1,2 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net
+EEM,long,2004-05-10 00:00:00,16.66996666005001,2004-05-28 00:00:00,18.022186177831845,signal:zscore_revert,0.08071710991135102

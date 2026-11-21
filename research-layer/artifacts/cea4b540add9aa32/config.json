@@ -1,0 +1,108 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "BND_1d": "2023-12-29 00:00:00",
+  "EMB_1d": "2023-12-29 00:00:00",
+  "HYG_1d": "2023-12-29 00:00:00",
+  "IEF_1d": "2023-12-29 00:00:00",
+  "LQD_1d": "2023-12-29 00:00:00",
+  "SHY_1d": "2023-12-29 00:00:00",
+  "TIP_1d": "2023-12-29 00:00:00",
+  "TLT_1d": "2023-12-29 00:00:00"
+ },
+ "data_sha256": {
+  "BND_1d": "6aec11c5b3bd017c6e4b9a63c9c2218dfe6da2edea4f0709dcfeec0534be2141",
+  "EMB_1d": "1f497c94f26edcb804c31b9a0357c7bdf46351d3f37e036db27f75b3de0102fc",
+  "HYG_1d": "30245965698935ff335306bd96d4047666fa535240eda9d69e66603b5128d158",
+  "IEF_1d": "4e73a53b65920eb3b7e3eaded334aafca24203507b2aeb07c58083ffc875c9b4",
+  "LQD_1d": "39957494f7e2963c1f703200e0ecf6c3c73e1e106a3119928c205a27eebdbd14",
+  "SHY_1d": "2c25f203e8b2f41ad7c79f5b30a70cf03c0b7698ffabb159f7c227d7f7e6df3c",
+  "TIP_1d": "bff9ed60605834e1d7415b6b04727e2c3977a486597beb4d2c64628f925c5b7b",
+  "TLT_1d": "16d3ad34ce5ee45edba4c0295d43567a8de5ea152eabf66c77b4cc352441b54c"
+ },
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "long",
+     "fast": 20,
+     "slow": 50
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "fast": 13,
+     "slow": 130
+    },
+    "role": "exit",
+    "type": "ma_crossunder"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.2,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.0001,
+   "short_financing_per_year": -0.005,
+   "slippage_ticks": 0.0001
+  },
+  "created_utc": "2026-11-05T12:16:02Z",
+  "family": "slow_duration_trend_long",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "run_id": "2026-11-05-120016-loop-bond_etf"
+  },
+  "name": "EMB 1d slow_duration_trend_long dlong f20 s50 f13 s130 al14 m2.5 av0.2 l30",
+  "provenance": {
+   "card_ids": [
+    "2243c5930df5c5be",
+    "3605eedc183f09ce",
+    "8ce8c138cdd38d16",
+    "9a6abe19343ae46f",
+    "b75771d2de3b3e53",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "proxy_card_ids": [
+    "2243c5930df5c5be",
+    "8ce8c138cdd38d16",
+    "b75771d2de3b3e53",
+    "dad2ffd5702377ba"
+   ],
+   "routed_via": "proxy",
+   "sibling_group_id": "slow_duration_trend_long-2026-11-05-120016-loop-bond_etf:EMB_1d"
+  },
+  "strategy_id": "cea4b540add9aa32",
+  "universe": {
+   "asset_class": "bond_etf",
+   "assets": [
+    "EMB"
+   ],
+   "session": "us_equity_5d",
+   "timeframe": "1d"
+  },
+  "version": 2
+ }
+}

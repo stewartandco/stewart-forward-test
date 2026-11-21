@@ -1,0 +1,194 @@
+{
+ "cutoff": "2023-12-31",
+ "data_end": {
+  "CFXUSDT_12h": "2023-12-31 12:00:00",
+  "CFXUSDT_1d": "2023-12-31 00:00:00",
+  "CFXUSDT_1h": "2023-12-31 23:00:00",
+  "CFXUSDT_4h": "2023-12-31 20:00:00",
+  "CVXUSDT_12h": "2023-12-31 12:00:00",
+  "CVXUSDT_1d": "2023-12-31 00:00:00",
+  "CVXUSDT_1h": "2023-12-31 23:00:00",
+  "CVXUSDT_4h": "2023-12-31 20:00:00",
+  "DCRUSDT_12h": "2023-12-31 12:00:00",
+  "DCRUSDT_1d": "2023-12-31 00:00:00",
+  "DCRUSDT_1h": "2023-12-31 23:00:00",
+  "DCRUSDT_4h": "2023-12-31 20:00:00",
+  "ENSUSDT_12h": "2023-12-31 12:00:00",
+  "ENSUSDT_1d": "2023-12-31 00:00:00",
+  "ENSUSDT_1h": "2023-12-31 23:00:00",
+  "ENSUSDT_4h": "2023-12-31 20:00:00",
+  "FETUSDT_12h": "2023-12-31 12:00:00",
+  "FETUSDT_1d": "2023-12-31 00:00:00",
+  "FETUSDT_1h": "2023-12-31 23:00:00",
+  "FETUSDT_4h": "2023-12-31 20:00:00",
+  "GNOUSDT_12h": "2023-12-31 12:00:00",
+  "GNOUSDT_1d": "2023-12-31 00:00:00",
+  "GNOUSDT_1h": "2023-12-31 23:00:00",
+  "GNOUSDT_4h": "2023-12-31 20:00:00",
+  "JASMYUSDT_12h": "2023-12-31 12:00:00",
+  "JASMYUSDT_1d": "2023-12-31 00:00:00",
+  "JASMYUSDT_1h": "2023-12-31 23:00:00",
+  "JASMYUSDT_4h": "2023-12-31 20:00:00",
+  "LDOUSDT_12h": "2023-12-31 12:00:00",
+  "LDOUSDT_1d": "2023-12-31 00:00:00",
+  "LDOUSDT_1h": "2023-12-31 23:00:00",
+  "LDOUSDT_4h": "2023-12-31 20:00:00",
+  "LUNCUSDT_12h": "2023-12-31 12:00:00",
+  "LUNCUSDT_1d": "2023-12-31 00:00:00",
+  "LUNCUSDT_1h": "2023-12-31 23:00:00",
+  "LUNCUSDT_4h": "2023-12-31 20:00:00",
+  "RAYUSDT_12h": "2023-12-31 12:00:00",
+  "RAYUSDT_1d": "2023-12-31 00:00:00",
+  "RAYUSDT_1h": "2023-12-31 23:00:00",
+  "RAYUSDT_4h": "2023-12-31 20:00:00",
+  "SUNUSDT_12h": "2023-12-31 12:00:00",
+  "SUNUSDT_1d": "2023-12-31 00:00:00",
+  "SUNUSDT_1h": "2023-12-31 23:00:00",
+  "SUNUSDT_4h": "2023-12-31 20:00:00",
+  "XTZUSDT_12h": "2023-12-31 12:00:00",
+  "XTZUSDT_1d": "2023-12-31 00:00:00",
+  "XTZUSDT_1h": "2023-12-31 23:00:00",
+  "XTZUSDT_4h": "2023-12-31 20:00:00"
+ },
+ "data_sha256": {
+  "CFXUSDT_12h": "73c421fadc4a0776b0fb7d0d610282484da3f6a9cdb2f6c96f248f879b2f4e2a",
+  "CFXUSDT_1d": "4c9ab89b98676efefd6d2382bc78683e05891f6fef5fdb92d0a9aa6b3d6b087a",
+  "CFXUSDT_1h": "f96cfa72752cc1399cf67933203358cb97fbd938fb4a6d5188da04e76dd8c22a",
+  "CFXUSDT_4h": "98d79acfa4e4beb87ca1075dcf99fafea7972c86a4d1bc1e989f185dec821e8c",
+  "CVXUSDT_12h": "d4f8734a55ad443e0fbba6b62df2e9ceb460e604b16299f0601aa0ab50ba1e86",
+  "CVXUSDT_1d": "fd8007499fc28b7f667dd9cec3e70e102c5ebc339e17cfcf75d800793fad9ed9",
+  "CVXUSDT_1h": "8e4aba964966055c2905e77df428502df3c081cd71b2c803ff6a4df4509bc032",
+  "CVXUSDT_4h": "279fe59594dbea7ba4d163005877d85a2fea5d4097d05ab155390c5899472f67",
+  "DCRUSDT_12h": "869b55618fc61d074ba90732781d7b55bdcc2926563f1e091a39edac65bb881b",
+  "DCRUSDT_1d": "2bc3d66bc605f75afad4c98dff7ff27c90ec320aab935cc770593c307a9b6702",
+  "DCRUSDT_1h": "9b2f8ad2bd52cc5525565780770cb8332e1df4803424f1b24e2118a71f6b9950",
+  "DCRUSDT_4h": "5230b0b4486257824eca530d08db9043aa663dde452f4c60e227ae6a879fa571",
+  "ENSUSDT_12h": "5c52404c32efd9e5e60f6f4909e13c531fe4208bba28882fd0f72c05a325e6b9",
+  "ENSUSDT_1d": "b674c2420d99f91a78747cb77a7f448622474a17e04eda3959a76c8cc8052a0d",
+  "ENSUSDT_1h": "10e016a4d79fad23ddd8e3a83a9ebfafc378090415a91cea3524b9681cbc29c5",
+  "ENSUSDT_4h": "cf0847e2ce8adec03bb41926af6e624e5ebf950de25bf93cabe272f4580509c4",
+  "FETUSDT_12h": "d4dcec95f02978a750b93f638e504a494bd59ee6fb3a34df4f7d3fe8b0e7e813",
+  "FETUSDT_1d": "5def96d78d21627f325f31ee9c70d2e989c03bdcae45552bfcb6f00a83817562",
+  "FETUSDT_1h": "aa27e4210975d68d6da0f29dfde546637d14b75c8e312df72653e3e4b251509c",
+  "FETUSDT_4h": "42f0011cb673f2f5e2412cdd66cf68b4989a78dbcb9d699251657d57fd51d027",
+  "GNOUSDT_12h": "434cc4f00de52ec8f5574476d1bbf0fa00d5a69e70d01b97142d6827465ebb7d",
+  "GNOUSDT_1d": "025065963867902c1185bf92f2fc973529cc6e85b4ca085cc36e9abfbb6cc2c9",
+  "GNOUSDT_1h": "41b96d1dede36224bb25c6a30d412d7307feceeef6eac2315b3fda83b728b4db",
+  "GNOUSDT_4h": "27a669951def9fd4f5ba89dbcc745b191cb4fc078a6ee878bdc916a5c6d34600",
+  "JASMYUSDT_12h": "d70d9701e8bdda7581ed85625040528fe783e72e78c94306239a6304bfb7feb2",
+  "JASMYUSDT_1d": "643b5029e67a8964559781229182414982097df75bd6410ab7713f245c7a7204",
+  "JASMYUSDT_1h": "1f8137a79730ad5dfcb0ae3c83a6e77f2aad6f44a8d8d9d246401ccd6d6eb328",
+  "JASMYUSDT_4h": "0a37bfc53fb440935d74fb595ae314575837bd8319006eb9b7aac5180e6d6f75",
+  "LDOUSDT_12h": "edef9db4b47394e2de191a7f16a92443711857ccb403039a150cae7fdec02093",
+  "LDOUSDT_1d": "d4167608874fbabb8d265b129b40e95047f56fd5591740685dd1043d7a87f82a",
+  "LDOUSDT_1h": "e1731b9f64af3cc329bc907e046d5987b3902652dda6989a26c99c89a0aab07b",
+  "LDOUSDT_4h": "afe2d1d9a28972149cd670ebeb1c9200322a7d50dedf8154d49f238bb7bbcdfe",
+  "LUNCUSDT_12h": "919ddc342560be498d543c0c30e2573c52b70f42637fee9ab0d88746f97f642d",
+  "LUNCUSDT_1d": "b91b4170c9b6f4c7707b0923875407f727405920c1941598e3ea07639235ebbc",
+  "LUNCUSDT_1h": "4dd2c91ccfb643e23a0038dd60fe6b4eacef1eea0b6bcec30478f9baeedbdfd5",
+  "LUNCUSDT_4h": "d70ad55fd2f14edaf6b6831391a1d8e035b77eac650c8a1d3df8b711b351cfe0",
+  "RAYUSDT_12h": "859d7b283f2d0ccc2d8da4c410a06a5b78512f5e5b039fb5ae0536a9d2dd17cb",
+  "RAYUSDT_1d": "896be0ff1e079af4426522b44a51de75b313a2182dac22248f10a9e8cfd15d4a",
+  "RAYUSDT_1h": "ecef903a1fdfbf566259c22dca48183de4c32f508841156df9133f956a0b1275",
+  "RAYUSDT_4h": "c2c6e9d76434806c5ca60c1839e73d948253e26be36c655e96b82aa9a97dde6f",
+  "SUNUSDT_12h": "4d8ecb98e3f143ccadb8af849eb9d7d90e41b8cff6bfe156293593c825520895",
+  "SUNUSDT_1d": "3d12d1897af033bc9ab0b615b6962f91ab011d819ca6215be524cf70188d2fc8",
+  "SUNUSDT_1h": "12accf1bbe8618e17d8c450753448cbb06e324fa1db5e8ecc70de6d1ca670e92",
+  "SUNUSDT_4h": "41077bee5915066df1e357fcae749ad7107794ee68cf1217da61f1279a384a3d",
+  "XTZUSDT_12h": "3cfeea5d983938c254f3b6954c8d77ccda62a2c25549365acf5f8db237fe32a9",
+  "XTZUSDT_1d": "cb50f5f676c1fda5defa5bbbf9f96a5d3ff008960cc5438e6eb72da5358ea7f6",
+  "XTZUSDT_1h": "724740083cfb8a3a14baa5d0cf4fcd07d13d7c19194636dcbfe1176962c4a3c9",
+  "XTZUSDT_4h": "1f741ffd2549c42276b540ecdc7bbecc5c7ceea2dd7b50268e082084fe959b0d"
+ },
+ "equity_bars_sha256": "a91750a3abc77b79b76521351383440395526f8d0803aa0a2098f4ae19347fc9",
+ "protocol": "screen-protocol-v1",
+ "spec": {
+  "blocks": [
+   {
+    "params": {
+     "direction": "both",
+     "fast": 34,
+     "slow": 130
+    },
+    "role": "entry",
+    "type": "ma_cross_dense"
+   },
+   {
+    "params": {
+     "lookback": 180,
+     "max_pctile": 0.9
+    },
+    "role": "filter",
+    "type": "vol_percentile_dense"
+   },
+   {
+    "params": {
+     "ma_len": 150
+    },
+    "role": "exit",
+    "type": "regime_flip"
+   },
+   {
+    "params": {
+     "atr_len": 14,
+     "mult": 2.5
+    },
+    "role": "stop",
+    "type": "atr_stop_dense"
+   },
+   {
+    "params": {
+     "ann_vol": 0.4,
+     "lookback": 30
+    },
+    "role": "risk",
+    "type": "vol_target"
+   }
+  ],
+  "cost_model": {
+   "commission_per_side": 0.001,
+   "slippage_ticks": 0.0005
+  },
+  "created_utc": "2026-11-09T12:16:54Z",
+  "family": "symmetric_ma_cross_speed_scan",
+  "generator": {
+   "agent": "composer",
+   "model": "claude-opus-5",
+   "pipeline_version": "g1.0.0",
+   "prompt_sha": "c8e7c223c7f520ab",
+   "run_id": "2026-11-09-120010-loop-crypto",
+   "served_model": "claude-opus-5"
+  },
+  "name": "XTZ 4h symmetric_ma_cross_speed_scan dboth f34 s130 l180 mp0.9 ml150 al14 m2.5 av0.4 l30",
+  "provenance": {
+   "card_ids": [
+    "072eb45a179fca95",
+    "1be665e133422ed2",
+    "2243c5930df5c5be",
+    "4e907fc4974a48f9",
+    "6078cc70ec7b8303",
+    "658c272c7c5620ea",
+    "bdd6f691940fb0de",
+    "c7c0e61fc25e8ba1",
+    "dad2ffd5702377ba",
+    "dcbe4d37af0f4eaa",
+    "e0d728e421153bec",
+    "e519d19950313468",
+    "e818d7f15744fa91"
+   ],
+   "generation": 0,
+   "parent_strategy_id": null,
+   "sibling_group_id": "symmetric_ma_cross_speed_scan-2026-11-09-120010-loop-crypto:XTZUSDT_4h"
+  },
+  "strategy_id": "af4a0f1e008c7663",
+  "universe": {
+   "asset_class": "crypto",
+   "assets": [
+    "XTZUSDT"
+   ],
+   "session": "24x7",
+   "timeframe": "4h"
+  },
+  "version": 2
+ }
+}

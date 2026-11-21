@@ -1,0 +1,5 @@
+asset,side,entry_date,entry_px,exit_date,exit_px,exit_reason,return_net,notional_frac
+IEF,short,2024-03-26 00:00:00,94.22,2024-06-12 00:00:00,94.08,signal:tstat_decay,1.4455529611542145e-05,1.0
+IEF,short,2024-10-24 00:00:00,94.98,2025-02-27 00:00:00,94.59,signal:tstat_decay,0.0020394609391450823,1.0
+IEF,short,2025-07-21 00:00:00,94.795,2025-07-23 00:00:00,94.775,signal:tstat_decay,-0.00022870094782647657,1.0
+IEF,short,2026-01-09 00:00:00,96.16,2026-02-13 00:00:00,97.12,stop,-0.010859551541082313,1.0
